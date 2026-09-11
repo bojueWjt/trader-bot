@@ -1,3 +1,7754 @@
+## 十四审独立 P1 review：判定表与终裁依据
+
+本轮按用户指定名称为第十二轮（十四审），独立审查方 Codex。十四审终裁 **pass**；本轮没有新增 P1 阻断项。
+S44（审查工具属主）和 S45 的指定反例已独立闭合；A36 四条对角线、A37 十个优先级节点均亲跑生产文件突变。
+本会话唯一写回仓库的文件是 docs/adr/review-G2-P1.md。产品源码、测试、契约和护栏均未修改。
+真实写盘注入与真实还原发生在系统临时目录的独立副本；临时取证文件不是产品或测试修改。
+未连接交易所私有 API，未读取 services/nautilus-node 配置，未 import services，未使用会话恢复命令。
+
+### 测量时刻和文件同一性
+
+首次测量：2026-09-11 15:40:29 +08:00，最近关键文件静默 96.16 秒；此时不判状态，先读约束与内容。
+独立批前快照：2026-09-11T15:41:14.442287+08:00；最年轻源码/测试/契约静默 140.97 秒。
+批前 HEAD=a59a0bfc8813bb145268f8abff054decdae2c28a；G2 market 源码、market 测试和契约相对 HEAD 差异为空。
+先采集每个文件 SHA256、mtime_ns、路径集合、HEAD 与实际 git status，再建冻结副本。
+用户给定的 16:37:10 晚于本机本次记录；本轮以本机实际时间为证，不复述该时刻作为自己的测量。
+冻结副本执行 T/S/D/A/AB，测试和被测模块均来自所记录副本；所有三阶段子进程禁写 pyc，pytest 禁用缓存。
+15:45:48 +08:00 的严格批后检查真实失败：contracts/README.md 内容变化，静默仅 80.11 秒；当时不判该文档状态。
+差异已逐字核对：仅在原 README 末尾新增 §24 A38；旧 SHA=cc5a3e5e672b3df62bed95c8c87a6d6dc505951043fa17983674c0c5ad9e8289。
+新 SHA=a8f12bccaed20b4007865b2e6f9433280d75a37ba3c1c91aafdbe5a5ebf7668a；对应外部提交后 HEAD=955f62c215cacdc2f451855d30e47dab75be0674。
+该新增裁定明确同选择器活性及立规者自审义务，与用户本轮要求一致；已纳入本报告判断，未改写旧快照伪装全程无变化。
+最终再次测量结果见“批后证据”；G2 源码、测试、护栏与批前的内容和路径集合均相等；mtime 变化另行记录，不将其忽略。
+15:49:13 的第二次严格检查再次失败：contract.py 与 vision.py 的 mtime 前移，但逐文件 SHA256 仍与批前相同；最近静默 174.27 秒。
+这证明终点内容一致，不证明原工作树期间从未被写过。突变实验在冻结副本中完成，没有受到原树中间写入影响；最终 S 再核当前树。
+research 及其他窗口的合法改动没有被覆盖；本轮不判其正在写入的模块。
+
+### 命令索引和证据口径
+
+T：`.venv-g2/bin/python -m pytest tests/market -q -p no:cacheprovider`。
+S：`.venv-g2/bin/python -m pytest tests/market/test_single_source.py -q -v -p no:cacheprovider`。
+D：`.venv-g2/bin/python -m pytest tests/market/test_boundary_discrimination.py -q -v -p no:cacheprovider`。
+A：`.venv-g2/bin/python -m quant_lab.market.execution replay --fixtures tests/market/fixtures/episodes --kernel A`。
+AB：`.venv-g2/bin/python -m quant_lab.market.nautilus_adapter report --reps 1`。
+所有命令均在 quant-lab 或其等内容冻结副本目录运行，设置 PYTHONDONTWRITEBYTECODE=1。
+M 为下方内嵌磁盘执行器；M000–M102 对应附录中的独立执行记录，不引用修复方的自证回执。
+M 单项复跑入口：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'A36-NUMERIC'`。不带末尾名称时运行全批；名称与旧表达均附在 P14_CASES 中。
+十审原命令从历史十审正文反引号提取，去重后 11 条；逐条 shlex.split，再 subprocess.run，未改其中 Python 内容。
+历史命令中的旧同进程 patch 仅作原样兼容性记录；其中 RESTORED 字样不作为本轮 A29 还原证据。
+过时表达匹配失败、测试改名、缺 pytest fixture 参数而失败，均不计作成功捕获生产缺陷。
+本轮主批 103 次三阶段实验：100 次注入 exit1，3 次注入 exit0；103 次基线和还原均 exit0，内容 SHA256 均回到基线。
+四条 A36 实验另各有一次叠加活性对照；均使四类边界节点全红。
+三次 GREEN 如实列出：S37 中段/尾段仅静态禁令选择器各一次、不可达的 vision 对照一次；它们不是闭合证据。
+每个阶段重新启动 Python；每个子进程只调用一次 pytest.main；记录 PID、收集数、逐节点 outcomes 和原始输出。
+导入前后验证七个 market 模块 __file__，收集后验证所有测试路径；父进程对运行前后的完整源/测试/契约内容进行哈希比对。
+还原判据是 SHA256 内容相等，退出码只说明测试结果。没有用连续两次 pytest.main 的缓存结果证明还原。
+
+### 十四审判定表
+
+| ID / 命题 | 状态 | 亲跑命令与真实输出摘要 | 阻断 P1 |
+|---|---|---|---|
+| S29 离网行与原回归 | closed | H3/P10N：mixed missing=0、all-off-grid missing=3，均 quarantined；M001/002/003 分别 1/2/1 failed 后还原绿 | 否 |
+| S31 B17 冲突门 | closed | M004/005/006：删门、同 hash 洗白输入、删版本诊断均 2 failed；每项基线/还原 2 passed | 否 |
+| S38 负 latency | closed | H0/H4 原样在 policy 构造处抛 ContractError；M007/008 均 1 failed 后 1 passed | 否 |
+| S39 loader 返回值生效 | closed | H1/H5 为旧表达失配，不能作闭合证据；M009/010/011 各 1 failed 后 1 passed | 否 |
+| S32 build_request 第二处 latency | closed | H6/P10I 与 TREE 仅来源定义；M037 2 failed；M057 的消费者差分 1 failed | 否 |
+| S33 vision 自写整除 | closed | M012 12 failed；M049 单独差分 1 failed；H8 helper 375 组和分区 25 组通过 | 否 |
+| S35 TTL 三解析与三到期 | closed | TREE：三个解析与三个到期调用各一次；M038–M043 全红并还原；M062–M069 差分单独变红 | 否 |
+| S37 中尾网格 | closed | TREE 核对真实逐点身份游标；M050/051/052 差分各 1 failed；M093/094 删委派各 3/2 failed | 否 |
+| S30 同值两种表达 | closed | M058 旧下界 1 failed，M055–M057 三个消费路径均 1 failed；还原绿 | 否 |
+| S42/S43 真实离网身份覆盖 | closed | M083 窗口内截断 3 failed；M084–M088 真实两流入口的非法接受/合法误拒各节点变红；见逐节点表 | 否 |
+| S44 快照新增文件漏检（用户工具） | closed | G：新增、删除、修改三种真实磁盘变化均 0/1/0；三组基线与还原树 SHA256 相等 | 否 |
+| S45 原样前向 1µs 容差 | closed | M091：S 的分区差分失败；M092：T 失败；M095：时间和分区差分失败，其余三类绿 | 否 |
+| A24 双向调用登记 | closed | M014/015 新增及移除真实调用方均 1 failed；M016/017 停用 missing/extra 检测各 1 failed | 否 |
+| A24 八条禁令活性 | closed | M018–M035 每条不可达重复及其检测器停用都变红；M089 P8 停用 2 failed，M090 真实树注入 1 failed | 否 |
+| A24 例外清单与实际树 | closed | TREE：9 个实际命中，VIOLATIONS=[]，CALL_DIFF=[]，COUNT_EQUAL=True；M036 删除外窗观测 1 failed | 否 |
+| A28 十条消费差分 | closed | M046–M069 分别选择十条差分：每条至少一个真实消费者偏离导致自身 failed；不借静态门失败记账 | 否 |
+| A36 四类判别矩阵 | closed | M095–M098 四条对角线各只红本类，其余三类全绿；四次 overlay 四类全红 | 否 |
+| A37(2) 删失偏向 | closed | M099 十个优先级节点逐一 failed→passed；A37-AST 两版本可执行 AST SHA 相等 | 否 |
+| A33/A38 活性选择器细化 | closed | M101 同四节点 selector：vision+1 为 4 passed；M102 grid 恒0 为 4 failed；二者均 SHA 还原 | 否 |
+| G3 force_close_net_R 欠条 | closed | TREE：调用集合 []、计数 {}；模块声明有无消费方理由、G3 责任、接入触发；消费方差分未做且不适用 | 否 |
+| 归档范围与 funding 语义 | closed | ARCHIVE：44640×2/offgrid0，funding93/offgrid15；FUNDING_RETAINED 93/0/True，LOADER93/True；PROVENANCE 三方 SHA 相等 | 否 |
+| S34 | partial-P2 | funding 8h 与 60s 容差保留；ARCHIVE 实跑 15 个抖动时间戳未损失 | 否，沿用既有裁定 |
+| S36 | partial-P2 | A/B 持仓截止仍各自表达；H6 打印实际落点，T358/AB 已分类差异不变 | 否，沿用既有裁定 |
+| S02 | partial-P2 | P2_UNSUPPORTED 明示真实结算时刻/U03/引擎余额未支持，AB 输出一致 | 否，沿用既有裁定 |
+| S04 | partial-P2 | 持仓截止/TP 余量回归包含于 T 并通过；B 账户/资金事件独立证明仍属 P2 | 否，沿用既有裁定 |
+| S06 | partial-P2 | P2_UNSUPPORTED 明示 bronze 深度回放/多来源版本未支持，AB 输出一致 | 否，沿用既有裁定 |
+| S07 | partial-P2 | P2_UNSUPPORTED 明示管理命令与预留全生命周期未支持，AB 输出一致 | 否，沿用既有裁定 |
+| S10 | partial-P2 | A/B 分类谓词回归通过；AB 全部已分类，独立经济证明与 B 定型仍属 P2 | 否，沿用既有裁定 |
+| S11 | partial-P2 | 保留既有 P2 内核定型边界；AB 22 项已分类，不将已解释差异升级 | 否，沿用既有裁定 |
+| S12 | partial-P2 | P2_UNSUPPORTED 明示版本化 lake snapshot 解析未支持；现行 loader 读 active silver | 否，沿用既有裁定 |
+| S13 | partial-P2 | 事件因果/精度/step 回归包含于 T 并通过；独立容量/预留重放仍属 P2 | 否，沿用既有裁定 |
+
+### A36 判别性矩阵与实际失败原因
+
+| 真实生产突变 | 时间 | 数值 | 空/缺失 | 等价对 | 同案叠加活性对照 |
+|---|---|---|---|---|---|
+| 前向 1µs 容差 | failed | passed | passed | passed | 四类均 failed |
+| risk_budget 经 float 再校验 | passed | failed | passed | passed | 四类均 failed |
+| 显式 [] 被 falsy 默认吞掉 | passed | passed | failed | passed | 四类均 failed |
+| 显式 t_start 加 1µs | passed | passed | passed | failed | 四类均 failed |
+
+时间行的失败在合法 open_time 集合比较；新增窗口内负向微秒输入确实到达 partition.check_bars。
+数值行在 Decimal 边界校验失败；不是导入/收集错误，也不是其他三类借用同一数值边界而失败。
+空/缺失行在显式 [] 本应被拒绝却未抛异常处失败；None 回退行为仍由单独断言区分。
+等价对行在显式 t_start 的解析时刻与省略值不相等处失败。
+四个实验均收集 15 个节点：四类边界、十个优先级、一个分区差分；非对角的三类结果逐项为 passed。
+A37 优先级十例的失败不能算入四类边界的判别性；M099 单独列账。
+M095 分区差分也失败是正确的；A36 的“只红本类”指四条 test_boundary 节点之间，不要求整个文件仅一个失败。
+
+### 对 A33 活性细化的独立判断
+
+判断成立。被测对象应是“取证器、导入路径、实际选择器”的组合。
+同一四节点选择器下，真实 vision+1 注入返回 4 passed，真实 grid 恒0 注入返回 4 failed；前者的绿没有活性证明力。
+健康取证器遇到不可达对照会绿，失效取证器也可能绿；仅凭这个输出不能区分两者。
+收集路径、内容 SHA 和 PID 能证明隔离身份，却不能把一个不可达的对照变成会红的对照。
+可辨识的办法是换成同选择器可捕获的控制，或增加一条该选择器实际运行的断言；后者也已经改变了原来的选择器。
+因此无需否定用户细化。本轮没有把同一会话里其他 selector 的红借给这四条边界节点。
+四次 A36 叠加控制保持各自实际 selector 不变，并在当前突变仍在盘上时使四类都红，避免用另一批的红为非对角 GREEN 背书。
+
+### 单一来源清单、八条禁令和例外证据
+
+树级扫描遍历整个 src/quant_lab 的 .py；不是只扫 market，也不是只扫描可达代码。
+调用登记核集合相等；使用次数登记额外防止一个函数内仍保留另一处调用而掩盖删除。
+resolve_entry_ttl_s 的三个消费方是 before validator、after validator、build_request；均实际调用一次。
+entry_expiry_at 的三个消费方是 A.timeline、A.submit_entries、B.PlanShell._submit_entries；均实际调用一次。
+kernel 中段使用从 first_grid_point 得到的网格游标，逐点身份相等才推进；尾部使用 grid_points_between。
+该中段身份比较不是另一份网格舍入/距离计数；原 o-prev 与 prev+iv 尾判已消失。
+M044/M045 只跑禁令时确实全绿：它们改变身份/尾判语义，不命中现有重复表达模式。
+相同生产突变在 M051/M052 对真实 kernel 差分各得到 1 failed；不能把前两条的绿说成静态门已捕获。
+P1 latency、P2 整秒截断、P3 时长除法、P4 falsy start、P5 入场到期、P6 中尾距离、P7 TTL 选择、P8 强平估值均有独立触发证据。
+除真实树注入外，本轮逐条停用检测分支，让检测器自己的参数化测试变红；标准赋值、类型注解、返回和拆行输入亦分别验证。
+
+| 例外 | 实际表达与证据 | 判断 |
+|---|---|---|
+| P1 / derived_t_start | TREE 唯一 latency timedelta；M037、M055–M057 捕获消费方重写/偏离 | 有实际命中依据，不外推其他表达 |
+| P3 / _us | TREE 为 datetime 差整除 1µs，保持整数微秒；H8 独立 375 组 helper 边界通过 | 有实际命中依据，不外推其他表达 |
+| P5 / derived_window_s | TREE 为 TTL 加持仓或研究段的时长；M059–M061 对真实窗口消费行为变红 | 有实际命中依据，不外推其他表达 |
+| P5 / entry_expiry_at | TREE 为绝对到期时刻；M041–M043 与 M065–M069 对 A/B 真实消费方变红 | 有实际命中依据，不外推其他表达 |
+| P7 / resolve_entry_ttl_s | TREE 同一 home 两次读字段命中：计划优先和政策回退；三个消费方替换均失败 | 有实际命中依据，不外推其他表达 |
+| P8 / force_close_net_R | TREE 为 mark−entry_avg_price 的唯一 home；M089/M090 分别验证禁令检测器与真实树 | 有实际命中依据，不外推其他表达 |
+| FOREIGN P5 / research.api.build_inputs_from_synthetic | TREE 冻结既有合成输入有效期表达；M036 去掉外窗观测后测试失败 | 有实际命中依据，不外推其他表达 |
+| FOREIGN P3 / research.maxt.calendar_blocks | TREE 冻结按天时间跨度表达；M036 与 FOREIGN_HITS 精确集合测试提供机械核对 | 有实际命中依据，不外推其他表达 |
+
+FOREIGN_HITS 是所有权冻结，并非证明 G3 语义已经验收；本轮未做 G3 算法或在途代码审查。
+funding 目前不在 FORBIDDEN_HOMES 中，也没有被 P1–P8 命中；不能称其已经获得一条例外清单里的豁免。
+funding 规则的依据在 note-G2-archive-timestamp-grid.md，且本轮真实归档独立复核相符。
+60 秒容差与 bar 精确网格是不同规则；未发现 lint 强制归一 funding 或把这 15 行误判为脏数据。
+lint 清单未直接链接 funding 的 note，保留为文档追溯风险；没有已发生错误隔离的证据，不重复升级为 P1。
+
+### A28 边界生成与三道机制分工
+
+时间生成器有 −1/0/+1µs、月末/闰日/年末、网格首尾、半开端点；S45 新增全部点提前与窗口内单点提前。
+kernel 和 loader 各自产生窗口内偏移；不会以另一个消费方覆盖了该输入为理由省略自己的边界。
+数值输入含 1e-12、1e4 量级第 12 位小数、26 位整数与标度上界；另有超过标度和幅度的拒绝输入。
+空与缺失有 ABSENT、None、[]、缺列、整列 null；显式同值/省略请求跨实际构造、解析、内核与 loader 路径比较。
+十条旧差分均由本轮真实消费者突变证明自身能失败；新增节点逐一对应，不能以参数组内另一个节点失败代替。
+对当前消费域完全等价的重复表达，差分全绿可能正确；A32 明确其应由禁令检出。
+禁令捕获已枚举语法的重复且在不可达区域有效；登记捕获缺失/新增使用点；差分捕获生成路径上的行为偏离。
+模块 docstring 已明确不宣称第三层不可穿过、差分不取代禁令、再次穿过须换层。
+本轮实跑支持这一有限分工；不把 103 组实验证据外推成任意输入、任意改写都不可通过。
+
+### A37 生产行为与 G3 欠条
+
+contract.py 比较 bef5750 与本轮冻结版本：剔除 docstring 后可执行 AST 完全相等，SHA 见附录。
+CENSOR_PRIORITY 生产顺序没有改变；本项新增的是偏向 unevaluable 的理由注释与十条回归。
+M099 把 LABEL_RIGHT_CENSORED 提到全部证据类之前，两种到达顺序 × 五个证据原因全部失败。
+因此“只补注释和回归、行为未改”的声明有独立证据；偏向是契约的错误代价选择，不宣称普适统计定理。
+force_close_net_R 的真实调用登记为空集，真实使用计数为空；没有为不存在的调用方填假条目。
+不适用理由：G3 尚无消费者；义务承担者：G3；触发事件：G3 接入时须补消费者差分和哨兵，证明 θ 随返回值改变。
+未做该消费者差分，原因是本轮树中没有等式左侧；函数夹具与禁令测试不冒充 G3 接入证据。
+
+### GOAL-2 §7 P1 DoD 逐条核对
+
+| DoD / 里程碑 | 本轮亲跑依据 | 裁定范围 |
+|---|---|---|
+| M-03 下载器/manifest/真实归档 | T 下载器成功、校验错拒绝、幂等回归通过；PROVENANCE bronze/侧车/manifest 三方 SHA 相等；真实 markPrice 44640 行 | 符合现有 P1 产物要求；未重新联网下载，不冒称新的网络冒烟 |
+| M-04 分区体检/quarantine | T 与 M001–M003、M091/M092；ARCHIVE 实际 funding 保留 | 缺口、离网、质量回归通过 |
+| M-05 三时钟 as-of | T 中 tests/market/test_asof.py 及相关回归全部通过，无 skip | 等号/晚到/同秒/未收盘/stale 的现有验收通过 |
+| M-06 合同/不变量/夹具 | T358；M007/M008 负延迟、M038–M043 TTL、四类矩阵有红绿证据 | 现有 P1 合同边界通过 |
+| M-07 候选 A | A passed=22 failed=0；22 项 replay=True；T 内不变量通过 | 超过至少 10 个 episode 要求 |
+| M-08 候选 B 与 A/B 报告 | AB exit0：MATCH12、LATENCY3、GAP1、PRIORITY4、GTD1、LIQUIDITY1；未解释项0 | 已出具报告，内核定型仍属 P2 |
+| M-09 执行输出与 G3 冒烟 | T 包含 test_execution_api.py；实际 evaluate/pair_arms 冻结合同输出冒烟通过，无 skip | 接口接缝通过，不代表 force_close_net_R 已接入 |
+| Codex P1 review 必修闭合 | 指定十审项和 S44/S45 闭合；四对角线与十优先级节点均已独立注入验证 | 本轮未留下 open/P1；允许 P1 pass |
+
+真实归档仅 BTCUSDT 2024-01，两路 bar 与一路 funding；此声明诚实，不阻断 P1 的单品种单月 M-03 要求。
+未做其他 44 品种、其他月份、实盘撮合、私有 API 或生产交易验证；原因分别为 P2 范围及本轮明确禁止。
+S34/S36 和既有八项 partial-P2 未重新升级。P2_UNSUPPORTED 实际只有 S02/S06/S07/S12 四键，AB 输出一致；不声称八项都有机器字段。
+剩余风险是已声明的 P2 能力、单月实测外推限制、语法门的表达范围和差分的输入范围，以及 G3 接入时欠条。
+
+### 新增/修改测试逐节点自证
+
+以已提交 bef5750→4f911a5 差异识别当前测试变更：三个已有差分函数、十二个公共入口参数节点、四个 A36 节点和十个 A37 节点，共 29 个。
+S42/S43 的节点虽已在历史轮次存在证据，本轮仍重做；S45/A36/A37 使用本轮记录，不引用修复方结论。
+
+| 具体节点 | 本轮磁盘突变 | 基线 / 注入 / 还原 |
+|---|---|---|
+| `tests/market/test_single_source.py::test_differential_partition_grid` | M046 A28-partition-count | passed / failed / passed，SHA 还原 |
+| `tests/market/test_single_source.py::test_differential_kernel_grid` | M050 A28-kernel-first | passed / failed / passed，SHA 还原 |
+| `tests/market/test_single_source.py::test_differential_lake_grid` | M053 A28-lake-count | passed / failed / passed，SHA 还原 |
+| `tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]` | M084 NEW-kernel-accept-missing | passed / failed / passed，SHA 还原 |
+| `tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]` | M085 NEW-kernel-reject-aligned | passed / failed / passed，SHA 还原 |
+| `tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]` | M081 S40-middle-split-bypass | passed / failed / passed，SHA 还原 |
+| `tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]` | M084 NEW-kernel-accept-missing | passed / failed / passed，SHA 还原 |
+| `tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]` | M085 NEW-kernel-reject-aligned | passed / failed / passed，SHA 还原 |
+| `tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]` | M081 S40-middle-split-bypass | passed / failed / passed，SHA 还原 |
+| `tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]` | M086 NEW-loader-truncate | passed / failed / passed，SHA 还原 |
+| `tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]` | M088 NEW-loader-reject-aligned | passed / failed / passed，SHA 还原 |
+| `tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]` | M086 NEW-loader-truncate | passed / failed / passed，SHA 还原 |
+| `tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]` | M086 NEW-loader-truncate | passed / failed / passed，SHA 还原 |
+| `tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]` | M088 NEW-loader-reject-aligned | passed / failed / passed，SHA 还原 |
+| `tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]` | M086 NEW-loader-truncate | passed / failed / passed，SHA 还原 |
+| `tests/market/test_boundary_discrimination.py::test_boundary_time` | M095 A36-TIME | passed / failed / passed，SHA 还原 |
+| `tests/market/test_boundary_discrimination.py::test_boundary_numeric` | M096 A36-NUMERIC | passed / failed / passed，SHA 还原 |
+| `tests/market/test_boundary_discrimination.py::test_boundary_empty` | M097 A36-EMPTY | passed / failed / passed，SHA 还原 |
+| `tests/market/test_boundary_discrimination.py::test_boundary_equivalence` | M098 A36-EQUIVALENCE | passed / failed / passed，SHA 还原 |
+| `tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]` | M099 A37-PRIORITY | passed / failed / passed，SHA 还原 |
+| `tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]` | M099 A37-PRIORITY | passed / failed / passed，SHA 还原 |
+| `tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]` | M099 A37-PRIORITY | passed / failed / passed，SHA 还原 |
+| `tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]` | M099 A37-PRIORITY | passed / failed / passed，SHA 还原 |
+| `tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]` | M099 A37-PRIORITY | passed / failed / passed，SHA 还原 |
+| `tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]` | M099 A37-PRIORITY | passed / failed / passed，SHA 还原 |
+| `tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]` | M099 A37-PRIORITY | passed / failed / passed，SHA 还原 |
+| `tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]` | M099 A37-PRIORITY | passed / failed / passed，SHA 还原 |
+| `tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]` | M099 A37-PRIORITY | passed / failed / passed，SHA 还原 |
+| `tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]` | M099 A37-PRIORITY | passed / failed / passed，SHA 还原 |
+
+### 独立命令原始输出
+
+#### T，exit 0
+`.venv-g2/bin/python -m pytest tests/market -q -p no:cacheprovider`
+
+```text
+........................................................................ [ 20%]
+........................................................................ [ 40%]
+........................................................................ [ 60%]
+........................................................................ [ 80%]
+......................................................................   [100%]
+358 passed in 39.47s
+```
+
+
+#### S，exit 0
+`.venv-g2/bin/python -m pytest tests/market/test_single_source.py -q -v -p no:cacheprovider`
+
+```text
+============================= test session starts ==============================
+platform darwin -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/tmp/g2-p14-independent/baseline
+configfile: pytest.ini
+collected 48 items
+
+tests/market/test_single_source.py ..................................... [ 77%]
+...........                                                              [100%]
+
+============================= 48 passed in 16.77s ==============================
+```
+
+
+#### D，exit 0
+`.venv-g2/bin/python -m pytest tests/market/test_boundary_discrimination.py -q -v -p no:cacheprovider`
+
+```text
+============================= test session starts ==============================
+platform darwin -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/tmp/g2-p14-independent/baseline
+configfile: pytest.ini
+collected 14 items
+
+tests/market/test_boundary_discrimination.py ..............              [100%]
+
+============================== 14 passed in 2.99s ==============================
+```
+
+
+#### A，exit 0
+`.venv-g2/bin/python -m quant_lab.market.execution replay --fixtures tests/market/fixtures/episodes --kernel A`
+
+```text
+E01    ok  replay=True 
+E02    ok  replay=True 
+E03    ok  replay=True 
+E04a   ok  replay=True 
+E04b   ok  replay=True 
+E04c   ok  replay=True 
+E05    ok  replay=True 
+E06    ok  replay=True 
+E07    ok  replay=True 
+E08    ok  replay=True 
+E09    ok  replay=True 
+E10    ok  replay=True 
+E11    ok  replay=True 
+E12    ok  replay=True 
+E14a   ok  replay=True 
+E14b   ok  replay=True 
+E14c   ok  replay=True 
+E15a   ok  replay=True 
+E15b   ok  replay=True 
+E16    ok  replay=True 
+E17    ok  replay=True 
+E18    ok  replay=True 
+kernel=A passed=22 failed=0
+```
+
+
+#### AB，exit 0
+`.venv-g2/bin/python -m quant_lab.market.nautilus_adapter report --reps 1`
+
+```text
+{"codes": {"MATCH": 12, "B_COMMAND_LATENCY": 3, "GAP_PRICE": 1, "SAME_TS_PRIORITY": 4, "GTD_BOUNDARY": 1, "B_LIQUIDITY_MODEL": 1}, "median_ms": {"A": 12.220291988342069, "B": 64.70324999827426}, "unsupported": {"S02": {"status": "unsupported", "capability": "real_settlement_time_U03_and_engine_balance", "owner": "G0 settlement contract + G2 P2"}, "S06": {"status": "unsupported", "capability": "bronze_depth_replay_and_multi_source_versions", "owner": "G1 lake + G2 P2"}, "S07": {"status": "unsupported", "capability": "management_commands_E13_C01_and_reservation_lifecycle", "owner": "G0 C01 + G2 P2"}, "S12": {"status": "unsupported", "capability": "versioned_lake_snapshot_resolution", "owner": "G1 lake + G0 identity contract"}}}
+```
+
+
+#### LIVE-S，exit 0
+`.venv-g2/bin/python -m pytest tests/market/test_single_source.py -q -v -p no:cacheprovider`
+
+```text
+============================= test session starts ==============================
+platform darwin -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0
+rootdir: /Users/balen/projects/trader-bot/quant-lab
+configfile: pyproject.toml
+plugins: anyio-4.15.1
+collected 48 items
+
+tests/market/test_single_source.py ..................................... [ 77%]
+...........                                                              [100%]
+
+============================= 48 passed in 18.71s ==============================
+```
+
+### 十审反引号命令：原样重跑输出
+
+#### H0，exit 1
+`.venv-g2/bin/python -c 'exec("import datetime as dt\nfrom unittest.mock import patch\nfrom quant_lab.market import contract as c\nfrom tests.market.test_review_p1 import e03\nq,_=e03()\np=c.ExecutionPolicy.model_validate({**c.resolve_policy(q.policy_version).model_dump(),\"version\":\"negative-latency-audit\",\"latency_s\":-1})\nwith patch.dict(c.POLICIES,{p.version:p}),patch.object(c,\"load_policy_registry\",return_value={p.version:p.content_hash}):\n    for s in (None,q.t_dec-dt.timedelta(seconds=1)):\n        try:\n            r=c.ExecutionRequest.model_validate({**q.model_dump(),\"policy_version\":p.version,\"policy_hash\":p.content_hash,\"t_start\":s})\n            print(s,\"ACCEPT\",r.resolved_t_start(p))\n        except c.ContractError as e:print(s,\"REJECT\",str(e))\n")'`
+
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "<string>", line 6, in <module>
+  File "/private/tmp/g2-p14-independent/baseline/.venv-g2/lib/python3.12/site-packages/pydantic/main.py", line 732, in model_validate
+    return cls.__pydantic_validator__.validate_python(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/g2-p14-independent/baseline/src/quant_lab/market/contract.py", line 333, in _latency_domain
+    raise ContractError("latency_s 必须非负：启动时刻不能早于决策时刻")
+quant_lab.market.contract.ContractError: latency_s 必须非负：启动时刻不能早于决策时刻
+```
+
+
+#### H1，exit 1
+`.venv-g2/bin/python -c 'exec("import inspect\nfrom unittest.mock import patch\nfrom quant_lab.market import execution as x\nfrom tests.market.test_constants_effective import test_grid_math_single_source_and_exact_to_microsecond as test\nold='"'"'expected = grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])'"'"'\nsrc=inspect.getsource(x.load_market_from_lake)\nassert src.count(old)==1\nns=dict(x.__dict__)\nexec(compile(src.replace(old,'"'"'grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"]); expected = 0'"'"'),\"<memory>\",\"exec\"),ns)\nns[\"grid_points_between\"]=lambda *args:x.grid_points_between(*args)\nwith patch.object(x,\"load_market_from_lake\",ns[\"load_market_from_lake\"]):\n    test();print(\"discarded result: GREEN\")\ntest();print(\"restored: GREEN\")\n")'`
+
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "<string>", line 7, in <module>
+AssertionError
+```
+
+
+#### H2，exit 1
+`.venv-g2/bin/python -c 'exec("import ast,inspect,textwrap\nfrom unittest.mock import patch\nfrom tests.market import test_outcome_kind as t\nfrom tests.market import test_constants_effective as k\nfrom quant_lab.market import contract as c,execution as x,partition_check as pc,kernel_a as ka\ndef outcome(fn):\n    try:\n        fn()\n        return \"GREEN\"\n    except BaseException as e:\n        return \"RED \"+type(e).__name__+\" \"+str(e)[:160]\ndef mutant(fn,old,new):\n    src=textwrap.dedent(inspect.getsource(fn))\n    assert src.count(old)==1,(fn.__name__,src.count(old))\n    ns=dict(fn.__globals__);exec(compile(src.replace(old,new),\"<memory-mutant>\",\"exec\"),ns)\n    return ns[fn.__name__]\nold=t.test_b16_pair_key_carries_policy_hash_and_batch_rejects_split_brain\nnew=t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes\nfor label,replacement in [(\"delete\",\"pass\")]:\n    fn=mutant(x.simulate_batch,\"check_policy_hash_consistency(df)\",replacement)\n    with patch.object(x,\"simulate_batch\",fn):\n        print(\"B17\",label,\"legacy\",outcome(old),\"new\",outcome(new))\nprint(\"B17 restored\",outcome(old),outcome(new))\nfn=mutant(pc.check_bars,\"first_gap = bool(df.height and grid_points_between(cal_from, df[key][0], sec) > 0)\",\"first_gap = bool(df.height and df[key][0] > cal_from)\")\nwith patch.object(pc,\"check_bars\",fn):\n    print(\"S29 old-first-gap\",outcome(t.test_s29_partition_grid_uses_single_source_and_no_empty_gaps))\nfn=mutant(pc.check_bars,\"exp_n = grid_points_between(cal_from, cal_to, sec)\",\"exp_n = int((cal_to-cal_from).total_seconds() // sec)\")\nwith patch.object(pc,\"check_bars\",fn):\n    print(\"S29 old-count\",outcome(t.test_s29_partition_grid_uses_single_source_and_no_empty_gaps))\nprint(\"S29 restored\",outcome(t.test_s29_partition_grid_uses_single_source_and_no_empty_gaps))\n# bypass a delegation but preserve behavior through a captured binding\nfor label,fn,oldexpr,newexpr,owner,attr,test in [\n(\"A-grid\",ka.KernelA._first_bar_gap,\"first_grid_point(self.t_start, bars[0].interval_s)\",\"_captured(self.t_start, bars[0].interval_s)\",ka.KernelA,\"_first_bar_gap\",k.test_grid_math_single_source_and_exact_to_microsecond),\n(\"loader-grid\",x.load_market_from_lake,'"'"'grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])'"'"','"'"'_captured(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])'"'"',x,\"load_market_from_lake\",k.test_grid_math_single_source_and_exact_to_microsecond)]:\n    m=mutant(fn,oldexpr,newexpr)\n    m.__globals__[\"_captured\"]=c.first_grid_point if label==\"A-grid\" else c.grid_points_between\n    with patch.object(owner,attr,m):\n        print(label,\"bypass\",outcome(test))\n    print(label,\"restored\",outcome(test))\n")'`
+
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "<string>", line 17, in <module>
+AttributeError: module 'tests.market.test_outcome_kind' has no attribute 'test_b16_pair_key_carries_policy_hash_and_batch_rejects_split_brain'
+```
+
+
+#### H3，exit 0
+`.venv-g2/bin/python -c 'exec("import datetime as dt,inspect,textwrap\nfrom unittest.mock import patch\nfrom tests.market.test_partition_check import bars,rules,run,JAN\nfrom tests.market import test_outcome_kind as t,test_constants_effective as k\nfrom quant_lab.market import contract as c,execution as x\nimport polars as pl\nfor offsets in [(0,1,60000000,120000000),(1,60000001,120000001)]:\n    df=bars(len(offsets)).with_columns(pl.Series(\"open_time\",[JAN+dt.timedelta(microseconds=u) for u in offsets]),pl.Series(\"close_time\",[JAN+dt.timedelta(microseconds=u,seconds=60) for u in offsets]))\n    out,qs,r=run(df,rules(JAN,JAN+dt.timedelta(seconds=180)))\n    print(\"offgrid\",offsets,\"expected\",r.expected_rows,\"missing\",r.missing,\"gaps\",r.gaps,\"flags\",out[\"gap_flag\"].to_list(),\"status\",r.status)\ndef outcome(fn):\n    try:\n        fn();return \"GREEN\"\n    except BaseException as e:\n        return \"RED \"+type(e).__name__+\" \"+str(e)[:140]\nsrc=inspect.getsource(x.simulate_batch).replace(\"check_policy_hash_consistency(df)\",'"'"'check_policy_hash_consistency(df.with_columns(pl.lit(\"sanitized\").alias(\"policy_hash\")))'"'"')\nns=dict(x.__dict__);exec(compile(src,\"<memory-mutant>\",\"exec\"),ns)\nns[\"check_policy_hash_consistency\"]=lambda df:x.check_policy_hash_consistency(df)\nwith patch.object(x,\"simulate_batch\",ns[\"simulate_batch\"]):\n    print(\"B17 sanitized dynamic\",outcome(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\n# rebuild the pydantic model in memory so validator substitutions actually execute\nsrc=inspect.getsource(c.ExecutionRequest).replace(\"if self.horizon_end <= exp_t_start:\",\"if self.horizon_end <= (self.t_start or self.t_dec):\")\nns=dict(c.__dict__);exec(compile(src,\"<memory-model-mutant>\",\"exec\"),ns)\nclass Registry:\n    def __init__(self): self.s=c.POLICY_HASH_REGISTRY.read_text()\n    def exists(self): return True\n    def read_text(self,**kw): return self.s\n    def write_text(self,s,**kw): self.s=s;return len(s)\nwith patch.object(c,\"POLICY_HASH_REGISTRY\",Registry()):\n    with patch.object(c,\"ExecutionRequest\",ns[\"ExecutionRequest\"]):\n        print(\"S30 old lower bound\",outcome(t.test_s30_window_lower_bound_uses_derived_start_not_t_dec))\n    print(\"S30 restored\",outcome(t.test_s30_window_lower_bound_uses_derived_start_not_t_dec))\nsrc=inspect.getsource(c.ExecutionRequest).replace(\"exp_t_start = derived_t_start(self.t_dec, pol)\",\"exp_t_start = self.t_dec + dt.timedelta(seconds=pol.latency_s)\")\nns=dict(c.__dict__);exec(compile(src,\"<memory-model-mutant>\",\"exec\"),ns)\nwith patch.object(c,\"ExecutionRequest\",ns[\"ExecutionRequest\"]):\n    print(\"start delegate bypass\",outcome(k.test_t_start_derivation_single_source))\nprint(\"start restored\",outcome(k.test_t_start_derivation_single_source))\n")'`
+
+```text
+offgrid (0, 1, 60000000, 120000000) expected 3 missing 0 gaps [] flags [False, False, False] status quarantined
+offgrid (1, 60000001, 120000001) expected 3 missing 3 gaps [{'from': '2024-01-01T00:00:00+00:00', 'to': '2024-01-01T00:03:00+00:00', 'n': 3}] flags [] status quarantined
+B17 sanitized dynamic RED TypeError test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes() missing 2 required positional arguments: 'monkeypatch' and 'later_versi
+S30 old lower bound RED TypeError test_s30_window_lower_bound_uses_derived_start_not_t_dec() missing 2 required positional arguments: 'tmp_path' and 'monkeypatch'
+S30 restored RED TypeError test_s30_window_lower_bound_uses_derived_start_not_t_dec() missing 2 required positional arguments: 'tmp_path' and 'monkeypatch'
+start delegate bypass RED Failed DID NOT RAISE ContractError
+start restored GREEN
+```
+
+
+#### H4，exit 1
+`.venv-g2/bin/python -c 'exec("import datetime as dt\nfrom unittest.mock import patch\nfrom tests.market.test_review_p1 import e03\nfrom quant_lab.market import contract as c\nq,m=e03()\nfor latency in (-1,0,60):\n    p=c.ExecutionPolicy.model_validate({**c.resolve_policy(q.policy_version).model_dump(),\"version\":\"audit-latency\",\"latency_s\":latency})\n    reg={**c.load_policy_registry(),p.version:p.content_hash}\n    with patch.dict(c.POLICIES,{p.version:p}),patch.object(c,\"load_policy_registry\",return_value=reg):\n        for explicit in (False,True):\n            try:\n                d={**q.model_dump(),\"policy_version\":p.version,\"policy_hash\":p.content_hash,\"t_start\":q.t_dec+dt.timedelta(seconds=latency) if explicit else None}\n                r=c.ExecutionRequest.model_validate(d)\n                print(\"latency\",latency,\"explicit\",explicit,\"ACCEPT\",r.resolved_t_start(p))\n            except Exception as e: print(\"latency\",latency,\"explicit\",explicit,\"REJECT\",type(e).__name__,str(e))\n        for us in (-1,0,1):\n            try:\n                r=c.build_request(q.model_dump(),policy_version=p.version,policy_hash=p.content_hash,risk_budget=q.risk_budget,market_manifest=q.market_manifest,horizon_end=q.t_dec+dt.timedelta(seconds=latency,microseconds=us))\n                print(\"build caller\",latency,us,\"ACCEPT\")\n            except Exception as e: print(\"build caller\",latency,us,\"REJECT\",type(e).__name__)\nwith patch.object(c,\"derived_t_start\",side_effect=lambda t,p:t+dt.timedelta(seconds=7)):\n    try:\n        c.build_request(q.model_dump(),policy_version=q.policy_version,policy_hash=q.policy_hash,risk_budget=q.risk_budget,market_manifest=q.market_manifest)\n        print(\"build sentinel ACCEPT\")\n    except Exception as e: print(\"build sentinel\",type(e).__name__,str(e))\n")'`
+
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "<string>", line 7, in <module>
+  File "/private/tmp/g2-p14-independent/baseline/.venv-g2/lib/python3.12/site-packages/pydantic/main.py", line 732, in model_validate
+    return cls.__pydantic_validator__.validate_python(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/g2-p14-independent/baseline/src/quant_lab/market/contract.py", line 333, in _latency_domain
+    raise ContractError("latency_s 必须非负：启动时刻不能早于决策时刻")
+quant_lab.market.contract.ContractError: latency_s 必须非负：启动时刻不能早于决策时刻
+```
+
+
+#### H5，exit 1
+`.venv-g2/bin/python -c 'exec("import inspect\nfrom unittest.mock import patch\nfrom quant_lab.market import execution as x,contract as c\nfrom tests.market import test_constants_effective as k,test_outcome_kind as t\nfrom tests.market.test_review_p1 import e03\ndef result(fn):\n    try: fn();return \"GREEN\"\n    except BaseException as e: return \"RED \"+type(e).__name__+\" \"+str(e)[:100]\nsrc=inspect.getsource(x.load_market_from_lake)\nold='"'"'expected = grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])'"'"'\nnew='"'"'grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"]); expected = 0'"'"'\nassert src.count(old)==1\nns=dict(x.__dict__);exec(compile(src.replace(old,new),\"<discard-grid-result>\",\"exec\"),ns)\nns[\"grid_points_between\"]=lambda *args:x.grid_points_between(*args)\nwith patch.object(x,\"load_market_from_lake\",ns[\"load_market_from_lake\"]):\n    print(\"loader discard return\",result(k.test_grid_math_single_source_and_exact_to_microsecond))\nprint(\"loader restored\",result(k.test_grid_math_single_source_and_exact_to_microsecond))\nsrc=inspect.getsource(x.simulate_batch)\nold=\"check_policy_hash_consistency(df)\"\nns=dict(x.__dict__);exec(compile(src.replace(old,'"'"'check_policy_hash_consistency(df.with_columns(pl.lit(\"sanitized\").alias(\"policy_hash\")))'"'"'),\"<sanitize-gate-input>\",\"exec\"),ns)\nns[\"check_policy_hash_consistency\"]=lambda df:x.check_policy_hash_consistency(df)\nq,m=e03();q2=c.ExecutionRequest.model_validate({**q.model_dump(),\"episode_id\":\"merge\"})\noriginal=x.result_row\ndef inject(req,res):\n    row=original(req,res)\n    if req.episode_id==\"merge\": row[\"policy_hash\"]=\"0\"*64\n    return row\nwith patch.object(x,\"simulate_batch\",ns[\"simulate_batch\"]):\n    print(\"sanitized gate regression\",result(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\n    ns[\"result_row\"]=inject\n    df=x.simulate_batch([q,q2],markets={m.manifest_id:m})\n    print(\"sanitized gate actual\",df.height,df[\"policy_hash\"].n_unique(),\"NO ContractError\")\nprint(\"gate restored\",result(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\n")'`
+
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "<string>", line 12, in <module>
+AssertionError
+```
+
+
+#### H6，exit 0
+`.venv-g2/bin/python -c 'exec("import pathlib,re\npatterns={\"S32\":(\"contract.py\",r\"return t_dec|horizon_end = t_dec\"),\"S33\":(\"vision.py\",r\"total_seconds\"),\"S34\":(\"execution.py\",r\"g = |while g|g \\+=|abs\\(\\(h - g\"),\"S35\":(\"contract.py\",r\"plan_ttl =|exp_ttl =|ttl = plan.expiry\"),\"S36A\":(\"kernel_a.py\",r\"self.hold_end = ts\"),\"S36B\":(\"nautilus_adapter.py\",r\"hold_end =|cutoff = min\"),\"S37\":(\"kernel_a.py\",r\"first_expected =|o - prev|return prev \\+|prev \\+ iv <\"),\"TTL-deadline-A\":(\"kernel_a.py\",r\"deadline =\"),\"TTL-deadline-B\":(\"nautilus_adapter.py\",r\"deadline =\")}\nfor label,(file,pattern) in patterns.items():\n    for i,line in enumerate((pathlib.Path(\"src/quant_lab/market\")/file).read_text().splitlines(),1):\n        if re.search(pattern,line):print(label,file+\":\"+str(i),line.strip())\n")'`
+
+```text
+S32 contract.py:266 return t_dec + dt.timedelta(seconds=policy.latency_s)
+S34 execution.py:247 g = a.replace(minute=0, second=0, microsecond=0)
+S34 execution.py:248 g = g.replace(hour=(g.hour // 8) * 8)
+S34 execution.py:250 while g <= b:
+S34 execution.py:251 if g >= a and not any(abs((h - g).total_seconds()) <= 60 for h in have):
+S34 execution.py:254 g += dt.timedelta(hours=8)
+S35 contract.py:280 ttl = plan.expiry.entry_ttl_s
+S35 contract.py:483 exp_ttl = resolve_entry_ttl_s(self.order_plan, pol)
+S36A kernel_a.py:422 self.hold_end = ts + dt.timedelta(seconds=self.plan.expiry.max_holding_s)
+S36B nautilus_adapter.py:530 hold_end = min(opens) + dt.timedelta(seconds=plan.expiry.max_holding_s)
+S36B nautilus_adapter.py:556 cutoff = min(cutoff, st["close_at"])
+S36B nautilus_adapter.py:558 cutoff = min(cutoff, st["censor_at"] - dt.timedelta(microseconds=1))
+S36B nautilus_adapter.py:560 cutoff = min(cutoff, st["open_at"] + dt.timedelta(seconds=plan.expiry.max_holding_s) - dt.timedelta(microseconds=1))
+TTL-deadline-A kernel_a.py:222 deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)
+TTL-deadline-A kernel_a.py:317 deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)
+TTL-deadline-B nautilus_adapter.py:226 deadline = entry_expiry_at(t_start, req.entry_ttl_s)
+```
+
+
+#### H7，exit 0
+`.venv-g2/bin/python -c 'exec("import inspect\nfrom unittest.mock import patch\nfrom tests.market import test_outcome_kind as t\nfrom quant_lab.market import execution as x\ndef out(fn):\n    try:fn();return \"GREEN\"\n    except BaseException as e:return \"RED \"+type(e).__name__\nreal=inspect.getsource\nfor name,token in [(\"test_lint_forbidden_patterns_do_not_reappear\",'"'"'multiplier\"] or \"1\"'"'"'),(\"test_s27_s28_single_source_start_time_and_exact_grid\",\"(req.t_start or req.t_dec)\")]:\n    fn=getattr(t,name)\n    with patch.object(inspect,\"getsource\",side_effect=lambda obj:real(obj)+\"\\n# \"+token):\n        print(name,\"forbidden injected\",out(fn))\n    print(name,\"restored\",out(fn))\nsrc=real(x.check_policy_hash_consistency).replace(\"{r['"'"'policy_version'"'"']}\",\"REDACTED\")\nns=dict(x.__dict__);exec(compile(src,\"<missing-version-diagnostic>\",\"exec\"),ns)\nwith patch.object(x,\"check_policy_hash_consistency\",ns[\"check_policy_hash_consistency\"]):\n    print(\"B17 missing version diagnostic\",out(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\nprint(\"B17 restored\",out(t.test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes))\n")'`
+
+```text
+test_lint_forbidden_patterns_do_not_reappear forbidden injected RED AssertionError
+test_lint_forbidden_patterns_do_not_reappear restored GREEN
+test_s27_s28_single_source_start_time_and_exact_grid forbidden injected RED AssertionError
+test_s27_s28_single_source_start_time_and_exact_grid restored GREEN
+B17 missing version diagnostic RED TypeError
+B17 restored RED TypeError
+```
+
+
+#### H8，exit 0
+`.venv-g2/bin/python -c 'exec("import datetime as dt,itertools\nfrom quant_lab.market import contract as c\nfrom tests.market.test_partition_check import bars,rules,run,JAN\nimport polars as pl\ncount=0\nfor iv,base,au,bu in itertools.product((1,7,60,900,28800),(c.EPOCH-dt.timedelta(days=1),c.EPOCH,JAN),(-1,0,1,999999,60000001),(-1,0,1,999999,180000001)):\n    a=base+dt.timedelta(microseconds=au);b=base+dt.timedelta(microseconds=bu)\n    first=c.first_grid_point(a,iv)\n    points=[c.EPOCH+dt.timedelta(seconds=i*iv) for i in range(int((a-c.EPOCH).total_seconds()//iv)-2,int((b-c.EPOCH).total_seconds()//iv)+3)]\n    want=sum(a<=p<b for p in points)\n    assert c.grid_points_between(a,b,iv)==want\n    assert first>=a and first-a<dt.timedelta(seconds=iv) and (first-c.EPOCH)%dt.timedelta(seconds=iv)==dt.timedelta(0)\n    count+=1\nprint(\"helper brute\",count,\"PASS\")\nn=0\nfor au,bu in [(0,180000000),(1,180000000),(0,180000001)]:\n    a=JAN+dt.timedelta(microseconds=au);b=JAN+dt.timedelta(microseconds=bu)\n    expected=[i for i in range(4) if a<=JAN+dt.timedelta(seconds=i*60)<b]\n    for mask in range(1,1<<len(expected)):\n        keep=[i for j,i in enumerate(expected) if mask&(1<<j)]\n        df=bars(4).filter(pl.col(\"open_time\").is_in([JAN+dt.timedelta(seconds=i*60) for i in keep]))\n        out,qs,r=run(df,rules(a,b))\n        assert r.missing==len(expected)-len(keep),(au,bu,keep,r)\n        assert sum(g[\"n\"] for g in r.gaps)==r.missing,(au,bu,keep,r)\n        assert all(g[\"n\"]>0 for g in r.gaps)\n        n+=1\nprint(\"partition aligned subsets\",n,\"PASS\")\n")'`
+
+```text
+helper brute 375 PASS
+partition aligned subsets 25 PASS
+```
+
+
+#### H9，exit 0
+`.venv-g2/bin/python -c 'exec("from quant_lab.market import contract as c\nfrom tests.market.test_review_p1 import e03\nq,m=e03()\nmodels=[(c.ExecutionRequest,q.model_dump()),(c.OrderPlan,q.order_plan.model_dump()),(c.ExecutionPolicy,c.resolve_policy(q.policy_version).model_dump()),(c.Entry,q.order_plan.entries[0].model_dump()),(c.Stop,q.order_plan.stop.model_dump()),(c.TakeProfit,q.order_plan.tps[0].model_dump()),(c.Sizing,q.order_plan.sizing.model_dump()),(c.Expiry,q.order_plan.expiry.model_dump()),(c.CostSpec,c.CostSpec().model_dump())]\nfor cls,base in models:\n    for name,f in cls.model_fields.items():\n        if f.is_required() and \"None\" not in str(f.annotation):\n            continue\n        results=[]\n        for tag,val in [(\"omit\",None),(\"None\",None),(\"False\",False),(\"0\",0),(\"emptystr\",\"\"),(\"emptylist\",[])]:\n            d=dict(base)\n            if tag==\"omit\": d.pop(name,None)\n            else: d[name]=val\n            try:\n                z=cls.model_validate(d)\n                results.append(tag+\"=\"+repr(getattr(z,name)))\n            except Exception: pass\n        print(cls.__name__+\".\"+name+\" | \"+(\"; \".join(results) or \"all reject\"))\n")'`
+
+```text
+ExecutionRequest.cost_scenario | omit='base'
+ExecutionRequest.path_scenario | omit='primary'
+ExecutionRequest.execution_contract_version | omit='g2-exec-v0'
+ExecutionRequest.seed | omit=0; False=0; 0=0
+ExecutionRequest.t_start | omit=None; None=None
+ExecutionRequest.position_mode | omit='one_way'
+ExecutionRequest.entry_ttl_s | omit=3600; None=3600
+ExecutionRequest.entry_fractions | omit=(Decimal('1'),); None=(Decimal('1'),)
+ExecutionRequest.tp_fractions | omit=(Decimal('1'),); None=(Decimal('1'),)
+ExecutionRequest.horizon_source | all reject
+OrderPlan.tps | omit=[]; emptylist=[]
+OrderPlan.reduce_only_exit | omit=True
+ExecutionPolicy.latency_s | omit=0; False=0; 0=0
+ExecutionPolicy.ladder_steps | omit=2; False=0; 0=0
+ExecutionPolicy.participation | omit=None; None=None; 0=Decimal('0')
+ExecutionPolicy.wallet | omit=Decimal('1000'); 0=Decimal('0')
+ExecutionPolicy.leverage | omit=Decimal('1'); 0=Decimal('0')
+ExecutionPolicy.mark_max_staleness_s | omit=120; False=0; 0=0
+ExecutionPolicy.settlement_quantum | omit=Decimal('1E-8'); 0=Decimal('0')
+ExecutionPolicy.max_horizon_s | omit=1209600; False=0; 0=0
+ExecutionPolicy.entry_ttl_s | omit=86400; False=0; 0=0
+ExecutionPolicy.entry_fraction_rule | omit='equal'
+ExecutionPolicy.tp_fraction_rule | omit='equal'
+ExecutionPolicy.tp_total_fraction | omit=Decimal('1'); 0=Decimal('0')
+Entry.fraction | omit=None; None=None
+Entry.tif | omit='GTC'
+Entry.post_only | omit=False; False=False; 0=False
+Stop.trigger | omit='mark'
+TakeProfit.fraction | omit=None; None=None; 0=Decimal('0')
+Sizing.qty | omit=None; None=None; 0=Decimal('0')
+Expiry.entry_ttl_s | omit=None; None=None
+Expiry.max_holding_s | omit=None; None=None
+CostSpec.maker_fee | omit=Decimal('0'); 0=Decimal('0')
+CostSpec.taker_fee | omit=Decimal('0'); 0=Decimal('0')
+CostSpec.slippage_ticks | omit=0; False=0; 0=0
+CostSpec.slippage_bps | omit=Decimal('0'); 0=Decimal('0')
+```
+
+
+#### H10，exit 0
+`.venv-g2/bin/python -c 'exec("import ast,pathlib,re\nfor p in sorted(pathlib.Path(\"src/quant_lab/market\").glob(\"*.py\")):\n    tree=ast.parse(p.read_text())\n    for node in sorted(ast.walk(tree),key=lambda n:getattr(n,\"lineno\",0)):\n        if isinstance(node,(ast.Compare,ast.BinOp,ast.BoolOp)):\n            expr=ast.unparse(node)\n            if re.search(r\"t_start|t_dec|horizon|ttl|holding|hold_end|deadline|staleness|grid|cal_from|cal_to|gap_h|total_seconds|calc_time\",expr) and len(expr)<240:\n                print(str(p)+\":\"+str(node.lineno)+\" \"+expr)\n")'`
+
+```text
+src/quant_lab/market/asof.py:180 stale > max_staleness_s
+src/quant_lab/market/contract.py:266 t_dec + dt.timedelta(seconds=policy.latency_s)
+src/quant_lab/market/contract.py:275 entry_ttl_s + (hold if hold is not None else policy.research_horizon_s)
+src/quant_lab/market/contract.py:281 ttl is not None
+src/quant_lab/market/contract.py:288 t_start + dt.timedelta(seconds=entry_ttl_s)
+src/quant_lab/market/contract.py:431 data.get('entry_ttl_s') is None and isinstance(plan, OrderPlan) and (pol is not None)
+src/quant_lab/market/contract.py:431 data.get('entry_ttl_s') is None
+src/quant_lab/market/contract.py:450 self.order_plan.expiry.entry_ttl_s is not None
+src/quant_lab/market/contract.py:466 exp_t_start < self.t_dec
+src/quant_lab/market/contract.py:468 self.horizon_end <= exp_t_start
+src/quant_lab/market/contract.py:473 self.entry_ttl_s is None
+src/quant_lab/market/contract.py:480 self.t_start is not None and self.t_start != exp_t_start
+src/quant_lab/market/contract.py:480 self.t_start is not None
+src/quant_lab/market/contract.py:480 self.t_start != exp_t_start
+src/quant_lab/market/contract.py:484 self.entry_ttl_s != exp_ttl
+src/quant_lab/market/contract.py:485 self.entry_ttl_source == 'plan'
+src/quant_lab/market/contract.py:490 self.horizon_end - exp_t_start
+src/quant_lab/market/contract.py:491 window > dt.timedelta(seconds=pol.max_horizon_s)
+src/quant_lab/market/contract.py:495 self.horizon_source == 'policy' and window != dt.timedelta(seconds=derived_s)
+src/quant_lab/market/contract.py:495 self.horizon_source == 'policy'
+src/quant_lab/market/contract.py:519 self.t_start is not None
+src/quant_lab/market/contract.py:540 horizon_end is not None
+src/quant_lab/market/contract.py:541 horizon_end is None
+src/quant_lab/market/contract.py:542 derived_t_start(t_dec, policy) + dt.timedelta(seconds=derived_window_s(plan, policy, ttl))
+src/quant_lab/market/contract.py:833 e.ts in settle_keys
+src/quant_lab/market/execution.py:153 req.resolved_t_start(_rp(req.policy_version)) - dt.timedelta(seconds=window_before_s)
+src/quant_lab/market/execution.py:219 first_grid_point(opened, interval_s) != opened
+src/quant_lab/market/execution.py:251 g >= a and (not any((abs((h - g).total_seconds()) <= 60 for h in have)))
+src/quant_lab/market/execution.py:251 abs((h - g).total_seconds()) <= 60
+src/quant_lab/market/kernel_a.py:202 b.open_time >= self.t_start
+src/quant_lab/market/kernel_a.py:208 [p for p in m.last if self.t_start <= p.ts <= end] + [p for p in self._expanded(m.bars_last, self.policy.participation) if p.ts <= end]
+src/quant_lab/market/kernel_a.py:208 self.t_start <= p.ts <= end
+src/quant_lab/market/kernel_a.py:209 [p for p in m.mark if self.t_start <= p.ts <= end] + [p for p in self._expanded(m.bars_mark, None) if p.ts <= end]
+src/quant_lab/market/kernel_a.py:209 self.t_start <= p.ts <= end
+src/quant_lab/market/kernel_a.py:220 self.t_start <= f.calc_time <= end
+src/quant_lab/market/kernel_a.py:223 deadline <= end
+src/quant_lab/market/kernel_a.py:240 b.open_time >= self.t_start and b.open_time < end
+src/quant_lab/market/kernel_a.py:240 b.open_time >= self.t_start
+src/quant_lab/market/kernel_a.py:251 grid_points_between(expected, end, interval_s) > 0
+src/quant_lab/market/kernel_a.py:257 self.hold_end is not None and self.hold_end <= self.req.horizon_end and (self.hold_end not in self.moments)
+src/quant_lab/market/kernel_a.py:257 self.hold_end is not None
+src/quant_lab/market/kernel_a.py:257 self.hold_end <= self.req.horizon_end
+src/quant_lab/market/kernel_a.py:257 self.hold_end not in self.moments
+src/quant_lab/market/kernel_a.py:260 self.hold_end is not None and self.hold_end in self.moments
+src/quant_lab/market/kernel_a.py:260 self.hold_end is not None
+src/quant_lab/market/kernel_a.py:260 self.hold_end in self.moments
+src/quant_lab/market/kernel_a.py:421 self.plan.expiry.max_holding_s is not None
+src/quant_lab/market/kernel_a.py:422 ts + dt.timedelta(seconds=self.plan.expiry.max_holding_s)
+src/quant_lab/market/kernel_a.py:567 ts in self.settled_keys
+src/quant_lab/market/kernel_a.py:568 self.settled_keys[ts] != row.rate
+src/quant_lab/market/kernel_a.py:572 mp is None or (ts - mp.ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:572 (ts - mp.ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:590 r.effective_from and self.t_start < r.effective_from or (r.effective_to and self.t_start >= r.effective_to)
+src/quant_lab/market/kernel_a.py:590 r.effective_from and self.t_start < r.effective_from
+src/quant_lab/market/kernel_a.py:590 r.effective_to and self.t_start >= r.effective_to
+src/quant_lab/market/kernel_a.py:590 self.t_start < r.effective_from
+src/quant_lab/market/kernel_a.py:590 self.t_start >= r.effective_to
+src/quant_lab/market/kernel_a.py:594 not self.market.bars_complete and (self._first_bar_gap(self.market.bars_last, self.req.horizon_end) is None and self._first_bar_gap(self.market.bars_mark, self.req.horizon_end) is None)
+src/quant_lab/market/kernel_a.py:594 self._first_bar_gap(self.market.bars_last, self.req.horizon_end) is None and self._first_bar_gap(self.market.bars_mark, self.req.horizon_end) is None
+src/quant_lab/market/kernel_a.py:594 self._first_bar_gap(self.market.bars_last, self.req.horizon_end) is None
+src/quant_lab/market/kernel_a.py:595 self._first_bar_gap(self.market.bars_mark, self.req.horizon_end) is None
+src/quant_lab/market/kernel_a.py:615 (mo.hold_end or (self.hold_end is not None and ts >= self.hold_end)) and self.pos != 0
+src/quant_lab/market/kernel_a.py:615 mo.hold_end or (self.hold_end is not None and ts >= self.hold_end)
+src/quant_lab/market/kernel_a.py:615 self.hold_end is not None and ts >= self.hold_end
+src/quant_lab/market/kernel_a.py:615 self.hold_end is not None
+src/quant_lab/market/kernel_a.py:615 ts >= self.hold_end
+src/quant_lab/market/kernel_a.py:618 mo.horizon and self.pos != 0
+src/quant_lab/market/kernel_a.py:621 ts == self.t_start and (not self.orders)
+src/quant_lab/market/kernel_a.py:621 ts == self.t_start
+src/quant_lab/market/kernel_a.py:633 o.deadline is not None and o.deadline <= ts
+src/quant_lab/market/kernel_a.py:633 o.deadline is not None
+src/quant_lab/market/kernel_a.py:633 o.deadline <= ts
+src/quant_lab/market/kernel_a.py:654 self.mark_ts is None or (ts - self.mark_ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:654 (ts - self.mark_ts).total_seconds() > self.policy.mark_max_staleness_s
+src/quant_lab/market/kernel_a.py:671 self.hold_end is not None and self.pos != 0
+src/quant_lab/market/kernel_a.py:671 self.hold_end is not None
+src/quant_lab/market/nautilus_adapter.py:146 list(market.last) + [p for b in market.bars_last if b.open_time >= t_start for p in expand_bar_b(b, req.path_scenario, plan.side)]
+src/quant_lab/market/nautilus_adapter.py:146 b.open_time >= t_start
+src/quant_lab/market/nautilus_adapter.py:148 list(market.mark) + [p for b in market.bars_mark if b.open_time >= t_start for p in expand_bar_b(b, req.path_scenario, plan.side)]
+src/quant_lab/market/nautilus_adapter.py:149 b.open_time >= t_start
+src/quant_lab/market/nautilus_adapter.py:150 b.open_time < t_start
+src/quant_lab/market/nautilus_adapter.py:150 p.path_step == 'C' and p.ts <= t_start
+src/quant_lab/market/nautilus_adapter.py:150 p.ts <= t_start
+src/quant_lab/market/nautilus_adapter.py:153 market.funding and len({f.calc_time for f in market.funding}) != len({(f.calc_time, f.rate) for f in market.funding})
+src/quant_lab/market/nautilus_adapter.py:153 len({f.calc_time for f in market.funding}) != len({(f.calc_time, f.rate) for f in market.funding})
+src/quant_lab/market/nautilus_adapter.py:156 t_start <= p.ts <= end
+src/quant_lab/market/nautilus_adapter.py:237 deadline <= end
+src/quant_lab/market/nautilus_adapter.py:419 self.fi < len(self.funding_rows) and self.funding_rows[self.fi].calc_time <= ts
+src/quant_lab/market/nautilus_adapter.py:419 self.funding_rows[self.fi].calc_time <= ts
+src/quant_lab/market/nautilus_adapter.py:422 row.calc_time < t_start or row.calc_time in self.settled_at
+src/quant_lab/market/nautilus_adapter.py:422 row.calc_time < t_start
+src/quant_lab/market/nautilus_adapter.py:422 row.calc_time in self.settled_at
+src/quant_lab/market/nautilus_adapter.py:425 m.ts <= row.calc_time and m.path_step in ('none', 'C')
+src/quant_lab/market/nautilus_adapter.py:425 m.ts <= row.calc_time
+src/quant_lab/market/nautilus_adapter.py:426 not mk or (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:426 (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:426 row.calc_time - mk[-1].ts
+src/quant_lab/market/nautilus_adapter.py:442 st['pos'] != 0 and (st['mark_ts'] is None or (ts - st['mark_ts']).total_seconds() > policy.mark_max_staleness_s)
+src/quant_lab/market/nautilus_adapter.py:442 st['mark_ts'] is None or (ts - st['mark_ts']).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:442 (ts - st['mark_ts']).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:450 self.fi < len(self.funding_rows) and self.funding_rows[self.fi].calc_time <= until and (st['pos'] != 0) and (not st['censor'])
+src/quant_lab/market/nautilus_adapter.py:450 self.funding_rows[self.fi].calc_time <= until
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time < t_start or row.calc_time in self.settled_at or row.calc_time < (st['open_at'] or t_start)
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time < t_start
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time in self.settled_at
+src/quant_lab/market/nautilus_adapter.py:453 row.calc_time < (st['open_at'] or t_start)
+src/quant_lab/market/nautilus_adapter.py:453 st['open_at'] or t_start
+src/quant_lab/market/nautilus_adapter.py:456 m.ts <= row.calc_time and m.path_step in ('none', 'C')
+src/quant_lab/market/nautilus_adapter.py:456 m.ts <= row.calc_time
+src/quant_lab/market/nautilus_adapter.py:457 not mk or (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:457 (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+src/quant_lab/market/nautilus_adapter.py:457 row.calc_time - mk[-1].ts
+src/quant_lab/market/nautilus_adapter.py:499 rules.effective_from and t_start < rules.effective_from or (rules.effective_to and t_start >= rules.effective_to)
+src/quant_lab/market/nautilus_adapter.py:499 rules.effective_from and t_start < rules.effective_from
+src/quant_lab/market/nautilus_adapter.py:499 rules.effective_to and t_start >= rules.effective_to
+src/quant_lab/market/nautilus_adapter.py:499 t_start < rules.effective_from
+src/quant_lab/market/nautilus_adapter.py:499 t_start >= rules.effective_to
+src/quant_lab/market/nautilus_adapter.py:527 plan.expiry.max_holding_s is not None
+src/quant_lab/market/nautilus_adapter.py:530 min(opens) + dt.timedelta(seconds=plan.expiry.max_holding_s)
+src/quant_lab/market/nautilus_adapter.py:531 e['ts'] < hold_end
+src/quant_lab/market/nautilus_adapter.py:559 plan.expiry.max_holding_s is not None and st['open_at'] is not None
+src/quant_lab/market/nautilus_adapter.py:559 plan.expiry.max_holding_s is not None
+src/quant_lab/market/nautilus_adapter.py:560 st['open_at'] + dt.timedelta(seconds=plan.expiry.max_holding_s) - dt.timedelta(microseconds=1)
+src/quant_lab/market/nautilus_adapter.py:560 st['open_at'] + dt.timedelta(seconds=plan.expiry.max_holding_s)
+src/quant_lab/market/nautilus_adapter.py:561 {m.ts for m in marks if t_start <= m.ts <= cutoff} | {p.ts for p in lasts if p.ts <= cutoff}
+src/quant_lab/market/nautilus_adapter.py:561 t_start <= m.ts <= cutoff
+src/quant_lab/market/partition_check.py:246 cal_from <= t < cal_to and first_grid_point(t, sec) == t
+src/quant_lab/market/partition_check.py:246 cal_from <= t < cal_to
+src/quant_lab/market/partition_check.py:246 first_grid_point(t, sec) == t
+src/quant_lab/market/partition_check.py:259 [False] + [grid_points_between(prev[i] + step, df[key][i], sec) > 0 for i in range(1, df.height)]
+src/quant_lab/market/partition_check.py:259 grid_points_between(prev[i] + step, df[key][i], sec) > 0
+src/quant_lab/market/partition_check.py:263 df.height and grid_points_between(cal_from, df[key][0], sec) > 0
+src/quant_lab/market/partition_check.py:263 grid_points_between(cal_from, df[key][0], sec) > 0
+src/quant_lab/market/partition_check.py:277 grid_points_between(df[key][-1] + step, cal_to, sec) > 0
+src/quant_lab/market/partition_check.py:291 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite() & pl.col('high').is_finite() & pl.col('low').is_finite()
+src/quant_lab/market/partition_check.py:291 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite() & pl.col('high').is_finite()
+src/quant_lab/market/partition_check.py:291 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite()
+src/quant_lab/market/partition_check.py:291 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0)
+src/quant_lab/market/partition_check.py:291 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high'))
+src/quant_lab/market/partition_check.py:291 pl.col('low') <= pl.min_horizontal('open', 'close')
+src/quant_lab/market/partition_check.py:291 pl.max_horizontal('open', 'close') <= pl.col('high')
+src/quant_lab/market/partition_check.py:335 df.height - df['calc_time'].n_unique()
+src/quant_lab/market/single_source.py:201 't_start' in attrs and 't_dec' in attrs
+src/quant_lab/market/single_source.py:201 't_start' in attrs
+src/quant_lab/market/single_source.py:201 't_dec' in attrs
+src/quant_lab/market/single_source.py:211 name == 'int' and node.args and ('total_seconds()' in self._seg(node.args[0]))
+src/quant_lab/market/single_source.py:211 'total_seconds()' in self._seg(node.args[0])
+src/quant_lab/market/single_source.py:253 isinstance(n, ast.Attribute) and n.attr == 'entry_ttl_s'
+src/quant_lab/market/single_source.py:253 n.attr == 'entry_ttl_s'
+src/quant_lab/market/single_source.py:286 isinstance(node.op, (ast.FloorDiv, ast.Div)) and ('total_seconds()' in seg or 'interval_s' in seg or 'timedelta' in seg)
+src/quant_lab/market/single_source.py:287 'total_seconds()' in seg or 'interval_s' in seg or 'timedelta' in seg
+src/quant_lab/market/single_source.py:287 'total_seconds()' in seg
+src/quant_lab/market/single_source.py:290 isinstance(node.op, ast.Add) and 'entry_ttl_s' in seg
+src/quant_lab/market/single_source.py:290 'entry_ttl_s' in seg
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite() & pl.col('high').is_finite() & pl.col('low').is_finite()
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite() & pl.col('high').is_finite()
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0) & pl.col('open').is_finite()
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high')) & (pl.col('low') > 0)
+src/quant_lab/market/vision.py:262 (pl.col('low') <= pl.min_horizontal('open', 'close')) & (pl.max_horizontal('open', 'close') <= pl.col('high'))
+src/quant_lab/market/vision.py:262 pl.col('low') <= pl.min_horizontal('open', 'close')
+src/quant_lab/market/vision.py:262 pl.max_horizontal('open', 'close') <= pl.col('high')
+```
+
+### TREE / ARCHIVE / PROVENANCE 可复跑探针与输出
+
+#### TREE，exit 0
+`.venv-g2/bin/python -B -c 'import json,ast,pathlib
+from quant_lab.market import single_source as g,contract as c
+actual=g.collect_call_sites(g.SRC,set(g.ALLOWED_CALLERS))
+print('"'"'REGISTRY'"'"',json.dumps({k:sorted(v) for k,v in actual.items()},sort_keys=True))
+print('"'"'CALL_DIFF'"'"',g.diff_call_sites(g.ALLOWED_CALLERS,actual))
+print('"'"'COUNTS'"'"',g.collect_call_counts(g.SRC,set(g.ALLOWED_CALL_COUNTS)))
+print('"'"'COUNT_EQUAL'"'"',g.collect_call_counts(g.SRC,set(g.ALLOWED_CALL_COUNTS))==g.ALLOWED_CALL_COUNTS)
+hits=g.lint_tree(g.SRC);print('"'"'HITS'"'"',json.dumps(hits,ensure_ascii=False));print('"'"'VIOLATIONS'"'"',g.violations(hits))
+print('"'"'P2_UNSUPPORTED'"'"',c.P2_UNSUPPORTED)
+for pattern,homes in g.FORBIDDEN_HOMES.items():
+ for home in sorted(homes):print('"'"'HOME'"'"',pattern,home,'"'"'ACTUAL'"'"',[x for x in hits if x[0]==pattern and x[2]==home])
+for pattern,home in sorted(g.FOREIGN_HITS):print('"'"'FOREIGN'"'"',pattern,home,'"'"'ACTUAL'"'"',[x for x in hits if x[0]==pattern and x[2]==home])
+for p in sorted((g.SRC/'"'"'market'"'"').glob('"'"'*.py'"'"')):
+ source=p.read_text()
+ for node in ast.walk(ast.parse(source)):
+  if isinstance(node,(ast.BinOp,ast.Compare,ast.BoolOp,ast.IfExp,ast.Call)):
+   seg=ast.get_source_segment(source,node)
+   if isinstance(seg,str) and any(t in seg for t in ['"'"'total_seconds'"'"','"'"'latency_s'"'"','"'"'entry_ttl_s'"'"','"'"'t_start or'"'"','"'"'prev +'"'"','"'"'o - prev'"'"']):
+    print('"'"'EXPR'"'"',p.name,node.lineno,seg[:210].replace('"'"'\n'"'"','"'"' '"'"'))
+'`
+
+```text
+REGISTRY {"check_policy_hash_consistency": ["market/execution.py:simulate_batch"], "derived_t_start": ["market/contract.py:ExecutionRequest._chk", "market/contract.py:ExecutionRequest.resolved_t_start", "market/contract.py:build_request"], "derived_window_s": ["market/contract.py:ExecutionRequest._chk", "market/contract.py:build_request"], "entry_expiry_at": ["market/kernel_a.py:KernelA.submit_entries", "market/kernel_a.py:KernelA.timeline", "market/nautilus_adapter.py:_simulate_b.PlanShell._submit_entries"], "first_grid_point": ["market/execution.py:load_market_from_lake.bars", "market/kernel_a.py:KernelA._first_bar_gap", "market/partition_check.py:check_bars"], "force_close_net_R": [], "grid_points_between": ["market/execution.py:load_market_from_lake.bars", "market/kernel_a.py:KernelA._first_bar_gap", "market/partition_check.py:check_bars", "market/vision.py:expected_rows"], "resolve_entry_ttl_s": ["market/contract.py:ExecutionRequest._chk", "market/contract.py:ExecutionRequest._resolve_ttl", "market/contract.py:build_request"]}
+CALL_DIFF []
+COUNTS {'first_grid_point': {'market/execution.py:load_market_from_lake.bars': 1, 'market/kernel_a.py:KernelA._first_bar_gap': 1, 'market/partition_check.py:check_bars': 1}, 'force_close_net_R': {}, 'derived_window_s': {'market/contract.py:ExecutionRequest._chk': 1, 'market/contract.py:build_request': 1}, 'entry_expiry_at': {'market/kernel_a.py:KernelA.timeline': 1, 'market/kernel_a.py:KernelA.submit_entries': 1, 'market/nautilus_adapter.py:_simulate_b.PlanShell._submit_entries': 1}, 'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1, 'market/kernel_a.py:KernelA._first_bar_gap': 1, 'market/partition_check.py:check_bars': 7, 'market/vision.py:expected_rows': 1}, 'check_policy_hash_consistency': {'market/execution.py:simulate_batch': 1}, 'resolve_entry_ttl_s': {'market/contract.py:ExecutionRequest._resolve_ttl': 1, 'market/contract.py:ExecutionRequest._chk': 1, 'market/contract.py:build_request': 1}, 'derived_t_start': {'market/contract.py:ExecutionRequest._chk': 1, 'market/contract.py:ExecutionRequest.resolved_t_start': 1, 'market/contract.py:build_request': 1}}
+COUNT_EQUAL True
+HITS [["P3_duration_div", 240, "market/contract.py:_us", "(t - EPOCH) // dt.timedelta(microseconds=1)"], ["P1_inline_latency", 266, "market/contract.py:derived_t_start", "dt.timedelta(seconds=policy.latency_s)"], ["P5_inline_entry_ttl", 275, "market/contract.py:derived_window_s", "entry_ttl_s + (hold if hold is not None else policy.research_horizon_s)"], ["P7_inline_ttl_resolution", 280, "market/contract.py:resolve_entry_ttl_s", "ttl = plan.expiry.entry_ttl_s"], ["P7_inline_ttl_resolution", 283, "market/contract.py:resolve_entry_ttl_s", "return policy.entry_ttl_s"], ["P5_inline_entry_ttl", 288, "market/contract.py:entry_expiry_at", "t_start + dt.timedelta(seconds=entry_ttl_s)"], ["P8_inline_force_close", 674, "market/contract.py:force_close_net_R", "mark - res.entry_avg_price"], ["P5_inline_entry_ttl", 627, "research/api.py:build_inputs_from_synthetic", "pl.col(\"t_dec\") + pl.duration(seconds=pl.col(\"entry_ttl_s\"))"], ["P3_duration_div", 157, "research/maxt.py:calendar_blocks", "(max(v) - min(v)).total_seconds() / 86400"]]
+VIOLATIONS []
+P2_UNSUPPORTED {'S02': {'status': 'unsupported', 'capability': 'real_settlement_time_U03_and_engine_balance', 'owner': 'G0 settlement contract + G2 P2'}, 'S06': {'status': 'unsupported', 'capability': 'bronze_depth_replay_and_multi_source_versions', 'owner': 'G1 lake + G2 P2'}, 'S07': {'status': 'unsupported', 'capability': 'management_commands_E13_C01_and_reservation_lifecycle', 'owner': 'G0 C01 + G2 P2'}, 'S12': {'status': 'unsupported', 'capability': 'versioned_lake_snapshot_resolution', 'owner': 'G1 lake + G0 identity contract'}}
+HOME P8_inline_force_close market/contract.py:force_close_net_R ACTUAL [('P8_inline_force_close', 674, 'market/contract.py:force_close_net_R', 'mark - res.entry_avg_price')]
+HOME P7_inline_ttl_resolution market/contract.py:resolve_entry_ttl_s ACTUAL [('P7_inline_ttl_resolution', 280, 'market/contract.py:resolve_entry_ttl_s', 'ttl = plan.expiry.entry_ttl_s'), ('P7_inline_ttl_resolution', 283, 'market/contract.py:resolve_entry_ttl_s', 'return policy.entry_ttl_s')]
+HOME P1_inline_latency market/contract.py:derived_t_start ACTUAL [('P1_inline_latency', 266, 'market/contract.py:derived_t_start', 'dt.timedelta(seconds=policy.latency_s)')]
+HOME P3_duration_div market/contract.py:_us ACTUAL [('P3_duration_div', 240, 'market/contract.py:_us', '(t - EPOCH) // dt.timedelta(microseconds=1)')]
+HOME P5_inline_entry_ttl market/contract.py:derived_window_s ACTUAL [('P5_inline_entry_ttl', 275, 'market/contract.py:derived_window_s', 'entry_ttl_s + (hold if hold is not None else policy.research_horizon_s)')]
+HOME P5_inline_entry_ttl market/contract.py:entry_expiry_at ACTUAL [('P5_inline_entry_ttl', 288, 'market/contract.py:entry_expiry_at', 't_start + dt.timedelta(seconds=entry_ttl_s)')]
+FOREIGN P3_duration_div research/maxt.py:calendar_blocks ACTUAL [('P3_duration_div', 157, 'research/maxt.py:calendar_blocks', '(max(v) - min(v)).total_seconds() / 86400')]
+FOREIGN P5_inline_entry_ttl research/api.py:build_inputs_from_synthetic ACTUAL [('P5_inline_entry_ttl', 627, 'research/api.py:build_inputs_from_synthetic', 'pl.col("t_dec") + pl.duration(seconds=pl.col("entry_ttl_s"))')]
+EXPR asof.py 179 (at - ct).total_seconds()
+EXPR contract.py 266 t_dec + dt.timedelta(seconds=policy.latency_s)
+EXPR contract.py 275 entry_ttl_s + (hold if hold is not None else policy.research_horizon_s)
+EXPR contract.py 288 t_start + dt.timedelta(seconds=entry_ttl_s)
+EXPR contract.py 329 field_validator("latency_s")
+EXPR contract.py 360 ExecutionPolicy(version="base-v1", research_horizon_s=5 * 86400, latency_s=0, ladder_steps=3,                                costs={"base": CostSpec(maker_fee=Decimal("0.0002"), taker_fee=Decimal("0.0005")),   
+EXPR contract.py 539 resolve_entry_ttl_s(plan, policy)
+EXPR contract.py 543 ExecutionRequest(         episode_id=str(episode_row["episode_id"]), graph_version=str(episode_row["graph_version"]),         decision_snapshot_hash=str(episode_row["decision_snapshot_hash"]), t_dec=t_dec, orde
+EXPR contract.py 1066 ExecutionResult(**exp.model_dump(), trace_hash="", kernel=kernel, kernel_version=kernel_version,                            entry_ttl_source=entry_ttl_source, fraction_source=fraction_source, horizon_source=hor
+EXPR contract.py 266 dt.timedelta(seconds=policy.latency_s)
+EXPR contract.py 288 dt.timedelta(seconds=entry_ttl_s)
+EXPR contract.py 431 data.get("entry_ttl_s") is None and isinstance(plan, OrderPlan) and pol is not None
+EXPR contract.py 450 "plan" if self.order_plan.expiry.entry_ttl_s is not None else "policy"
+EXPR contract.py 473 self.entry_ttl_s is None
+EXPR contract.py 483 resolve_entry_ttl_s(self.order_plan, pol)
+EXPR contract.py 484 self.entry_ttl_s != exp_ttl
+EXPR contract.py 333 ContractError("latency_s 必须非负：启动时刻不能早于决策时刻")
+EXPR contract.py 431 data.get("entry_ttl_s") is None
+EXPR contract.py 450 self.order_plan.expiry.entry_ttl_s is not None
+EXPR contract.py 469 ContractError(f"horizon_end 必须晚于 t_start（推导值 {exp_t_start}，latency_s={pol.latency_s}）")
+EXPR contract.py 474 ContractError("entry_ttl_s 未能解析（计划与 policy 都未给）")
+EXPR contract.py 481 ContractError(f"t_start 与 policy {self.policy_version} 解析值不一致：{self.t_start} != {exp_t_start}"                                 f"（latency_s={pol.latency_s}；要平移开始时刻请改 policy.latency_s）")
+EXPR contract.py 485 "计划" if self.entry_ttl_source == "plan" else f"policy {self.policy_version}"
+EXPR contract.py 486 ContractError(f"entry_ttl_s 与{src}解析值不一致：{self.entry_ttl_s} != {exp_ttl}")
+EXPR contract.py 431 data.get("entry_ttl_s")
+EXPR contract.py 432 resolve_entry_ttl_s(plan, pol)
+EXPR contract.py 485 self.entry_ttl_source == "plan"
+EXPR execution.py 251 g >= a and not any(abs((h - g).total_seconds()) <= 60 for h in have)
+EXPR execution.py 251 any(abs((h - g).total_seconds()) <= 60 for h in have)
+EXPR execution.py 251 abs((h - g).total_seconds()) <= 60
+EXPR execution.py 251 abs((h - g).total_seconds())
+EXPR execution.py 251 (h - g).total_seconds()
+EXPR kernel_a.py 222 entry_expiry_at(self.t_start, self.req.entry_ttl_s)
+EXPR kernel_a.py 317 entry_expiry_at(self.t_start, self.req.entry_ttl_s)
+EXPR kernel_a.py 572 mp is None or (ts - mp.ts).total_seconds() > self.policy.mark_max_staleness_s
+EXPR kernel_a.py 691 ExecutionResult(             canonical_events=self.events, fill_status=fill_status, filled_qty=self.entry_qty,             fees=quantize_money(self.fees), funding=quantize_money(self.funding_total), slippage=qu
+EXPR kernel_a.py 572 (ts - mp.ts).total_seconds() > self.policy.mark_max_staleness_s
+EXPR kernel_a.py 572 (ts - mp.ts).total_seconds()
+EXPR kernel_a.py 654 self.mark_ts is None or (ts - self.mark_ts).total_seconds() > self.policy.mark_max_staleness_s
+EXPR kernel_a.py 654 (ts - self.mark_ts).total_seconds() > self.policy.mark_max_staleness_s
+EXPR kernel_a.py 654 (ts - self.mark_ts).total_seconds()
+EXPR nautilus_adapter.py 598 ExecutionResult(         canonical_events=events, fill_status=fill_status, filled_qty=st["entry_qty"], fees=quantize_money(st["fees"]),         funding=quantize_money(st["funding"]), slippage=quantize_money(st[
+EXPR nautilus_adapter.py 226 entry_expiry_at(t_start, req.entry_ttl_s)
+EXPR nautilus_adapter.py 442 st["pos"] != 0 and (st["mark_ts"] is None or (ts - st["mark_ts"]).total_seconds() > policy.mark_max_staleness_s)
+EXPR nautilus_adapter.py 422 row.calc_time < t_start or row.calc_time in self.settled_at
+EXPR nautilus_adapter.py 426 not mk or (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+EXPR nautilus_adapter.py 442 st["mark_ts"] is None or (ts - st["mark_ts"]).total_seconds() > policy.mark_max_staleness_s
+EXPR nautilus_adapter.py 453 row.calc_time < t_start or row.calc_time in self.settled_at or row.calc_time < (st["open_at"] or t_start)
+EXPR nautilus_adapter.py 457 not mk or (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+EXPR nautilus_adapter.py 426 (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+EXPR nautilus_adapter.py 442 (ts - st["mark_ts"]).total_seconds() > policy.mark_max_staleness_s
+EXPR nautilus_adapter.py 457 (row.calc_time - mk[-1].ts).total_seconds() > policy.mark_max_staleness_s
+EXPR nautilus_adapter.py 426 (row.calc_time - mk[-1].ts).total_seconds()
+EXPR nautilus_adapter.py 442 (ts - st["mark_ts"]).total_seconds()
+EXPR nautilus_adapter.py 457 (row.calc_time - mk[-1].ts).total_seconds()
+EXPR single_source.py 211 name == "int" and node.args and "total_seconds()" in self._seg(node.args[0])
+EXPR single_source.py 286 isinstance(node.op, (ast.FloorDiv, ast.Div)) and (             "total_seconds()" in seg or "interval_s" in seg or "timedelta" in seg         )
+EXPR single_source.py 290 isinstance(node.op, ast.Add) and "entry_ttl_s" in seg
+EXPR single_source.py 211 "total_seconds()" in self._seg(node.args[0])
+EXPR single_source.py 212 self._hit("P2_int_total_seconds", node)
+EXPR single_source.py 287 "total_seconds()" in seg or "interval_s" in seg or "timedelta" in seg
+EXPR single_source.py 290 "entry_ttl_s" in seg
+EXPR single_source.py 209 kw.arg == "seconds" and "latency_s" in self._seg(kw.value)
+EXPR single_source.py 253 isinstance(n, ast.Attribute) and n.attr == "entry_ttl_s"
+EXPR single_source.py 287 "total_seconds()" in seg
+EXPR single_source.py 209 "latency_s" in self._seg(kw.value)
+EXPR single_source.py 253 n.attr == "entry_ttl_s"
+```
+
+
+#### ARCHIVE，exit 0
+`.venv-g2/bin/python -B -c 'import pathlib,datetime as dt,polars as pl
+from quant_lab.market import partition_check as pc,execution as ex,contract as c
+from tests.market.test_single_source import _request
+base=pathlib.Path('"'"'data/lake/market/silver/binance/um'"'"')
+for kind,col,seconds in [('"'"'klines'"'"','"'"'open_time'"'"',60),('"'"'markPriceKlines'"'"','"'"'open_time'"'"',60),('"'"'fundingRate'"'"','"'"'calc_time'"'"',28800)]:
+ files=sorted((base/kind).glob('"'"'*/instrument=BTCUSDT-PERP.BINANCE-UM/date=2024-01-*/part.parquet'"'"'))
+ frame=pl.concat([pl.read_parquet(f) for f in files]); times=frame[col].to_list(); epoch=dt.datetime(1970,1,1,tzinfo=dt.UTC)
+ offsets=[int(((t-epoch)%dt.timedelta(seconds=seconds))/dt.timedelta(microseconds=1)) for t in times]
+ print('"'"'ARCHIVE'"'"',kind,'"'"'files'"'"',len(files),'"'"'rows'"'"',len(times),'"'"'offgrid'"'"',sum(x!=0 for x in offsets),'"'"'offsets_us'"'"',sorted(set(offsets)))
+ if kind=='"'"'fundingRate'"'"':
+  out,qs,rep=pc.check_funding(frame,pid='"'"'p14'"'"',inst='"'"'BTCUSDT-PERP.BINANCE-UM'"'"',period='"'"'2024-01'"'"')
+  loaded=set()
+  for day in range(1,32):
+   start=dt.datetime(2024,1,day,tzinfo=dt.UTC);end=start+dt.timedelta(days=1)-dt.timedelta(microseconds=1)
+   market=ex.load_market_from_lake(_request(t_dec=start,t_start=None,horizon_end=end),lake_root='"'"'data/lake/market'"'"')
+   loaded.update(f.calc_time for f in market.funding)
+  print('"'"'FUNDING_RETAINED'"'"',out.height,len(qs),set(out['"'"'calc_time'"'"'])==set(times),'"'"'LOADER'"'"',len(loaded),loaded==set(times))
+'`
+
+```text
+ARCHIVE klines files 31 rows 44640 offgrid 0 offsets_us [0]
+ARCHIVE markPriceKlines files 31 rows 44640 offgrid 0 offsets_us [0]
+ARCHIVE fundingRate files 31 rows 93 offgrid 15 offsets_us [0, 1000, 2000, 3000]
+FUNDING_RETAINED 93 0 True LOADER 93 True
+```
+
+
+#### PROVENANCE，exit 0
+`.venv-g2/bin/python -B -c 'import pathlib,hashlib,json,zipfile
+base=pathlib.Path('"'"'data/lake/market'"'"')
+for mf in sorted((base/'"'"'_manifest'"'"').glob('"'"'*.json'"'"')):
+ m=json.loads(mf.read_text());kind=m['"'"'data_type'"'"'];interval=m['"'"'interval'"'"'];z=base/'"'"'bronze/binance/um'"'"'/kind/interval/'"'"'BTCUSDT/2024-01.zip'"'"'
+ sha=hashlib.sha256(z.read_bytes()).hexdigest();side=z.with_suffix('"'"'.zip.sha256'"'"').read_text().split()[0]
+ with zipfile.ZipFile(z) as archive:
+  names=archive.namelist();line_count=sum(len(archive.read(n).splitlines()) for n in names)
+ assert sha==m['"'"'source_sha256'"'"']==side
+ print(mf.name,'"'"'actual_rows'"'"',m['"'"'actual_rows'"'"'],'"'"'expected_rows'"'"',m['"'"'expected_rows'"'"'],'"'"'bronze_lines'"'"',line_count,'"'"'sha256'"'"',sha,'"'"'three_way_equal'"'"',True,'"'"'checksum_source'"'"',m['"'"'checksum_source'"'"'])
+'`
+
+```text
+binance-um-BTCUSDT-fundingRate-8h-2024-01.json actual_rows 93 expected_rows None bronze_lines 94 sha256 3e0d30870672aa8f0f937881056e3cfd55913ae5c780cd50b33f2763aa0ba58e three_way_equal True checksum_source vision_CHECKSUM
+binance-um-BTCUSDT-klines-1m-2024-01.json actual_rows 44640 expected_rows 44640 bronze_lines 44641 sha256 21eeac04a76a7a35b10467e5e752fb2f8cff77cdeb57df6b50a23ce8d69bb190 three_way_equal True checksum_source vision_CHECKSUM
+binance-um-BTCUSDT-markPriceKlines-1m-2024-01.json actual_rows 44640 expected_rows 44640 bronze_lines 44641 sha256 1607b1522928d2a698592019fef7c3fcc9bee2cd01674c72a27e7fc028fd66ca three_way_equal True checksum_source vision_CHECKSUM
+```
+
+归档探针首次误用了不含 instrument= 前缀的路径 glob，输出 ValueError: cannot concat empty list；这次工具错误不计产品缺陷。修正 glob 后得到上列真实逐行结果。
+
+### A37 可执行 AST 同一性
+
+```json
+{
+  "old_commit": "bef5750",
+  "behavior_ast_equal": true,
+  "old_ast_sha": "f30dff288d2e010083cd06f2ba714fa2a128d3222ad9ca165ce10d5dc41088bd",
+  "new_ast_sha": "f30dff288d2e010083cd06f2ba714fa2a128d3222ad9ca165ce10d5dc41088bd"
+}
+```
+
+复跑命令：`.venv-g2/bin/python -B -c 'import ast,subprocess,pathlib,hashlib; old=subprocess.check_output(['"'"'git'"'"','"'"'show'"'"','"'"'bef5750:quant-lab/src/quant_lab/market/contract.py'"'"'],text=True); now=pathlib.Path('"'"'src/quant_lab/market/contract.py'"'"').read_text(); a=ast.parse(old); b=ast.parse(now)
+for tree in (a,b):
+ for n in ast.walk(tree):
+  if isinstance(n,(ast.Module,ast.ClassDef,ast.FunctionDef,ast.AsyncFunctionDef)) and n.body and isinstance(n.body[0],ast.Expr) and isinstance(n.body[0].value,ast.Constant) and isinstance(n.body[0].value.value,str): n.body.pop(0)
+x=ast.dump(a,include_attributes=False); y=ast.dump(b,include_attributes=False); print('"'"'AST_EQUAL'"'"',x==y,'"'"'OLD'"'"',hashlib.sha256(x.encode()).hexdigest(),'"'"'CURRENT'"'"',hashlib.sha256(y.encode()).hexdigest()); assert x==y'`。
+
+### S44 三阶段真实磁盘护栏证据
+副本中新建 git 基线；快照在注入前由独立进程生成。每一阶段都另起进程调用 assert_matches。护栏的该模式覆盖 .py；不声称对 JSON 或其他后缀自动全覆盖。
+G 复跑命令：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_GUARD -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])'`。
+
+<!-- P14_GUARD -->
+
+```python
+import pathlib,subprocess,os,json,hashlib,tempfile,shutil,sys
+repo=pathlib.Path.cwd().parent;py=sys.executable;env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1'}
+
+g=pathlib.Path(tempfile.mkdtemp(prefix='p14-guard-'));(g/'src').mkdir();(g/'src/base.py').write_text('value = 1\n');shutil.copyfile(repo/'quant-lab/scripts/tree_guard.py',g/'guard.py')
+for args in [['init','-q'],['add','src/base.py','guard.py'],['-c','user.name=review','-c','user.email=review@localhost','commit','-qm','baseline']]:subprocess.run(['git',*args],cwd=g,check=True,capture_output=True)
+collect='from guard import TreeGuard;import pathlib,json;g=TreeGuard(["src"],repo=str(pathlib.Path.cwd()));pathlib.Path("snap.json").write_text(json.dumps(g.snapshot()));print(g.assert_clean("BASE"))'
+result=subprocess.run([py,'-B','-c',collect],cwd=g,env=env,text=True,capture_output=True,check=True);print(result.stdout)
+child='from guard import TreeGuard;import pathlib,json;g=TreeGuard(["src"],repo=str(pathlib.Path.cwd()));print(g.assert_matches(json.loads(pathlib.Path("snap.json").read_text()),"P14"))'
+def digest():return hashlib.sha256(json.dumps({str(f.relative_to(g)):hashlib.sha256(f.read_bytes()).hexdigest() for f in sorted((g/'src').rglob('*')) if f.is_file()},sort_keys=True).encode()).hexdigest()
+records=[]
+for mode in ['add','delete','modify']:
+ d={'mode':mode}
+ for phase in ['baseline','injected','restored']:
+  if phase=='injected':
+   if mode=='add':(g/'src/new.py').write_text('def unregistered():\n    return 1\n')
+   if mode=='delete':(g/'src/base.py').unlink()
+   if mode=='modify':(g/'src/base.py').write_text('value = 2\n')
+  if phase=='restored':
+   (g/'src/new.py').unlink(missing_ok=True);(g/'src/base.py').write_text('value = 1\n')
+  r=subprocess.run([py,'-B','-c',child],cwd=g,env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+  d[phase]={'sha256':digest(),'exit':r.returncode,'output':r.stdout}
+ assert d['baseline']['sha256']==d['restored']['sha256'];records.append(d)
+print(json.dumps(records,indent=2));print('GUARD',[(d['mode'],*[d[p]['exit'] for p in ['baseline','injected','restored']]) for d in records]);shutil.rmtree(g)
+```
+
+
+#### G / add
+baseline exit=0 tree SHA256=c897be411c234c6eca56badcd9b61b4fc69aa7e8daaaf22509338ea208c48730
+
+```text
+P14：1 个文件逐一回到批前快照 ✓ （批前基线 == HEAD(c96b94d)）
+```
+
+injected exit=1 tree SHA256=161ee3e957af4bdd403a70f65149b57059d426fb22dd62d1c89ac05a883af064
+
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/p14-guard-g5j5aqc5/guard.py", line 97, in assert_matches
+    raise DirtyTree(f"{when}：{len(bad)} 个文件未回到批前快照\n" + "\n".join("    " + b for b in bad[:20]))
+guard.DirtyTree: P14：1 个文件未回到批前快照
+    src/new.py: <快照中不存在> → 批中新增（未被快照覆盖，疑为残骸）
+```
+
+restored exit=0 tree SHA256=c897be411c234c6eca56badcd9b61b4fc69aa7e8daaaf22509338ea208c48730
+
+```text
+P14：1 个文件逐一回到批前快照 ✓ （批前基线 == HEAD(c96b94d)）
+```
+
+
+#### G / delete
+baseline exit=0 tree SHA256=c897be411c234c6eca56badcd9b61b4fc69aa7e8daaaf22509338ea208c48730
+
+```text
+P14：1 个文件逐一回到批前快照 ✓ （批前基线 == HEAD(c96b94d)）
+```
+
+injected exit=1 tree SHA256=44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
+
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/p14-guard-g5j5aqc5/guard.py", line 97, in assert_matches
+    raise DirtyTree(f"{when}：{len(bad)} 个文件未回到批前快照\n" + "\n".join("    " + b for b in bad[:20]))
+guard.DirtyTree: P14：1 个文件未回到批前快照
+    src/base.py: 585c93666fcb → <缺失>
+```
+
+restored exit=0 tree SHA256=c897be411c234c6eca56badcd9b61b4fc69aa7e8daaaf22509338ea208c48730
+
+```text
+P14：1 个文件逐一回到批前快照 ✓ （批前基线 == HEAD(c96b94d)）
+```
+
+
+#### G / modify
+baseline exit=0 tree SHA256=c897be411c234c6eca56badcd9b61b4fc69aa7e8daaaf22509338ea208c48730
+
+```text
+P14：1 个文件逐一回到批前快照 ✓ （批前基线 == HEAD(c96b94d)）
+```
+
+injected exit=1 tree SHA256=fd65f6133bf88956fa98c411e6e440a3813ec8da9972609d5673a5f2978f213c
+
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/p14-guard-g5j5aqc5/guard.py", line 97, in assert_matches
+    raise DirtyTree(f"{when}：{len(bad)} 个文件未回到批前快照\n" + "\n".join("    " + b for b in bad[:20]))
+guard.DirtyTree: P14：1 个文件未回到批前快照
+    src/base.py: 585c93666fcb → 69ef4f409b53
+```
+
+restored exit=0 tree SHA256=c897be411c234c6eca56badcd9b61b4fc69aa7e8daaaf22509338ea208c48730
+
+```text
+P14：1 个文件逐一回到批前快照 ✓ （批前基线 == HEAD(c96b94d)）
+```
+
+
+### 批后证据
+
+```json
+{
+  "time": "2026-09-11T15:49:37.015400+08:00",
+  "file_count": 97,
+  "source_test_contract_mtime_sha_equal": false,
+  "youngest_seconds": 197.59456062316895,
+  "changed_docs": [
+    "src/quant_lab/market/contract.py",
+    "contracts/README.md",
+    "src/quant_lab/market/vision.py"
+  ],
+  "status": " M src/quant_lab/research/api.py\n M src/quant_lab/research/ledger.py\n M src/quant_lab/research/nullmodel.py\n M src/quant_lab/research/paths.py\n M taskList.json\n M tests/research/test_review_p1_round3.py\n?? ../docs/plans/2026-09-11-watcher-to-app-migration.md\n?? ../docs/plans/2026-09-11-watcher-to-app-migration.review.md\n?? scripts/mutation_batch.py\n?? ../tests/control-plane/api/test_m1e_trace.py\n",
+  "owned_changes": [
+    "src/quant_lab/market/contract.py",
+    "contracts/README.md",
+    "src/quant_lab/market/vision.py"
+  ],
+  "market_test_guard_equal": true,
+  "mtime_changed": {
+    "src/quant_lab/market/contract.py": {
+      "before": 1789112330881454546,
+      "after": 1789112779420862434
+    },
+    "contracts/README.md": {
+      "before": 1789112281551129958,
+      "after": 1789112668854111258
+    },
+    "src/quant_lab/market/vision.py": {
+      "before": 1789112299831359438,
+      "after": 1789112777334288659
+    }
+  },
+  "readme_append_only": true,
+  "head": "955f62c215cacdc2f451855d30e47dab75be0674",
+  "readme_diff": "diff --git a/tmp/g2-p14-independent/baseline/contracts/README.md b/Users/balen/projects/trader-bot/quant-lab/contracts/README.md\nindex 3dc3626..f8d5918 100644\n--- a/tmp/g2-p14-independent/baseline/contracts/README.md\n+++ b/Users/balen/projects/trader-bot/quant-lab/contracts/README.md\n@@ -691,3 +691,48 @@ A36 到达于十三审派出之后，该轮任务书未含此判据；G2 决定*\n **本轮据此执行**：data 空闲 3 小时、market 空闲 5 分钟 → 提交（`4f911a5`，19 文件）；**research 距今 114 秒、在窗口内 → 保留至其下一个空闲窗口**。同时按 §21.2 收入 `scripts/tree_guard.py`——**认证链上的工具与它认证的对象同列**。\n \n **附记**：本条修订由 G0 观察自身规则的执行代价而作出。**一条规则连续两轮阻止它本该促成的事，就该被检查是不是比必要更严**——这与 §14 A26\"假警报终将被关掉\"同源：**过严的规则不会被遵守，只会被绕过或搁置**。\n+\n+\n+## 24. 裁定 A38：\"同批\"须以**选择器**定义；对照的绿必须携带信息（G0 OR-02 R68，changeLog #65）\n+\n+### 24.1 G2 所请的 A33/A34 细化**成立**，并可给出更强的形式\n+\n+G2 首次做同批活性对照时用 `vision.expected_rows + 1`，**四类全绿**，第一反应是怀疑取证器失效。真因是：**那四条 `test_boundary_*` 根本不测 `expected_rows`**——**该对照是本批选择器碰不到的**。换成消费方入口的无条件破坏（`grid_points_between` 恒返回 0）后四类全部 RED。\n+\n+**G0 独立判断：细化成立，理由可比其表述更精确。**\n+\n+对照的职责是证明**本批的\"取证器 + 选择器\"组合能把绿变红**。若对照不在本批选择器的可达范围内，**它只可能产出绿**，而这种绿**不携带任何信息**——它由两种情形**同样产生**：\n+\n+| 情形 | 对照结果 |\n+|---|---|\n+| 取证器健康 + 对照不可达 | 绿 |\n+| **取证器失效** | 绿 |\n+\n+**§19 A33 的存在理由正是\"失效产出的是绿\"**；一条**唯一可能输出是绿**的对照，恰好废掉了这条规则。\n+\n+**更强的形式（G0 补）**：该要求**自带验证**——**若对照在本批实际选择器下变红，可达性即由那个红本身证明**，无须另做可达性论证。故规则可收敛为一句：\n+\n+> **对照必须在本批实际使用的选择器下变红。**\n+\n+**并据此消歧 §20.1 的\"同批\"**：G2 那次对照**与被测同处一次会话**，故按字面满足\"同批\"，却与被测**不同选择器**。**裁定：\"同批\"以选择器同一性定义，不以会话或墙钟分组定义。**\n+\n+### 24.2 与 §22 A36 是同一条谓词\n+\n+- §22 A36：给不出**只有该边界类能捕获**的突变 → 该类视为**未覆盖**；\n+- 本节：给不出**本批选择器能捕获**的对照 → 该批视为**无活性证据**。\n+\n+**两处要的都是判别性，不是\"红过\"。** G2 上轮写\"判别性是这条规则唯一起作用的部分\"时，未想到它**同样适用于对照本身**——**规则用于检验别人时是判别性，用于检验自己时也必须是判别性。**\n+\n+### 24.3 判例 6：对别人要求集合相等，对自己写了单向检查\n+\n+**S44 根因（G2 自陈，G0 核实）**：其快照护栏只遍历**快照内已有文件**问\"变了没\"，**没问\"有没有多出文件\"**——是一条**单向检查**。\n+\n+**而同一工具内就有现成对照**：`scripts/tree_guard.py` 的 `assert_declared`（:102）用集合语义，**抓到了那个新增文件**；`assert_matches`（:78）没有，**没抓到**。**两条路径，一条有集合相等一条没有，同一文件、同一时间。**\n+\n+**更值得记的是**：G2 在 §12 A24 中**要求他人的调用点登记必须是集合相等（新增与缺失都要红）**，而其自身护栏用了单向检查。\n+\n+**故立一般义务**：**凡为他人立下的检查性质要求（集合相等、判别性、自证会红、基线先于过程），立规者须同期审计自己的同类工具是否满足**，并在看板记录该审计。**一条只用于约束他人的规则，其作者是它最不可能被应用到的对象**——不是因为双标，而是因为**立规时注意力在被规范的对象上，不在自己手里的工具上**。\n+\n+### 24.4 A36 判别性矩阵首条对角线已验（G2 独立复核）\n+\n+注入 S45 原样\"前向 1µs 容差\" → **时间类 RED / 数值 GREEN / 空缺失 GREEN / 等价对 GREEN**。**只红本类、他类全绿**，对角线成立。**这才是 A36 要的东西，不是\"又跑了一批全红的突变\"。** 其余三条对角线待十四审独立复核。\n",
+  "readme_current_git_diff": ""
+}
+```
+
+历史正文 SHA256=2b7903533b950f23a9846dada36ea17166372cc8022dbc70315d1664dea9f0e5；历史正文将在本章之后作为连续字节块保留。
+实际原报告末尾已含十一、十二、十三审结语；它们与九审/十审四行全部逐字保留，不为凑结尾组数删历史。十四审两行只追加到整个文件最末。
+
+### 磁盘突变清单、三阶段输出与 SHA256
+
+#### M000 CONTROL-expected-plus-one
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' CONTROL-expected-plus-one`
+目标：`src/quant_lab/market/vision.py`；selector：`tests/market/test_single_source.py::test_differential_vision_count`
+baseline exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51172
+ISOLATION_OK pid=51172
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.11s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_vision_count": "passed"}
+```
+
+injected exit=1 file SHA256=621d345e2efab4ea12e7295a6f0f97fc71802152917eb66f32963496771d2f21 tree SHA256=10bb27e2638a9f0f2c3648d72b98120d46b3504afd17630774486649b1cc7871
+
+```text
+ISOLATION_OK pid=51193
+ISOLATION_OK pid=51193
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_vision_count ________________________
+tests/market/test_single_source.py:267: in test_differential_vision_count
+    assert vision.expected_rows(kind, interval, period) == c.grid_points_between(
+E   AssertionError: assert 8353 == 8352
+E    +  where 8353 = <function expected_rows at 0x10be86ca0>('indexPriceKlines', '5m', '2024-02')
+E    +    where <function expected_rows at 0x10be86ca0> = vision.expected_rows
+E    +  and   8352 = <function grid_points_between at 0x10acc1da0>(datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 3, 1, 0, 0, tzinfo=datetime.timezone.utc), 300)
+E    +    where <function grid_points_between at 0x10acc1da0> = c.grid_points_between
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_vision_count - A...
+1 failed in 0.15s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_vision_count": "failed"}
+```
+
+restored exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51211
+ISOLATION_OK pid=51211
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.12s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_vision_count": "passed"}
+```
+
+内容还原相等：True
+
+#### M001 S29-first-gap
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S29-first-gap`
+目标：`src/quant_lab/market/partition_check.py`；selector：`tests/market/test_review_p1_round10.py::test_s29_subsecond_calendar_start_has_no_false_first_gap`
+baseline exit=0 file SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51173
+ISOLATION_OK pid=51173
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.23s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s29_subsecond_calendar_start_has_no_false_first_gap": "passed"}
+```
+
+injected exit=1 file SHA256=c7c0cbe6c46d55054bf1ee2aa32e98fe3bcdbee1cb28bbec73d501b74028dc5e tree SHA256=0193c78e60682f3046e1add4f0189bb7ba2383e70a89ee297d35124ab430ee34
+
+```text
+ISOLATION_OK pid=51197
+ISOLATION_OK pid=51197
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_s29_subsecond_calendar_start_has_no_false_first_gap ___________
+tests/market/test_review_p1_round10.py:35: in test_s29_subsecond_calendar_start_has_no_false_first_gap
+    assert out["gap_flag"].to_list() == [False, False]
+E   assert [True, False] == [False, False]
+E     
+E     At index 0 diff: True != False
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_review_p1_round10.py::test_s29_subsecond_calendar_start_has_no_false_first_gap
+1 failed in 0.25s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s29_subsecond_calendar_start_has_no_false_first_gap": "failed"}
+```
+
+restored exit=0 file SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51212
+ISOLATION_OK pid=51212
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.22s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s29_subsecond_calendar_start_has_no_false_first_gap": "passed"}
+```
+
+内容还原相等：True
+
+#### M002 S29-range-only
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S29-range-only`
+目标：`src/quant_lab/market/partition_check.py`；selector：`tests/market/test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar`
+baseline exit=0 file SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51171
+ISOLATION_OK pid=51171
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 0.27s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar[all-off-grid]": "passed", "tests/market/test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar[mixed-off-grid]": "passed"}
+```
+
+injected exit=1 file SHA256=0ce79f68208294b8711c813177ae11de1d5934b3980d78354b36858f03210957 tree SHA256=d30ce00bf4b15d220639c4bc2f47aa536f5a489b2bc513f160e63ce77bd231a3
+
+```text
+ISOLATION_OK pid=51198
+ISOLATION_OK pid=51198
+COLLECTED=2
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+___________ test_s29_off_grid_never_covers_calendar[mixed-off-grid] ____________
+tests/market/test_review_p1_round10.py:21: in test_s29_off_grid_never_covers_calendar
+    out, qs, report = run(df, rules(eff_from=JAN, eff_to=JAN + dt.timedelta(seconds=180)))
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_partition_check.py:30: in run
+    return pc.check_bars(df, pid="p", data_type=data_type, interval="1m", inst=INST, period=period, rules=rules_df, **kw)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/tmp/g2-p14-independent/mutant-2/src/quant_lab/market/partition_check.py:253: in check_bars
+    assert rep.missing >= 0, "present 必须是期望网格的子集"
+           ^^^^^^^^^^^^^^^^
+E   AssertionError: present 必须是期望网格的子集
+____________ test_s29_off_grid_never_covers_calendar[all-off-grid] _____________
+tests/market/test_review_p1_round10.py:21: in test_s29_off_grid_never_covers_calendar
+    out, qs, report = run(df, rules(eff_from=JAN, eff_to=JAN + dt.timedelta(seconds=180)))
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_partition_check.py:30: in run
+    return pc.check_bars(df, pid="p", data_type=data_type, interval="1m", inst=INST, period=period, rules=rules_df, **kw)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/tmp/g2-p14-independent/mutant-2/src/quant_lab/market/partition_check.py:284: in check_bars
+    assert sum(g["n"] for g in rep.gaps) == rep.missing, "缺口清单与 missing 必须一致"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: 缺口清单与 missing 必须一致
+=========================== short test summary info ============================
+FAILED tests/market/test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar[mixed-off-grid]
+FAILED tests/market/test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar[all-off-grid]
+2 failed in 0.27s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar[all-off-grid]": "failed", "tests/market/test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar[mixed-off-grid]": "failed"}
+```
+
+restored exit=0 file SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51213
+ISOLATION_OK pid=51213
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 0.26s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar[all-off-grid]": "passed", "tests/market/test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar[mixed-off-grid]": "passed"}
+```
+
+内容还原相等：True
+
+#### M003 S29-truncated-count
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S29-truncated-count`
+目标：`src/quant_lab/market/partition_check.py`；selector：`tests/market/test_review_p1_round10.py::test_s29_subsecond_end_includes_last_grid_point`
+baseline exit=0 file SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51225
+ISOLATION_OK pid=51225
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.15s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s29_subsecond_end_includes_last_grid_point": "passed"}
+```
+
+injected exit=1 file SHA256=f66016b2c89496f9d14377060b0bb2c774f3c692f02c3cfbee4cbfa817c77bc9 tree SHA256=a92f0afa107c9b92612e1fcd6e71c51584e6cb28f0ed5b1b1675809fe83ed593
+
+```text
+ISOLATION_OK pid=51235
+ISOLATION_OK pid=51235
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________ test_s29_subsecond_end_includes_last_grid_point ________________
+tests/market/test_review_p1_round10.py:39: in test_s29_subsecond_end_includes_last_grid_point
+    _, _, report = run(bars(2), rules(eff_from=JAN, eff_to=JAN + dt.timedelta(minutes=2, microseconds=1)))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_partition_check.py:30: in run
+    return pc.check_bars(df, pid="p", data_type=data_type, interval="1m", inst=INST, period=period, rules=rules_df, **kw)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/tmp/g2-p14-independent/mutant-3/src/quant_lab/market/partition_check.py:284: in check_bars
+    assert sum(g["n"] for g in rep.gaps) == rep.missing, "缺口清单与 missing 必须一致"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: 缺口清单与 missing 必须一致
+=========================== short test summary info ============================
+FAILED tests/market/test_review_p1_round10.py::test_s29_subsecond_end_includes_last_grid_point
+1 failed in 0.25s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s29_subsecond_end_includes_last_grid_point": "failed"}
+```
+
+restored exit=0 file SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51244
+ISOLATION_OK pid=51244
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.25s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s29_subsecond_end_includes_last_grid_point": "passed"}
+```
+
+内容还原相等：True
+
+#### M004 S31-remove-output-gate
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S31-remove-output-gate`
+目标：`src/quant_lab/market/execution.py`；selector：`tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes`
+baseline exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51227
+ISOLATION_OK pid=51227
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 0.31s
+OUTCOMES={"tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]": "passed", "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]": "passed"}
+```
+
+injected exit=1 file SHA256=908fefbe9a732125ab4e796cba3637e69c3898c345362fb0617aa1270a2518e5 tree SHA256=05bec839c808bb154eceee061ae95a7ccfa268db98f6ab8c641d27e059ced823
+
+```text
+ISOLATION_OK pid=51237
+ISOLATION_OK pid=51237
+COLLECTED=2
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_ test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version] _
+tests/market/test_outcome_kind.py:309: in test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes
+    with pytest.raises(c.ContractError, match="policy_hash") as error:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+_ test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version] _
+tests/market/test_outcome_kind.py:309: in test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes
+    with pytest.raises(c.ContractError, match="policy_hash") as error:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+=========================== short test summary info ============================
+FAILED tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]
+FAILED tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]
+2 failed in 0.29s
+OUTCOMES={"tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]": "failed", "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]": "failed"}
+```
+
+restored exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51246
+ISOLATION_OK pid=51246
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 0.24s
+OUTCOMES={"tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]": "passed", "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]": "passed"}
+```
+
+内容还原相等：True
+
+#### M005 S31-sanitized-copy
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S31-sanitized-copy`
+目标：`src/quant_lab/market/execution.py`；selector：`tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes`
+baseline exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51228
+ISOLATION_OK pid=51228
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 0.30s
+OUTCOMES={"tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]": "passed", "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]": "passed"}
+```
+
+injected exit=1 file SHA256=4b1b88c06345bf057405428979ceae497c1fb8f90cc09971f88adb63c36d4d2b tree SHA256=aab0011d18ee2e5942151df8b1f74809debb88dadf4e3e7346456dd2c6ddab57
+
+```text
+ISOLATION_OK pid=51236
+ISOLATION_OK pid=51236
+COLLECTED=2
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_ test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version] _
+tests/market/test_outcome_kind.py:309: in test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes
+    with pytest.raises(c.ContractError, match="policy_hash") as error:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+_ test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version] _
+tests/market/test_outcome_kind.py:309: in test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes
+    with pytest.raises(c.ContractError, match="policy_hash") as error:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+=========================== short test summary info ============================
+FAILED tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]
+FAILED tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]
+2 failed in 0.30s
+OUTCOMES={"tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]": "failed", "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]": "failed"}
+```
+
+restored exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51245
+ISOLATION_OK pid=51245
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 0.25s
+OUTCOMES={"tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]": "passed", "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]": "passed"}
+```
+
+内容还原相等：True
+
+#### M006 S31-redacted-version
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S31-redacted-version`
+目标：`src/quant_lab/market/execution.py`；selector：`tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes`
+baseline exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51259
+ISOLATION_OK pid=51259
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 0.21s
+OUTCOMES={"tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]": "passed", "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]": "passed"}
+```
+
+injected exit=1 file SHA256=4ea653e7ddad73aafec5c49d501103c594b255f34b99c7460562cdb7a45589ef tree SHA256=16a64a992ca2e6938e27a6d1dc4f6c4b62bfa6da253880ee138274a3ed794424
+
+```text
+ISOLATION_OK pid=51270
+ISOLATION_OK pid=51270
+COLLECTED=2
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_ test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version] _
+tests/market/test_outcome_kind.py:313: in test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes
+    assert "conflict-version-S31" in message
+E   assert 'conflict-version-S31' in "同一 policy_version 对应多个 policy_hash（版本串与内容不一一对应）：REDACTED → ['11111111111111111111111111111111111111111111111111111111...222222222222222222222222222222222222222222222222', '3333333333333333333333333333333333333333333333333333333333333333']"
+_ test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version] _
+tests/market/test_outcome_kind.py:313: in test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes
+    assert "conflict-version-S31" in message
+E   assert 'conflict-version-S31' in "同一 policy_version 对应多个 policy_hash（版本串与内容不一一对应）：REDACTED → ['11111111111111111111111111111111111111111111111111111111...222222222222222222222222222222222222222222222222', '3333333333333333333333333333333333333333333333333333333333333333']"
+=========================== short test summary info ============================
+FAILED tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]
+FAILED tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]
+2 failed in 0.40s
+OUTCOMES={"tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]": "failed", "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]": "failed"}
+```
+
+restored exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51277
+ISOLATION_OK pid=51277
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 0.23s
+OUTCOMES={"tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]": "passed", "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]": "passed"}
+```
+
+内容还原相等：True
+
+#### M007 S38-remove-domain
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S38-remove-domain`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_review_p1_round10.py::test_s38_policy_rejects_negative_latency`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51262
+ISOLATION_OK pid=51262
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.15s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s38_policy_rejects_negative_latency": "passed"}
+```
+
+injected exit=1 file SHA256=1f502ba11e5e0db04bbf50879c770bd17602fa8f65863b0582fac1e299911c49 tree SHA256=9978254f59e8454d764c4abdb7a5de79331ede9452f921514fbca9a748dfe895
+
+```text
+ISOLATION_OK pid=51271
+ISOLATION_OK pid=51271
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________ test_s38_policy_rejects_negative_latency ___________________
+tests/market/test_review_p1_round10.py:46: in test_s38_policy_rejects_negative_latency
+    with pytest.raises(c.ContractError, match="启动时刻不能早于决策时刻"):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+=========================== short test summary info ============================
+FAILED tests/market/test_review_p1_round10.py::test_s38_policy_rejects_negative_latency
+1 failed in 0.23s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s38_policy_rejects_negative_latency": "failed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51278
+ISOLATION_OK pid=51278
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.09s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s38_policy_rejects_negative_latency": "passed"}
+```
+
+内容还原相等：True
+
+#### M008 S38-explicit-only
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S38-explicit-only`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_review_p1_round10.py::test_s38_resolved_start_checked_for_both_spellings`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51263
+ISOLATION_OK pid=51263
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.14s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s38_resolved_start_checked_for_both_spellings": "passed"}
+```
+
+injected exit=1 file SHA256=773c4bf0c0edf8452c8d939f6d19c93131c3e0fb3d26c926aaf90fd173e401be tree SHA256=0184f7b5d6aa10afff5fa4eb1377d49c9a3ff133da0b4114759e51e3f2137b7b
+
+```text
+ISOLATION_OK pid=51272
+ISOLATION_OK pid=51272
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________ test_s38_resolved_start_checked_for_both_spellings ______________
+tests/market/test_review_p1_round10.py:56: in test_s38_resolved_start_checked_for_both_spellings
+    with pytest.raises(c.ContractError, match="不能早于 t_dec"):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+=========================== short test summary info ============================
+FAILED tests/market/test_review_p1_round10.py::test_s38_resolved_start_checked_for_both_spellings
+1 failed in 0.23s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s38_resolved_start_checked_for_both_spellings": "failed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51279
+ISOLATION_OK pid=51279
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.15s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s38_resolved_start_checked_for_both_spellings": "passed"}
+```
+
+内容还原相等：True
+
+#### M009 S39-discard-return
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S39-discard-return`
+目标：`src/quant_lab/market/execution.py`；selector：`tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage`
+baseline exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51285
+ISOLATION_OK pid=51285
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 3.29s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage": "passed"}
+```
+
+injected exit=1 file SHA256=d46c423dafb9a031e8b5675d6a745e21bfb21b08896f061138ae2084e8964d6a tree SHA256=9bcf5fd1ac6500550de9675a78e449be123e01c54584cf072c858e732a06bbbe
+
+```text
+ISOLATION_OK pid=51338
+ISOLATION_OK pid=51338
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________ test_s39_loader_grid_return_controls_coverage _________________
+tests/market/test_review_p1_round10.py:79: in test_s39_loader_grid_return_controls_coverage
+    assert baseline.bars_complete and baseline.bars_quality_ok
+E   AssertionError: assert (False)
+E    +  where False = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 0, 0, t... archive calc_time only', 'klines 期望 0 根，实际 3 根合法唯一网格 bar（原始 3 行）', 'markPriceKlines 期望 0 根，实际 3 根合法唯一网格 bar（原始 3 行）']).bars_complete
+=========================== short test summary info ============================
+FAILED tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage
+1 failed in 0.38s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage": "failed"}
+```
+
+restored exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51346
+ISOLATION_OK pid=51346
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.35s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage": "passed"}
+```
+
+内容还原相等：True
+
+#### M010 S39-inline-count
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S39-inline-count`
+目标：`src/quant_lab/market/execution.py`；selector：`tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage`
+baseline exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51287
+ISOLATION_OK pid=51287
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 3.30s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage": "passed"}
+```
+
+injected exit=1 file SHA256=8effc3ddf17d961087a4ccdb5a6b6bf6c8269d5b3ad1cf563b0f97c446df888a tree SHA256=27fdf824b314cc4672bd65379f1691a416bd677e1687226536a2e82bf1f55333
+
+```text
+ISOLATION_OK pid=51339
+ISOLATION_OK pid=51339
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________ test_s39_loader_grid_return_controls_coverage _________________
+tests/market/test_review_p1_round10.py:89: in test_s39_loader_grid_return_controls_coverage
+    assert calls == [(JAN, request.horizon_end, 60)] * 2
+E   assert [] == [(datetime.da...one.utc), 60)]
+E     
+E     Right contains 2 more items, first extra item: (datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, 0, 3, tzinfo=datetime.timezone.utc), 60)
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage
+1 failed in 0.38s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage": "failed"}
+```
+
+restored exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51347
+ISOLATION_OK pid=51347
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.35s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage": "passed"}
+```
+
+内容还原相等：True
+
+#### M011 S39-wrong-helper-value
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S39-wrong-helper-value`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51288
+ISOLATION_OK pid=51288
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 3.29s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage": "passed"}
+```
+
+injected exit=1 file SHA256=84747d8dd1f919ed48041b3e62913a716fddadac2c532abf31e0c1f491c06edd tree SHA256=55dbf9b4b0d6227b823a6711753145f5c722473f8653fda755a73c03cad8e82d
+
+```text
+ISOLATION_OK pid=51340
+ISOLATION_OK pid=51340
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________ test_s39_loader_grid_return_controls_coverage _________________
+tests/market/test_review_p1_round10.py:79: in test_s39_loader_grid_return_controls_coverage
+    assert baseline.bars_complete and baseline.bars_quality_ok
+E   AssertionError: assert (False)
+E    +  where False = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 0, 0, t...rchive calc_time only', 'klines 期望 10 根，实际 3 根合法唯一网格 bar（原始 3 行）', 'markPriceKlines 期望 10 根，实际 3 根合法唯一网格 bar（原始 3 行）']).bars_complete
+=========================== short test summary info ============================
+FAILED tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage
+1 failed in 0.39s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage": "failed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51348
+ISOLATION_OK pid=51348
+COLLECTED=1
+.                                                                        [100%]
+=============================== warnings summary ===============================
+../../../../tmp/g2-p14-independent/baseline/.venv-g2/lib/python3.12/site-packages/_pytest/pathlib.py:95
+  /tmp/g2-p14-independent/baseline/.venv-g2/lib/python3.12/site-packages/_pytest/pathlib.py:95: PytestWarning: (rm_rf) error removing /private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/garbage-70902557-6944-44c9-a4c8-89c2d08b09f8
+  <class 'OSError'>: [Errno 66] Directory not empty: '/private/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/pytest-of-balen/garbage-70902557-6944-44c9-a4c8-89c2d08b09f8'
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 1 warning in 0.36s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage": "passed"}
+```
+
+内容还原相等：True
+
+#### M012 S33-wrong-expected
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S33-wrong-expected`
+目标：`src/quant_lab/market/vision.py`；selector：`tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence`
+baseline exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51361
+ISOLATION_OK pid=51361
+COLLECTED=12
+............                                                             [100%]
+12 passed in 0.12s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2023-02-28-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2023-02-28-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-01-1-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-01-1-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-31-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-31-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-12-31-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-12-31-1m]": "passed"}
+```
+
+injected exit=1 file SHA256=621d345e2efab4ea12e7295a6f0f97fc71802152917eb66f32963496771d2f21 tree SHA256=10bb27e2638a9f0f2c3648d72b98120d46b3504afd17630774486649b1cc7871
+
+```text
+ISOLATION_OK pid=51368
+ISOLATION_OK pid=51368
+COLLECTED=12
+FFFFFFFFFFFF                                                             [100%]
+=================================== FAILURES ===================================
+____________ test_s33_aligned_calendar_equivalence[2024-01-01-1-1m] ____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 1441 == ((1 * 86400) // 60)
+E    +  where 1441 = <function expected_rows at 0x108286ca0>('klines', '1m', '2024-01-01')
+E    +    where <function expected_rows at 0x108286ca0> = v.expected_rows
+___________ test_s33_aligned_calendar_equivalence[2024-01-01-1-15m] ____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 97 == ((1 * 86400) // 900)
+E    +  where 97 = <function expected_rows at 0x108286ca0>('klines', '15m', '2024-01-01')
+E    +    where <function expected_rows at 0x108286ca0> = v.expected_rows
+____________ test_s33_aligned_calendar_equivalence[2024-02-29-1-1m] ____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 1441 == ((1 * 86400) // 60)
+E    +  where 1441 = <function expected_rows at 0x108286ca0>('klines', '1m', '2024-02-29')
+E    +    where <function expected_rows at 0x108286ca0> = v.expected_rows
+___________ test_s33_aligned_calendar_equivalence[2024-02-29-1-15m] ____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 97 == ((1 * 86400) // 900)
+E    +  where 97 = <function expected_rows at 0x108286ca0>('klines', '15m', '2024-02-29')
+E    +    where <function expected_rows at 0x108286ca0> = v.expected_rows
+_____________ test_s33_aligned_calendar_equivalence[2024-01-31-1m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 44641 == ((31 * 86400) // 60)
+E    +  where 44641 = <function expected_rows at 0x108286ca0>('klines', '1m', '2024-01')
+E    +    where <function expected_rows at 0x108286ca0> = v.expected_rows
+____________ test_s33_aligned_calendar_equivalence[2024-01-31-15m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 2977 == ((31 * 86400) // 900)
+E    +  where 2977 = <function expected_rows at 0x108286ca0>('klines', '15m', '2024-01')
+E    +    where <function expected_rows at 0x108286ca0> = v.expected_rows
+_____________ test_s33_aligned_calendar_equivalence[2024-02-29-1m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 41761 == ((29 * 86400) // 60)
+E    +  where 41761 = <function expected_rows at 0x108286ca0>('klines', '1m', '2024-02')
+E    +    where <function expected_rows at 0x108286ca0> = v.expected_rows
+____________ test_s33_aligned_calendar_equivalence[2024-02-29-15m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 2785 == ((29 * 86400) // 900)
+E    +  where 2785 = <function expected_rows at 0x108286ca0>('klines', '15m', '2024-02')
+E    +    where <function expected_rows at 0x108286ca0> = v.expected_rows
+_____________ test_s33_aligned_calendar_equivalence[2023-02-28-1m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 40321 == ((28 * 86400) // 60)
+E    +  where 40321 = <function expected_rows at 0x108286ca0>('klines', '1m', '2023-02')
+E    +    where <function expected_rows at 0x108286ca0> = v.expected_rows
+____________ test_s33_aligned_calendar_equivalence[2023-02-28-15m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 2689 == ((28 * 86400) // 900)
+E    +  where 2689 = <function expected_rows at 0x108286ca0>('klines', '15m', '2023-02')
+E    +    where <function expected_rows at 0x108286ca0> = v.expected_rows
+_____________ test_s33_aligned_calendar_equivalence[2024-12-31-1m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 44641 == ((31 * 86400) // 60)
+E    +  where 44641 = <function expected_rows at 0x108286ca0>('klines', '1m', '2024-12')
+E    +    where <function expected_rows at 0x108286ca0> = v.expected_rows
+____________ test_s33_aligned_calendar_equivalence[2024-12-31-15m] _____________
+tests/market/test_review_p1_round10.py:99: in test_s33_aligned_calendar_equivalence
+    assert v.expected_rows("klines", interval, period) == days * 86400 // v.INTERVAL_SECONDS[interval]
+E   AssertionError: assert 2977 == ((31 * 86400) // 900)
+E    +  where 2977 = <function expected_rows at 0x108286ca0>('klines', '15m', '2024-12')
+E    +    where <function expected_rows at 0x108286ca0> = v.expected_rows
+=========================== short test summary info ============================
+FAILED tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-01-1-1m]
+FAILED tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-01-1-15m]
+FAILED tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1-1m]
+FAILED tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1-15m]
+FAILED tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-31-1m]
+FAILED tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-31-15m]
+FAILED tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1m]
+FAILED tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-15m]
+FAILED tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2023-02-28-1m]
+FAILED tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2023-02-28-15m]
+FAILED tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-12-31-1m]
+FAILED tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-12-31-15m]
+12 failed in 0.30s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2023-02-28-15m]": "failed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2023-02-28-1m]": "failed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-01-1-15m]": "failed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-01-1-1m]": "failed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-31-15m]": "failed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-31-1m]": "failed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1-15m]": "failed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1-1m]": "failed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-15m]": "failed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1m]": "failed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-12-31-15m]": "failed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-12-31-1m]": "failed"}
+```
+
+restored exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51377
+ISOLATION_OK pid=51377
+COLLECTED=12
+............                                                             [100%]
+12 passed in 0.16s
+OUTCOMES={"tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2023-02-28-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2023-02-28-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-01-1-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-01-1-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-31-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-31-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-12-31-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-12-31-1m]": "passed"}
+```
+
+内容还原相等：True
+
+#### M013 modified-existing-first-point-sentinel
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' modified-existing-first-point-sentinel`
+目标：`src/quant_lab/market/kernel_a.py`；selector：`tests/market/test_constants_effective.py::test_grid_math_single_source_and_exact_to_microsecond`
+baseline exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51366
+ISOLATION_OK pid=51366
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.07s
+OUTCOMES={"tests/market/test_constants_effective.py::test_grid_math_single_source_and_exact_to_microsecond": "passed"}
+```
+
+injected exit=1 file SHA256=bccd4290969ab0947ba22d3c8bfe57a3275e8477de98641da7cd90f730faf65c tree SHA256=57378d02d85c14d1bc2a99c69f7563da141b64a377a160df320ab3a025739d29
+
+```text
+ISOLATION_OK pid=51369
+ISOLATION_OK pid=51369
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________ test_grid_math_single_source_and_exact_to_microsecond _____________
+tests/market/test_constants_effective.py:133: in test_grid_math_single_source_and_exact_to_microsecond
+    assert moved != real, "_first_bar_gap 未真正委派给 first_grid_point（换哨兵后行为不变）"
+E   AssertionError: _first_bar_gap 未真正委派给 first_grid_point（换哨兵后行为不变）
+E   assert datetime.datetime(2024, 1, 1, 12, 0, tzinfo=datetime.timezone.utc) != datetime.datetime(2024, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+=========================== short test summary info ============================
+FAILED tests/market/test_constants_effective.py::test_grid_math_single_source_and_exact_to_microsecond
+1 failed in 0.25s
+OUTCOMES={"tests/market/test_constants_effective.py::test_grid_math_single_source_and_exact_to_microsecond": "failed"}
+```
+
+restored exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51376
+ISOLATION_OK pid=51376
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.14s
+OUTCOMES={"tests/market/test_constants_effective.py::test_grid_math_single_source_and_exact_to_microsecond": "passed"}
+```
+
+内容还原相等：True
+
+#### M014 A24-real-caller-missing
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-caller-missing`
+目标：`src/quant_lab/market/vision.py`；selector：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`
+baseline exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51367
+ISOLATION_OK pid=51367
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.34s
+OUTCOMES={"tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed"}
+```
+
+injected exit=1 file SHA256=86e7c48d7c1030eaa15df9e9fb247369b569ba5a825999ae8e93bccb76ee6d85 tree SHA256=15e1239f1e647c5b58b927d39a90e0a7ac34ca154605b6c5a9592e5a82b53f1f
+
+```text
+ISOLATION_OK pid=51371
+ISOLATION_OK pid=51371
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['grid_points...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "grid_points_between：登记的调用方 ['market/vision.py:expected_rows'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_single_source_call_sites_match_registry
+1 failed in 0.46s
+OUTCOMES={"tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "failed"}
+```
+
+restored exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51382
+ISOLATION_OK pid=51382
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.44s
+OUTCOMES={"tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed"}
+```
+
+内容还原相等：True
+
+#### M015 A24-real-caller-extra
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-caller-extra`
+目标：`src/quant_lab/market/vision.py`；selector：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`
+baseline exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51383
+ISOLATION_OK pid=51383
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.49s
+OUTCOMES={"tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed"}
+```
+
+injected exit=1 file SHA256=52e4bf1dd6077f5123c85bc8da687a150f9883f18a0403aea120f3a20653598c tree SHA256=78905e3fc8d2670484e2c135fc86de36b6c68afe4ecaca2c21a783cf9a023848
+
+```text
+ISOLATION_OK pid=51390
+ISOLATION_OK pid=51390
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['grid_points...则单一来源的使用面不可知'] == []
+E     
+E     Left contains one more item: "grid_points_between：出现**未登记**的调用方 ['market/vision.py:_unregistered_grid_probe']——新调用方必须登记，否则单一来源的使用面不可知"
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_single_source_call_sites_match_registry
+1 failed in 0.39s
+OUTCOMES={"tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "failed"}
+```
+
+restored exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51407
+ISOLATION_OK pid=51407
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.42s
+OUTCOMES={"tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed"}
+```
+
+内容还原相等：True
+
+#### M016 A24-gate-missing-disabled
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-gate-missing-disabled`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51384
+ISOLATION_OK pid=51384
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.22s
+OUTCOMES={"tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]": "passed"}
+```
+
+injected exit=1 file SHA256=c7e1fb20dc57ef5ab67064a08418647f50699cc5e0860e2b3410be2dc9a5ad82 tree SHA256=dddd756c07981fa8d765a3ad3a3fab5fc85423a7708348daf6b97a39eebc6517
+
+```text
+ISOLATION_OK pid=51389
+ISOLATION_OK pid=51389
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________ test_registry_gate_fails_when_mutated[missing] ________________
+tests/market/test_single_source.py:52: in test_registry_gate_fails_when_mutated
+    assert len(message) == 1
+E   assert 0 == 1
+E    +  where 0 = len([])
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]
+1 failed in 0.15s
+OUTCOMES={"tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51402
+ISOLATION_OK pid=51402
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.13s
+OUTCOMES={"tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]": "passed"}
+```
+
+内容还原相等：True
+
+#### M017 A24-gate-extra-disabled
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-gate-extra-disabled`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51391
+ISOLATION_OK pid=51391
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.15s
+OUTCOMES={"tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]": "passed"}
+```
+
+injected exit=1 file SHA256=ea3f8bd46bf21ce930979e516e766e1055c8fa5a0bef7f77b3f838c1b3f5c415 tree SHA256=a944254f6994277b0497f801599beb6960d1bf46a5a75305a8973aea29f7c6f5
+
+```text
+ISOLATION_OK pid=51401
+ISOLATION_OK pid=51401
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_registry_gate_fails_when_mutated[extra] _________________
+tests/market/test_single_source.py:52: in test_registry_gate_fails_when_mutated
+    assert len(message) == 1
+E   assert 0 == 1
+E    +  where 0 = len([])
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]
+1 failed in 0.17s
+OUTCOMES={"tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51440
+ISOLATION_OK pid=51440
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.08s
+OUTCOMES={"tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]": "passed"}
+```
+
+内容还原相等：True
+
+#### M018 A24-real-inline-latency
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-latency`
+目标：`src/quant_lab/market/vision.py`；selector：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`
+baseline exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51441
+ISOLATION_OK pid=51441
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 3.03s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+injected exit=1 file SHA256=348df56392200c54a60c20b9d25b12a93cd0266881a2a1c69fca21048312ed90 tree SHA256=1672965fbec19739d04f44fa9c6cd1efc879a5469e67e9373feeb9e119d09e4d
+
+```text
+ISOLATION_OK pid=51488
+ISOLATION_OK pid=51488
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P1_inline_....latency_s)')] == []
+E     
+E     Left contains one more item: ('P1_inline_latency', 566, 'market/vision.py:_inline_probe', 'dt.timedelta(seconds=policy.latency_s)')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 2.11s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "failed"}
+```
+
+restored exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51511
+ISOLATION_OK pid=51511
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 1.41s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+内容还原相等：True
+
+#### M019 A24-disable-pattern-latency
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-latency`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51447
+ISOLATION_OK pid=51447
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.10s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]": "passed"}
+```
+
+injected exit=1 file SHA256=b5a287cd7624e0fd2070fd81ae2ef316935cd262c5220085a7bf670cfd88434c tree SHA256=f090b77a5de16bb491015b789d370f15b5b547b5e539c0b904900b0276ab6783
+
+```text
+ISOLATION_OK pid=51453
+ISOLATION_OK pid=51453
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________ test_lint_gate_fails_on_injected_violation[latency] ______________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P1_inline_latency'}
+E     
+E     Extra items in the right set:
+E     'P1_inline_latency'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]
+1 failed in 0.58s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51484
+ISOLATION_OK pid=51484
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.22s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]": "passed"}
+```
+
+内容还原相等：True
+
+#### M020 A24-real-inline-int-seconds
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-int-seconds`
+目标：`src/quant_lab/market/vision.py`；selector：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`
+baseline exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51454
+ISOLATION_OK pid=51454
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 2.27s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+injected exit=1 file SHA256=cb0f44ee75eaf94eea519b7308e278c21d048dc871cf77ca9a1ee935ea160cd0 tree SHA256=4cb721f429655a9111105a472e648d2cb68dc40ee2afa6e3cb1385351654f420
+
+```text
+ISOLATION_OK pid=51504
+ISOLATION_OK pid=51504
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P2_int_tot..._seconds())')] == []
+E     
+E     Left contains one more item: ('P2_int_total_seconds', 566, 'market/vision.py:_inline_probe', 'int((b - a).total_seconds())')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.24s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "failed"}
+```
+
+restored exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51517
+ISOLATION_OK pid=51517
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 1.44s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+内容还原相等：True
+
+#### M021 A24-disable-pattern-int-seconds
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-int-seconds`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51505
+ISOLATION_OK pid=51505
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.11s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]": "passed"}
+```
+
+injected exit=1 file SHA256=bb55f83af65c060a3b6028a78c7d5d38c7649f984e5c9d265ffc2f4febcbd33b tree SHA256=3ebbf370139430c8c05b56212a9fef6ab417af70b628b6d55fbd74475c238087
+
+```text
+ISOLATION_OK pid=51510
+ISOLATION_OK pid=51510
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_lint_gate_fails_on_injected_violation[int-seconds] ____________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P2_int_total_seconds'}
+E     
+E     Extra items in the right set:
+E     'P2_int_total_seconds'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]
+1 failed in 0.13s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51516
+ISOLATION_OK pid=51516
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.14s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]": "passed"}
+```
+
+内容还原相等：True
+
+#### M022 A24-real-inline-duration-div
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-duration-div`
+目标：`src/quant_lab/market/vision.py`；selector：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`
+baseline exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51532
+ISOLATION_OK pid=51532
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 1.74s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+injected exit=1 file SHA256=d7c8ff9a7f9e099896722f51a74945f546b80b64f535f2b7ca0262f5b190d020 tree SHA256=acda2384bb5584b02ebb9aa99b2dcafb64bbb05bb0ff4c90f2cb399d3130454a
+
+```text
+ISOLATION_OK pid=51572
+ISOLATION_OK pid=51572
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P3_duratio... interval_s')] == []
+E     
+E     Left contains one more item: ('P3_duration_div', 566, 'market/vision.py:_inline_probe', '(b - a).total_seconds() // interval_s')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.29s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "failed"}
+```
+
+restored exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51587
+ISOLATION_OK pid=51587
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 1.05s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+内容还原相等：True
+
+#### M023 A24-disable-pattern-duration-div
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-duration-div`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51549
+ISOLATION_OK pid=51549
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.23s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]": "passed"}
+```
+
+injected exit=1 file SHA256=ef8ea14f08a2ae8bd9f3a7ef29338b0c649648a17a9e25200f7118a9933a58ea tree SHA256=22673aba40679501dc7988ddbc1c1b412084f95c619b02999ada23d62aa2bb17
+
+```text
+ISOLATION_OK pid=51567
+ISOLATION_OK pid=51567
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_lint_gate_fails_on_injected_violation[duration-div] ___________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P3_duration_div'}
+E     
+E     Extra items in the right set:
+E     'P3_duration_div'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]
+1 failed in 0.16s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51574
+ISOLATION_OK pid=51574
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.14s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]": "passed"}
+```
+
+内容还原相等：True
+
+#### M024 A24-real-inline-start-or
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-start-or`
+目标：`src/quant_lab/market/vision.py`；selector：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`
+baseline exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51556
+ISOLATION_OK pid=51556
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 1.25s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+injected exit=1 file SHA256=5b2f0731ed9f91e922c98b649a6e41bdfd509920164d76f5ff00c3048d5fdf46 tree SHA256=e3aa62e6bd187be4e77e4eed771586f2acee50b48159441fd0c7d854dd2e4da5
+
+```text
+ISOLATION_OK pid=51581
+ISOLATION_OK pid=51581
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P4_t_start...r req.t_dec')] == []
+E     
+E     Left contains one more item: ('P4_t_start_or_t_dec', 566, 'market/vision.py:_inline_probe', 'req.t_start or req.t_dec')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.71s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "failed"}
+```
+
+restored exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51620
+ISOLATION_OK pid=51620
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 1.78s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+内容还原相等：True
+
+#### M025 A24-disable-pattern-start-or
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-start-or`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51582
+ISOLATION_OK pid=51582
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.32s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]": "passed"}
+```
+
+injected exit=1 file SHA256=fd030c485761268edd0e3366f5ad9ff54fe6313c2fb89de89494361c9144225e tree SHA256=476ad6108eb0dd4af0c37550cbdf4afda542d3ed34c16266dc3eb1420a9e3762
+
+```text
+ISOLATION_OK pid=51614
+ISOLATION_OK pid=51614
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________ test_lint_gate_fails_on_injected_violation[start-or] _____________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P4_t_start_or_t_dec'}
+E     
+E     Extra items in the right set:
+E     'P4_t_start_or_t_dec'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]
+1 failed in 0.14s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51621
+ISOLATION_OK pid=51621
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.26s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]": "passed"}
+```
+
+内容还原相等：True
+
+#### M026 A24-real-inline-expiry-add
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-expiry-add`
+目标：`src/quant_lab/market/vision.py`；selector：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`
+baseline exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51626
+ISOLATION_OK pid=51626
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 1.08s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+injected exit=1 file SHA256=11ffbd653ff7bdac251f76e2190cbd0dbe25fdba295441b5f2271266e7ee7e4d tree SHA256=f0e070a83851e819536449bdf6cb5f3ec5ad0fec5127d4d684d33abe6d4fdcbc
+
+```text
+ISOLATION_OK pid=51652
+ISOLATION_OK pid=51652
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P5_inline_...ntry_ttl_s)')] == []
+E     
+E     Left contains one more item: ('P5_inline_entry_ttl', 566, 'market/vision.py:_inline_probe', 't + dt.timedelta(seconds=req.entry_ttl_s)')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.21s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "failed"}
+```
+
+restored exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51675
+ISOLATION_OK pid=51675
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 1.35s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+内容还原相等：True
+
+#### M027 A24-disable-pattern-expiry-add
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-expiry-add`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51632
+ISOLATION_OK pid=51632
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.10s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]": "passed"}
+```
+
+injected exit=1 file SHA256=d519d609c831cd527420c10d9cc227715b0927f5d3733da1ec753acfebda7faa tree SHA256=acfbd589e3d8dfec285d0d23d47ee720541869bd4f2462f3bf89605b4a4d65d6
+
+```text
+ISOLATION_OK pid=51634
+ISOLATION_OK pid=51634
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________ test_lint_gate_fails_on_injected_violation[expiry-add] ____________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P5_inline_entry_ttl'}
+E     
+E     Extra items in the right set:
+E     'P5_inline_entry_ttl'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]
+1 failed in 0.14s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51644
+ISOLATION_OK pid=51644
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.09s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]": "passed"}
+```
+
+内容还原相等：True
+
+#### M028 A24-real-inline-middle-grid
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-middle-grid`
+目标：`src/quant_lab/market/vision.py`；selector：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`
+baseline exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51633
+ISOLATION_OK pid=51633
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.94s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+injected exit=1 file SHA256=4a82ee5c698d826bbbf35216129bb26d80475ea0f21428fe544bda713fbd29f0 tree SHA256=3a1320ba05697cd073e2226a5ddf934a8c9ce7424e2938f1a2fb40f8b58b59c2
+
+```text
+ISOLATION_OK pid=51663
+ISOLATION_OK pid=51663
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P6_inline_...- prev > iv')] == []
+E     
+E     Left contains one more item: ('P6_inline_grid_comparison', 566, 'market/vision.py:_inline_probe', 'o - prev > iv')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.03s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "failed"}
+```
+
+restored exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51677
+ISOLATION_OK pid=51677
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 1.84s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+内容还原相等：True
+
+#### M029 A24-disable-pattern-middle-grid
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-middle-grid`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51662
+ISOLATION_OK pid=51662
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.09s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]": "passed"}
+```
+
+injected exit=1 file SHA256=095fcb211f4ceab70e4bd1d19417a098fb6e0814412943cdcab568e812cff5be tree SHA256=39cada748f7235193fa22d90ec155c8ba66242a1b429935d281ec5ea47f6c5cf
+
+```text
+ISOLATION_OK pid=51674
+ISOLATION_OK pid=51674
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_lint_gate_fails_on_injected_violation[middle-grid] ____________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P6_inline_grid_comparison'}
+E     
+E     Extra items in the right set:
+E     'P6_inline_grid_comparison'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]
+1 failed in 0.13s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51676
+ISOLATION_OK pid=51676
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.09s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]": "passed"}
+```
+
+内容还原相等：True
+
+#### M030 A24-real-inline-tail-grid
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-tail-grid`
+目标：`src/quant_lab/market/vision.py`；selector：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`
+baseline exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51682
+ISOLATION_OK pid=51682
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 1.67s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+injected exit=1 file SHA256=09cd1de0e6648ef44383e0d9c2c080be58406ae600ba395cd47ee05142dd651f tree SHA256=fbd307977555be96a002035f035b55b7b02f263bd10d63d1bd9859b7824d2e17
+
+```text
+ISOLATION_OK pid=51743
+ISOLATION_OK pid=51743
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P6_inline_... + iv < end')] == []
+E     
+E     Left contains one more item: ('P6_inline_grid_comparison', 566, 'market/vision.py:_inline_probe', 'prev + iv < end')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 2.61s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "failed"}
+```
+
+restored exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51789
+ISOLATION_OK pid=51789
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 1.26s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+内容还原相等：True
+
+#### M031 A24-disable-pattern-tail-grid
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-tail-grid`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51694
+ISOLATION_OK pid=51694
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.10s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]": "passed"}
+```
+
+injected exit=1 file SHA256=095fcb211f4ceab70e4bd1d19417a098fb6e0814412943cdcab568e812cff5be tree SHA256=39cada748f7235193fa22d90ec155c8ba66242a1b429935d281ec5ea47f6c5cf
+
+```text
+ISOLATION_OK pid=51741
+ISOLATION_OK pid=51741
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________ test_lint_gate_fails_on_injected_violation[tail-grid] _____________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P6_inline_grid_comparison'}
+E     
+E     Extra items in the right set:
+E     'P6_inline_grid_comparison'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]
+1 failed in 0.24s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51772
+ISOLATION_OK pid=51772
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.16s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]": "passed"}
+```
+
+内容还原相等：True
+
+#### M032 A24-real-inline-ttl-expression
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-ttl-expression`
+目标：`src/quant_lab/market/vision.py`；selector：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`
+baseline exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51728
+ISOLATION_OK pid=51728
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 1.89s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+injected exit=1 file SHA256=3be936d956d379b3cae352064b6f9173708ec17e03782987ef4a6238f612fdbd tree SHA256=40e8668fd48126a878afad5781b6263c2487be5e1221219b651239139a8b8558
+
+```text
+ISOLATION_OK pid=51773
+ISOLATION_OK pid=51773
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P7_inline_...entry_ttl_s')] == []
+E     
+E     Left contains 2 more items, first extra item: ('P7_inline_ttl_resolution', 566, 'market/vision.py:_inline_probe', 'ttl = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.70s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "failed"}
+```
+
+restored exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51857
+ISOLATION_OK pid=51857
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 1.08s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+内容还原相等：True
+
+#### M033 A24-disable-pattern-ttl-expression
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-ttl-expression`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51781
+ISOLATION_OK pid=51781
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.27s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]": "passed"}
+```
+
+injected exit=1 file SHA256=1d422902dd881989de9d8328bd9d15914a006e38283e1025ca90ddfd924ea531 tree SHA256=7ef0e08d31bab531a65ed28f0b742fab18b4138b19b2948b950de5c4e494d407
+
+```text
+ISOLATION_OK pid=51858
+ISOLATION_OK pid=51858
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________ test_lint_gate_fails_on_injected_violation[ttl-expression] __________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]
+1 failed in 0.18s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51876
+ISOLATION_OK pid=51876
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.15s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]": "passed"}
+```
+
+内容还原相等：True
+
+#### M034 A24-real-inline-ttl-branches
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-real-inline-ttl-branches`
+目标：`src/quant_lab/market/vision.py`；selector：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`
+baseline exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51877
+ISOLATION_OK pid=51877
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 1.12s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+injected exit=1 file SHA256=fcb5b81a0c9ddfdbfecb860ff52782f451d40845e2dfe85a94aaf5805cacb992 tree SHA256=46cd35ee414289390f3171b396958ab8f4f308ff2089951ff7eedc1d85371911
+
+```text
+ISOLATION_OK pid=51894
+ISOLATION_OK pid=51894
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P7_inline_...entry_ttl_s')] == []
+E     
+E     Left contains 2 more items, first extra item: ('P7_inline_ttl_resolution', 566, 'market/vision.py:_inline_probe', 'ttl = plan.expiry.entry_ttl_s')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 1.52s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "failed"}
+```
+
+restored exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51917
+ISOLATION_OK pid=51917
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.95s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+内容还原相等：True
+
+#### M035 A24-disable-pattern-ttl-branches
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-disable-pattern-ttl-branches`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51887
+ISOLATION_OK pid=51887
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.10s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]": "passed"}
+```
+
+injected exit=1 file SHA256=1d422902dd881989de9d8328bd9d15914a006e38283e1025ca90ddfd924ea531 tree SHA256=7ef0e08d31bab531a65ed28f0b742fab18b4138b19b2948b950de5c4e494d407
+
+```text
+ISOLATION_OK pid=51893
+ISOLATION_OK pid=51893
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_lint_gate_fails_on_injected_violation[ttl-branches] ___________
+tests/market/test_single_source.py:75: in test_lint_gate_fails_on_injected_violation
+    assert {p for p, _, _, _ in bad} == {pattern}
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]
+1 failed in 0.12s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51895
+ISOLATION_OK pid=51895
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.10s
+OUTCOMES={"tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]": "passed"}
+```
+
+内容还原相等：True
+
+#### M036 A24-foreign-freeze
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A24-foreign-freeze`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_foreign_hits_registry_is_exact`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51888
+ISOLATION_OK pid=51888
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.94s
+OUTCOMES={"tests/market/test_single_source.py::test_foreign_hits_registry_is_exact": "passed"}
+```
+
+injected exit=1 file SHA256=aab3a308cd0f5ed1985041810867726bece1f79b700687b8a5b6430ead4c1147 tree SHA256=19228cbcb75d144563e62f6e71f57f393966fb837e707ed3dc626c0ed57db887
+
+```text
+ISOLATION_OK pid=51900
+ISOLATION_OK pid=51900
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________________ test_foreign_hits_registry_is_exact ______________________
+tests/market/test_single_source.py:36: in test_foreign_hits_registry_is_exact
+    assert hits == gate.FOREIGN_HITS
+E   AssertionError: assert set() == {('P3_duratio...m_synthetic')}
+E     
+E     Extra items in the right set:
+E     ('P3_duration_div', 'research/maxt.py:calendar_blocks')
+E     ('P5_inline_entry_ttl', 'research/api.py:build_inputs_from_synthetic')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_foreign_hits_registry_is_exact
+1 failed in 1.66s
+OUTCOMES={"tests/market/test_single_source.py::test_foreign_hits_registry_is_exact": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51922
+ISOLATION_OK pid=51922
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 1.05s
+OUTCOMES={"tests/market/test_single_source.py::test_foreign_hits_registry_is_exact": "passed"}
+```
+
+内容还原相等：True
+
+#### M037 S32-build-start-bypass
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S32-build-start-bypass`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`, `tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51911
+ISOLATION_OK pid=51911
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 1.25s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed"}
+```
+
+injected exit=1 file SHA256=c80846ee3d756b0335d31415978b2ad53db45cd82326ae58fba1dfd42ee1c362 tree SHA256=5b4f32e7262f5bcfad5d0bae119f48999e6988e3305e8d903a5219e6829ecdbe
+
+```text
+ISOLATION_OK pid=51928
+ISOLATION_OK pid=51928
+COLLECTED=2
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['derived_t_s...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "derived_t_start：登记的调用方 ['market/contract.py:build_request'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P1_inline_...licy, ttl))')] == []
+E     
+E     Left contains one more item: ('P1_inline_latency', 542, 'market/contract.py:build_request', 'dt.timedelta(seconds=policy.latency_s + derived_window_s(plan, policy, ttl))')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_single_source_call_sites_match_registry
+FAILED tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+2 failed in 1.70s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "failed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "failed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51981
+ISOLATION_OK pid=51981
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 1.62s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed"}
+```
+
+内容还原相等：True
+
+#### M038 S35-ttl-before
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S35-ttl-before`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51923
+ISOLATION_OK pid=51923
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.30s
+OUTCOMES={"tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed"}
+```
+
+injected exit=1 file SHA256=1fea0f98bc4de9111df95a30d0e8b2260f46652b63ff0c1a08a0d71b247c7553 tree SHA256=931a4f1627dd59afef496a687494e8efce22a73389e396963e1bcec4ce8d43a3
+
+```text
+ISOLATION_OK pid=51929
+ISOLATION_OK pid=51929
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['resolve_ent...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "resolve_entry_ttl_s：登记的调用方 ['market/contract.py:ExecutionRequest._resolve_ttl'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_single_source_call_sites_match_registry
+1 failed in 0.43s
+OUTCOMES={"tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "failed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51979
+ISOLATION_OK pid=51979
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.62s
+OUTCOMES={"tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed"}
+```
+
+内容还原相等：True
+
+#### M039 S35-ttl-after
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S35-ttl-after`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=51934
+ISOLATION_OK pid=51934
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.36s
+OUTCOMES={"tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed"}
+```
+
+injected exit=1 file SHA256=cedc26a146a0aaf28cd7d4d49d33f2082d3301b4d447c27d744d4cf62b370d25 tree SHA256=041988722cc5ff6f923e39380afecc07b76076174667e8625825a4dc05e748c1
+
+```text
+ISOLATION_OK pid=51968
+ISOLATION_OK pid=51968
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['resolve_ent...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "resolve_entry_ttl_s：登记的调用方 ['market/contract.py:ExecutionRequest._chk'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_single_source_call_sites_match_registry
+1 failed in 0.62s
+OUTCOMES={"tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "failed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52003
+ISOLATION_OK pid=52003
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.34s
+OUTCOMES={"tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed"}
+```
+
+内容还原相等：True
+
+#### M040 S35-ttl-builder
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S35-ttl-builder`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52005
+ISOLATION_OK pid=52005
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.31s
+OUTCOMES={"tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed"}
+```
+
+injected exit=1 file SHA256=d603bb751411e6a8f71f356352d304e5c79c8014ef990507e7b5d4c073610dff tree SHA256=e49f50f7aee395a7c968399bcf68bdb92327b1efea7c4f494d3c812523e8bcab
+
+```text
+ISOLATION_OK pid=52018
+ISOLATION_OK pid=52018
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['resolve_ent...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "resolve_entry_ttl_s：登记的调用方 ['market/contract.py:build_request'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_single_source_call_sites_match_registry
+1 failed in 0.45s
+OUTCOMES={"tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "failed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52318
+ISOLATION_OK pid=52318
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.34s
+OUTCOMES={"tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed"}
+```
+
+内容还原相等：True
+
+#### M041 S35-expiry-A-timeline
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S35-expiry-A-timeline`
+目标：`src/quant_lab/market/kernel_a.py`；selector：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`, `tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`
+baseline exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52010
+ISOLATION_OK pid=52010
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 1.28s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed"}
+```
+
+injected exit=1 file SHA256=d10dbefdcbf1c0d6b9bfbada42129e502e3d10200b04bc958f18d79a75d5a8ee tree SHA256=66209cc84c5fa943bffbd7eb1a9b2128db7c83527f788711fe7e9f903016f52f
+
+```text
+ISOLATION_OK pid=52439
+ISOLATION_OK pid=52439
+COLLECTED=2
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['entry_expir...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "entry_expiry_at：登记的调用方 ['market/kernel_a.py:KernelA.timeline'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P7_inline_...ntry_ttl_s)')] == []
+E     
+E     Left contains 2 more items, first extra item: ('P7_inline_ttl_resolution', 222, 'market/kernel_a.py:KernelA.timeline', 'deadline = self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_single_source_call_sites_match_registry
+FAILED tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+2 failed in 1.48s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "failed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "failed"}
+```
+
+restored exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52461
+ISOLATION_OK pid=52461
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 1.32s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed"}
+```
+
+内容还原相等：True
+
+#### M042 S35-expiry-A-entries
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S35-expiry-A-entries`
+目标：`src/quant_lab/market/kernel_a.py`；selector：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`, `tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`
+baseline exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52029
+ISOLATION_OK pid=52029
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 1.34s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed"}
+```
+
+injected exit=1 file SHA256=933409fa62febda37d554f0ccd0d8f4a881b96ddbd86f8932d2feedb671b0339 tree SHA256=2750fa6d9ee814a4344802371a14a48483ac88b4c1cacf3ec3f0d889ddb36580
+
+```text
+ISOLATION_OK pid=52443
+ISOLATION_OK pid=52443
+COLLECTED=2
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['entry_expir...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "entry_expiry_at：登记的调用方 ['market/kernel_a.py:KernelA.submit_entries'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P7_inline_...ntry_ttl_s)')] == []
+E     
+E     Left contains 2 more items, first extra item: ('P7_inline_ttl_resolution', 317, 'market/kernel_a.py:KernelA.submit_entries', 'deadline = self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_single_source_call_sites_match_registry
+FAILED tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+2 failed in 1.50s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "failed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "failed"}
+```
+
+restored exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52462
+ISOLATION_OK pid=52462
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 1.29s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed"}
+```
+
+内容还原相等：True
+
+#### M043 S35-expiry-B
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S35-expiry-B`
+目标：`src/quant_lab/market/nautilus_adapter.py`；selector：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`, `tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`
+baseline exit=0 file SHA256=580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52444
+ISOLATION_OK pid=52444
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 1.29s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed"}
+```
+
+injected exit=1 file SHA256=abca157a7613de5e72286335d295ec1ea02a3a6bc4d26fe1b039a221f4b9430c tree SHA256=92139abac9f8f7474d165e1f781f95ae48c23371177ec311aa95d9efe7d2d4bc
+
+```text
+ISOLATION_OK pid=52463
+ISOLATION_OK pid=52463
+COLLECTED=2
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['entry_expir...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "entry_expiry_at：登记的调用方 ['market/nautilus_adapter.py:_simulate_b.PlanShell._submit_entries'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P7_inline_...ntry_ttl_s)')] == []
+E     
+E     Left contains 2 more items, first extra item: ('P7_inline_ttl_resolution', 226, 'market/nautilus_adapter.py:_simulate_b.PlanShell._submit_entries', 'deadline = t_start + dt.timedelta(seconds=req.entry_ttl_s)')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_single_source_call_sites_match_registry
+FAILED tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+2 failed in 1.27s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "failed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "failed"}
+```
+
+restored exit=0 file SHA256=580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52474
+ISOLATION_OK pid=52474
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 1.17s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed"}
+```
+
+内容还原相等：True
+
+#### M044 S37-middle
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S37-middle`
+目标：`src/quant_lab/market/kernel_a.py`；selector：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`
+baseline exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52472
+ISOLATION_OK pid=52472
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 1.23s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+injected exit=0 file SHA256=561a12ec6b2c2a64877c45445e90e21899cd6f5251aec51b8e4aca69b5fffc71 tree SHA256=2db55ba27f8f4e6cc3b1b2b8bf3177de4744e73ac2779190647f0a29df9770d1
+
+```text
+ISOLATION_OK pid=52499
+ISOLATION_OK pid=52499
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.95s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+restored exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52517
+ISOLATION_OK pid=52517
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.80s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+内容还原相等：True
+
+#### M045 S37-tail
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S37-tail`
+目标：`src/quant_lab/market/kernel_a.py`；selector：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`
+baseline exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52473
+ISOLATION_OK pid=52473
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 1.22s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+injected exit=0 file SHA256=a220143099e69580a32112ca7df775f3e620121b5f1504bd4cfa0557d3d10e7f tree SHA256=1f8a4be7659046abce36830ff5575a192ca619c181bfc3d798bbd57749f1d27e
+
+```text
+ISOLATION_OK pid=52498
+ISOLATION_OK pid=52498
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.96s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+restored exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52516
+ISOLATION_OK pid=52516
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.76s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+内容还原相等：True
+
+#### M046 A28-partition-count
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-partition-count`
+目标：`src/quant_lab/market/partition_check.py`；selector：`tests/market/test_single_source.py::test_differential_partition_grid`
+baseline exit=0 file SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52515
+ISOLATION_OK pid=52515
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 6.32s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+injected exit=1 file SHA256=9ce967bc18a2cae92142e68b3767d6cefd3321e76c8382657b16b33ac0dd5fba tree SHA256=3027186f3a0f6c0d5be4998363ed8981a6e365a4a36cb6d883257db9763fb675
+
+```text
+ISOLATION_OK pid=52583
+ISOLATION_OK pid=52583
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________________ test_differential_partition_grid _______________________
+tests/market/test_single_source.py:227: in test_differential_partition_grid
+    out, quarantines, report = pc.check_bars(
+/tmp/g2-p14-independent/mutant-46/src/quant_lab/market/partition_check.py:253: in check_bars
+    assert rep.missing >= 0, "present 必须是期望网格的子集"
+           ^^^^^^^^^^^^^^^^
+E   AssertionError: present 必须是期望网格的子集
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_partition_grid
+1 failed in 2.72s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_partition_grid": "failed"}
+```
+
+restored exit=0 file SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52762
+ISOLATION_OK pid=52762
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 5.98s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+内容还原相等：True
+
+#### M047 A28-partition-first
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-partition-first`
+目标：`src/quant_lab/market/partition_check.py`；selector：`tests/market/test_single_source.py::test_differential_partition_grid`
+baseline exit=0 file SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52530
+ISOLATION_OK pid=52530
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 6.21s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+injected exit=1 file SHA256=8c612fd9703614f287dd01afc9fa2977cc5d53dcd914dc06c74133707c395bcc tree SHA256=57aff1d0d3d278f3ca5253729fea96030da2f6eaf934853909df6904e08364b3
+
+```text
+ISOLATION_OK pid=52727
+ISOLATION_OK pid=52727
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________________ test_differential_partition_grid _______________________
+tests/market/test_single_source.py:227: in test_differential_partition_grid
+    out, quarantines, report = pc.check_bars(
+/tmp/g2-p14-independent/mutant-47/src/quant_lab/market/partition_check.py:284: in check_bars
+    assert sum(g["n"] for g in rep.gaps) == rep.missing, "缺口清单与 missing 必须一致"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: 缺口清单与 missing 必须一致
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_partition_grid
+1 failed in 0.17s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_partition_grid": "failed"}
+```
+
+restored exit=0 file SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52746
+ISOLATION_OK pid=52746
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 6.18s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+内容还原相等：True
+
+#### M048 A28-partition-middle
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-partition-middle`
+目标：`src/quant_lab/market/partition_check.py`；selector：`tests/market/test_single_source.py::test_differential_partition_grid`
+baseline exit=0 file SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52531
+ISOLATION_OK pid=52531
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 6.23s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+injected exit=1 file SHA256=f62b408fc41ee6159e9a1c240e520ba7dc761bfe23177afb43ef991ee6b3aaae tree SHA256=795c17324bf7158e40368c7d214e62de1f8070acac0aa9364935fdc522edbd18
+
+```text
+ISOLATION_OK pid=52728
+ISOLATION_OK pid=52728
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________________ test_differential_partition_grid _______________________
+tests/market/test_single_source.py:247: in test_differential_partition_grid
+    assert out['gap_flag'].to_list() == flags
+E   assert [False, True, True, True] == [False, False, False, False]
+E     
+E     At index 1 diff: True != False
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_partition_grid
+1 failed in 2.30s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_partition_grid": "failed"}
+```
+
+restored exit=0 file SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52768
+ISOLATION_OK pid=52768
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 5.94s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+内容还原相等：True
+
+#### M049 A28-vision-count
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-vision-count`
+目标：`src/quant_lab/market/vision.py`；selector：`tests/market/test_single_source.py::test_differential_vision_count`
+baseline exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52836
+ISOLATION_OK pid=52836
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.08s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_vision_count": "passed"}
+```
+
+injected exit=1 file SHA256=7b958775ba0a60c66fc580244dad71d04d60dd887eccba4273d9cc57ae1b06ee tree SHA256=5c64d6cf2bb9ebf6af1f4d3851e761633f738d000f7613243330ab45623f89ca
+
+```text
+ISOLATION_OK pid=52837
+ISOLATION_OK pid=52837
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_vision_count ________________________
+tests/market/test_single_source.py:267: in test_differential_vision_count
+    assert vision.expected_rows(kind, interval, period) == c.grid_points_between(
+E   AssertionError: assert 8353 == 8352
+E    +  where 8353 = <function expected_rows at 0x10ca86ca0>('indexPriceKlines', '5m', '2024-02')
+E    +    where <function expected_rows at 0x10ca86ca0> = vision.expected_rows
+E    +  and   8352 = <function grid_points_between at 0x10b809da0>(datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 3, 1, 0, 0, tzinfo=datetime.timezone.utc), 300)
+E    +    where <function grid_points_between at 0x10b809da0> = c.grid_points_between
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_vision_count - A...
+1 failed in 0.10s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_vision_count": "failed"}
+```
+
+restored exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52844
+ISOLATION_OK pid=52844
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.09s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_vision_count": "passed"}
+```
+
+内容还原相等：True
+
+#### M050 A28-kernel-first
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-kernel-first`
+目标：`src/quant_lab/market/kernel_a.py`；selector：`tests/market/test_single_source.py::test_differential_kernel_grid`
+baseline exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52838
+ISOLATION_OK pid=52838
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.09s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_kernel_grid": "passed"}
+```
+
+injected exit=1 file SHA256=bccd4290969ab0947ba22d3c8bfe57a3275e8477de98641da7cd90f730faf65c tree SHA256=57378d02d85c14d1bc2a99c69f7563da141b64a377a160df320ab3a025739d29
+
+```text
+ISOLATION_OK pid=52843
+ISOLATION_OK pid=52843
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_kernel_grid _________________________
+tests/market/test_single_source.py:298: in test_differential_kernel_grid
+    assert kernel._first_bar_gap(bars, end) == want
+E   AssertionError: assert datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc) == None
+E    +  where datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10a4e4e30>._first_bar_gap
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_kernel_grid - As...
+1 failed in 0.11s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_kernel_grid": "failed"}
+```
+
+restored exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52856
+ISOLATION_OK pid=52856
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.11s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_kernel_grid": "passed"}
+```
+
+内容还原相等：True
+
+#### M051 A28-kernel-middle
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-kernel-middle`
+目标：`src/quant_lab/market/kernel_a.py`；selector：`tests/market/test_single_source.py::test_differential_kernel_grid`
+baseline exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52855
+ISOLATION_OK pid=52855
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.09s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_kernel_grid": "passed"}
+```
+
+injected exit=1 file SHA256=561a12ec6b2c2a64877c45445e90e21899cd6f5251aec51b8e4aca69b5fffc71 tree SHA256=2db55ba27f8f4e6cc3b1b2b8bf3177de4744e73ac2779190647f0a29df9770d1
+
+```text
+ISOLATION_OK pid=52864
+ISOLATION_OK pid=52864
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_kernel_grid _________________________
+tests/market/test_single_source.py:298: in test_differential_kernel_grid
+    assert kernel._first_bar_gap(bars, end) == want
+E   AssertionError: assert datetime.datetime(2024, 2, 1, 0, 3, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc)
+E    +  where datetime.datetime(2024, 2, 1, 0, 3, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10c0e4920>._first_bar_gap
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_kernel_grid - As...
+1 failed in 0.11s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_kernel_grid": "failed"}
+```
+
+restored exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52882
+ISOLATION_OK pid=52882
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.07s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_kernel_grid": "passed"}
+```
+
+内容还原相等：True
+
+#### M052 A28-kernel-tail
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-kernel-tail`
+目标：`src/quant_lab/market/kernel_a.py`；selector：`tests/market/test_single_source.py::test_differential_kernel_grid`
+baseline exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52857
+ISOLATION_OK pid=52857
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.09s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_kernel_grid": "passed"}
+```
+
+injected exit=1 file SHA256=a220143099e69580a32112ca7df775f3e620121b5f1504bd4cfa0557d3d10e7f tree SHA256=1f8a4be7659046abce36830ff5575a192ca619c181bfc3d798bbd57749f1d27e
+
+```text
+ISOLATION_OK pid=52863
+ISOLATION_OK pid=52863
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_kernel_grid _________________________
+tests/market/test_single_source.py:298: in test_differential_kernel_grid
+    assert kernel._first_bar_gap(bars, end) == want
+E   AssertionError: assert None == datetime.datetime(2024, 2, 1, 0, 3, tzinfo=datetime.timezone.utc)
+E    +  where None = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10c57a9c0>._first_bar_gap
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_kernel_grid - As...
+1 failed in 0.12s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_kernel_grid": "failed"}
+```
+
+restored exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52883
+ISOLATION_OK pid=52883
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.08s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_kernel_grid": "passed"}
+```
+
+内容还原相等：True
+
+#### M053 A28-lake-count
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-lake-count`
+目标：`src/quant_lab/market/execution.py`；selector：`tests/market/test_single_source.py::test_differential_lake_grid`
+baseline exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52866
+ISOLATION_OK pid=52866
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 3.54s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_lake_grid": "passed"}
+```
+
+injected exit=1 file SHA256=fd3eca0318b42f2feb50e3be93752c649eb9ea977fc410dcd1286b2da0a72d9b tree SHA256=41b4d9c5975f0f6292385d5adb7230a43778831d501f76f83d0a3cb5d0cedf10
+
+```text
+ISOLATION_OK pid=52920
+ISOLATION_OK pid=52920
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________________ test_differential_lake_grid __________________________
+tests/market/test_single_source.py:353: in test_differential_lake_grid
+    assert market.bars_complete == (present == set(expected) and not off_grid)
+E   AssertionError: assert False == (({datetime.dat...timezone.utc)} == {datetime.dat...timezone.utc)}
+E    +  where False = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 31, 23, 59... 4 根，实际 5 根合法唯一网格 bar（原始 5 行）', 'manifest missing fundingRate 2024-01', 'fundingRate 缺 2024-02-01T00:00:00+00:00 结算行']).bars_complete
+E     
+E     Use -v to get more diff and not set()))
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_lake_grid - Asse...
+1 failed in 1.36s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_lake_grid": "failed"}
+```
+
+restored exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52934
+ISOLATION_OK pid=52934
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 5.48s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_lake_grid": "passed"}
+```
+
+内容还原相等：True
+
+#### M054 A28-lake-start
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-lake-start`
+目标：`src/quant_lab/market/execution.py`；selector：`tests/market/test_single_source.py::test_differential_start`
+baseline exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52894
+ISOLATION_OK pid=52894
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 4.25s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_start": "passed"}
+```
+
+injected exit=1 file SHA256=147a05e42c56268a5ae01b9e7ae49a352b6127215734fe57b726ad1785403f55 tree SHA256=ac1f829970cbfa2f6087fe4c8c5f002efde1bd0cba319481331ae9f00aba8ba8
+
+```text
+ISOLATION_OK pid=52924
+ISOLATION_OK pid=52924
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_start ____________________________
+tests/market/test_single_source.py:397: in test_differential_start
+    assert actual.bars_complete
+E   AssertionError: assert False
+E    +  where False = MarketView(manifest_id='a28', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 2, 1, 0, 0, tzinfo=da... 4 根，实际 3 根合法唯一网格 bar（原始 3 行）', 'manifest missing fundingRate 2024-01', 'fundingRate 缺 2024-02-01T00:00:00+00:00 结算行']).bars_complete
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_start - Assertio...
+1 failed in 1.75s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_start": "failed"}
+```
+
+restored exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52945
+ISOLATION_OK pid=52945
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 4.26s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_start": "passed"}
+```
+
+内容还原相等：True
+
+#### M055 A28-start-validator
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-start-validator`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_single_source.py::test_differential_start`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52895
+ISOLATION_OK pid=52895
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 4.10s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_start": "passed"}
+```
+
+injected exit=1 file SHA256=7772d4123a34cebdc0952e0e9bd20011dc225640c3793e5fdd77f259c1a61f10 tree SHA256=214e2e6eaf35377a429ab3d7d0443e4ba7e198780a75fa82fb49abb6b1ea3034
+
+```text
+ISOLATION_OK pid=52923
+ISOLATION_OK pid=52923
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_start ____________________________
+tests/market/test_single_source.py:383: in test_differential_start
+    req = _build(_plan(), t_dec, policy)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_single_source.py:170: in _build
+    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,
+/tmp/g2-p14-independent/mutant-55/src/quant_lab/market/contract.py:543: in build_request
+    return ExecutionRequest(
+/tmp/g2-p14-independent/mutant-55/src/quant_lab/market/contract.py:467: in _chk
+    raise ContractError("t_start 不能早于 t_dec（解析后的启动时刻）")
+E   quant_lab.market.contract.ContractError: t_start 不能早于 t_dec（解析后的启动时刻）
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_start - quant_la...
+1 failed in 1.75s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_start": "failed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=52944
+ISOLATION_OK pid=52944
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 4.25s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_start": "passed"}
+```
+
+内容还原相等：True
+
+#### M056 A28-start-resolver
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-start-resolver`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_single_source.py::test_differential_start`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53002
+ISOLATION_OK pid=53002
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 4.60s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_start": "passed"}
+```
+
+injected exit=1 file SHA256=036777b4cd57bb5c98fab9d2c490fd56ee84cad996800624e651087b7fe6f18e tree SHA256=07192ee52c10d297e57a12e40cdd2a227766b2b35d4842afd040b7330ff8b130
+
+```text
+ISOLATION_OK pid=53213
+ISOLATION_OK pid=53213
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_start ____________________________
+tests/market/test_single_source.py:384: in test_differential_start
+    assert req.resolved_t_start(policy) == start
+E   AssertionError: assert datetime.datetime(2024, 1, 31, 23, 58, 59, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc)
+E    +  where datetime.datetime(2024, 1, 31, 23, 58, 59, tzinfo=datetime.timezone.utc) = resolved_t_start(ExecutionPolicy(version='a28-input', latency_s=0, ladder_steps=2, costs={'base': CostSpec(maker_fee=Decimal('0'), take...zon_s=432000, entry_ttl_s=86400, entry_fraction_rule='equal', tp_fraction_rule='equal', tp_total_fraction=Decimal('1')))
+E    +    where resolved_t_start = ExecutionRequest(episode_id='E03', graph_version='gv-fixture', decision_snapshot_hash='dsh-E03', t_dec=datetime.dateti...e='one_way', entry_ttl_s=86400, entry_fractions=(Decimal('1'),), tp_fractions=(Decimal('1'),), horizon_source='policy').resolved_t_start
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_start - Assertio...
+1 failed in 1.23s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_start": "failed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53252
+ISOLATION_OK pid=53252
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 4.32s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_start": "passed"}
+```
+
+内容还原相等：True
+
+#### M057 A28-start-builder
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-start-builder`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_single_source.py::test_differential_start`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53003
+ISOLATION_OK pid=53003
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 4.60s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_start": "passed"}
+```
+
+injected exit=1 file SHA256=8fab3da64b05385c15135597955d5884ecf051ce0a118c1ff09a2d3f6a37663e tree SHA256=e91521878c4cdce969301a8a9bf1628dc4f6a4d69500bd0a79f235e6261aef1a
+
+```text
+ISOLATION_OK pid=53211
+ISOLATION_OK pid=53211
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_start ____________________________
+tests/market/test_single_source.py:383: in test_differential_start
+    req = _build(_plan(), t_dec, policy)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_single_source.py:170: in _build
+    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,
+/tmp/g2-p14-independent/mutant-57/src/quant_lab/market/contract.py:543: in build_request
+    return ExecutionRequest(
+/tmp/g2-p14-independent/mutant-57/src/quant_lab/market/contract.py:496: in _chk
+    raise ContractError(f"horizon_source=policy 但 horizon_end 与推导值不一致：窗口 {window} != {dt.timedelta(seconds=derived_s)}"
+E   quant_lab.market.contract.ContractError: horizon_source=policy 但 horizon_end 与推导值不一致：窗口 5 days, 23:59:59.000001 != 6 days, 0:00:00（自选观察窗请显式标 horizon_source='caller'，它会进 trace_hash 并由 G3 记入尝试账本）
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_start - quant_la...
+1 failed in 1.06s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_start": "failed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53251
+ISOLATION_OK pid=53251
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 3.78s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_start": "passed"}
+```
+
+内容还原相等：True
+
+#### M058 A28-start-lower-bound
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-start-lower-bound`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_single_source.py::test_differential_start`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53004
+ISOLATION_OK pid=53004
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 4.59s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_start": "passed"}
+```
+
+injected exit=1 file SHA256=2cdd866365e34789c7f9abe9852c18c689512f6e7d0299dbe5073afe42cd3ff0 tree SHA256=88e51c2998af901f11ca04bd254cd8f431902807a344397101f6b66a5ba02da2
+
+```text
+ISOLATION_OK pid=53212
+ISOLATION_OK pid=53212
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_start ____________________________
+tests/market/test_single_source.py:406: in test_differential_start
+    assert _accepts(data) == (valid_spelling and data['horizon_end'] > start)
+E   AssertionError: assert True == ((True and datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc) > datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc)))
+E    +  where True = _accepts({'episode_id': 'E03', 'graph_version': 'gv-fixture', 'decision_snapshot_hash': 'dsh-E03', 't_dec': datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), ...})
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_start - Assertio...
+1 failed in 1.23s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_start": "failed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53253
+ISOLATION_OK pid=53253
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 3.72s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_start": "passed"}
+```
+
+内容还原相等：True
+
+#### M059 A28-window-validator
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-window-validator`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_single_source.py::test_differential_window`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53285
+ISOLATION_OK pid=53285
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.25s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_window": "passed"}
+```
+
+injected exit=1 file SHA256=da9de42572e1c6457d6a8a525c78c9da6b87f1e57da4945edbefad038a489ddc tree SHA256=7c392602dc121933314603a5e0e9dee12ea71250edd6a40424c5775ae4c50cd0
+
+```text
+ISOLATION_OK pid=53292
+ISOLATION_OK pid=53292
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_window ___________________________
+tests/market/test_single_source.py:432: in test_differential_window
+    assert _accepts(data) == want
+E   AssertionError: assert True == False
+E    +  where True = _accepts({'episode_id': 'E03', 'graph_version': 'gv-fixture', 'decision_snapshot_hash': 'dsh-E03', 't_dec': datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), ...})
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_window - Asserti...
+1 failed in 0.13s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_window": "failed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53298
+ISOLATION_OK pid=53298
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.33s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_window": "passed"}
+```
+
+内容还原相等：True
+
+#### M060 A28-window-builder
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-window-builder`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_single_source.py::test_differential_window`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53286
+ISOLATION_OK pid=53286
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.29s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_window": "passed"}
+```
+
+injected exit=1 file SHA256=24e66bd3833406b643d6b17af6faf52294c76cecf6eb612717db40b684104971 tree SHA256=136047816c9bdc31b7a6e4b04ae06e87c73b79f0628bb5cc0bf01f1f3d38d674
+
+```text
+ISOLATION_OK pid=53293
+ISOLATION_OK pid=53293
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_window ___________________________
+tests/market/test_single_source.py:421: in test_differential_window
+    req = _build(plan, t_dec, policy)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_single_source.py:170: in _build
+    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,
+/tmp/g2-p14-independent/mutant-60/src/quant_lab/market/contract.py:543: in build_request
+    return ExecutionRequest(
+/tmp/g2-p14-independent/mutant-60/src/quant_lab/market/contract.py:492: in _chk
+    raise ContractError(f"观察窗 {window} 超过 policy {self.policy_version} 的安全上限 "
+E   quant_lab.market.contract.ContractError: 观察窗 4 days, 15:07:40 超过 policy a28-input 的安全上限 max_horizon_s=400000s（亚秒偏移同样超限）
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_window - quant_l...
+1 failed in 0.15s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_window": "failed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53299
+ISOLATION_OK pid=53299
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.28s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_window": "passed"}
+```
+
+内容还原相等：True
+
+#### M061 A28-window-derived-validator
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-window-derived-validator`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_single_source.py::test_differential_window`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53291
+ISOLATION_OK pid=53291
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.24s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_window": "passed"}
+```
+
+injected exit=1 file SHA256=3f1e6f70f9a1ccc96aa20b24b529864479b789798863af7b7ed21590e9e23a65 tree SHA256=a1c9a98ae98d3c649dd3d0777ed01d6606935a60cccb9c441380da49cfd06263
+
+```text
+ISOLATION_OK pid=53300
+ISOLATION_OK pid=53300
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_differential_window ___________________________
+tests/market/test_single_source.py:421: in test_differential_window
+    req = _build(plan, t_dec, policy)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_single_source.py:170: in _build
+    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,
+/tmp/g2-p14-independent/mutant-61/src/quant_lab/market/contract.py:543: in build_request
+    return ExecutionRequest(
+/tmp/g2-p14-independent/mutant-61/src/quant_lab/market/contract.py:496: in _chk
+    raise ContractError(f"horizon_source=policy 但 horizon_end 与推导值不一致：窗口 {window} != {dt.timedelta(seconds=derived_s)}"
+E   quant_lab.market.contract.ContractError: horizon_source=policy 但 horizon_end 与推导值不一致：窗口 0:03:03 != 4 days, 15:07:40（自选观察窗请显式标 horizon_source='caller'，它会进 trace_hash 并由 G3 记入尝试账本）
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_window - quant_l...
+1 failed in 0.16s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_window": "failed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53301
+ISOLATION_OK pid=53301
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.27s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_window": "passed"}
+```
+
+内容还原相等：True
+
+#### M062 A28-ttl-before
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-ttl-before`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_single_source.py::test_differential_ttl`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53308
+ISOLATION_OK pid=53308
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.11s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_ttl": "passed"}
+```
+
+injected exit=1 file SHA256=1fea0f98bc4de9111df95a30d0e8b2260f46652b63ff0c1a08a0d71b247c7553 tree SHA256=931a4f1627dd59afef496a687494e8efce22a73389e396963e1bcec4ce8d43a3
+
+```text
+ISOLATION_OK pid=53313
+ISOLATION_OK pid=53313
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________________ test_differential_ttl _____________________________
+tests/market/test_single_source.py:457: in test_differential_ttl
+    assert _accepts(data) == want
+E   AssertionError: assert False == True
+E    +  where False = _accepts({'episode_id': 'E03', 'graph_version': 'gv-fixture', 'decision_snapshot_hash': 'dsh-E03', 't_dec': datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), ...})
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_ttl - AssertionE...
+1 failed in 0.20s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_ttl": "failed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53350
+ISOLATION_OK pid=53350
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.10s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_ttl": "passed"}
+```
+
+内容还原相等：True
+
+#### M063 A28-ttl-validator
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-ttl-validator`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_single_source.py::test_differential_ttl`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53309
+ISOLATION_OK pid=53309
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.11s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_ttl": "passed"}
+```
+
+injected exit=1 file SHA256=cedc26a146a0aaf28cd7d4d49d33f2082d3301b4d447c27d744d4cf62b370d25 tree SHA256=041988722cc5ff6f923e39380afecc07b76076174667e8625825a4dc05e748c1
+
+```text
+ISOLATION_OK pid=53317
+ISOLATION_OK pid=53317
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________________ test_differential_ttl _____________________________
+tests/market/test_single_source.py:448: in test_differential_ttl
+    req = _build(plan, t_dec, policy)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_single_source.py:170: in _build
+    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,
+/tmp/g2-p14-independent/mutant-63/src/quant_lab/market/contract.py:543: in build_request
+    return ExecutionRequest(
+/tmp/g2-p14-independent/mutant-63/src/quant_lab/market/contract.py:486: in _chk
+    raise ContractError(f"entry_ttl_s 与{src}解析值不一致：{self.entry_ttl_s} != {exp_ttl}")
+E   quant_lab.market.contract.ContractError: entry_ttl_s 与计划解析值不一致：1 != 321
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_ttl - quant_lab....
+1 failed in 0.18s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_ttl": "failed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53349
+ISOLATION_OK pid=53349
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.11s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_ttl": "passed"}
+```
+
+内容还原相等：True
+
+#### M064 A28-ttl-builder
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-ttl-builder`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_single_source.py::test_differential_ttl`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53320
+ISOLATION_OK pid=53320
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.11s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_ttl": "passed"}
+```
+
+injected exit=1 file SHA256=d603bb751411e6a8f71f356352d304e5c79c8014ef990507e7b5d4c073610dff tree SHA256=e49f50f7aee395a7c968399bcf68bdb92327b1efea7c4f494d3c812523e8bcab
+
+```text
+ISOLATION_OK pid=53340
+ISOLATION_OK pid=53340
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________________ test_differential_ttl _____________________________
+tests/market/test_single_source.py:448: in test_differential_ttl
+    req = _build(plan, t_dec, policy)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_single_source.py:170: in _build
+    return c.build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,
+/tmp/g2-p14-independent/mutant-64/src/quant_lab/market/contract.py:543: in build_request
+    return ExecutionRequest(
+/tmp/g2-p14-independent/mutant-64/src/quant_lab/market/contract.py:486: in _chk
+    raise ContractError(f"entry_ttl_s 与{src}解析值不一致：{self.entry_ttl_s} != {exp_ttl}")
+E   quant_lab.market.contract.ContractError: entry_ttl_s 与计划解析值不一致：321 != 1
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_ttl - quant_lab....
+1 failed in 0.17s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_ttl": "failed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53366
+ISOLATION_OK pid=53366
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.14s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_ttl": "passed"}
+```
+
+内容还原相等：True
+
+#### M065 A28-expiry-timeline
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-expiry-timeline`
+目标：`src/quant_lab/market/kernel_a.py`；selector：`tests/market/test_single_source.py::test_differential_expiry_timeline`
+baseline exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53367
+ISOLATION_OK pid=53367
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.13s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_expiry_timeline": "passed"}
+```
+
+injected exit=1 file SHA256=c457948f7ee6c7853ffe080fd135072c9ca4a2cf9ef30e927c51ad6a19693be7 tree SHA256=fb64479e0b1bc18d90f775fc2e9b39464904155e342902ab8cd6ab8fee8b907c
+
+```text
+ISOLATION_OK pid=53538
+ISOLATION_OK pid=53538
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________________ test_differential_expiry_timeline _______________________
+tests/market/test_single_source.py:489: in test_differential_expiry_timeline
+    assert [moment.ts for moment in moments if moment.expiry] == expected
+E   assert [datetime.dat...timezone.utc)] == []
+E     
+E     Left contains one more item: datetime.datetime(2024, 2, 1, 0, 1, tzinfo=datetime.timezone.utc)
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_expiry_timeline
+1 failed in 0.15s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_expiry_timeline": "failed"}
+```
+
+restored exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53550
+ISOLATION_OK pid=53550
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.11s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_expiry_timeline": "passed"}
+```
+
+内容还原相等：True
+
+#### M066 A28-expiry-timeline-bound
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-expiry-timeline-bound`
+目标：`src/quant_lab/market/kernel_a.py`；selector：`tests/market/test_single_source.py::test_differential_expiry_timeline`
+baseline exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53368
+ISOLATION_OK pid=53368
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.13s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_expiry_timeline": "passed"}
+```
+
+injected exit=1 file SHA256=43b0ef3f8793b59124ae93c21e44ca5fb916d622e364165401bbac6cdd32d17d tree SHA256=efa34be242aec2ab570adc2762531d045bede3a69c29717584f41b957a14798d
+
+```text
+ISOLATION_OK pid=53537
+ISOLATION_OK pid=53537
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________________ test_differential_expiry_timeline _______________________
+tests/market/test_single_source.py:489: in test_differential_expiry_timeline
+    assert [moment.ts for moment in moments if moment.expiry] == expected
+E   assert [] == [datetime.dat...timezone.utc)]
+E     
+E     Right contains one more item: datetime.datetime(2024, 2, 1, 0, 1, 0, 999999, tzinfo=datetime.timezone.utc)
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_expiry_timeline
+1 failed in 0.17s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_expiry_timeline": "failed"}
+```
+
+restored exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53551
+ISOLATION_OK pid=53551
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.09s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_expiry_timeline": "passed"}
+```
+
+内容还原相等：True
+
+#### M067 A28-expiry-orders
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-expiry-orders`
+目标：`src/quant_lab/market/kernel_a.py`；selector：`tests/market/test_single_source.py::test_differential_expiry_orders`
+baseline exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53541
+ISOLATION_OK pid=53541
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.13s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_expiry_orders": "passed"}
+```
+
+injected exit=1 file SHA256=699a5ea5ec065b8d861e7d083e9033cc3b9bd4ae55fcb7104af5928aa0274d06 tree SHA256=38570c329103b2467b8100a46e1ec73778bb48e533b81d0340d668c6b6494dee
+
+```text
+ISOLATION_OK pid=53549
+ISOLATION_OK pid=53549
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________________ test_differential_expiry_orders ________________________
+tests/market/test_single_source.py:499: in test_differential_expiry_orders
+    assert [order.deadline for order in orders] == [expiry] * len(orders)
+E   assert [datetime.dat...timezone.utc)] == [datetime.dat...timezone.utc)]
+E     
+E     At index 0 diff: datetime.datetime(2024, 2, 1, 0, 1, tzinfo=datetime.timezone.utc) != datetime.datetime(2024, 2, 1, 0, 1, 0, 999999, tzinfo=datetime.timezone.utc)
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_expiry_orders - ...
+1 failed in 0.13s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_expiry_orders": "failed"}
+```
+
+restored exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53560
+ISOLATION_OK pid=53560
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.11s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_expiry_orders": "passed"}
+```
+
+内容还原相等：True
+
+#### M068 A28-expiry-b
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-expiry-b`
+目标：`src/quant_lab/market/nautilus_adapter.py`；selector：`tests/market/test_single_source.py::test_differential_expiry_b`
+baseline exit=0 file SHA256=580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53559
+ISOLATION_OK pid=53559
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 2.17s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_expiry_b": "passed"}
+```
+
+injected exit=1 file SHA256=93508dd01932ee32e33966c8fb8d6220995c1c0e55245a7106def6830e4b8bd6 tree SHA256=962227cff394c5b3e2e5b64ffc0324ec87823826e0f7cc1f66e39541463fc155
+
+```text
+ISOLATION_OK pid=53585
+ISOLATION_OK pid=53585
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________________________ test_differential_expiry_b __________________________
+tests/market/test_single_source.py:524: in test_differential_expiry_b
+    assert expired[0].reason == 'horizon_end'
+E   AssertionError: assert 'entry_ttl' == 'horizon_end'
+E     
+E     - horizon_end
+E     + entry_ttl
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_expiry_b - Asser...
+1 failed in 1.80s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_expiry_b": "failed"}
+```
+
+restored exit=0 file SHA256=580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53760
+ISOLATION_OK pid=53760
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 1.56s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_expiry_b": "passed"}
+```
+
+内容还原相等：True
+
+#### M069 A28-expiry-b-bound
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A28-expiry-b-bound`
+目标：`src/quant_lab/market/nautilus_adapter.py`；selector：`tests/market/test_single_source.py::test_differential_expiry_b`
+baseline exit=0 file SHA256=580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53563
+ISOLATION_OK pid=53563
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 2.17s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_expiry_b": "passed"}
+```
+
+injected exit=1 file SHA256=4074659c55f2818731864050c5c15d5cfda38b9137a541b1ae42e64111f32fe1 tree SHA256=c5b69187681f498a517987a49f6e1b6e1d938afd2047cb63f5cec9c70c2da2a5
+
+```text
+ISOLATION_OK pid=53584
+ISOLATION_OK pid=53584
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________________________ test_differential_expiry_b __________________________
+tests/market/test_single_source.py:522: in test_differential_expiry_b
+    assert expired[0].reason == 'entry_ttl'
+E   AssertionError: assert 'horizon_end' == 'entry_ttl'
+E     
+E     - entry_ttl
+E     + horizon_end
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_expiry_b - Asser...
+1 failed in 1.80s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_expiry_b": "failed"}
+```
+
+restored exit=0 file SHA256=580c782a26924ddbad1d576a4ca107b475e74d92a01a57e2fdd22fa68fee5650 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53759
+ISOLATION_OK pid=53759
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 1.55s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_expiry_b": "passed"}
+```
+
+内容还原相等：True
+
+#### M070 P7-disable-annotated
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' P7-disable-annotated`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53569
+ISOLATION_OK pid=53569
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.10s
+OUTCOMES={"tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]": "passed"}
+```
+
+injected exit=1 file SHA256=1d422902dd881989de9d8328bd9d15914a006e38283e1025ca90ddfd924ea531 tree SHA256=7ef0e08d31bab531a65ed28f0b742fab18b4138b19b2948b950de5c4e494d407
+
+```text
+ISOLATION_OK pid=53574
+ISOLATION_OK pid=53574
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________________ test_ttl_standard_nodes[annotated] ______________________
+tests/market/test_single_source.py:95: in test_ttl_standard_nodes
+    assert {p for p, _, _, _ in lint.hits} == expected
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]
+1 failed in 0.14s
+OUTCOMES={"tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53579
+ISOLATION_OK pid=53579
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.10s
+OUTCOMES={"tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]": "passed"}
+```
+
+内容还原相等：True
+
+#### M071 P7-disable-augmented
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' P7-disable-augmented`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53681
+ISOLATION_OK pid=53681
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.08s
+OUTCOMES={"tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]": "passed"}
+```
+
+injected exit=1 file SHA256=1d422902dd881989de9d8328bd9d15914a006e38283e1025ca90ddfd924ea531 tree SHA256=7ef0e08d31bab531a65ed28f0b742fab18b4138b19b2948b950de5c4e494d407
+
+```text
+ISOLATION_OK pid=53752
+ISOLATION_OK pid=53752
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________________ test_ttl_standard_nodes[augmented] ______________________
+tests/market/test_single_source.py:95: in test_ttl_standard_nodes
+    assert {p for p, _, _, _ in lint.hits} == expected
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]
+1 failed in 0.11s
+OUTCOMES={"tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53761
+ISOLATION_OK pid=53761
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.12s
+OUTCOMES={"tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]": "passed"}
+```
+
+内容还原相等：True
+
+#### M072 P7-disable-named
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' P7-disable-named`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_ttl_standard_nodes[named]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53766
+ISOLATION_OK pid=53766
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.15s
+OUTCOMES={"tests/market/test_single_source.py::test_ttl_standard_nodes[named]": "passed"}
+```
+
+injected exit=1 file SHA256=1d422902dd881989de9d8328bd9d15914a006e38283e1025ca90ddfd924ea531 tree SHA256=7ef0e08d31bab531a65ed28f0b742fab18b4138b19b2948b950de5c4e494d407
+
+```text
+ISOLATION_OK pid=53771
+ISOLATION_OK pid=53771
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________________ test_ttl_standard_nodes[named] ________________________
+tests/market/test_single_source.py:95: in test_ttl_standard_nodes
+    assert {p for p, _, _, _ in lint.hits} == expected
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_ttl_standard_nodes[named] - A...
+1 failed in 0.11s
+OUTCOMES={"tests/market/test_single_source.py::test_ttl_standard_nodes[named]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53778
+ISOLATION_OK pid=53778
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.07s
+OUTCOMES={"tests/market/test_single_source.py::test_ttl_standard_nodes[named]": "passed"}
+```
+
+内容还原相等：True
+
+#### M073 P7-disable-return
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' P7-disable-return`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_ttl_standard_nodes[return]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53776
+ISOLATION_OK pid=53776
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.07s
+OUTCOMES={"tests/market/test_single_source.py::test_ttl_standard_nodes[return]": "passed"}
+```
+
+injected exit=1 file SHA256=1d422902dd881989de9d8328bd9d15914a006e38283e1025ca90ddfd924ea531 tree SHA256=7ef0e08d31bab531a65ed28f0b742fab18b4138b19b2948b950de5c4e494d407
+
+```text
+ISOLATION_OK pid=53780
+ISOLATION_OK pid=53780
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________________ test_ttl_standard_nodes[return] ________________________
+tests/market/test_single_source.py:95: in test_ttl_standard_nodes
+    assert {p for p, _, _, _ in lint.hits} == expected
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_ttl_standard_nodes[return] - ...
+1 failed in 0.12s
+OUTCOMES={"tests/market/test_single_source.py::test_ttl_standard_nodes[return]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53794
+ISOLATION_OK pid=53794
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.11s
+OUTCOMES={"tests/market/test_single_source.py::test_ttl_standard_nodes[return]": "passed"}
+```
+
+内容还原相等：True
+
+#### M074 P7-disable-comprehension
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' P7-disable-comprehension`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53777
+ISOLATION_OK pid=53777
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.07s
+OUTCOMES={"tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]": "passed"}
+```
+
+injected exit=1 file SHA256=1d422902dd881989de9d8328bd9d15914a006e38283e1025ca90ddfd924ea531 tree SHA256=7ef0e08d31bab531a65ed28f0b742fab18b4138b19b2948b950de5c4e494d407
+
+```text
+ISOLATION_OK pid=53779
+ISOLATION_OK pid=53779
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________ test_ttl_standard_nodes[comprehension] ____________________
+tests/market/test_single_source.py:95: in test_ttl_standard_nodes
+    assert {p for p, _, _, _ in lint.hits} == expected
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]
+1 failed in 0.14s
+OUTCOMES={"tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53795
+ISOLATION_OK pid=53795
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.08s
+OUTCOMES={"tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]": "passed"}
+```
+
+内容还原相等：True
+
+#### M075 P7-disable-return-field
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' P7-disable-return-field`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53781
+ISOLATION_OK pid=53781
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.10s
+OUTCOMES={"tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]": "passed"}
+```
+
+injected exit=1 file SHA256=1d422902dd881989de9d8328bd9d15914a006e38283e1025ca90ddfd924ea531 tree SHA256=7ef0e08d31bab531a65ed28f0b742fab18b4138b19b2948b950de5c4e494d407
+
+```text
+ISOLATION_OK pid=53793
+ISOLATION_OK pid=53793
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________ test_ttl_standard_nodes[return-field] _____________________
+tests/market/test_single_source.py:95: in test_ttl_standard_nodes
+    assert {p for p, _, _, _ in lint.hits} == expected
+E   AssertionError: assert set() == {'P7_inline_ttl_resolution'}
+E     
+E     Extra items in the right set:
+E     'P7_inline_ttl_resolution'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]
+1 failed in 0.15s
+OUTCOMES={"tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53802
+ISOLATION_OK pid=53802
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.11s
+OUTCOMES={"tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]": "passed"}
+```
+
+内容还原相等：True
+
+#### M076 P6-defuse-delta = o - prev
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'P6-defuse-delta = o - prev'`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53803
+ISOLATION_OK pid=53803
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.11s
+OUTCOMES={"tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]": "passed"}
+```
+
+injected exit=1 file SHA256=d2238c2948f5ad7261542b0c03da6dea108f8fdbd90d898f98ed401424d96e81 tree SHA256=0239d50f85a670daa4caa1e4ba9c9371faafa61d6252c1867954bdad639bd50c
+
+```text
+ISOLATION_OK pid=53812
+ISOLATION_OK pid=53812
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_grid_local_definition[delta = o - prev] _________________
+tests/market/test_single_source.py:104: in test_grid_local_definition
+    assert {p for p, _, _, _ in lint.hits} == {"P6_inline_grid_comparison"}
+E   AssertionError: assert set() == {'P6_inline_grid_comparison'}
+E     
+E     Extra items in the right set:
+E     'P6_inline_grid_comparison'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]
+1 failed in 0.13s
+OUTCOMES={"tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53815
+ISOLATION_OK pid=53815
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.15s
+OUTCOMES={"tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]": "passed"}
+```
+
+内容还原相等：True
+
+#### M077 P6-defuse-delta: int = o - prev
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'P6-defuse-delta: int = o - prev'`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53804
+ISOLATION_OK pid=53804
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.11s
+OUTCOMES={"tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]": "passed"}
+```
+
+injected exit=1 file SHA256=d2238c2948f5ad7261542b0c03da6dea108f8fdbd90d898f98ed401424d96e81 tree SHA256=0239d50f85a670daa4caa1e4ba9c9371faafa61d6252c1867954bdad639bd50c
+
+```text
+ISOLATION_OK pid=53811
+ISOLATION_OK pid=53811
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________ test_grid_local_definition[delta: int = o - prev] _______________
+tests/market/test_single_source.py:104: in test_grid_local_definition
+    assert {p for p, _, _, _ in lint.hits} == {"P6_inline_grid_comparison"}
+E   AssertionError: assert set() == {'P6_inline_grid_comparison'}
+E     
+E     Extra items in the right set:
+E     'P6_inline_grid_comparison'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]
+1 failed in 0.13s
+OUTCOMES={"tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53816
+ISOLATION_OK pid=53816
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.13s
+OUTCOMES={"tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]": "passed"}
+```
+
+内容还原相等：True
+
+#### M078 P6-defuse-delta -= prev
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'P6-defuse-delta -= prev'`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53813
+ISOLATION_OK pid=53813
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.10s
+OUTCOMES={"tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]": "passed"}
+```
+
+injected exit=1 file SHA256=d2238c2948f5ad7261542b0c03da6dea108f8fdbd90d898f98ed401424d96e81 tree SHA256=0239d50f85a670daa4caa1e4ba9c9371faafa61d6252c1867954bdad639bd50c
+
+```text
+ISOLATION_OK pid=53814
+ISOLATION_OK pid=53814
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________________ test_grid_local_definition[delta -= prev] ___________________
+tests/market/test_single_source.py:104: in test_grid_local_definition
+    assert {p for p, _, _, _ in lint.hits} == {"P6_inline_grid_comparison"}
+E   AssertionError: assert set() == {'P6_inline_grid_comparison'}
+E     
+E     Extra items in the right set:
+E     'P6_inline_grid_comparison'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]
+1 failed in 0.18s
+OUTCOMES={"tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53824
+ISOLATION_OK pid=53824
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.10s
+OUTCOMES={"tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]": "passed"}
+```
+
+内容还原相等：True
+
+#### M079 augmented-duration-augmented
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' augmented-duration-augmented`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53825
+ISOLATION_OK pid=53825
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.10s
+OUTCOMES={"tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]": "passed"}
+```
+
+injected exit=1 file SHA256=ef8ea14f08a2ae8bd9f3a7ef29338b0c649648a17a9e25200f7118a9933a58ea tree SHA256=22673aba40679501dc7988ddbc1c1b412084f95c619b02999ada23d62aa2bb17
+
+```text
+ISOLATION_OK pid=53832
+ISOLATION_OK pid=53832
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________ test_augmented_binary_patterns[duration-augmented] ______________
+tests/market/test_single_source.py:115: in test_augmented_binary_patterns
+    assert {p for p, _, _, _ in lint.hits} == {pattern}
+E   AssertionError: assert set() == {'P3_duration_div'}
+E     
+E     Extra items in the right set:
+E     'P3_duration_div'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]
+1 failed in 0.13s
+OUTCOMES={"tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53844
+ISOLATION_OK pid=53844
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.09s
+OUTCOMES={"tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]": "passed"}
+```
+
+内容还原相等：True
+
+#### M080 augmented-expiry-augmented
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' augmented-expiry-augmented`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53826
+ISOLATION_OK pid=53826
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.10s
+OUTCOMES={"tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]": "passed"}
+```
+
+injected exit=1 file SHA256=d519d609c831cd527420c10d9cc227715b0927f5d3733da1ec753acfebda7faa tree SHA256=acfbd589e3d8dfec285d0d23d47ee720541869bd4f2462f3bf89605b4a4d65d6
+
+```text
+ISOLATION_OK pid=53831
+ISOLATION_OK pid=53831
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________ test_augmented_binary_patterns[expiry-augmented] _______________
+tests/market/test_single_source.py:115: in test_augmented_binary_patterns
+    assert {p for p, _, _, _ in lint.hits} == {pattern}
+E   AssertionError: assert set() == {'P5_inline_entry_ttl'}
+E     
+E     Extra items in the right set:
+E     'P5_inline_entry_ttl'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]
+1 failed in 0.13s
+OUTCOMES={"tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53843
+ISOLATION_OK pid=53843
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.09s
+OUTCOMES={"tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]": "passed"}
+```
+
+内容还原相等：True
+
+#### M081 S40-middle-split-bypass
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S40-middle-split-bypass`
+目标：`src/quant_lab/market/kernel_a.py`；selector：`tests/market/test_single_source.py`
+baseline exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53833
+ISOLATION_OK pid=53833
+COLLECTED=48
+................................................                         [100%]
+48 passed in 16.88s
+OUTCOMES={"tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]": "passed", "tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]": "passed", "tests/market/test_single_source.py::test_differential_expiry_b": "passed", "tests/market/test_single_source.py::test_differential_expiry_orders": "passed", "tests/market/test_single_source.py::test_differential_expiry_timeline": "passed", "tests/market/test_single_source.py::test_differential_kernel_grid": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_grid": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed", "tests/market/test_single_source.py::test_differential_start": "passed", "tests/market/test_single_source.py::test_differential_ttl": "passed", "tests/market/test_single_source.py::test_differential_vision_count": "passed", "tests/market/test_single_source.py::test_differential_window": "passed", "tests/market/test_single_source.py::test_foreign_hits_registry_is_exact": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]": "passed", "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[named]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return]": "passed"}
+```
+
+injected exit=1 file SHA256=561a12ec6b2c2a64877c45445e90e21899cd6f5251aec51b8e4aca69b5fffc71 tree SHA256=2db55ba27f8f4e6cc3b1b2b8bf3177de4744e73ac2779190647f0a29df9770d1
+
+```text
+ISOLATION_OK pid=54108
+ISOLATION_OK pid=54108
+COLLECTED=48
+............................F.........F..F......                         [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_kernel_grid _________________________
+tests/market/test_single_source.py:298: in test_differential_kernel_grid
+    assert kernel._first_bar_gap(bars, end) == want
+E   AssertionError: assert datetime.datetime(2024, 2, 1, 0, 3, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc)
+E    +  where datetime.datetime(2024, 2, 1, 0, 3, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10c3e4ec0>._first_bar_gap
+__________ test_differential_kernel_public_interior_bar[bars_last-1] ___________
+tests/market/test_single_source.py:554: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E     
+E     - BAR_GAP
+E     + LABEL_RIGHT_CENSORED
+__________ test_differential_kernel_public_interior_bar[bars_mark-1] ___________
+tests/market/test_single_source.py:554: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E     
+E     - BAR_GAP
+E     + LABEL_RIGHT_CENSORED
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_kernel_grid - As...
+FAILED tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]
+FAILED tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]
+3 failed, 45 passed in 17.38s
+OUTCOMES={"tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]": "passed", "tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]": "passed", "tests/market/test_single_source.py::test_differential_expiry_b": "passed", "tests/market/test_single_source.py::test_differential_expiry_orders": "passed", "tests/market/test_single_source.py::test_differential_expiry_timeline": "passed", "tests/market/test_single_source.py::test_differential_kernel_grid": "failed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "failed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "failed", "tests/market/test_single_source.py::test_differential_lake_grid": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed", "tests/market/test_single_source.py::test_differential_start": "passed", "tests/market/test_single_source.py::test_differential_ttl": "passed", "tests/market/test_single_source.py::test_differential_vision_count": "passed", "tests/market/test_single_source.py::test_differential_window": "passed", "tests/market/test_single_source.py::test_foreign_hits_registry_is_exact": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]": "passed", "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[named]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return]": "passed"}
+```
+
+restored exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54273
+ISOLATION_OK pid=54273
+COLLECTED=48
+................................................                         [100%]
+48 passed in 18.28s
+OUTCOMES={"tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]": "passed", "tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]": "passed", "tests/market/test_single_source.py::test_differential_expiry_b": "passed", "tests/market/test_single_source.py::test_differential_expiry_orders": "passed", "tests/market/test_single_source.py::test_differential_expiry_timeline": "passed", "tests/market/test_single_source.py::test_differential_kernel_grid": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_grid": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed", "tests/market/test_single_source.py::test_differential_start": "passed", "tests/market/test_single_source.py::test_differential_ttl": "passed", "tests/market/test_single_source.py::test_differential_vision_count": "passed", "tests/market/test_single_source.py::test_differential_window": "passed", "tests/market/test_single_source.py::test_foreign_hits_registry_is_exact": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]": "passed", "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[named]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return]": "passed"}
+```
+
+内容还原相等：True
+
+#### M082 S41-annotated-ttl
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S41-annotated-ttl`
+目标：`src/quant_lab/market/vision.py`；selector：`tests/market/test_single_source.py`
+baseline exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53861
+ISOLATION_OK pid=53861
+COLLECTED=48
+................................................                         [100%]
+48 passed in 15.82s
+OUTCOMES={"tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]": "passed", "tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]": "passed", "tests/market/test_single_source.py::test_differential_expiry_b": "passed", "tests/market/test_single_source.py::test_differential_expiry_orders": "passed", "tests/market/test_single_source.py::test_differential_expiry_timeline": "passed", "tests/market/test_single_source.py::test_differential_kernel_grid": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_grid": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed", "tests/market/test_single_source.py::test_differential_start": "passed", "tests/market/test_single_source.py::test_differential_ttl": "passed", "tests/market/test_single_source.py::test_differential_vision_count": "passed", "tests/market/test_single_source.py::test_differential_window": "passed", "tests/market/test_single_source.py::test_foreign_hits_registry_is_exact": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]": "passed", "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[named]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return]": "passed"}
+```
+
+injected exit=1 file SHA256=7be204eac4b97c9c03a3756daf28fa91f311f4ff78770ce8cbd9b03419a9dc6d tree SHA256=fe9282d8de9953126a73d929a439e46f86e1575383f15e3a21e9480da7213bd2
+
+```text
+ISOLATION_OK pid=54114
+ISOLATION_OK pid=54114
+COLLECTED=48
+.F..............................................                         [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P7_inline_...entry_ttl_s')] == []
+E     
+E     Left contains 2 more items, first extra item: ('P7_inline_ttl_resolution', 566, 'market/vision.py:_audit_ttl', 'ttl: int = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed, 47 passed in 16.98s
+OUTCOMES={"tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]": "passed", "tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]": "passed", "tests/market/test_single_source.py::test_differential_expiry_b": "passed", "tests/market/test_single_source.py::test_differential_expiry_orders": "passed", "tests/market/test_single_source.py::test_differential_expiry_timeline": "passed", "tests/market/test_single_source.py::test_differential_kernel_grid": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_grid": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed", "tests/market/test_single_source.py::test_differential_start": "passed", "tests/market/test_single_source.py::test_differential_ttl": "passed", "tests/market/test_single_source.py::test_differential_vision_count": "passed", "tests/market/test_single_source.py::test_differential_window": "passed", "tests/market/test_single_source.py::test_foreign_hits_registry_is_exact": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]": "passed", "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "failed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[named]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return]": "passed"}
+```
+
+restored exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54271
+ISOLATION_OK pid=54271
+COLLECTED=48
+................................................                         [100%]
+48 passed in 18.28s
+OUTCOMES={"tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]": "passed", "tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]": "passed", "tests/market/test_single_source.py::test_differential_expiry_b": "passed", "tests/market/test_single_source.py::test_differential_expiry_orders": "passed", "tests/market/test_single_source.py::test_differential_expiry_timeline": "passed", "tests/market/test_single_source.py::test_differential_kernel_grid": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_grid": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed", "tests/market/test_single_source.py::test_differential_start": "passed", "tests/market/test_single_source.py::test_differential_ttl": "passed", "tests/market/test_single_source.py::test_differential_vision_count": "passed", "tests/market/test_single_source.py::test_differential_window": "passed", "tests/market/test_single_source.py::test_foreign_hits_registry_is_exact": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]": "passed", "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[named]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return]": "passed"}
+```
+
+内容还原相等：True
+
+#### M083 S42-kernel-truncate-open
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S42-kernel-truncate-open`
+目标：`src/quant_lab/market/kernel_a.py`；selector：`tests/market/test_single_source.py`
+baseline exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53862
+ISOLATION_OK pid=53862
+COLLECTED=48
+................................................                         [100%]
+48 passed in 15.81s
+OUTCOMES={"tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]": "passed", "tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]": "passed", "tests/market/test_single_source.py::test_differential_expiry_b": "passed", "tests/market/test_single_source.py::test_differential_expiry_orders": "passed", "tests/market/test_single_source.py::test_differential_expiry_timeline": "passed", "tests/market/test_single_source.py::test_differential_kernel_grid": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_grid": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed", "tests/market/test_single_source.py::test_differential_start": "passed", "tests/market/test_single_source.py::test_differential_ttl": "passed", "tests/market/test_single_source.py::test_differential_vision_count": "passed", "tests/market/test_single_source.py::test_differential_window": "passed", "tests/market/test_single_source.py::test_foreign_hits_registry_is_exact": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]": "passed", "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[named]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return]": "passed"}
+```
+
+injected exit=1 file SHA256=7b89a662c108d1d7d1c0f46531b3bd182672842f82984f1fcef605422375c06b tree SHA256=da9071d007e4259b02d6015819b3aae49be32226b5f95fbcb5c12ea0f01ce478
+
+```text
+ISOLATION_OK pid=54113
+ISOLATION_OK pid=54113
+COLLECTED=48
+............................F.........F..F......                         [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_kernel_grid _________________________
+tests/market/test_single_source.py:298: in test_differential_kernel_grid
+    assert kernel._first_bar_gap(bars, end) == want
+E   AssertionError: assert None == datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc)
+E    +  where None = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x108b7bef0>._first_bar_gap
+__________ test_differential_kernel_public_interior_bar[bars_last-1] ___________
+tests/market/test_single_source.py:554: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E     
+E     - BAR_GAP
+E     + LABEL_RIGHT_CENSORED
+__________ test_differential_kernel_public_interior_bar[bars_mark-1] ___________
+tests/market/test_single_source.py:554: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E     
+E     - BAR_GAP
+E     + LABEL_RIGHT_CENSORED
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_kernel_grid - As...
+FAILED tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]
+FAILED tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]
+3 failed, 45 passed in 16.98s
+OUTCOMES={"tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]": "passed", "tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]": "passed", "tests/market/test_single_source.py::test_differential_expiry_b": "passed", "tests/market/test_single_source.py::test_differential_expiry_orders": "passed", "tests/market/test_single_source.py::test_differential_expiry_timeline": "passed", "tests/market/test_single_source.py::test_differential_kernel_grid": "failed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "failed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "failed", "tests/market/test_single_source.py::test_differential_lake_grid": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed", "tests/market/test_single_source.py::test_differential_start": "passed", "tests/market/test_single_source.py::test_differential_ttl": "passed", "tests/market/test_single_source.py::test_differential_vision_count": "passed", "tests/market/test_single_source.py::test_differential_window": "passed", "tests/market/test_single_source.py::test_foreign_hits_registry_is_exact": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]": "passed", "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[named]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return]": "passed"}
+```
+
+restored exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54272
+ISOLATION_OK pid=54272
+COLLECTED=48
+................................................                         [100%]
+48 passed in 18.27s
+OUTCOMES={"tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]": "passed", "tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]": "passed", "tests/market/test_single_source.py::test_differential_expiry_b": "passed", "tests/market/test_single_source.py::test_differential_expiry_orders": "passed", "tests/market/test_single_source.py::test_differential_expiry_timeline": "passed", "tests/market/test_single_source.py::test_differential_kernel_grid": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_grid": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed", "tests/market/test_single_source.py::test_differential_start": "passed", "tests/market/test_single_source.py::test_differential_ttl": "passed", "tests/market/test_single_source.py::test_differential_vision_count": "passed", "tests/market/test_single_source.py::test_differential_window": "passed", "tests/market/test_single_source.py::test_foreign_hits_registry_is_exact": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]": "passed", "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[named]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return]": "passed"}
+```
+
+内容还原相等：True
+
+#### M084 NEW-kernel-accept-missing
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' NEW-kernel-accept-missing`
+目标：`src/quant_lab/market/kernel_a.py`；selector：`tests/market/test_single_source.py::test_differential_kernel_grid`, `tests/market/test_single_source.py::test_differential_kernel_public_interior_bar`
+baseline exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54648
+ISOLATION_OK pid=54648
+COLLECTED=7
+.......                                                                  [100%]
+7 passed in 0.11s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_kernel_grid": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "passed"}
+```
+
+injected exit=1 file SHA256=2760c52fd86e34f85a7a7f926bdd6c31edb50a726420ee9879d5bf251c6f6068 tree SHA256=6cb1ae23256367c4533ca4438d0dbb319abaef080613305543c091e60084ae91
+
+```text
+ISOLATION_OK pid=54657
+ISOLATION_OK pid=54657
+COLLECTED=7
+FF.FF.F                                                                  [100%]
+=================================== FAILURES ===================================
+________________________ test_differential_kernel_grid _________________________
+tests/market/test_single_source.py:298: in test_differential_kernel_grid
+    assert kernel._first_bar_gap(bars, end) == want
+E   AssertionError: assert datetime.datetime(2024, 2, 1, 0, 3, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc)
+E    +  where datetime.datetime(2024, 2, 1, 0, 3, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x10ccf8470>._first_bar_gap
+__________ test_differential_kernel_public_interior_bar[bars_last--1] __________
+tests/market/test_single_source.py:554: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E     
+E     - BAR_GAP
+E     + LABEL_RIGHT_CENSORED
+__________ test_differential_kernel_public_interior_bar[bars_last-1] ___________
+tests/market/test_single_source.py:554: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E     
+E     - BAR_GAP
+E     + LABEL_RIGHT_CENSORED
+__________ test_differential_kernel_public_interior_bar[bars_mark--1] __________
+tests/market/test_single_source.py:554: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E     
+E     - BAR_GAP
+E     + LABEL_RIGHT_CENSORED
+__________ test_differential_kernel_public_interior_bar[bars_mark-1] ___________
+tests/market/test_single_source.py:554: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E     
+E     - BAR_GAP
+E     + LABEL_RIGHT_CENSORED
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_kernel_grid - As...
+FAILED tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]
+FAILED tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]
+FAILED tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]
+FAILED tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]
+5 failed, 2 passed in 0.14s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_kernel_grid": "failed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "failed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "failed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "failed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "failed"}
+```
+
+restored exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54671
+ISOLATION_OK pid=54671
+COLLECTED=7
+.......                                                                  [100%]
+7 passed in 0.17s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_kernel_grid": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "passed"}
+```
+
+内容还原相等：True
+
+#### M085 NEW-kernel-reject-aligned
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' NEW-kernel-reject-aligned`
+目标：`src/quant_lab/market/kernel_a.py`；selector：`tests/market/test_single_source.py::test_differential_kernel_public_interior_bar`
+baseline exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54647
+ISOLATION_OK pid=54647
+COLLECTED=6
+......                                                                   [100%]
+6 passed in 0.09s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "passed"}
+```
+
+injected exit=1 file SHA256=4e9db5bc371c152032fbb9192666265d5742dace94ec22a1dfb2263d3a06c766 tree SHA256=b0bc6bf276209688d286db23d1ab0b3f718f94de1163c4cf06651c56710c0ce8
+
+```text
+ISOLATION_OK pid=54656
+ISOLATION_OK pid=54656
+COLLECTED=6
+FFFFFF                                                                   [100%]
+=================================== FAILURES ===================================
+__________ test_differential_kernel_public_interior_bar[bars_last--1] __________
+tests/market/test_single_source.py:556: in test_differential_kernel_public_interior_bar
+    assert kernel._first_bar_gap(getattr(market, stream), end) == want_gap
+E   AssertionError: assert datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc)
+E    +  where datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 1, 1, 1, 3, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x1086b69c0>._first_bar_gap
+E    +    and   [Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)] = getattr(MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...ne, effective_to=None), rules_known=True, bars_complete=True, bars_quality_ok=True, manifest_refs=[], quality_notes=[]), 'bars_last')
+__________ test_differential_kernel_public_interior_bar[bars_last-0] ___________
+tests/market/test_single_source.py:554: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'BAR_GAP' == 'LABEL_RIGHT_CENSORED'
+E     
+E     - LABEL_RIGHT_CENSORED
+E     + BAR_GAP
+__________ test_differential_kernel_public_interior_bar[bars_last-1] ___________
+tests/market/test_single_source.py:556: in test_differential_kernel_public_interior_bar
+    assert kernel._first_bar_gap(getattr(market, stream), end) == want_gap
+E   AssertionError: assert datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc)
+E    +  where datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 1, 1, 1, 3, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x1087bd160>._first_bar_gap
+E    +    and   [Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)] = getattr(MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...ne, effective_to=None), rules_known=True, bars_complete=True, bars_quality_ok=True, manifest_refs=[], quality_notes=[]), 'bars_last')
+__________ test_differential_kernel_public_interior_bar[bars_mark--1] __________
+tests/market/test_single_source.py:556: in test_differential_kernel_public_interior_bar
+    assert kernel._first_bar_gap(getattr(market, stream), end) == want_gap
+E   AssertionError: assert datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc)
+E    +  where datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 1, 1, 1, 3, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x108b0f800>._first_bar_gap
+E    +    and   [Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)] = getattr(MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...ne, effective_to=None), rules_known=True, bars_complete=True, bars_quality_ok=True, manifest_refs=[], quality_notes=[]), 'bars_mark')
+__________ test_differential_kernel_public_interior_bar[bars_mark-0] ___________
+tests/market/test_single_source.py:554: in test_differential_kernel_public_interior_bar
+    assert result.censor_reason == want_reason
+E   AssertionError: assert 'BAR_GAP' == 'LABEL_RIGHT_CENSORED'
+E     
+E     - LABEL_RIGHT_CENSORED
+E     + BAR_GAP
+__________ test_differential_kernel_public_interior_bar[bars_mark-1] ___________
+tests/market/test_single_source.py:556: in test_differential_kernel_public_interior_bar
+    assert kernel._first_bar_gap(getattr(market, stream), end) == want_gap
+E   AssertionError: assert datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 1, 1, 1, tzinfo=datetime.timezone.utc)
+E    +  where datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 1, 1, 1, 3, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x108b30d70>._first_bar_gap
+E    +    and   [Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'), ...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)] = getattr(MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...ne, effective_to=None), rules_known=True, bars_complete=True, bars_quality_ok=True, manifest_refs=[], quality_notes=[]), 'bars_mark')
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]
+FAILED tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]
+FAILED tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]
+FAILED tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]
+FAILED tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]
+FAILED tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]
+6 failed in 0.15s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "failed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "failed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "failed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "failed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "failed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "failed"}
+```
+
+restored exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54670
+ISOLATION_OK pid=54670
+COLLECTED=6
+......                                                                   [100%]
+6 passed in 0.15s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "passed"}
+```
+
+内容还原相等：True
+
+#### M086 NEW-loader-truncate
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' NEW-loader-truncate`
+目标：`src/quant_lab/market/execution.py`；selector：`tests/market/test_single_source.py::test_differential_lake_grid`, `tests/market/test_single_source.py::test_differential_lake_public_interior_bar`
+baseline exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54649
+ISOLATION_OK pid=54649
+COLLECTED=7
+.......                                                                  [100%]
+7 passed in 5.27s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_lake_grid": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed"}
+```
+
+injected exit=1 file SHA256=cd7a326db5d8d853dd9449d3d1eb3be1c3d4141efc49fa9f13538adf8456417c tree SHA256=bcf90017f15906e256ebe755e300866d8642b61798f9654373d3dfdae9ead150
+
+```text
+ISOLATION_OK pid=54710
+ISOLATION_OK pid=54710
+COLLECTED=7
+FF.FF.F                                                                  [100%]
+=================================== FAILURES ===================================
+_________________________ test_differential_lake_grid __________________________
+tests/market/test_single_source.py:356: in test_differential_lake_grid
+    assert any("off-grid" in note and opened.isoformat() in note for note in market.quality_notes)
+E   assert False
+E    +  where False = any(<generator object test_differential_lake_grid.<locals>.<genexpr> at 0x10c704ee0>)
+____________ test_differential_lake_public_interior_bar[klines--1] _____________
+tests/market/test_single_source.py:579: in test_differential_lake_public_interior_bar
+    assert any(stream in note and opens[1].isoformat() in note for note in market.quality_notes)
+E   assert False
+E    +  where False = any(<generator object test_differential_lake_public_interior_bar.<locals>.<genexpr> at 0x10ca81fc0>)
+_____________ test_differential_lake_public_interior_bar[klines-1] _____________
+tests/market/test_single_source.py:575: in test_differential_lake_public_interior_bar
+    assert market.bars_complete == (offset_us == 0)
+E   AssertionError: assert True == (1 == 0)
+E    +  where True = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...er only', 'unsupported: S02 U03 real settlement time; archive calc_time only', 'manifest missing fundingRate 2024-01']).bars_complete
+________ test_differential_lake_public_interior_bar[markPriceKlines--1] ________
+tests/market/test_single_source.py:579: in test_differential_lake_public_interior_bar
+    assert any(stream in note and opens[1].isoformat() in note for note in market.quality_notes)
+E   assert False
+E    +  where False = any(<generator object test_differential_lake_public_interior_bar.<locals>.<genexpr> at 0x10caecc80>)
+________ test_differential_lake_public_interior_bar[markPriceKlines-1] _________
+tests/market/test_single_source.py:575: in test_differential_lake_public_interior_bar
+    assert market.bars_complete == (offset_us == 0)
+E   AssertionError: assert True == (1 == 0)
+E    +  where True = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...er only', 'unsupported: S02 U03 real settlement time; archive calc_time only', 'manifest missing fundingRate 2024-01']).bars_complete
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_lake_grid - asse...
+FAILED tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]
+FAILED tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]
+FAILED tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]
+FAILED tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]
+5 failed, 2 passed in 1.58s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_lake_grid": "failed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "failed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "failed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "failed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "failed"}
+```
+
+restored exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54732
+ISOLATION_OK pid=54732
+COLLECTED=7
+.......                                                                  [100%]
+7 passed in 3.15s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_lake_grid": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed"}
+```
+
+内容还原相等：True
+
+#### M087 NEW-loader-count-only
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' NEW-loader-count-only`
+目标：`src/quant_lab/market/execution.py`；selector：`tests/market/test_single_source.py::test_differential_lake_grid`, `tests/market/test_single_source.py::test_differential_lake_public_interior_bar`
+baseline exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54673
+ISOLATION_OK pid=54673
+COLLECTED=7
+.......                                                                  [100%]
+7 passed in 3.20s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_lake_grid": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed"}
+```
+
+injected exit=1 file SHA256=a779f7256ae06479cfccaf1629152fd2b9f879cfc7def238f957d48e95ec6b02 tree SHA256=9761747b0c8eea39b2c37e798b88d38536cffaa0e35140a7348e8ceb778bd9a2
+
+```text
+ISOLATION_OK pid=54709
+ISOLATION_OK pid=54709
+COLLECTED=7
+FF.FF.F                                                                  [100%]
+=================================== FAILURES ===================================
+_________________________ test_differential_lake_grid __________________________
+tests/market/test_single_source.py:353: in test_differential_lake_grid
+    assert market.bars_complete == (present == set(expected) and not off_grid)
+E   AssertionError: assert True == (({datetime.dat...timezone.utc)} == {datetime.dat...timezone.utc)}
+E    +  where True = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 31, 23, 59... time; archive calc_time only', 'manifest missing fundingRate 2024-01', 'fundingRate 缺 2024-02-01T00:00:00+00:00 结算行']).bars_complete
+E     
+E     Extra items in the right set:
+E     datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc)
+E     Use -v to get more diff))
+____________ test_differential_lake_public_interior_bar[klines--1] _____________
+tests/market/test_single_source.py:575: in test_differential_lake_public_interior_bar
+    assert market.bars_complete == (offset_us == 0)
+E   AssertionError: assert True == (-1 == 0)
+E    +  where True = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...er only', 'unsupported: S02 U03 real settlement time; archive calc_time only', 'manifest missing fundingRate 2024-01']).bars_complete
+_____________ test_differential_lake_public_interior_bar[klines-1] _____________
+tests/market/test_single_source.py:575: in test_differential_lake_public_interior_bar
+    assert market.bars_complete == (offset_us == 0)
+E   AssertionError: assert True == (1 == 0)
+E    +  where True = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...er only', 'unsupported: S02 U03 real settlement time; archive calc_time only', 'manifest missing fundingRate 2024-01']).bars_complete
+________ test_differential_lake_public_interior_bar[markPriceKlines--1] ________
+tests/market/test_single_source.py:575: in test_differential_lake_public_interior_bar
+    assert market.bars_complete == (offset_us == 0)
+E   AssertionError: assert True == (-1 == 0)
+E    +  where True = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...er only', 'unsupported: S02 U03 real settlement time; archive calc_time only', 'manifest missing fundingRate 2024-01']).bars_complete
+________ test_differential_lake_public_interior_bar[markPriceKlines-1] _________
+tests/market/test_single_source.py:575: in test_differential_lake_public_interior_bar
+    assert market.bars_complete == (offset_us == 0)
+E   AssertionError: assert True == (1 == 0)
+E    +  where True = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...er only', 'unsupported: S02 U03 real settlement time; archive calc_time only', 'manifest missing fundingRate 2024-01']).bars_complete
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_lake_grid - Asse...
+FAILED tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]
+FAILED tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]
+FAILED tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]
+FAILED tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]
+5 failed, 2 passed in 1.58s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_lake_grid": "failed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "failed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "failed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "failed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "failed"}
+```
+
+restored exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54731
+ISOLATION_OK pid=54731
+COLLECTED=7
+.......                                                                  [100%]
+7 passed in 4.12s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_lake_grid": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed"}
+```
+
+内容还原相等：True
+
+#### M088 NEW-loader-reject-aligned
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' NEW-loader-reject-aligned`
+目标：`src/quant_lab/market/execution.py`；selector：`tests/market/test_single_source.py::test_differential_lake_public_interior_bar`
+baseline exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54674
+ISOLATION_OK pid=54674
+COLLECTED=6
+......                                                                   [100%]
+6 passed in 3.20s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed"}
+```
+
+injected exit=1 file SHA256=b31e98bfa630d116dcf3260dbf1453fc5312c465fd720866477f6fa96d4857a9 tree SHA256=654233b008d64367f19a3e94046532cefba7dde724b0f292b924fa7c01d96940
+
+```text
+ISOLATION_OK pid=54708
+ISOLATION_OK pid=54708
+COLLECTED=6
+.F..F.                                                                   [100%]
+=================================== FAILURES ===================================
+_____________ test_differential_lake_public_interior_bar[klines-0] _____________
+tests/market/test_single_source.py:575: in test_differential_lake_public_interior_bar
+    assert market.bars_complete == (offset_us == 0)
+E   AssertionError: assert False == (0 == 0)
+E    +  where False = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...，实际 3 根合法唯一网格 bar（原始 3 行）', 'markPriceKlines 期望 4 根，实际 3 根合法唯一网格 bar（原始 3 行）', 'manifest missing fundingRate 2024-01']).bars_complete
+________ test_differential_lake_public_interior_bar[markPriceKlines-0] _________
+tests/market/test_single_source.py:575: in test_differential_lake_public_interior_bar
+    assert market.bars_complete == (offset_us == 0)
+E   AssertionError: assert False == (0 == 0)
+E    +  where False = MarketView(manifest_id='fixture-E03', last=[], mark=[], bars_last=[Bar(open_time=datetime.datetime(2024, 1, 1, 1, 0, t...，实际 3 根合法唯一网格 bar（原始 3 行）', 'markPriceKlines 期望 4 根，实际 3 根合法唯一网格 bar（原始 3 行）', 'manifest missing fundingRate 2024-01']).bars_complete
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]
+FAILED tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]
+2 failed, 4 passed in 1.58s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "failed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "failed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed"}
+```
+
+restored exit=0 file SHA256=8afa5b640f603b2da02966a77390974c31d0d220461aff4c24377481c6c5797e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54730
+ISOLATION_OK pid=54730
+COLLECTED=6
+......                                                                   [100%]
+6 passed in 0.59s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed"}
+```
+
+内容还原相等：True
+
+#### M089 B19-M25 suppress inline ban
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M25 suppress inline ban'`
+目标：`src/quant_lab/market/single_source.py`；selector：`tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent`
+baseline exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54877
+ISOLATION_OK pid=54877
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 0.06s
+OUTCOMES={"tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent[mark]": "passed", "tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent[quote.mark]": "passed"}
+```
+
+injected exit=1 file SHA256=b006f8959e950996f7338661accbb9490da369d86d2fa2e320f2e7309d401c90 tree SHA256=af208c8df4dec8cf6502f2616813a9b60c6b2e7bb07cd33e4b4d1e77f5c7cd1f
+
+```text
+ISOLATION_OK pid=54878
+ISOLATION_OK pid=54878
+COLLECTED=2
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+________________ test_force_close_inline_ban_independent[mark] _________________
+tests/market/test_force_close_net_r.py:191: in test_force_close_inline_ban_independent
+    assert len(bad) == 1 and bad[0][0] == "P8_inline_force_close"
+E   assert (0 == 1)
+E    +  where 0 = len([])
+_____________ test_force_close_inline_ban_independent[quote.mark] ______________
+tests/market/test_force_close_net_r.py:191: in test_force_close_inline_ban_independent
+    assert len(bad) == 1 and bad[0][0] == "P8_inline_force_close"
+E   assert (0 == 1)
+E    +  where 0 = len([])
+=========================== short test summary info ============================
+FAILED tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent[mark]
+FAILED tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent[quote.mark]
+2 failed in 0.05s
+OUTCOMES={"tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent[mark]": "failed", "tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent[quote.mark]": "failed"}
+```
+
+restored exit=0 file SHA256=5d59cf614b460d9629118f0af192060f6919d5f1bb6fedcc46fc2bc0e7207502 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54883
+ISOLATION_OK pid=54883
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 0.04s
+OUTCOMES={"tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent[mark]": "passed", "tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent[quote.mark]": "passed"}
+```
+
+内容还原相等：True
+
+#### M090 B19-M31 inline expression real tree gate
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' 'B19-M31 inline expression real tree gate'`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54891
+ISOLATION_OK pid=54891
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.85s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+injected exit=1 file SHA256=4d4b92ccd1b5984b310cd1c6471e26217a34a317136d53be81505bb8c37bf6aa tree SHA256=4bf50bd3521a0d4a61d33be7bb53316b8b4e870a0f03c6dbbf0dce693cda24ea
+
+```text
+ISOLATION_OK pid=54907
+ISOLATION_OK pid=54907
+COLLECTED=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_no_inline_reexpression_of_single_sources_anywhere_in_src _________
+tests/market/test_single_source.py:31: in test_no_inline_reexpression_of_single_sources_anywhere_in_src
+    assert gate.violations(gate.lint_tree(gate.SRC)) == []
+E   AssertionError: assert [('P8_inline_...y_avg_price')] == []
+E     
+E     Left contains one more item: ('P8_inline_force_close', 1108, 'market/contract.py:forbidden_valuation', 'mark - res.entry_avg_price')
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src
+1 failed in 0.86s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "failed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54915
+ISOLATION_OK pid=54915
+COLLECTED=1
+.                                                                        [100%]
+1 passed in 0.97s
+OUTCOMES={"tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed"}
+```
+
+内容还原相等：True
+
+#### M091 S45-partition-negative-tolerance
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S45-partition-negative-tolerance`
+目标：`src/quant_lab/market/partition_check.py`；selector：`tests/market/test_single_source.py`
+baseline exit=0 file SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54902
+ISOLATION_OK pid=54902
+COLLECTED=48
+................................................                         [100%]
+48 passed in 16.21s
+OUTCOMES={"tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]": "passed", "tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]": "passed", "tests/market/test_single_source.py::test_differential_expiry_b": "passed", "tests/market/test_single_source.py::test_differential_expiry_orders": "passed", "tests/market/test_single_source.py::test_differential_expiry_timeline": "passed", "tests/market/test_single_source.py::test_differential_kernel_grid": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_grid": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed", "tests/market/test_single_source.py::test_differential_start": "passed", "tests/market/test_single_source.py::test_differential_ttl": "passed", "tests/market/test_single_source.py::test_differential_vision_count": "passed", "tests/market/test_single_source.py::test_differential_window": "passed", "tests/market/test_single_source.py::test_foreign_hits_registry_is_exact": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]": "passed", "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[named]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return]": "passed"}
+```
+
+injected exit=1 file SHA256=045ea1ba667b337c66a23ed5b90e0f84caa35ac2b28eaf7741b8c7b50eea851d tree SHA256=d89e982613cadd80fd4ad610832e8499d9900d26c12e331d3e2c232cf3ad24fb
+
+```text
+ISOLATION_OK pid=55068
+ISOLATION_OK pid=55068
+COLLECTED=48
+..........................F.....................                         [100%]
+=================================== FAILURES ===================================
+_______________________ test_differential_partition_grid _______________________
+tests/market/test_single_source.py:232: in test_differential_partition_grid
+    assert out['open_time'].to_list() == present
+E   AssertionError: assert [datetime.dat...o(key='UTC'))] == []
+E     
+E     Left contains one more item: datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=zoneinfo.ZoneInfo(key='UTC'))
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_differential_partition_grid
+1 failed, 47 passed in 10.68s
+OUTCOMES={"tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]": "passed", "tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]": "passed", "tests/market/test_single_source.py::test_differential_expiry_b": "passed", "tests/market/test_single_source.py::test_differential_expiry_orders": "passed", "tests/market/test_single_source.py::test_differential_expiry_timeline": "passed", "tests/market/test_single_source.py::test_differential_kernel_grid": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_grid": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "failed", "tests/market/test_single_source.py::test_differential_start": "passed", "tests/market/test_single_source.py::test_differential_ttl": "passed", "tests/market/test_single_source.py::test_differential_vision_count": "passed", "tests/market/test_single_source.py::test_differential_window": "passed", "tests/market/test_single_source.py::test_foreign_hits_registry_is_exact": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]": "passed", "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[named]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return]": "passed"}
+```
+
+restored exit=0 file SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=55302
+ISOLATION_OK pid=55302
+COLLECTED=48
+................................................                         [100%]
+48 passed in 14.34s
+OUTCOMES={"tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]": "passed", "tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]": "passed", "tests/market/test_single_source.py::test_differential_expiry_b": "passed", "tests/market/test_single_source.py::test_differential_expiry_orders": "passed", "tests/market/test_single_source.py::test_differential_expiry_timeline": "passed", "tests/market/test_single_source.py::test_differential_kernel_grid": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_grid": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed", "tests/market/test_single_source.py::test_differential_start": "passed", "tests/market/test_single_source.py::test_differential_ttl": "passed", "tests/market/test_single_source.py::test_differential_vision_count": "passed", "tests/market/test_single_source.py::test_differential_window": "passed", "tests/market/test_single_source.py::test_foreign_hits_registry_is_exact": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]": "passed", "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[named]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return]": "passed"}
+```
+
+内容还原相等：True
+
+#### M092 S45-partition-negative-fullT
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S45-partition-negative-fullT`
+目标：`src/quant_lab/market/partition_check.py`；selector：`tests/market`
+baseline exit=0 file SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54909
+ISOLATION_OK pid=54909
+COLLECTED=358
+........................................................................ [ 20%]
+........................................................................ [ 40%]
+........................................................................ [ 60%]
+........................................................................ [ 80%]
+......................................................................   [100%]
+358 passed in 40.05s
+OUTCOMES={"tests/market/test_asof.py::test_by_groups_do_not_cross_contaminate_and_suffix": "passed", "tests/market/test_asof.py::test_late_arrival_uses_available_at_not_event_time": "passed", "tests/market/test_asof.py::test_le_with_sequence_uses_equal_only_with_order_evidence": "passed", "tests/market/test_asof.py::test_mark_price_at_values": "passed", "tests/market/test_asof.py::test_naive_datetime_rejected": "passed", "tests/market/test_asof.py::test_quantize_price_tick": "passed", "tests/market/test_asof.py::test_real_partition_mark_price_at": "passed", "tests/market/test_asof.py::test_same_second_ambiguity_rejected_without_sequence": "passed", "tests/market/test_asof.py::test_strict_lt_excludes_equal_timestamp": "passed", "tests/market/test_asof.py::test_tolerance_marks_stale_and_does_not_forward_fill": "passed", "tests/market/test_asof.py::test_unclosed_bar_invisible_and_equality_semantics": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_constants_effective.py::test_censor_priority_has_call_site_and_effect": "passed", "tests/market/test_constants_effective.py::test_df_decimal_drives_batch_schema": "passed", "tests/market/test_constants_effective.py::test_exit_leg_order_drives_output_order_not_event_order": "passed", "tests/market/test_constants_effective.py::test_grid_math_single_source_and_exact_to_microsecond": "passed", "tests/market/test_constants_effective.py::test_interval_seconds_drives_expected_rows_and_path_points": "passed", "tests/market/test_constants_effective.py::test_settlement_and_ratio_quantum_drive_rounding": "passed", "tests/market/test_constants_effective.py::test_spike_k_and_min_samples_drive_flagging": "passed", "tests/market/test_constants_effective.py::test_t_start_derivation_single_source": "passed", "tests/market/test_contract.py::test_b5_entry_ttl_nullable_resolved_by_policy_and_hashed": "passed", "tests/market/test_contract.py::test_b8_fractions_nullable_policy_split_and_hashed": "passed", "tests/market/test_contract.py::test_build_request_from_episode_row": "passed", "tests/market/test_contract.py::test_canonical_json_rules": "passed", "tests/market/test_contract.py::test_diff_result_reports_first_event_diff_and_scalars": "passed", "tests/market/test_contract.py::test_entry_limit_requires_single_price_and_positive": "passed", "tests/market/test_contract.py::test_fixture_count_and_integrity": "passed", "tests/market/test_contract.py::test_floor_step_and_quantize": "passed", "tests/market/test_contract.py::test_invariants_pass_on_gold_and_catch_violations": "passed", "tests/market/test_contract.py::test_order_plan_rejects[bad0]": "passed", "tests/market/test_contract.py::test_order_plan_rejects[bad1]": "passed", "tests/market/test_contract.py::test_order_plan_rejects[bad2]": "passed", "tests/market/test_contract.py::test_order_plan_rejects[bad3]": "passed", "tests/market/test_contract.py::test_order_plan_rejects[bad4]": "passed", "tests/market/test_contract.py::test_policy_hash_is_content_addressed_and_required": "passed", "tests/market/test_contract.py::test_policy_registry": "passed", "tests/market/test_contract.py::test_request_validation": "passed", "tests/market/test_contract.py::test_tp_before_fill_rejected": "passed", "tests/market/test_contract.py::test_trace_hash_sensitivity": "passed", "tests/market/test_execution_api.py::test_g3_evaluate_consumes_frozen_contract_output": "passed", "tests/market/test_execution_api.py::test_g3_pairing_smoke_on_synthetic_episodes": "passed", "tests/market/test_execution_api.py::test_load_market_from_lake_and_simulate_real_bars": "passed", "tests/market/test_execution_api.py::test_simulate_batch_non_strict_keeps_error_rows": "passed", "tests/market/test_execution_api.py::test_simulate_batch_schema_and_pairing": "passed", "tests/market/test_execution_api.py::test_simulate_requires_market_and_checks_manifest": "passed", "tests/market/test_force_close_net_r.py::test_accounting_and_read_only[long-base-19.240000000000-1.320]": "passed", "tests/market/test_force_close_net_r.py::test_accounting_and_read_only[long-stress-19.051428571429-2.640]": "passed", "tests/market/test_force_close_net_r.py::test_accounting_and_read_only[short-base--15.045714285714-1.320]": "passed", "tests/market/test_force_close_net_r.py::test_accounting_and_read_only[short-stress--15.234285714286-2.640]": "passed", "tests/market/test_force_close_net_r.py::test_fixture_asof_and_sentinel": "passed", "tests/market/test_force_close_net_r.py::test_force_close_empty_registration": "passed", "tests/market/test_force_close_net_r.py::test_force_close_fixture_registration[bypass]": "passed", "tests/market/test_force_close_net_r.py::test_force_close_fixture_registration[extra]": "passed", "tests/market/test_force_close_net_r.py::test_force_close_fixture_registration[internal_bypass]": "passed", "tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent[mark]": "passed", "tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent[quote.mark]": "passed", "tests/market/test_force_close_net_r.py::test_missing_kernel_value_is_error[entry]": "passed", "tests/market/test_force_close_net_r.py::test_missing_kernel_value_is_error[gross]": "passed", "tests/market/test_force_close_net_r.py::test_no_residual_is_none[closed]": "passed", "tests/market/test_force_close_net_r.py::test_no_residual_is_none[unfilled]": "passed", "tests/market/test_force_close_net_r.py::test_right_censor_routes_remain_reachable[hold_end]": "passed", "tests/market/test_force_close_net_r.py::test_right_censor_routes_remain_reachable[horizon]": "passed", "tests/market/test_funding.py::test_conflicting_duplicate_settlement_key_rejected": "passed", "tests/market/test_funding.py::test_duplicate_settlement_row_applied_once_and_zero_position_row_recorded": "passed", "tests/market/test_funding.py::test_incomplete_schedule_censors_even_when_some_rows_present": "passed", "tests/market/test_funding.py::test_settlement_before_t_start_ignored_and_variable_interval_chain": "passed", "tests/market/test_funding.py::test_settlement_mark_is_last_closed_before_calc_time_not_after": "passed", "tests/market/test_funding.py::test_settlement_mark_uses_closed_bar_not_new_bar_open": "passed", "tests/market/test_funding.py::test_sign_convention_long_short_positive_negative[long--0.001-0.2]": "passed", "tests/market/test_funding.py::test_sign_convention_long_short_positive_negative[long-0.001--0.2]": "passed", "tests/market/test_funding.py::test_sign_convention_long_short_positive_negative[short--0.001--0.2]": "passed", "tests/market/test_funding.py::test_sign_convention_long_short_positive_negative[short-0.001-0.2]": "passed", "tests/market/test_funding.py::test_stale_settlement_mark_censors": "passed", "tests/market/test_kernel_a.py::test_entry_ttl_source_both_values_in_results": "passed", "tests/market/test_kernel_a.py::test_filters_accept_at_boundary_and_reject_beyond": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E01]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E02]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E03]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E04a]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E04b]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E04c]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E05]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E06]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E07]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E08]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E09]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E10]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E11]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E12]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E14a]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E14b]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E14c]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E15a]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E15b]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E16]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E17]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E18]": "passed", "tests/market/test_kernel_a.py::test_horizon_expires_working_entries_without_fill": "passed", "tests/market/test_kernel_a.py::test_path_expansion_rules": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[0]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[10]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[11]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[12]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[13]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[14]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[15]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[16]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[17]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[18]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[19]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[1]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[20]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[21]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[22]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[23]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[24]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[25]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[26]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[27]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[28]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[29]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[2]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[30]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[31]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[32]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[33]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[34]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[35]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[36]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[37]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[38]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[39]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[3]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[4]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[5]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[6]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[7]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[8]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[9]": "passed", "tests/market/test_kernel_a.py::test_replay_cli_all_pass": "passed", "tests/market/test_kernel_a.py::test_replay_hash_consistent_across_runs_and_orderings": "passed", "tests/market/test_kernel_a.py::test_risk_budget_sizing_and_multiplier": "passed", "tests/market/test_kernel_a.py::test_rules_unknown_and_lifecycle_censor": "passed", "tests/market/test_kernel_a.py::test_scenario_interval_favorable_vs_adverse_same_bars": "passed", "tests/market/test_kernel_a.py::test_trace_hash_changes_with_policy_seed_market_but_not_ingested_fields": "passed", "tests/market/test_nautilus_adapter.py::test_b_funding_via_adjust_account_matches_gold": "passed", "tests/market/test_nautilus_adapter.py::test_b_match_set_and_all_diffs_explained": "passed", "tests/market/test_nautilus_adapter.py::test_b_replay_consistent": "passed", "tests/market/test_nautilus_adapter.py::test_b_results_satisfy_invariants": "passed", "tests/market/test_nautilus_adapter.py::test_independent_path_expansion_agrees_with_a": "passed", "tests/market/test_nautilus_adapter.py::test_known_semantic_differences_are_the_documented_ones": "passed", "tests/market/test_outcome_kind.py::test_b11_b12_horizon_source_and_policy_split": "passed", "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]": "passed", "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]": "passed", "tests/market/test_outcome_kind.py::test_batch_exposes_both_columns": "passed", "tests/market/test_outcome_kind.py::test_every_result_maps_to_exactly_one_of_seven_values": "passed", "tests/market/test_outcome_kind.py::test_lint_forbidden_patterns_do_not_reappear": "passed", "tests/market/test_outcome_kind.py::test_no_fill_without_reject_or_expire_is_pending_ruling": "passed", "tests/market/test_outcome_kind.py::test_rejected_not_merged_into_unfilled_expired": "passed", "tests/market/test_outcome_kind.py::test_s18_all_non_match_branches_report_actual_event_set": "passed", "tests/market/test_outcome_kind.py::test_s18_b10_enumerated_rule4_and_no_fallback_labelling": "passed", "tests/market/test_outcome_kind.py::test_s19_explicit_ttl_cannot_bypass_policy_fallback": "passed", "tests/market/test_outcome_kind.py::test_s21_primary_censor_follows_contract_priority_not_check_order": "passed", "tests/market/test_outcome_kind.py::test_s22_explicit_empty_allocation_is_rejected_not_silently_filled": "passed", "tests/market/test_outcome_kind.py::test_s24_s25_derivation_is_single_source_and_subsecond_cannot_bypass": "passed", "tests/market/test_outcome_kind.py::test_s27_s28_single_source_start_time_and_exact_grid": "passed", "tests/market/test_outcome_kind.py::test_s29_partition_grid_uses_single_source_and_no_empty_gaps": "passed", "tests/market/test_outcome_kind.py::test_s30_window_lower_bound_uses_derived_start_not_t_dec": "passed", "tests/market/test_outcome_kind.py::test_six_values_reachable_and_filled_closed_unreachable_in_v0": "passed", "tests/market/test_outcome_kind.py::test_stopped_takes_precedence_and_exit_legs_keeps_mixed_information": "passed", "tests/market/test_outcome_kind.py::test_two_censor_classes_never_cross": "passed", "tests/market/test_partition_check.py::test_clean_partition_no_quarantine": "passed", "tests/market/test_partition_check.py::test_duplicate_and_unsorted_keys": "passed", "tests/market/test_partition_check.py::test_end_to_end_partition_idempotent_quarantine": "passed", "tests/market/test_partition_check.py::test_funding_schedule_gap_and_variable_interval": "passed", "tests/market/test_partition_check.py::test_gap_flagged_on_next_bar_not_filled": "passed", "tests/market/test_partition_check.py::test_lifecycle_symbol_time_invalid_and_calendar_from_rules": "passed", "tests/market/test_partition_check.py::test_no_rules_marks_rule_history_missing": "passed", "tests/market/test_partition_check.py::test_ohlc_invalid_flagged_row_kept": "passed", "tests/market/test_partition_check.py::test_precision_off_grid": "passed", "tests/market/test_partition_check.py::test_rules_from_exchange_info_snapshot": "passed", "tests/market/test_partition_check.py::test_rules_from_manifests_never_infers_delisting": "passed", "tests/market/test_partition_check.py::test_schema_drift_quarantines_whole_partition": "passed", "tests/market/test_partition_check.py::test_spike_flagged_not_dropped_and_not_across_gap": "passed", "tests/market/test_replay.py::test_batch_order_and_single_vs_batch_consistent": "passed", "tests/market/test_replay.py::test_trace_hash_identical_across_processes": "passed", "tests/market/test_review_fixes.py::test_p2_report_exposes_unsupported_capabilities": "passed", "tests/market/test_review_fixes.py::test_s05_loader_unknown_quality[missing-gap_flag]": "passed", "tests/market/test_review_fixes.py::test_s05_loader_unknown_quality[missing-ohlc_valid]": "passed", "tests/market/test_review_fixes.py::test_s05_loader_unknown_quality[null-gap_flag]": "passed", "tests/market/test_review_fixes.py::test_s05_loader_unknown_quality[null-ohlc_valid]": "passed", "tests/market/test_review_fixes.py::test_s05_partition_unknown_ohlc_is_quarantined[close]": "passed", "tests/market/test_review_fixes.py::test_s05_partition_unknown_ohlc_is_quarantined[high]": "passed", "tests/market/test_review_fixes.py::test_s05_partition_unknown_ohlc_is_quarantined[low]": "passed", "tests/market/test_review_fixes.py::test_s05_partition_unknown_ohlc_is_quarantined[open]": "passed", "tests/market/test_review_fixes.py::test_s05_partition_unknown_ohlc_is_quarantined[volume]": "passed", "tests/market/test_review_fixes.py::test_s05_spike_unknown_gap_is_not_clean": "passed", "tests/market/test_review_fixes.py::test_s06_vision_unknown_duplicate_values_quarantined": "passed", "tests/market/test_review_fixes.py::test_s07_management_stream_rejected_at_request_boundary": "passed", "tests/market/test_review_fixes.py::test_s10_missing_a_cannot_match": "passed", "tests/market/test_review_fixes.py::test_s10_report_balance_evidence": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[A-adverse-base]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[A-adverse-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[A-favorable-base]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[A-favorable-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[A-primary-base]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[A-primary-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[B-adverse-base]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[B-adverse-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[B-favorable-base]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[B-favorable-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[B-primary-base]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[B-primary-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_b_replay_across_processes": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[A-adverse-base]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[A-adverse-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[A-favorable-base]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[A-favorable-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[A-primary-base]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[A-primary-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[B-adverse-base]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[B-adverse-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[B-favorable-base]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[B-favorable-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[B-primary-base]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[B-primary-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_report_cli_exception_returns_failure": "passed", "tests/market/test_review_fixes.py::test_s12_snapshot_request_explicitly_unsupported": "passed", "tests/market/test_review_fixes.py::test_s13_event_decimal_precision_rejected": "passed", "tests/market/test_review_fixes.py::test_s13_event_precision_checked_by_invariants": "passed", "tests/market/test_review_fixes.py::test_s16_exposure_uses_observation_boundary[closed]": "passed", "tests/market/test_review_fixes.py::test_s16_exposure_uses_observation_boundary[funding_censor]": "passed", "tests/market/test_review_fixes.py::test_s16_exposure_uses_observation_boundary[hold]": "passed", "tests/market/test_review_fixes.py::test_s16_exposure_uses_observation_boundary[horizon]": "passed", "tests/market/test_review_fixes.py::test_s16_horizon_equal_mark_does_not_extend_exposure": "passed", "tests/market/test_review_p1.py::test_s01_tp_fill_requires_current_last_to_satisfy_limit": "passed", "tests/market/test_review_p1.py::test_s02_b_rejects_conflicting_settlement_and_uses_closed_mark": "passed", "tests/market/test_review_p1.py::test_s03_intra_bar_start_begins_at_next_bar_open": "passed", "tests/market/test_review_p1.py::test_s04_max_holding_censors_and_tp_remainder_goes_to_last_leg": "passed", "tests/market/test_review_p1.py::test_s05_loader_rejects_unchecked_or_incomplete_partitions": "passed", "tests/market/test_review_p1.py::test_s05_rule_expiry_mid_window_and_mark_required_before_entry": "passed", "tests/market/test_review_p1.py::test_s06_conflicting_keys_quarantined_and_bronze_retained": "passed", "tests/market/test_review_p1.py::test_s07_post_only_cross_rejected_and_price_priority_and_margin_recheck": "passed", "tests/market/test_review_p1.py::test_s08_multiplier_scales_pnl_fees_exposure": "passed", "tests/market/test_review_p1.py::test_s09_equal_candidate_null_kept": "passed", "tests/market/test_review_p1.py::test_s10_classifier_exc_first_and_predicate_bound": "passed", "tests/market/test_review_p1.py::test_s12_hash_sensitivity_and_stale_policy_hash_rejected": "passed", "tests/market/test_review_p1.py::test_s13_event_level_invariants": "passed", "tests/market/test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar[all-off-grid]": "passed", "tests/market/test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar[mixed-off-grid]": "passed", "tests/market/test_review_p1_round10.py::test_s29_subsecond_calendar_start_has_no_false_first_gap": "passed", "tests/market/test_review_p1_round10.py::test_s29_subsecond_end_includes_last_grid_point": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2023-02-28-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2023-02-28-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-01-1-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-01-1-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-31-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-31-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-12-31-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-12-31-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s38_policy_rejects_negative_latency": "passed", "tests/market/test_review_p1_round10.py::test_s38_resolved_start_checked_for_both_spellings": "passed", "tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage": "passed", "tests/market/test_review_p1_round2.py::test_c1_s04_hold_end_precedes_funding_and_b_truncates": "passed", "tests/market/test_review_p1_round2.py::test_c1_s08_public_simulate_multiplier": "passed", "tests/market/test_review_p1_round2.py::test_c1_s09_same_name_sequence_columns": "passed", "tests/market/test_review_p1_round2.py::test_c1_s13_closed_causality_precision_and_step": "passed", "tests/market/test_review_p1_round2.py::test_c2_loader_missing_funding_and_unknown_rules": "passed", "tests/market/test_review_p1_round2.py::test_c3_s03_b_mark_bars_filtered_by_t_start": "passed", "tests/market/test_review_p1_round2.py::test_c3_s07_equity_based_affordability": "passed", "tests/market/test_review_p1_round2.py::test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash": "passed", "tests/market/test_review_p1_round2.py::test_s14_revised_source_supersedes_old_silver_days": "passed", "tests/market/test_review_p1_round3.py::test_s14_loader_unverifiable_source_rows_fail_closed": "passed", "tests/market/test_review_p1_round3.py::test_s15_earliest_gap_across_streams": "passed", "tests/market/test_review_p1_round3.py::test_s15_head_and_tail_gaps": "passed", "tests/market/test_review_p1_round3.py::test_s15_quality_failure_censors_at_start_even_with_locatable_gap": "passed", "tests/market/test_review_p1_round3.py::test_s16_b_exposure_respects_hold_cutoff": "passed", "tests/market/test_review_p1_round4.py::test_s05_null_ohlc_valid_fails_closed": "passed", "tests/market/test_review_p1_round4.py::test_s17_explicit_fractions_cannot_bypass_policy_or_precision": "passed", "tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]": "passed", "tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]": "passed", "tests/market/test_single_source.py::test_differential_expiry_b": "passed", "tests/market/test_single_source.py::test_differential_expiry_orders": "passed", "tests/market/test_single_source.py::test_differential_expiry_timeline": "passed", "tests/market/test_single_source.py::test_differential_kernel_grid": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_grid": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed", "tests/market/test_single_source.py::test_differential_start": "passed", "tests/market/test_single_source.py::test_differential_ttl": "passed", "tests/market/test_single_source.py::test_differential_vision_count": "passed", "tests/market/test_single_source.py::test_differential_window": "passed", "tests/market/test_single_source.py::test_foreign_hits_registry_is_exact": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]": "passed", "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[named]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return]": "passed", "tests/market/test_smoke.py::test_market_package_importable": "passed", "tests/market/test_smoke.py::test_no_services_import": "passed", "tests/market/test_smoke.py::test_pinned_nautilus_version": "passed", "tests/market/test_vision.py::test_404_records_missing_source": "passed", "tests/market/test_vision.py::test_checksum_mismatch_quarantines_and_no_silver": "passed", "tests/market/test_vision.py::test_coverage_and_months": "passed", "tests/market/test_vision.py::test_full_month_ok_manifest": "passed", "tests/market/test_vision.py::test_funding_and_metrics_parse": "passed", "tests/market/test_vision.py::test_gap_and_duplicates_counted_not_filled": "passed", "tests/market/test_vision.py::test_header_detection_and_microsecond_timestamps": "passed", "tests/market/test_vision.py::test_idempotent_skip_and_force": "passed", "tests/market/test_vision.py::test_mirror_fallback_after_retries": "passed", "tests/market/test_vision.py::test_ohlc_invalid_flagged_not_dropped": "passed", "tests/market/test_vision.py::test_source_paths": "passed"}
+```
+
+injected exit=1 file SHA256=045ea1ba667b337c66a23ed5b90e0f84caa35ac2b28eaf7741b8c7b50eea851d tree SHA256=d89e982613cadd80fd4ad610832e8499d9900d26c12e331d3e2c232cf3ad24fb
+
+```text
+ISOLATION_OK pid=55530
+ISOLATION_OK pid=55530
+COLLECTED=358
+...........F............................................................ [ 20%]
+........................................................................ [ 40%]
+........................................................................ [ 60%]
+........................................................................ [ 80%]
+..................................F...................................   [100%]
+=================================== FAILURES ===================================
+______________________________ test_boundary_time ______________________________
+tests/market/test_boundary_discrimination.py:59: in test_boundary_time
+    probe(opens=opens)
+tests/market/test_boundary_discrimination.py:40: in probe
+    assert out['open_time'].to_list() == present
+E   AssertionError: assert [datetime.dat...o(key='UTC'))] == [datetime.dat...timezone.utc)]
+E     
+E     At index 1 diff: datetime.datetime(2024, 1, 1, 1, 0, 59, 999999, tzinfo=zoneinfo.ZoneInfo(key='UTC')) != datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)
+E     Left contains one more item: datetime.datetime(2024, 1, 1, 1, 2, tzinfo=zoneinfo.ZoneInfo(key='UTC'))
+E     Use -v to get more diff
+_______________________ test_differential_partition_grid _______________________
+tests/market/test_single_source.py:232: in test_differential_partition_grid
+    assert out['open_time'].to_list() == present
+E   AssertionError: assert [datetime.dat...o(key='UTC'))] == []
+E     
+E     Left contains one more item: datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=zoneinfo.ZoneInfo(key='UTC'))
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_time - Ass...
+FAILED tests/market/test_single_source.py::test_differential_partition_grid
+2 failed, 356 passed in 32.97s
+OUTCOMES={"tests/market/test_asof.py::test_by_groups_do_not_cross_contaminate_and_suffix": "passed", "tests/market/test_asof.py::test_late_arrival_uses_available_at_not_event_time": "passed", "tests/market/test_asof.py::test_le_with_sequence_uses_equal_only_with_order_evidence": "passed", "tests/market/test_asof.py::test_mark_price_at_values": "passed", "tests/market/test_asof.py::test_naive_datetime_rejected": "passed", "tests/market/test_asof.py::test_quantize_price_tick": "passed", "tests/market/test_asof.py::test_real_partition_mark_price_at": "passed", "tests/market/test_asof.py::test_same_second_ambiguity_rejected_without_sequence": "passed", "tests/market/test_asof.py::test_strict_lt_excludes_equal_timestamp": "passed", "tests/market/test_asof.py::test_tolerance_marks_stale_and_does_not_forward_fill": "passed", "tests/market/test_asof.py::test_unclosed_bar_invisible_and_equality_semantics": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "failed", "tests/market/test_constants_effective.py::test_censor_priority_has_call_site_and_effect": "passed", "tests/market/test_constants_effective.py::test_df_decimal_drives_batch_schema": "passed", "tests/market/test_constants_effective.py::test_exit_leg_order_drives_output_order_not_event_order": "passed", "tests/market/test_constants_effective.py::test_grid_math_single_source_and_exact_to_microsecond": "passed", "tests/market/test_constants_effective.py::test_interval_seconds_drives_expected_rows_and_path_points": "passed", "tests/market/test_constants_effective.py::test_settlement_and_ratio_quantum_drive_rounding": "passed", "tests/market/test_constants_effective.py::test_spike_k_and_min_samples_drive_flagging": "passed", "tests/market/test_constants_effective.py::test_t_start_derivation_single_source": "passed", "tests/market/test_contract.py::test_b5_entry_ttl_nullable_resolved_by_policy_and_hashed": "passed", "tests/market/test_contract.py::test_b8_fractions_nullable_policy_split_and_hashed": "passed", "tests/market/test_contract.py::test_build_request_from_episode_row": "passed", "tests/market/test_contract.py::test_canonical_json_rules": "passed", "tests/market/test_contract.py::test_diff_result_reports_first_event_diff_and_scalars": "passed", "tests/market/test_contract.py::test_entry_limit_requires_single_price_and_positive": "passed", "tests/market/test_contract.py::test_fixture_count_and_integrity": "passed", "tests/market/test_contract.py::test_floor_step_and_quantize": "passed", "tests/market/test_contract.py::test_invariants_pass_on_gold_and_catch_violations": "passed", "tests/market/test_contract.py::test_order_plan_rejects[bad0]": "passed", "tests/market/test_contract.py::test_order_plan_rejects[bad1]": "passed", "tests/market/test_contract.py::test_order_plan_rejects[bad2]": "passed", "tests/market/test_contract.py::test_order_plan_rejects[bad3]": "passed", "tests/market/test_contract.py::test_order_plan_rejects[bad4]": "passed", "tests/market/test_contract.py::test_policy_hash_is_content_addressed_and_required": "passed", "tests/market/test_contract.py::test_policy_registry": "passed", "tests/market/test_contract.py::test_request_validation": "passed", "tests/market/test_contract.py::test_tp_before_fill_rejected": "passed", "tests/market/test_contract.py::test_trace_hash_sensitivity": "passed", "tests/market/test_execution_api.py::test_g3_evaluate_consumes_frozen_contract_output": "passed", "tests/market/test_execution_api.py::test_g3_pairing_smoke_on_synthetic_episodes": "passed", "tests/market/test_execution_api.py::test_load_market_from_lake_and_simulate_real_bars": "passed", "tests/market/test_execution_api.py::test_simulate_batch_non_strict_keeps_error_rows": "passed", "tests/market/test_execution_api.py::test_simulate_batch_schema_and_pairing": "passed", "tests/market/test_execution_api.py::test_simulate_requires_market_and_checks_manifest": "passed", "tests/market/test_force_close_net_r.py::test_accounting_and_read_only[long-base-19.240000000000-1.320]": "passed", "tests/market/test_force_close_net_r.py::test_accounting_and_read_only[long-stress-19.051428571429-2.640]": "passed", "tests/market/test_force_close_net_r.py::test_accounting_and_read_only[short-base--15.045714285714-1.320]": "passed", "tests/market/test_force_close_net_r.py::test_accounting_and_read_only[short-stress--15.234285714286-2.640]": "passed", "tests/market/test_force_close_net_r.py::test_fixture_asof_and_sentinel": "passed", "tests/market/test_force_close_net_r.py::test_force_close_empty_registration": "passed", "tests/market/test_force_close_net_r.py::test_force_close_fixture_registration[bypass]": "passed", "tests/market/test_force_close_net_r.py::test_force_close_fixture_registration[extra]": "passed", "tests/market/test_force_close_net_r.py::test_force_close_fixture_registration[internal_bypass]": "passed", "tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent[mark]": "passed", "tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent[quote.mark]": "passed", "tests/market/test_force_close_net_r.py::test_missing_kernel_value_is_error[entry]": "passed", "tests/market/test_force_close_net_r.py::test_missing_kernel_value_is_error[gross]": "passed", "tests/market/test_force_close_net_r.py::test_no_residual_is_none[closed]": "passed", "tests/market/test_force_close_net_r.py::test_no_residual_is_none[unfilled]": "passed", "tests/market/test_force_close_net_r.py::test_right_censor_routes_remain_reachable[hold_end]": "passed", "tests/market/test_force_close_net_r.py::test_right_censor_routes_remain_reachable[horizon]": "passed", "tests/market/test_funding.py::test_conflicting_duplicate_settlement_key_rejected": "passed", "tests/market/test_funding.py::test_duplicate_settlement_row_applied_once_and_zero_position_row_recorded": "passed", "tests/market/test_funding.py::test_incomplete_schedule_censors_even_when_some_rows_present": "passed", "tests/market/test_funding.py::test_settlement_before_t_start_ignored_and_variable_interval_chain": "passed", "tests/market/test_funding.py::test_settlement_mark_is_last_closed_before_calc_time_not_after": "passed", "tests/market/test_funding.py::test_settlement_mark_uses_closed_bar_not_new_bar_open": "passed", "tests/market/test_funding.py::test_sign_convention_long_short_positive_negative[long--0.001-0.2]": "passed", "tests/market/test_funding.py::test_sign_convention_long_short_positive_negative[long-0.001--0.2]": "passed", "tests/market/test_funding.py::test_sign_convention_long_short_positive_negative[short--0.001--0.2]": "passed", "tests/market/test_funding.py::test_sign_convention_long_short_positive_negative[short-0.001-0.2]": "passed", "tests/market/test_funding.py::test_stale_settlement_mark_censors": "passed", "tests/market/test_kernel_a.py::test_entry_ttl_source_both_values_in_results": "passed", "tests/market/test_kernel_a.py::test_filters_accept_at_boundary_and_reject_beyond": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E01]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E02]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E03]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E04a]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E04b]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E04c]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E05]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E06]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E07]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E08]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E09]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E10]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E11]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E12]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E14a]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E14b]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E14c]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E15a]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E15b]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E16]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E17]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E18]": "passed", "tests/market/test_kernel_a.py::test_horizon_expires_working_entries_without_fill": "passed", "tests/market/test_kernel_a.py::test_path_expansion_rules": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[0]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[10]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[11]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[12]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[13]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[14]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[15]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[16]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[17]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[18]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[19]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[1]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[20]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[21]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[22]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[23]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[24]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[25]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[26]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[27]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[28]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[29]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[2]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[30]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[31]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[32]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[33]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[34]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[35]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[36]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[37]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[38]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[39]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[3]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[4]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[5]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[6]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[7]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[8]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[9]": "passed", "tests/market/test_kernel_a.py::test_replay_cli_all_pass": "passed", "tests/market/test_kernel_a.py::test_replay_hash_consistent_across_runs_and_orderings": "passed", "tests/market/test_kernel_a.py::test_risk_budget_sizing_and_multiplier": "passed", "tests/market/test_kernel_a.py::test_rules_unknown_and_lifecycle_censor": "passed", "tests/market/test_kernel_a.py::test_scenario_interval_favorable_vs_adverse_same_bars": "passed", "tests/market/test_kernel_a.py::test_trace_hash_changes_with_policy_seed_market_but_not_ingested_fields": "passed", "tests/market/test_nautilus_adapter.py::test_b_funding_via_adjust_account_matches_gold": "passed", "tests/market/test_nautilus_adapter.py::test_b_match_set_and_all_diffs_explained": "passed", "tests/market/test_nautilus_adapter.py::test_b_replay_consistent": "passed", "tests/market/test_nautilus_adapter.py::test_b_results_satisfy_invariants": "passed", "tests/market/test_nautilus_adapter.py::test_independent_path_expansion_agrees_with_a": "passed", "tests/market/test_nautilus_adapter.py::test_known_semantic_differences_are_the_documented_ones": "passed", "tests/market/test_outcome_kind.py::test_b11_b12_horizon_source_and_policy_split": "passed", "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]": "passed", "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]": "passed", "tests/market/test_outcome_kind.py::test_batch_exposes_both_columns": "passed", "tests/market/test_outcome_kind.py::test_every_result_maps_to_exactly_one_of_seven_values": "passed", "tests/market/test_outcome_kind.py::test_lint_forbidden_patterns_do_not_reappear": "passed", "tests/market/test_outcome_kind.py::test_no_fill_without_reject_or_expire_is_pending_ruling": "passed", "tests/market/test_outcome_kind.py::test_rejected_not_merged_into_unfilled_expired": "passed", "tests/market/test_outcome_kind.py::test_s18_all_non_match_branches_report_actual_event_set": "passed", "tests/market/test_outcome_kind.py::test_s18_b10_enumerated_rule4_and_no_fallback_labelling": "passed", "tests/market/test_outcome_kind.py::test_s19_explicit_ttl_cannot_bypass_policy_fallback": "passed", "tests/market/test_outcome_kind.py::test_s21_primary_censor_follows_contract_priority_not_check_order": "passed", "tests/market/test_outcome_kind.py::test_s22_explicit_empty_allocation_is_rejected_not_silently_filled": "passed", "tests/market/test_outcome_kind.py::test_s24_s25_derivation_is_single_source_and_subsecond_cannot_bypass": "passed", "tests/market/test_outcome_kind.py::test_s27_s28_single_source_start_time_and_exact_grid": "passed", "tests/market/test_outcome_kind.py::test_s29_partition_grid_uses_single_source_and_no_empty_gaps": "passed", "tests/market/test_outcome_kind.py::test_s30_window_lower_bound_uses_derived_start_not_t_dec": "passed", "tests/market/test_outcome_kind.py::test_six_values_reachable_and_filled_closed_unreachable_in_v0": "passed", "tests/market/test_outcome_kind.py::test_stopped_takes_precedence_and_exit_legs_keeps_mixed_information": "passed", "tests/market/test_outcome_kind.py::test_two_censor_classes_never_cross": "passed", "tests/market/test_partition_check.py::test_clean_partition_no_quarantine": "passed", "tests/market/test_partition_check.py::test_duplicate_and_unsorted_keys": "passed", "tests/market/test_partition_check.py::test_end_to_end_partition_idempotent_quarantine": "passed", "tests/market/test_partition_check.py::test_funding_schedule_gap_and_variable_interval": "passed", "tests/market/test_partition_check.py::test_gap_flagged_on_next_bar_not_filled": "passed", "tests/market/test_partition_check.py::test_lifecycle_symbol_time_invalid_and_calendar_from_rules": "passed", "tests/market/test_partition_check.py::test_no_rules_marks_rule_history_missing": "passed", "tests/market/test_partition_check.py::test_ohlc_invalid_flagged_row_kept": "passed", "tests/market/test_partition_check.py::test_precision_off_grid": "passed", "tests/market/test_partition_check.py::test_rules_from_exchange_info_snapshot": "passed", "tests/market/test_partition_check.py::test_rules_from_manifests_never_infers_delisting": "passed", "tests/market/test_partition_check.py::test_schema_drift_quarantines_whole_partition": "passed", "tests/market/test_partition_check.py::test_spike_flagged_not_dropped_and_not_across_gap": "passed", "tests/market/test_replay.py::test_batch_order_and_single_vs_batch_consistent": "passed", "tests/market/test_replay.py::test_trace_hash_identical_across_processes": "passed", "tests/market/test_review_fixes.py::test_p2_report_exposes_unsupported_capabilities": "passed", "tests/market/test_review_fixes.py::test_s05_loader_unknown_quality[missing-gap_flag]": "passed", "tests/market/test_review_fixes.py::test_s05_loader_unknown_quality[missing-ohlc_valid]": "passed", "tests/market/test_review_fixes.py::test_s05_loader_unknown_quality[null-gap_flag]": "passed", "tests/market/test_review_fixes.py::test_s05_loader_unknown_quality[null-ohlc_valid]": "passed", "tests/market/test_review_fixes.py::test_s05_partition_unknown_ohlc_is_quarantined[close]": "passed", "tests/market/test_review_fixes.py::test_s05_partition_unknown_ohlc_is_quarantined[high]": "passed", "tests/market/test_review_fixes.py::test_s05_partition_unknown_ohlc_is_quarantined[low]": "passed", "tests/market/test_review_fixes.py::test_s05_partition_unknown_ohlc_is_quarantined[open]": "passed", "tests/market/test_review_fixes.py::test_s05_partition_unknown_ohlc_is_quarantined[volume]": "passed", "tests/market/test_review_fixes.py::test_s05_spike_unknown_gap_is_not_clean": "passed", "tests/market/test_review_fixes.py::test_s06_vision_unknown_duplicate_values_quarantined": "passed", "tests/market/test_review_fixes.py::test_s07_management_stream_rejected_at_request_boundary": "passed", "tests/market/test_review_fixes.py::test_s10_missing_a_cannot_match": "passed", "tests/market/test_review_fixes.py::test_s10_report_balance_evidence": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[A-adverse-base]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[A-adverse-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[A-favorable-base]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[A-favorable-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[A-primary-base]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[A-primary-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[B-adverse-base]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[B-adverse-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[B-favorable-base]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[B-favorable-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[B-primary-base]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[B-primary-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_b_replay_across_processes": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[A-adverse-base]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[A-adverse-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[A-favorable-base]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[A-favorable-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[A-primary-base]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[A-primary-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[B-adverse-base]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[B-adverse-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[B-favorable-base]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[B-favorable-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[B-primary-base]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[B-primary-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_report_cli_exception_returns_failure": "passed", "tests/market/test_review_fixes.py::test_s12_snapshot_request_explicitly_unsupported": "passed", "tests/market/test_review_fixes.py::test_s13_event_decimal_precision_rejected": "passed", "tests/market/test_review_fixes.py::test_s13_event_precision_checked_by_invariants": "passed", "tests/market/test_review_fixes.py::test_s16_exposure_uses_observation_boundary[closed]": "passed", "tests/market/test_review_fixes.py::test_s16_exposure_uses_observation_boundary[funding_censor]": "passed", "tests/market/test_review_fixes.py::test_s16_exposure_uses_observation_boundary[hold]": "passed", "tests/market/test_review_fixes.py::test_s16_exposure_uses_observation_boundary[horizon]": "passed", "tests/market/test_review_fixes.py::test_s16_horizon_equal_mark_does_not_extend_exposure": "passed", "tests/market/test_review_p1.py::test_s01_tp_fill_requires_current_last_to_satisfy_limit": "passed", "tests/market/test_review_p1.py::test_s02_b_rejects_conflicting_settlement_and_uses_closed_mark": "passed", "tests/market/test_review_p1.py::test_s03_intra_bar_start_begins_at_next_bar_open": "passed", "tests/market/test_review_p1.py::test_s04_max_holding_censors_and_tp_remainder_goes_to_last_leg": "passed", "tests/market/test_review_p1.py::test_s05_loader_rejects_unchecked_or_incomplete_partitions": "passed", "tests/market/test_review_p1.py::test_s05_rule_expiry_mid_window_and_mark_required_before_entry": "passed", "tests/market/test_review_p1.py::test_s06_conflicting_keys_quarantined_and_bronze_retained": "passed", "tests/market/test_review_p1.py::test_s07_post_only_cross_rejected_and_price_priority_and_margin_recheck": "passed", "tests/market/test_review_p1.py::test_s08_multiplier_scales_pnl_fees_exposure": "passed", "tests/market/test_review_p1.py::test_s09_equal_candidate_null_kept": "passed", "tests/market/test_review_p1.py::test_s10_classifier_exc_first_and_predicate_bound": "passed", "tests/market/test_review_p1.py::test_s12_hash_sensitivity_and_stale_policy_hash_rejected": "passed", "tests/market/test_review_p1.py::test_s13_event_level_invariants": "passed", "tests/market/test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar[all-off-grid]": "passed", "tests/market/test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar[mixed-off-grid]": "passed", "tests/market/test_review_p1_round10.py::test_s29_subsecond_calendar_start_has_no_false_first_gap": "passed", "tests/market/test_review_p1_round10.py::test_s29_subsecond_end_includes_last_grid_point": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2023-02-28-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2023-02-28-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-01-1-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-01-1-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-31-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-31-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-12-31-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-12-31-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s38_policy_rejects_negative_latency": "passed", "tests/market/test_review_p1_round10.py::test_s38_resolved_start_checked_for_both_spellings": "passed", "tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage": "passed", "tests/market/test_review_p1_round2.py::test_c1_s04_hold_end_precedes_funding_and_b_truncates": "passed", "tests/market/test_review_p1_round2.py::test_c1_s08_public_simulate_multiplier": "passed", "tests/market/test_review_p1_round2.py::test_c1_s09_same_name_sequence_columns": "passed", "tests/market/test_review_p1_round2.py::test_c1_s13_closed_causality_precision_and_step": "passed", "tests/market/test_review_p1_round2.py::test_c2_loader_missing_funding_and_unknown_rules": "passed", "tests/market/test_review_p1_round2.py::test_c3_s03_b_mark_bars_filtered_by_t_start": "passed", "tests/market/test_review_p1_round2.py::test_c3_s07_equity_based_affordability": "passed", "tests/market/test_review_p1_round2.py::test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash": "passed", "tests/market/test_review_p1_round2.py::test_s14_revised_source_supersedes_old_silver_days": "passed", "tests/market/test_review_p1_round3.py::test_s14_loader_unverifiable_source_rows_fail_closed": "passed", "tests/market/test_review_p1_round3.py::test_s15_earliest_gap_across_streams": "passed", "tests/market/test_review_p1_round3.py::test_s15_head_and_tail_gaps": "passed", "tests/market/test_review_p1_round3.py::test_s15_quality_failure_censors_at_start_even_with_locatable_gap": "passed", "tests/market/test_review_p1_round3.py::test_s16_b_exposure_respects_hold_cutoff": "passed", "tests/market/test_review_p1_round4.py::test_s05_null_ohlc_valid_fails_closed": "passed", "tests/market/test_review_p1_round4.py::test_s17_explicit_fractions_cannot_bypass_policy_or_precision": "passed", "tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]": "passed", "tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]": "passed", "tests/market/test_single_source.py::test_differential_expiry_b": "passed", "tests/market/test_single_source.py::test_differential_expiry_orders": "passed", "tests/market/test_single_source.py::test_differential_expiry_timeline": "passed", "tests/market/test_single_source.py::test_differential_kernel_grid": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_grid": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "failed", "tests/market/test_single_source.py::test_differential_start": "passed", "tests/market/test_single_source.py::test_differential_ttl": "passed", "tests/market/test_single_source.py::test_differential_vision_count": "passed", "tests/market/test_single_source.py::test_differential_window": "passed", "tests/market/test_single_source.py::test_foreign_hits_registry_is_exact": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]": "passed", "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[named]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return]": "passed", "tests/market/test_smoke.py::test_market_package_importable": "passed", "tests/market/test_smoke.py::test_no_services_import": "passed", "tests/market/test_smoke.py::test_pinned_nautilus_version": "passed", "tests/market/test_vision.py::test_404_records_missing_source": "passed", "tests/market/test_vision.py::test_checksum_mismatch_quarantines_and_no_silver": "passed", "tests/market/test_vision.py::test_coverage_and_months": "passed", "tests/market/test_vision.py::test_full_month_ok_manifest": "passed", "tests/market/test_vision.py::test_funding_and_metrics_parse": "passed", "tests/market/test_vision.py::test_gap_and_duplicates_counted_not_filled": "passed", "tests/market/test_vision.py::test_header_detection_and_microsecond_timestamps": "passed", "tests/market/test_vision.py::test_idempotent_skip_and_force": "passed", "tests/market/test_vision.py::test_mirror_fallback_after_retries": "passed", "tests/market/test_vision.py::test_ohlc_invalid_flagged_not_dropped": "passed", "tests/market/test_vision.py::test_source_paths": "passed"}
+```
+
+restored exit=0 file SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=55854
+ISOLATION_OK pid=55854
+COLLECTED=358
+........................................................................ [ 20%]
+........................................................................ [ 40%]
+........................................................................ [ 60%]
+........................................................................ [ 80%]
+......................................................................   [100%]
+358 passed in 34.23s
+OUTCOMES={"tests/market/test_asof.py::test_by_groups_do_not_cross_contaminate_and_suffix": "passed", "tests/market/test_asof.py::test_late_arrival_uses_available_at_not_event_time": "passed", "tests/market/test_asof.py::test_le_with_sequence_uses_equal_only_with_order_evidence": "passed", "tests/market/test_asof.py::test_mark_price_at_values": "passed", "tests/market/test_asof.py::test_naive_datetime_rejected": "passed", "tests/market/test_asof.py::test_quantize_price_tick": "passed", "tests/market/test_asof.py::test_real_partition_mark_price_at": "passed", "tests/market/test_asof.py::test_same_second_ambiguity_rejected_without_sequence": "passed", "tests/market/test_asof.py::test_strict_lt_excludes_equal_timestamp": "passed", "tests/market/test_asof.py::test_tolerance_marks_stale_and_does_not_forward_fill": "passed", "tests/market/test_asof.py::test_unclosed_bar_invisible_and_equality_semantics": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_constants_effective.py::test_censor_priority_has_call_site_and_effect": "passed", "tests/market/test_constants_effective.py::test_df_decimal_drives_batch_schema": "passed", "tests/market/test_constants_effective.py::test_exit_leg_order_drives_output_order_not_event_order": "passed", "tests/market/test_constants_effective.py::test_grid_math_single_source_and_exact_to_microsecond": "passed", "tests/market/test_constants_effective.py::test_interval_seconds_drives_expected_rows_and_path_points": "passed", "tests/market/test_constants_effective.py::test_settlement_and_ratio_quantum_drive_rounding": "passed", "tests/market/test_constants_effective.py::test_spike_k_and_min_samples_drive_flagging": "passed", "tests/market/test_constants_effective.py::test_t_start_derivation_single_source": "passed", "tests/market/test_contract.py::test_b5_entry_ttl_nullable_resolved_by_policy_and_hashed": "passed", "tests/market/test_contract.py::test_b8_fractions_nullable_policy_split_and_hashed": "passed", "tests/market/test_contract.py::test_build_request_from_episode_row": "passed", "tests/market/test_contract.py::test_canonical_json_rules": "passed", "tests/market/test_contract.py::test_diff_result_reports_first_event_diff_and_scalars": "passed", "tests/market/test_contract.py::test_entry_limit_requires_single_price_and_positive": "passed", "tests/market/test_contract.py::test_fixture_count_and_integrity": "passed", "tests/market/test_contract.py::test_floor_step_and_quantize": "passed", "tests/market/test_contract.py::test_invariants_pass_on_gold_and_catch_violations": "passed", "tests/market/test_contract.py::test_order_plan_rejects[bad0]": "passed", "tests/market/test_contract.py::test_order_plan_rejects[bad1]": "passed", "tests/market/test_contract.py::test_order_plan_rejects[bad2]": "passed", "tests/market/test_contract.py::test_order_plan_rejects[bad3]": "passed", "tests/market/test_contract.py::test_order_plan_rejects[bad4]": "passed", "tests/market/test_contract.py::test_policy_hash_is_content_addressed_and_required": "passed", "tests/market/test_contract.py::test_policy_registry": "passed", "tests/market/test_contract.py::test_request_validation": "passed", "tests/market/test_contract.py::test_tp_before_fill_rejected": "passed", "tests/market/test_contract.py::test_trace_hash_sensitivity": "passed", "tests/market/test_execution_api.py::test_g3_evaluate_consumes_frozen_contract_output": "passed", "tests/market/test_execution_api.py::test_g3_pairing_smoke_on_synthetic_episodes": "passed", "tests/market/test_execution_api.py::test_load_market_from_lake_and_simulate_real_bars": "passed", "tests/market/test_execution_api.py::test_simulate_batch_non_strict_keeps_error_rows": "passed", "tests/market/test_execution_api.py::test_simulate_batch_schema_and_pairing": "passed", "tests/market/test_execution_api.py::test_simulate_requires_market_and_checks_manifest": "passed", "tests/market/test_force_close_net_r.py::test_accounting_and_read_only[long-base-19.240000000000-1.320]": "passed", "tests/market/test_force_close_net_r.py::test_accounting_and_read_only[long-stress-19.051428571429-2.640]": "passed", "tests/market/test_force_close_net_r.py::test_accounting_and_read_only[short-base--15.045714285714-1.320]": "passed", "tests/market/test_force_close_net_r.py::test_accounting_and_read_only[short-stress--15.234285714286-2.640]": "passed", "tests/market/test_force_close_net_r.py::test_fixture_asof_and_sentinel": "passed", "tests/market/test_force_close_net_r.py::test_force_close_empty_registration": "passed", "tests/market/test_force_close_net_r.py::test_force_close_fixture_registration[bypass]": "passed", "tests/market/test_force_close_net_r.py::test_force_close_fixture_registration[extra]": "passed", "tests/market/test_force_close_net_r.py::test_force_close_fixture_registration[internal_bypass]": "passed", "tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent[mark]": "passed", "tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent[quote.mark]": "passed", "tests/market/test_force_close_net_r.py::test_missing_kernel_value_is_error[entry]": "passed", "tests/market/test_force_close_net_r.py::test_missing_kernel_value_is_error[gross]": "passed", "tests/market/test_force_close_net_r.py::test_no_residual_is_none[closed]": "passed", "tests/market/test_force_close_net_r.py::test_no_residual_is_none[unfilled]": "passed", "tests/market/test_force_close_net_r.py::test_right_censor_routes_remain_reachable[hold_end]": "passed", "tests/market/test_force_close_net_r.py::test_right_censor_routes_remain_reachable[horizon]": "passed", "tests/market/test_funding.py::test_conflicting_duplicate_settlement_key_rejected": "passed", "tests/market/test_funding.py::test_duplicate_settlement_row_applied_once_and_zero_position_row_recorded": "passed", "tests/market/test_funding.py::test_incomplete_schedule_censors_even_when_some_rows_present": "passed", "tests/market/test_funding.py::test_settlement_before_t_start_ignored_and_variable_interval_chain": "passed", "tests/market/test_funding.py::test_settlement_mark_is_last_closed_before_calc_time_not_after": "passed", "tests/market/test_funding.py::test_settlement_mark_uses_closed_bar_not_new_bar_open": "passed", "tests/market/test_funding.py::test_sign_convention_long_short_positive_negative[long--0.001-0.2]": "passed", "tests/market/test_funding.py::test_sign_convention_long_short_positive_negative[long-0.001--0.2]": "passed", "tests/market/test_funding.py::test_sign_convention_long_short_positive_negative[short--0.001--0.2]": "passed", "tests/market/test_funding.py::test_sign_convention_long_short_positive_negative[short-0.001-0.2]": "passed", "tests/market/test_funding.py::test_stale_settlement_mark_censors": "passed", "tests/market/test_kernel_a.py::test_entry_ttl_source_both_values_in_results": "passed", "tests/market/test_kernel_a.py::test_filters_accept_at_boundary_and_reject_beyond": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E01]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E02]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E03]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E04a]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E04b]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E04c]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E05]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E06]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E07]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E08]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E09]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E10]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E11]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E12]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E14a]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E14b]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E14c]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E15a]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E15b]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E16]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E17]": "passed", "tests/market/test_kernel_a.py::test_fixture_matches_independent_expectation[E18]": "passed", "tests/market/test_kernel_a.py::test_horizon_expires_working_entries_without_fill": "passed", "tests/market/test_kernel_a.py::test_path_expansion_rules": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[0]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[10]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[11]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[12]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[13]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[14]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[15]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[16]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[17]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[18]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[19]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[1]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[20]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[21]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[22]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[23]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[24]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[25]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[26]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[27]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[28]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[29]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[2]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[30]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[31]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[32]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[33]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[34]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[35]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[36]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[37]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[38]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[39]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[3]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[4]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[5]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[6]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[7]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[8]": "passed", "tests/market/test_kernel_a.py::test_random_plans_satisfy_invariants[9]": "passed", "tests/market/test_kernel_a.py::test_replay_cli_all_pass": "passed", "tests/market/test_kernel_a.py::test_replay_hash_consistent_across_runs_and_orderings": "passed", "tests/market/test_kernel_a.py::test_risk_budget_sizing_and_multiplier": "passed", "tests/market/test_kernel_a.py::test_rules_unknown_and_lifecycle_censor": "passed", "tests/market/test_kernel_a.py::test_scenario_interval_favorable_vs_adverse_same_bars": "passed", "tests/market/test_kernel_a.py::test_trace_hash_changes_with_policy_seed_market_but_not_ingested_fields": "passed", "tests/market/test_nautilus_adapter.py::test_b_funding_via_adjust_account_matches_gold": "passed", "tests/market/test_nautilus_adapter.py::test_b_match_set_and_all_diffs_explained": "passed", "tests/market/test_nautilus_adapter.py::test_b_replay_consistent": "passed", "tests/market/test_nautilus_adapter.py::test_b_results_satisfy_invariants": "passed", "tests/market/test_nautilus_adapter.py::test_independent_path_expansion_agrees_with_a": "passed", "tests/market/test_nautilus_adapter.py::test_known_semantic_differences_are_the_documented_ones": "passed", "tests/market/test_outcome_kind.py::test_b11_b12_horizon_source_and_policy_split": "passed", "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[first-version]": "passed", "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes[later-version]": "passed", "tests/market/test_outcome_kind.py::test_batch_exposes_both_columns": "passed", "tests/market/test_outcome_kind.py::test_every_result_maps_to_exactly_one_of_seven_values": "passed", "tests/market/test_outcome_kind.py::test_lint_forbidden_patterns_do_not_reappear": "passed", "tests/market/test_outcome_kind.py::test_no_fill_without_reject_or_expire_is_pending_ruling": "passed", "tests/market/test_outcome_kind.py::test_rejected_not_merged_into_unfilled_expired": "passed", "tests/market/test_outcome_kind.py::test_s18_all_non_match_branches_report_actual_event_set": "passed", "tests/market/test_outcome_kind.py::test_s18_b10_enumerated_rule4_and_no_fallback_labelling": "passed", "tests/market/test_outcome_kind.py::test_s19_explicit_ttl_cannot_bypass_policy_fallback": "passed", "tests/market/test_outcome_kind.py::test_s21_primary_censor_follows_contract_priority_not_check_order": "passed", "tests/market/test_outcome_kind.py::test_s22_explicit_empty_allocation_is_rejected_not_silently_filled": "passed", "tests/market/test_outcome_kind.py::test_s24_s25_derivation_is_single_source_and_subsecond_cannot_bypass": "passed", "tests/market/test_outcome_kind.py::test_s27_s28_single_source_start_time_and_exact_grid": "passed", "tests/market/test_outcome_kind.py::test_s29_partition_grid_uses_single_source_and_no_empty_gaps": "passed", "tests/market/test_outcome_kind.py::test_s30_window_lower_bound_uses_derived_start_not_t_dec": "passed", "tests/market/test_outcome_kind.py::test_six_values_reachable_and_filled_closed_unreachable_in_v0": "passed", "tests/market/test_outcome_kind.py::test_stopped_takes_precedence_and_exit_legs_keeps_mixed_information": "passed", "tests/market/test_outcome_kind.py::test_two_censor_classes_never_cross": "passed", "tests/market/test_partition_check.py::test_clean_partition_no_quarantine": "passed", "tests/market/test_partition_check.py::test_duplicate_and_unsorted_keys": "passed", "tests/market/test_partition_check.py::test_end_to_end_partition_idempotent_quarantine": "passed", "tests/market/test_partition_check.py::test_funding_schedule_gap_and_variable_interval": "passed", "tests/market/test_partition_check.py::test_gap_flagged_on_next_bar_not_filled": "passed", "tests/market/test_partition_check.py::test_lifecycle_symbol_time_invalid_and_calendar_from_rules": "passed", "tests/market/test_partition_check.py::test_no_rules_marks_rule_history_missing": "passed", "tests/market/test_partition_check.py::test_ohlc_invalid_flagged_row_kept": "passed", "tests/market/test_partition_check.py::test_precision_off_grid": "passed", "tests/market/test_partition_check.py::test_rules_from_exchange_info_snapshot": "passed", "tests/market/test_partition_check.py::test_rules_from_manifests_never_infers_delisting": "passed", "tests/market/test_partition_check.py::test_schema_drift_quarantines_whole_partition": "passed", "tests/market/test_partition_check.py::test_spike_flagged_not_dropped_and_not_across_gap": "passed", "tests/market/test_replay.py::test_batch_order_and_single_vs_batch_consistent": "passed", "tests/market/test_replay.py::test_trace_hash_identical_across_processes": "passed", "tests/market/test_review_fixes.py::test_p2_report_exposes_unsupported_capabilities": "passed", "tests/market/test_review_fixes.py::test_s05_loader_unknown_quality[missing-gap_flag]": "passed", "tests/market/test_review_fixes.py::test_s05_loader_unknown_quality[missing-ohlc_valid]": "passed", "tests/market/test_review_fixes.py::test_s05_loader_unknown_quality[null-gap_flag]": "passed", "tests/market/test_review_fixes.py::test_s05_loader_unknown_quality[null-ohlc_valid]": "passed", "tests/market/test_review_fixes.py::test_s05_partition_unknown_ohlc_is_quarantined[close]": "passed", "tests/market/test_review_fixes.py::test_s05_partition_unknown_ohlc_is_quarantined[high]": "passed", "tests/market/test_review_fixes.py::test_s05_partition_unknown_ohlc_is_quarantined[low]": "passed", "tests/market/test_review_fixes.py::test_s05_partition_unknown_ohlc_is_quarantined[open]": "passed", "tests/market/test_review_fixes.py::test_s05_partition_unknown_ohlc_is_quarantined[volume]": "passed", "tests/market/test_review_fixes.py::test_s05_spike_unknown_gap_is_not_clean": "passed", "tests/market/test_review_fixes.py::test_s06_vision_unknown_duplicate_values_quarantined": "passed", "tests/market/test_review_fixes.py::test_s07_management_stream_rejected_at_request_boundary": "passed", "tests/market/test_review_fixes.py::test_s10_missing_a_cannot_match": "passed", "tests/market/test_review_fixes.py::test_s10_report_balance_evidence": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[A-adverse-base]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[A-adverse-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[A-favorable-base]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[A-favorable-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[A-primary-base]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[A-primary-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[B-adverse-base]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[B-adverse-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[B-favorable-base]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[B-favorable-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[B-primary-base]": "passed", "tests/market/test_review_fixes.py::test_s11_all_episodes_cost_path_invariants[B-primary-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_b_replay_across_processes": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[A-adverse-base]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[A-adverse-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[A-favorable-base]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[A-favorable-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[A-primary-base]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[A-primary-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[B-adverse-base]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[B-adverse-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[B-favorable-base]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[B-favorable-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[B-primary-base]": "passed", "tests/market/test_review_fixes.py::test_s11_cost_path_matrix[B-primary-stress]": "passed", "tests/market/test_review_fixes.py::test_s11_report_cli_exception_returns_failure": "passed", "tests/market/test_review_fixes.py::test_s12_snapshot_request_explicitly_unsupported": "passed", "tests/market/test_review_fixes.py::test_s13_event_decimal_precision_rejected": "passed", "tests/market/test_review_fixes.py::test_s13_event_precision_checked_by_invariants": "passed", "tests/market/test_review_fixes.py::test_s16_exposure_uses_observation_boundary[closed]": "passed", "tests/market/test_review_fixes.py::test_s16_exposure_uses_observation_boundary[funding_censor]": "passed", "tests/market/test_review_fixes.py::test_s16_exposure_uses_observation_boundary[hold]": "passed", "tests/market/test_review_fixes.py::test_s16_exposure_uses_observation_boundary[horizon]": "passed", "tests/market/test_review_fixes.py::test_s16_horizon_equal_mark_does_not_extend_exposure": "passed", "tests/market/test_review_p1.py::test_s01_tp_fill_requires_current_last_to_satisfy_limit": "passed", "tests/market/test_review_p1.py::test_s02_b_rejects_conflicting_settlement_and_uses_closed_mark": "passed", "tests/market/test_review_p1.py::test_s03_intra_bar_start_begins_at_next_bar_open": "passed", "tests/market/test_review_p1.py::test_s04_max_holding_censors_and_tp_remainder_goes_to_last_leg": "passed", "tests/market/test_review_p1.py::test_s05_loader_rejects_unchecked_or_incomplete_partitions": "passed", "tests/market/test_review_p1.py::test_s05_rule_expiry_mid_window_and_mark_required_before_entry": "passed", "tests/market/test_review_p1.py::test_s06_conflicting_keys_quarantined_and_bronze_retained": "passed", "tests/market/test_review_p1.py::test_s07_post_only_cross_rejected_and_price_priority_and_margin_recheck": "passed", "tests/market/test_review_p1.py::test_s08_multiplier_scales_pnl_fees_exposure": "passed", "tests/market/test_review_p1.py::test_s09_equal_candidate_null_kept": "passed", "tests/market/test_review_p1.py::test_s10_classifier_exc_first_and_predicate_bound": "passed", "tests/market/test_review_p1.py::test_s12_hash_sensitivity_and_stale_policy_hash_rejected": "passed", "tests/market/test_review_p1.py::test_s13_event_level_invariants": "passed", "tests/market/test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar[all-off-grid]": "passed", "tests/market/test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar[mixed-off-grid]": "passed", "tests/market/test_review_p1_round10.py::test_s29_subsecond_calendar_start_has_no_false_first_gap": "passed", "tests/market/test_review_p1_round10.py::test_s29_subsecond_end_includes_last_grid_point": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2023-02-28-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2023-02-28-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-01-1-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-01-1-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-31-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-01-31-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-02-29-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-12-31-15m]": "passed", "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence[2024-12-31-1m]": "passed", "tests/market/test_review_p1_round10.py::test_s38_policy_rejects_negative_latency": "passed", "tests/market/test_review_p1_round10.py::test_s38_resolved_start_checked_for_both_spellings": "passed", "tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage": "passed", "tests/market/test_review_p1_round2.py::test_c1_s04_hold_end_precedes_funding_and_b_truncates": "passed", "tests/market/test_review_p1_round2.py::test_c1_s08_public_simulate_multiplier": "passed", "tests/market/test_review_p1_round2.py::test_c1_s09_same_name_sequence_columns": "passed", "tests/market/test_review_p1_round2.py::test_c1_s13_closed_causality_precision_and_step": "passed", "tests/market/test_review_p1_round2.py::test_c2_loader_missing_funding_and_unknown_rules": "passed", "tests/market/test_review_p1_round2.py::test_c3_s03_b_mark_bars_filtered_by_t_start": "passed", "tests/market/test_review_p1_round2.py::test_c3_s07_equity_based_affordability": "passed", "tests/market/test_review_p1_round2.py::test_c3_s12_b_rejects_stale_policy_and_registry_pins_hash": "passed", "tests/market/test_review_p1_round2.py::test_s14_revised_source_supersedes_old_silver_days": "passed", "tests/market/test_review_p1_round3.py::test_s14_loader_unverifiable_source_rows_fail_closed": "passed", "tests/market/test_review_p1_round3.py::test_s15_earliest_gap_across_streams": "passed", "tests/market/test_review_p1_round3.py::test_s15_head_and_tail_gaps": "passed", "tests/market/test_review_p1_round3.py::test_s15_quality_failure_censors_at_start_even_with_locatable_gap": "passed", "tests/market/test_review_p1_round3.py::test_s16_b_exposure_respects_hold_cutoff": "passed", "tests/market/test_review_p1_round4.py::test_s05_null_ohlc_valid_fails_closed": "passed", "tests/market/test_review_p1_round4.py::test_s17_explicit_fractions_cannot_bypass_policy_or_precision": "passed", "tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]": "passed", "tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]": "passed", "tests/market/test_single_source.py::test_differential_expiry_b": "passed", "tests/market/test_single_source.py::test_differential_expiry_orders": "passed", "tests/market/test_single_source.py::test_differential_expiry_timeline": "passed", "tests/market/test_single_source.py::test_differential_kernel_grid": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_last-1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark--1]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-0]": "passed", "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar[bars_mark-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_grid": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[klines-1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines--1]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-0]": "passed", "tests/market/test_single_source.py::test_differential_lake_public_interior_bar[markPriceKlines-1]": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed", "tests/market/test_single_source.py::test_differential_start": "passed", "tests/market/test_single_source.py::test_differential_ttl": "passed", "tests/market/test_single_source.py::test_differential_vision_count": "passed", "tests/market/test_single_source.py::test_differential_window": "passed", "tests/market/test_single_source.py::test_foreign_hits_registry_is_exact": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]": "passed", "tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]": "passed", "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]": "passed", "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]": "passed", "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[named]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]": "passed", "tests/market/test_single_source.py::test_ttl_standard_nodes[return]": "passed", "tests/market/test_smoke.py::test_market_package_importable": "passed", "tests/market/test_smoke.py::test_no_services_import": "passed", "tests/market/test_smoke.py::test_pinned_nautilus_version": "passed", "tests/market/test_vision.py::test_404_records_missing_source": "passed", "tests/market/test_vision.py::test_checksum_mismatch_quarantines_and_no_silver": "passed", "tests/market/test_vision.py::test_coverage_and_months": "passed", "tests/market/test_vision.py::test_full_month_ok_manifest": "passed", "tests/market/test_vision.py::test_funding_and_metrics_parse": "passed", "tests/market/test_vision.py::test_gap_and_duplicates_counted_not_filled": "passed", "tests/market/test_vision.py::test_header_detection_and_microsecond_timestamps": "passed", "tests/market/test_vision.py::test_idempotent_skip_and_force": "passed", "tests/market/test_vision.py::test_mirror_fallback_after_retries": "passed", "tests/market/test_vision.py::test_ohlc_invalid_flagged_not_dropped": "passed", "tests/market/test_vision.py::test_source_paths": "passed"}
+```
+
+内容还原相等：True
+
+#### M093 S37-first-registration-bypass
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S37-first-registration-bypass`
+目标：`src/quant_lab/market/kernel_a.py`；selector：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`, `tests/market/test_single_source.py::test_single_source_use_counts_match_registry`, `tests/market/test_single_source.py::test_differential_kernel_grid`
+baseline exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54932
+ISOLATION_OK pid=54932
+COLLECTED=3
+...                                                                      [100%]
+3 passed in 0.55s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_kernel_grid": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "passed"}
+```
+
+injected exit=1 file SHA256=bccd4290969ab0947ba22d3c8bfe57a3275e8477de98641da7cd90f730faf65c tree SHA256=57378d02d85c14d1bc2a99c69f7563da141b64a377a160df320ab3a025739d29
+
+```text
+ISOLATION_OK pid=54958
+ISOLATION_OK pid=54958
+COLLECTED=3
+FFF                                                                      [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['first_grid_...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "first_grid_point：登记的调用方 ['market/kernel_a.py:KernelA._first_bar_gap'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+_________________ test_single_source_use_counts_match_registry _________________
+tests/market/test_single_source.py:79: in test_single_source_use_counts_match_registry
+    assert gate.collect_call_counts(gate.SRC, set(gate.ALLOWED_CALL_COUNTS)) == gate.ALLOWED_CALL_COUNTS
+E   AssertionError: assert {'entry_expir...ows': 1}, ...} == {'force_close...est': 1}, ...}
+E     
+E     Omitting 7 identical items, use -vv to show
+E     Differing items:
+E     {'first_grid_point': {'market/execution.py:load_market_from_lake.bars': 1, 'market/partition_check.py:check_bars': 1}} != {'first_grid_point': {'market/execution.py:load_market_from_lake.bars': 1, 'market/kernel_a.py:KernelA._first_bar_gap': 1, 'market/partition_check.py:check_bars': 1}}
+E     Use -v to get more diff
+________________________ test_differential_kernel_grid _________________________
+tests/market/test_single_source.py:298: in test_differential_kernel_grid
+    assert kernel._first_bar_gap(bars, end) == want
+E   AssertionError: assert datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc) == None
+E    +  where datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc) = _first_bar_gap([Bar(open_time=datetime.datetime(2024, 1, 31, 23, 59, tzinfo=datetime.timezone.utc), o=Decimal('100'), h=Decimal('100'...zone.utc), o=Decimal('100'), h=Decimal('100'), l=Decimal('100'), c=Decimal('100'), volume=Decimal('0'), interval_s=60)], datetime.datetime(2024, 2, 1, 0, 3, 58, 999999, tzinfo=datetime.timezone.utc))
+E    +    where _first_bar_gap = <quant_lab.market.kernel_a.KernelA object at 0x1087e38f0>._first_bar_gap
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_single_source_call_sites_match_registry
+FAILED tests/market/test_single_source.py::test_single_source_use_counts_match_registry
+FAILED tests/market/test_single_source.py::test_differential_kernel_grid - As...
+3 failed in 0.47s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_kernel_grid": "failed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "failed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "failed"}
+```
+
+restored exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54967
+ISOLATION_OK pid=54967
+COLLECTED=3
+...                                                                      [100%]
+3 passed in 0.67s
+OUTCOMES={"tests/market/test_single_source.py::test_differential_kernel_grid": "passed", "tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "passed"}
+```
+
+内容还原相等：True
+
+#### M094 S37-tail-registration-bypass
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' S37-tail-registration-bypass`
+目标：`src/quant_lab/market/kernel_a.py`；selector：`tests/market/test_single_source.py::test_single_source_call_sites_match_registry`, `tests/market/test_single_source.py::test_single_source_use_counts_match_registry`
+baseline exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54972
+ISOLATION_OK pid=54972
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 0.49s
+OUTCOMES={"tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "passed"}
+```
+
+injected exit=1 file SHA256=a0c7684ded7c4b4a4e9ef093d4f64ca48b49a71968dadb738fd66a1da254c36d tree SHA256=1d0699d44ffbe807bc4c58ce720aa566f1d538e82b1f7534a7dd319e55d18203
+
+```text
+ISOLATION_OK pid=54980
+ISOLATION_OK pid=54980
+COLLECTED=2
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_________________ test_single_source_call_sites_match_registry _________________
+tests/market/test_single_source.py:27: in test_single_source_call_sites_match_registry
+    assert gate.diff_call_sites(gate.ALLOWED_CALLERS, actual) == []
+E   assert ['grid_points...OWED_CALLERS'] == []
+E     
+E     Left contains one more item: "grid_points_between：登记的调用方 ['market/kernel_a.py:KernelA._first_bar_gap'] **不再调用它**——这通常意味着该处改回了自己写一份（S29 的形态），而不是调用方被正当删除；若确实是正当删除，请同步改 ALLOWED_CALLERS"
+E     Use -v to get more diff
+_________________ test_single_source_use_counts_match_registry _________________
+tests/market/test_single_source.py:79: in test_single_source_use_counts_match_registry
+    assert gate.collect_call_counts(gate.SRC, set(gate.ALLOWED_CALL_COUNTS)) == gate.ALLOWED_CALL_COUNTS
+E   AssertionError: assert {'derived_t_s...t_R': {}, ...} == {'force_close...est': 1}, ...}
+E     
+E     Omitting 7 identical items, use -vv to show
+E     Differing items:
+E     {'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1, 'market/partition_check.py:check_bars': 7, 'market/vision.py:expected_rows': 1}} != {'grid_points_between': {'market/execution.py:load_market_from_lake.bars': 1, 'market/kernel_a.py:KernelA._first_bar_gap': 1, 'market/partition_check.py:check_bars': 7, 'market/vision.py:expected_rows': 1}}
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_single_source.py::test_single_source_call_sites_match_registry
+FAILED tests/market/test_single_source.py::test_single_source_use_counts_match_registry
+2 failed in 0.54s
+OUTCOMES={"tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "failed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "failed"}
+```
+
+restored exit=0 file SHA256=f6cce0bb9b66ceb3189122e409cc204bfd65f6535235872435e1c626081e782e tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=54994
+ISOLATION_OK pid=54994
+COLLECTED=2
+..                                                                       [100%]
+2 passed in 0.55s
+OUTCOMES={"tests/market/test_single_source.py::test_single_source_call_sites_match_registry": "passed", "tests/market/test_single_source.py::test_single_source_use_counts_match_registry": "passed"}
+```
+
+内容还原相等：True
+
+#### M095 A36-TIME
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A36-TIME`
+目标：`src/quant_lab/market/partition_check.py`；selector：`tests/market/test_boundary_discrimination.py`, `tests/market/test_single_source.py::test_differential_partition_grid`
+baseline exit=0 file SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=55005
+ISOLATION_OK pid=55005
+COLLECTED=15
+...............                                                          [100%]
+15 passed in 6.22s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+injected exit=1 file SHA256=045ea1ba667b337c66a23ed5b90e0f84caa35ac2b28eaf7741b8c7b50eea851d tree SHA256=d89e982613cadd80fd4ad610832e8499d9900d26c12e331d3e2c232cf3ad24fb
+
+```text
+ISOLATION_OK pid=55073
+ISOLATION_OK pid=55073
+COLLECTED=15
+F.............F                                                          [100%]
+=================================== FAILURES ===================================
+______________________________ test_boundary_time ______________________________
+tests/market/test_boundary_discrimination.py:59: in test_boundary_time
+    probe(opens=opens)
+tests/market/test_boundary_discrimination.py:40: in probe
+    assert out['open_time'].to_list() == present
+E   AssertionError: assert [datetime.dat...o(key='UTC'))] == [datetime.dat...timezone.utc)]
+E     
+E     At index 1 diff: datetime.datetime(2024, 1, 1, 1, 0, 59, 999999, tzinfo=zoneinfo.ZoneInfo(key='UTC')) != datetime.datetime(2024, 1, 1, 1, 2, tzinfo=datetime.timezone.utc)
+E     Left contains one more item: datetime.datetime(2024, 1, 1, 1, 2, tzinfo=zoneinfo.ZoneInfo(key='UTC'))
+E     Use -v to get more diff
+_______________________ test_differential_partition_grid _______________________
+tests/market/test_single_source.py:232: in test_differential_partition_grid
+    assert out['open_time'].to_list() == present
+E   AssertionError: assert [datetime.dat...o(key='UTC'))] == []
+E     
+E     Left contains one more item: datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=zoneinfo.ZoneInfo(key='UTC'))
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_time - Ass...
+FAILED tests/market/test_single_source.py::test_differential_partition_grid
+2 failed, 13 passed in 0.58s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "failed", "tests/market/test_single_source.py::test_differential_partition_grid": "failed"}
+```
+
+restored exit=0 file SHA256=1b0ddff88d5a8716781cd89479261d99931b186208190fdbe0af1bcbda867374 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=55104
+ISOLATION_OK pid=55104
+COLLECTED=15
+...............                                                          [100%]
+15 passed in 6.47s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+A36 overlay exit=1 partition SHA256=53210c229666e43438e260c7a446d3cdfadeed0f3cd9f16d9463b350bde9eeb0 tree SHA256=fa34ef27eb0c3bfc742474e41fd583b6f83370e5ab3a9b05176b555b9f50c9a3
+
+```text
+ISOLATION_OK pid=55082
+ISOLATION_OK pid=55082
+COLLECTED=15
+FFFF..........F                                                          [100%]
+=================================== FAILURES ===================================
+______________________________ test_boundary_time ______________________________
+tests/market/test_boundary_discrimination.py:53: in test_boundary_time
+    probe()
+tests/market/test_boundary_discrimination.py:41: in probe
+    assert report.expected_rows == 3
+E   AssertionError: assert 4 == 3
+E    +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+____________________________ test_boundary_numeric _____________________________
+tests/market/test_boundary_discrimination.py:68: in test_boundary_numeric
+    probe()
+tests/market/test_boundary_discrimination.py:41: in probe
+    assert report.expected_rows == 3
+E   AssertionError: assert 4 == 3
+E    +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+_____________________________ test_boundary_empty ______________________________
+tests/market/test_boundary_discrimination.py:85: in test_boundary_empty
+    probe()
+tests/market/test_boundary_discrimination.py:41: in probe
+    assert report.expected_rows == 3
+E   AssertionError: assert 4 == 3
+E    +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+__________________________ test_boundary_equivalence ___________________________
+tests/market/test_boundary_discrimination.py:98: in test_boundary_equivalence
+    omitted = probe()[0]
+              ^^^^^^^
+tests/market/test_boundary_discrimination.py:41: in probe
+    assert report.expected_rows == 3
+E   AssertionError: assert 4 == 3
+E    +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+_______________________ test_differential_partition_grid _______________________
+tests/market/test_single_source.py:231: in test_differential_partition_grid
+    assert report.expected_rows == c.grid_points_between(a, b, 60)
+E   AssertionError: assert 2 == 1
+E    +  where 2 = CheckReport(partition_id='a28', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+E    +  and   1 = <function grid_points_between at 0x109845da0>(datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), 60)
+E    +    where <function grid_points_between at 0x109845da0> = c.grid_points_between
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_time - Ass...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_numeric - ...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_empty - As...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_equivalence
+FAILED tests/market/test_single_source.py::test_differential_partition_grid
+5 failed, 10 passed in 1.96s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "failed", "tests/market/test_single_source.py::test_differential_partition_grid": "failed"}
+```
+
+内容还原相等：True
+
+#### M096 A36-NUMERIC
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A36-NUMERIC`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_boundary_discrimination.py`, `tests/market/test_single_source.py::test_differential_partition_grid`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=55307
+ISOLATION_OK pid=55307
+COLLECTED=15
+...............                                                          [100%]
+15 passed in 7.80s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+injected exit=1 file SHA256=907c2f824c6108bad6acb9a60e4836c84f65976f24d53e7037e978022285ae28 tree SHA256=a2289d5f43184e5dea84b736c60ea429e03f63f01ea7ad597131933aa9207c77
+
+```text
+ISOLATION_OK pid=55499
+ISOLATION_OK pid=55499
+COLLECTED=15
+.F.............                                                          [100%]
+=================================== FAILURES ===================================
+____________________________ test_boundary_numeric _____________________________
+tests/market/test_boundary_discrimination.py:70: in test_boundary_numeric
+    probe(risk=risk)
+tests/market/test_boundary_discrimination.py:30: in probe
+    req = c.ExecutionRequest.model_validate(payload)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/tmp/g2-p14-independent/mutant-96/src/quant_lab/market/contract.py:459: in _chk
+    check_decimal(Decimal(float(self.risk_budget)), "risk_budget")
+/tmp/g2-p14-independent/mutant-96/src/quant_lab/market/contract.py:89: in check_decimal
+    raise ContractError(f"{name} 超出 Decimal(38,12)：{d}")
+E   quant_lab.market.contract.ContractError: risk_budget 超出 Decimal(38,12)：1.0000000000000000209225608301284726753266340892878361046314239501953125E-8
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_numeric - ...
+1 failed, 14 passed in 6.02s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=55584
+ISOLATION_OK pid=55584
+COLLECTED=15
+...............                                                          [100%]
+15 passed in 6.00s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+A36 overlay exit=1 partition SHA256=cbb6a69508839bb9aaf38c5a19c89bbf769b9a375283e92e47de914c4cd68082 tree SHA256=a2fb1e995c19f5d4a37764880aa13d3f4a5c7b24183fec20cfaf94a2607261d3
+
+```text
+ISOLATION_OK pid=55536
+ISOLATION_OK pid=55536
+COLLECTED=15
+FFFF..........F                                                          [100%]
+=================================== FAILURES ===================================
+______________________________ test_boundary_time ______________________________
+tests/market/test_boundary_discrimination.py:53: in test_boundary_time
+    probe()
+tests/market/test_boundary_discrimination.py:41: in probe
+    assert report.expected_rows == 3
+E   AssertionError: assert 4 == 3
+E    +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+____________________________ test_boundary_numeric _____________________________
+tests/market/test_boundary_discrimination.py:68: in test_boundary_numeric
+    probe()
+tests/market/test_boundary_discrimination.py:41: in probe
+    assert report.expected_rows == 3
+E   AssertionError: assert 4 == 3
+E    +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+_____________________________ test_boundary_empty ______________________________
+tests/market/test_boundary_discrimination.py:85: in test_boundary_empty
+    probe()
+tests/market/test_boundary_discrimination.py:41: in probe
+    assert report.expected_rows == 3
+E   AssertionError: assert 4 == 3
+E    +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+__________________________ test_boundary_equivalence ___________________________
+tests/market/test_boundary_discrimination.py:98: in test_boundary_equivalence
+    omitted = probe()[0]
+              ^^^^^^^
+tests/market/test_boundary_discrimination.py:41: in probe
+    assert report.expected_rows == 3
+E   AssertionError: assert 4 == 3
+E    +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+_______________________ test_differential_partition_grid _______________________
+tests/market/test_single_source.py:231: in test_differential_partition_grid
+    assert report.expected_rows == c.grid_points_between(a, b, 60)
+E   AssertionError: assert 2 == 1
+E    +  where 2 = CheckReport(partition_id='a28', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+E    +  and   1 = <function grid_points_between at 0x107685da0>(datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), 60)
+E    +    where <function grid_points_between at 0x107685da0> = c.grid_points_between
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_time - Ass...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_numeric - ...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_empty - As...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_equivalence
+FAILED tests/market/test_single_source.py::test_differential_partition_grid
+5 failed, 10 passed in 1.74s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "failed", "tests/market/test_single_source.py::test_differential_partition_grid": "failed"}
+```
+
+内容还原相等：True
+
+#### M097 A36-EMPTY
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A36-EMPTY`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_boundary_discrimination.py`, `tests/market/test_single_source.py::test_differential_partition_grid`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=55537
+ISOLATION_OK pid=55537
+COLLECTED=15
+...............                                                          [100%]
+15 passed in 6.50s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+injected exit=1 file SHA256=6db2b67c4ab21277c1bc4b475d3f4b4e352cbd9c1ba53f81f6df4ef378d2185c tree SHA256=65b1d89d37a102d50969a16caa40921f4fa1070b27d9edebf48bfc8cb8848bb8
+
+```text
+ISOLATION_OK pid=55637
+ISOLATION_OK pid=55637
+COLLECTED=15
+..F............                                                          [100%]
+=================================== FAILURES ===================================
+_____________________________ test_boundary_empty ______________________________
+tests/market/test_boundary_discrimination.py:87: in test_boundary_empty
+    with pytest.raises(c.ContractError, match='长度|推导不一致'):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ContractError
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_empty - Fa...
+1 failed, 14 passed in 6.52s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=55701
+ISOLATION_OK pid=55701
+COLLECTED=15
+...............                                                          [100%]
+15 passed in 5.69s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+A36 overlay exit=1 partition SHA256=cbb6a69508839bb9aaf38c5a19c89bbf769b9a375283e92e47de914c4cd68082 tree SHA256=d8cd97c34cb76047ed1dd10e7ca65f9dd167c5a70bdaecd5461b6295e5e15be4
+
+```text
+ISOLATION_OK pid=55696
+ISOLATION_OK pid=55696
+COLLECTED=15
+FFFF..........F                                                          [100%]
+=================================== FAILURES ===================================
+______________________________ test_boundary_time ______________________________
+tests/market/test_boundary_discrimination.py:53: in test_boundary_time
+    probe()
+tests/market/test_boundary_discrimination.py:41: in probe
+    assert report.expected_rows == 3
+E   AssertionError: assert 4 == 3
+E    +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+____________________________ test_boundary_numeric _____________________________
+tests/market/test_boundary_discrimination.py:68: in test_boundary_numeric
+    probe()
+tests/market/test_boundary_discrimination.py:41: in probe
+    assert report.expected_rows == 3
+E   AssertionError: assert 4 == 3
+E    +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+_____________________________ test_boundary_empty ______________________________
+tests/market/test_boundary_discrimination.py:85: in test_boundary_empty
+    probe()
+tests/market/test_boundary_discrimination.py:41: in probe
+    assert report.expected_rows == 3
+E   AssertionError: assert 4 == 3
+E    +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+__________________________ test_boundary_equivalence ___________________________
+tests/market/test_boundary_discrimination.py:98: in test_boundary_equivalence
+    omitted = probe()[0]
+              ^^^^^^^
+tests/market/test_boundary_discrimination.py:41: in probe
+    assert report.expected_rows == 3
+E   AssertionError: assert 4 == 3
+E    +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+_______________________ test_differential_partition_grid _______________________
+tests/market/test_single_source.py:231: in test_differential_partition_grid
+    assert report.expected_rows == c.grid_points_between(a, b, 60)
+E   AssertionError: assert 2 == 1
+E    +  where 2 = CheckReport(partition_id='a28', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+E    +  and   1 = <function grid_points_between at 0x106e39da0>(datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), 60)
+E    +    where <function grid_points_between at 0x106e39da0> = c.grid_points_between
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_time - Ass...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_numeric - ...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_empty - As...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_equivalence
+FAILED tests/market/test_single_source.py::test_differential_partition_grid
+5 failed, 10 passed in 0.26s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "failed", "tests/market/test_single_source.py::test_differential_partition_grid": "failed"}
+```
+
+内容还原相等：True
+
+#### M098 A36-EQUIVALENCE
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A36-EQUIVALENCE`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_boundary_discrimination.py`, `tests/market/test_single_source.py::test_differential_partition_grid`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=55646
+ISOLATION_OK pid=55646
+COLLECTED=15
+...............                                                          [100%]
+15 passed in 6.26s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+injected exit=1 file SHA256=4521f426ed7397b125b16d0711f55cf686dcd6ff222748ac2a9467c00660af61 tree SHA256=60c79434de5ec70f517c02094f0873f0cad11c0623f86a6eeac12c04b7c7109a
+
+```text
+ISOLATION_OK pid=55713
+ISOLATION_OK pid=55713
+COLLECTED=15
+...F...........                                                          [100%]
+=================================== FAILURES ===================================
+__________________________ test_boundary_equivalence ___________________________
+tests/market/test_boundary_discrimination.py:99: in test_boundary_equivalence
+    explicit = probe(spelling=START, allocation=(Decimal(1),))[0]
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/market/test_boundary_discrimination.py:32: in probe
+    assert req.resolved_t_start(c.resolve_policy(req.policy_version)) == START
+E   AssertionError: assert datetime.datetime(2024, 1, 1, 1, 0, 0, 1, tzinfo=datetime.timezone.utc) == datetime.datetime(2024, 1, 1, 1, 0, tzinfo=datetime.timezone.utc)
+E    +  where datetime.datetime(2024, 1, 1, 1, 0, 0, 1, tzinfo=datetime.timezone.utc) = resolved_t_start(ExecutionPolicy(version='fixture-zero-v1', latency_s=0, ladder_steps=2, costs={'base': CostSpec(maker_fee=Decimal('0')...zon_s=432000, entry_ttl_s=86400, entry_fraction_rule='equal', tp_fraction_rule='equal', tp_total_fraction=Decimal('1')))
+E    +    where resolved_t_start = ExecutionRequest(episode_id='E03', graph_version='gv-fixture', decision_snapshot_hash='dsh-E03', t_dec=datetime.dateti...de='one_way', entry_ttl_s=3600, entry_fractions=(Decimal('1'),), tp_fractions=(Decimal('1'),), horizon_source='caller').resolved_t_start
+E    +    and   ExecutionPolicy(version='fixture-zero-v1', latency_s=0, ladder_steps=2, costs={'base': CostSpec(maker_fee=Decimal('0')...zon_s=432000, entry_ttl_s=86400, entry_fraction_rule='equal', tp_fraction_rule='equal', tp_total_fraction=Decimal('1')) = <function resolve_policy at 0x106e3a520>('fixture-zero-v1')
+E    +      where <function resolve_policy at 0x106e3a520> = c.resolve_policy
+E    +      and   'fixture-zero-v1' = ExecutionRequest(episode_id='E03', graph_version='gv-fixture', decision_snapshot_hash='dsh-E03', t_dec=datetime.dateti...de='one_way', entry_ttl_s=3600, entry_fractions=(Decimal('1'),), tp_fractions=(Decimal('1'),), horizon_source='caller').policy_version
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_equivalence
+1 failed, 14 passed in 5.42s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=55774
+ISOLATION_OK pid=55774
+COLLECTED=15
+...............                                                          [100%]
+15 passed in 5.02s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+A36 overlay exit=1 partition SHA256=cbb6a69508839bb9aaf38c5a19c89bbf769b9a375283e92e47de914c4cd68082 tree SHA256=0f3a528f1dfd551abd3e6d6cbc31dea3012b26494ee38e0f1914d05a85dd9f0e
+
+```text
+ISOLATION_OK pid=55769
+ISOLATION_OK pid=55769
+COLLECTED=15
+FFFF..........F                                                          [100%]
+=================================== FAILURES ===================================
+______________________________ test_boundary_time ______________________________
+tests/market/test_boundary_discrimination.py:53: in test_boundary_time
+    probe()
+tests/market/test_boundary_discrimination.py:41: in probe
+    assert report.expected_rows == 3
+E   AssertionError: assert 4 == 3
+E    +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+____________________________ test_boundary_numeric _____________________________
+tests/market/test_boundary_discrimination.py:68: in test_boundary_numeric
+    probe()
+tests/market/test_boundary_discrimination.py:41: in probe
+    assert report.expected_rows == 3
+E   AssertionError: assert 4 == 3
+E    +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+_____________________________ test_boundary_empty ______________________________
+tests/market/test_boundary_discrimination.py:85: in test_boundary_empty
+    probe()
+tests/market/test_boundary_discrimination.py:41: in probe
+    assert report.expected_rows == 3
+E   AssertionError: assert 4 == 3
+E    +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+__________________________ test_boundary_equivalence ___________________________
+tests/market/test_boundary_discrimination.py:98: in test_boundary_equivalence
+    omitted = probe()[0]
+              ^^^^^^^
+tests/market/test_boundary_discrimination.py:41: in probe
+    assert report.expected_rows == 3
+E   AssertionError: assert 4 == 3
+E    +  where 4 = CheckReport(partition_id='a36', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+_______________________ test_differential_partition_grid _______________________
+tests/market/test_single_source.py:231: in test_differential_partition_grid
+    assert report.expected_rows == c.grid_points_between(a, b, 60)
+E   AssertionError: assert 2 == 1
+E    +  where 2 = CheckReport(partition_id='a28', data_type='markPriceKlines', interval='1m', instrument_id='BTCUSDT-PERP.BINANCE-UM', p...5c1694761caeb9543fdc57d1505a50c811d25d706eec73f69daa03ced74', rule_version='partition-check-v1', status='ok', notes=[]).expected_rows
+E    +  and   1 = <function grid_points_between at 0x10b6a9da0>(datetime.datetime(2024, 1, 31, 23, 58, 59, 999999, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 2, 1, 0, 0, tzinfo=datetime.timezone.utc), 60)
+E    +    where <function grid_points_between at 0x10b6a9da0> = c.grid_points_between
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_time - Ass...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_numeric - ...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_empty - As...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_equivalence
+FAILED tests/market/test_single_source.py::test_differential_partition_grid
+5 failed, 10 passed in 0.25s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "failed", "tests/market/test_single_source.py::test_differential_partition_grid": "failed"}
+```
+
+内容还原相等：True
+
+#### M099 A37-PRIORITY
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A37-PRIORITY`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_boundary_discrimination.py`, `tests/market/test_single_source.py::test_differential_partition_grid`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=55768
+ISOLATION_OK pid=55768
+COLLECTED=15
+...............                                                          [100%]
+15 passed in 5.05s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+injected exit=1 file SHA256=f7d820ffac60c4ddb981edb6c7eb40e87cf606de05c2e3718a8049758a0225fc tree SHA256=5a33167d4228594c4abc0f6329c8afe614bbc2001087dd9294fc6533c674739b
+
+```text
+ISOLATION_OK pid=55799
+ISOLATION_OK pid=55799
+COLLECTED=15
+....FFFFFFFFFF.                                                          [100%]
+=================================== FAILURES ===================================
+____ test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok] _____
+tests/market/test_boundary_discrimination.py:120: in test_a37_evidence_wins_over_label
+    assert result.censor_reason == reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'SYMBOL_TIME_INVALID'
+E     
+E     - SYMBOL_TIME_INVALID
+E     + LABEL_RIGHT_CENSORED
+____ test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok] ____
+tests/market/test_boundary_discrimination.py:120: in test_a37_evidence_wins_over_label
+    assert result.censor_reason == reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'RULE_HISTORY_MISSING'
+E     
+E     - RULE_HISTORY_MISSING
+E     + LABEL_RIGHT_CENSORED
+___________ test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok] ___________
+tests/market/test_boundary_discrimination.py:120: in test_a37_evidence_wins_over_label
+    assert result.censor_reason == reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E     
+E     - BAR_GAP
+E     + LABEL_RIGHT_CENSORED
+_________ test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok] __________
+tests/market/test_boundary_discrimination.py:120: in test_a37_evidence_wins_over_label
+    assert result.censor_reason == reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'MARK_STALE'
+E     
+E     - MARK_STALE
+E     + LABEL_RIGHT_CENSORED
+___ test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok] ___
+tests/market/test_boundary_discrimination.py:120: in test_a37_evidence_wins_over_label
+    assert result.censor_reason == reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'FUNDING_SCHEDULE_GAP'
+E     
+E     - FUNDING_SCHEDULE_GAP
+E     + LABEL_RIGHT_CENSORED
+_____ test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok] _____
+tests/market/test_boundary_discrimination.py:120: in test_a37_evidence_wins_over_label
+    assert result.censor_reason == reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'SYMBOL_TIME_INVALID'
+E     
+E     - SYMBOL_TIME_INVALID
+E     + LABEL_RIGHT_CENSORED
+____ test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok] _____
+tests/market/test_boundary_discrimination.py:120: in test_a37_evidence_wins_over_label
+    assert result.censor_reason == reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'RULE_HISTORY_MISSING'
+E     
+E     - RULE_HISTORY_MISSING
+E     + LABEL_RIGHT_CENSORED
+___________ test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok] ____________
+tests/market/test_boundary_discrimination.py:120: in test_a37_evidence_wins_over_label
+    assert result.censor_reason == reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'BAR_GAP'
+E     
+E     - BAR_GAP
+E     + LABEL_RIGHT_CENSORED
+__________ test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok] __________
+tests/market/test_boundary_discrimination.py:120: in test_a37_evidence_wins_over_label
+    assert result.censor_reason == reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'MARK_STALE'
+E     
+E     - MARK_STALE
+E     + LABEL_RIGHT_CENSORED
+___ test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok] ____
+tests/market/test_boundary_discrimination.py:120: in test_a37_evidence_wins_over_label
+    assert result.censor_reason == reason
+E   AssertionError: assert 'LABEL_RIGHT_CENSORED' == 'FUNDING_SCHEDULE_GAP'
+E     
+E     - FUNDING_SCHEDULE_GAP
+E     + LABEL_RIGHT_CENSORED
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]
+FAILED tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]
+10 failed, 5 passed in 6.19s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "failed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=55863
+ISOLATION_OK pid=55863
+COLLECTED=15
+...............                                                          [100%]
+15 passed in 5.69s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+内容还原相等：True
+
+#### M100 A33-MATRIX-CONTROL
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A33-MATRIX-CONTROL`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_boundary_discrimination.py`, `tests/market/test_single_source.py::test_differential_partition_grid`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=55810
+ISOLATION_OK pid=55810
+COLLECTED=15
+...............                                                          [100%]
+15 passed in 5.07s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+injected exit=1 file SHA256=b4b7a2b4b0889b045b32a3aec936091278130ef555bc6aa788d97499d254ad0a tree SHA256=878be9b6b37884e75aefdd0831723a608f5090af0f5f6629c3edc1a7db2e7332
+
+```text
+ISOLATION_OK pid=55869
+ISOLATION_OK pid=55869
+COLLECTED=15
+FFFF...........                                                          [100%]
+=================================== FAILURES ===================================
+______________________________ test_boundary_time ______________________________
+tests/market/test_boundary_discrimination.py:53: in test_boundary_time
+    probe()
+tests/market/test_boundary_discrimination.py:38: in probe
+    out, qs, report = partition(frame)
+                      ^^^^^^^^^^^^^^^^
+tests/market/test_boundary_discrimination.py:48: in partition
+    return pc.check_bars(frame, pid='a36', data_type='markPriceKlines', interval='1m',
+/tmp/g2-p14-independent/mutant-100/src/quant_lab/market/partition_check.py:253: in check_bars
+    assert rep.missing >= 0, "present 必须是期望网格的子集"
+           ^^^^^^^^^^^^^^^^
+E   AssertionError: present 必须是期望网格的子集
+____________________________ test_boundary_numeric _____________________________
+tests/market/test_boundary_discrimination.py:68: in test_boundary_numeric
+    probe()
+tests/market/test_boundary_discrimination.py:38: in probe
+    out, qs, report = partition(frame)
+                      ^^^^^^^^^^^^^^^^
+tests/market/test_boundary_discrimination.py:48: in partition
+    return pc.check_bars(frame, pid='a36', data_type='markPriceKlines', interval='1m',
+/tmp/g2-p14-independent/mutant-100/src/quant_lab/market/partition_check.py:253: in check_bars
+    assert rep.missing >= 0, "present 必须是期望网格的子集"
+           ^^^^^^^^^^^^^^^^
+E   AssertionError: present 必须是期望网格的子集
+_____________________________ test_boundary_empty ______________________________
+tests/market/test_boundary_discrimination.py:85: in test_boundary_empty
+    probe()
+tests/market/test_boundary_discrimination.py:38: in probe
+    out, qs, report = partition(frame)
+                      ^^^^^^^^^^^^^^^^
+tests/market/test_boundary_discrimination.py:48: in partition
+    return pc.check_bars(frame, pid='a36', data_type='markPriceKlines', interval='1m',
+/tmp/g2-p14-independent/mutant-100/src/quant_lab/market/partition_check.py:253: in check_bars
+    assert rep.missing >= 0, "present 必须是期望网格的子集"
+           ^^^^^^^^^^^^^^^^
+E   AssertionError: present 必须是期望网格的子集
+__________________________ test_boundary_equivalence ___________________________
+tests/market/test_boundary_discrimination.py:98: in test_boundary_equivalence
+    omitted = probe()[0]
+              ^^^^^^^
+tests/market/test_boundary_discrimination.py:38: in probe
+    out, qs, report = partition(frame)
+                      ^^^^^^^^^^^^^^^^
+tests/market/test_boundary_discrimination.py:48: in partition
+    return pc.check_bars(frame, pid='a36', data_type='markPriceKlines', interval='1m',
+/tmp/g2-p14-independent/mutant-100/src/quant_lab/market/partition_check.py:253: in check_bars
+    assert rep.missing >= 0, "present 必须是期望网格的子集"
+           ^^^^^^^^^^^^^^^^
+E   AssertionError: present 必须是期望网格的子集
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_time - Ass...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_numeric - ...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_empty - As...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_equivalence
+4 failed, 11 passed in 4.08s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "failed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=55907
+ISOLATION_OK pid=55907
+COLLECTED=15
+...............                                                          [100%]
+15 passed in 5.24s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[False-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-BAR_GAP-bars_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-FUNDING_SCHEDULE_GAP-funding_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-MARK_STALE-mark_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-RULE_HISTORY_MISSING-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_a37_evidence_wins_over_label[True-SYMBOL_TIME_INVALID-rules_ok]": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed", "tests/market/test_single_source.py::test_differential_partition_grid": "passed"}
+```
+
+内容还原相等：True
+
+#### M101 A33-UNREACHABLE-CONTROL
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A33-UNREACHABLE-CONTROL`
+目标：`src/quant_lab/market/vision.py`；selector：`tests/market/test_boundary_discrimination.py::test_boundary_time`, `tests/market/test_boundary_discrimination.py::test_boundary_numeric`, `tests/market/test_boundary_discrimination.py::test_boundary_empty`, `tests/market/test_boundary_discrimination.py::test_boundary_equivalence`
+baseline exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53091
+ISOLATION_OK pid=53091
+COLLECTED=4
+....                                                                     [100%]
+4 passed in 1.85s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed"}
+```
+
+injected exit=0 file SHA256=621d345e2efab4ea12e7295a6f0f97fc71802152917eb66f32963496771d2f21 tree SHA256=10bb27e2638a9f0f2c3648d72b98120d46b3504afd17630774486649b1cc7871
+
+```text
+ISOLATION_OK pid=53203
+ISOLATION_OK pid=53203
+COLLECTED=4
+....                                                                     [100%]
+4 passed in 1.29s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed"}
+```
+
+restored exit=0 file SHA256=30f0dcdf25bd9e9869fe13d516fdd7a0d7646528e440cf5f85ff993147614cd8 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53250
+ISOLATION_OK pid=53250
+COLLECTED=4
+....                                                                     [100%]
+4 passed in 0.72s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed"}
+```
+
+内容还原相等：True
+
+#### M102 A33-SELECTOR-CONTROL
+复跑：`.venv-g2/bin/python -c 'import pathlib; s=pathlib.Path("docs/adr/review-G2-P1.md").read_text(); exec(s.split(chr(10)+"<!-- P14_RUNNER -->"+chr(10),1)[1].split(chr(96)*3+"python"+chr(10),1)[1].split(chr(10)+chr(96)*3,1)[0])' A33-SELECTOR-CONTROL`
+目标：`src/quant_lab/market/contract.py`；selector：`tests/market/test_boundary_discrimination.py::test_boundary_time`, `tests/market/test_boundary_discrimination.py::test_boundary_numeric`, `tests/market/test_boundary_discrimination.py::test_boundary_empty`, `tests/market/test_boundary_discrimination.py::test_boundary_equivalence`
+baseline exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53260
+ISOLATION_OK pid=53260
+COLLECTED=4
+....                                                                     [100%]
+4 passed in 0.93s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed"}
+```
+
+injected exit=1 file SHA256=b4b7a2b4b0889b045b32a3aec936091278130ef555bc6aa788d97499d254ad0a tree SHA256=878be9b6b37884e75aefdd0831723a608f5090af0f5f6629c3edc1a7db2e7332
+
+```text
+ISOLATION_OK pid=53270
+ISOLATION_OK pid=53270
+COLLECTED=4
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+______________________________ test_boundary_time ______________________________
+tests/market/test_boundary_discrimination.py:53: in test_boundary_time
+    probe()
+tests/market/test_boundary_discrimination.py:38: in probe
+    out, qs, report = partition(frame)
+                      ^^^^^^^^^^^^^^^^
+tests/market/test_boundary_discrimination.py:48: in partition
+    return pc.check_bars(frame, pid='a36', data_type='markPriceKlines', interval='1m',
+/tmp/g2-p14-independent/mutant-102/src/quant_lab/market/partition_check.py:253: in check_bars
+    assert rep.missing >= 0, "present 必须是期望网格的子集"
+           ^^^^^^^^^^^^^^^^
+E   AssertionError: present 必须是期望网格的子集
+____________________________ test_boundary_numeric _____________________________
+tests/market/test_boundary_discrimination.py:68: in test_boundary_numeric
+    probe()
+tests/market/test_boundary_discrimination.py:38: in probe
+    out, qs, report = partition(frame)
+                      ^^^^^^^^^^^^^^^^
+tests/market/test_boundary_discrimination.py:48: in partition
+    return pc.check_bars(frame, pid='a36', data_type='markPriceKlines', interval='1m',
+/tmp/g2-p14-independent/mutant-102/src/quant_lab/market/partition_check.py:253: in check_bars
+    assert rep.missing >= 0, "present 必须是期望网格的子集"
+           ^^^^^^^^^^^^^^^^
+E   AssertionError: present 必须是期望网格的子集
+_____________________________ test_boundary_empty ______________________________
+tests/market/test_boundary_discrimination.py:85: in test_boundary_empty
+    probe()
+tests/market/test_boundary_discrimination.py:38: in probe
+    out, qs, report = partition(frame)
+                      ^^^^^^^^^^^^^^^^
+tests/market/test_boundary_discrimination.py:48: in partition
+    return pc.check_bars(frame, pid='a36', data_type='markPriceKlines', interval='1m',
+/tmp/g2-p14-independent/mutant-102/src/quant_lab/market/partition_check.py:253: in check_bars
+    assert rep.missing >= 0, "present 必须是期望网格的子集"
+           ^^^^^^^^^^^^^^^^
+E   AssertionError: present 必须是期望网格的子集
+__________________________ test_boundary_equivalence ___________________________
+tests/market/test_boundary_discrimination.py:98: in test_boundary_equivalence
+    omitted = probe()[0]
+              ^^^^^^^
+tests/market/test_boundary_discrimination.py:38: in probe
+    out, qs, report = partition(frame)
+                      ^^^^^^^^^^^^^^^^
+tests/market/test_boundary_discrimination.py:48: in partition
+    return pc.check_bars(frame, pid='a36', data_type='markPriceKlines', interval='1m',
+/tmp/g2-p14-independent/mutant-102/src/quant_lab/market/partition_check.py:253: in check_bars
+    assert rep.missing >= 0, "present 必须是期望网格的子集"
+           ^^^^^^^^^^^^^^^^
+E   AssertionError: present 必须是期望网格的子集
+=========================== short test summary info ============================
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_time - Ass...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_numeric - ...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_empty - As...
+FAILED tests/market/test_boundary_discrimination.py::test_boundary_equivalence
+4 failed in 0.25s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_boundary_empty": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "failed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "failed"}
+```
+
+restored exit=0 file SHA256=8ccced9abb38f402e51a9b2dc46e7013625d76525a3764f4d35c572217e02be7 tree SHA256=d965a459b3672805e66d525807db88bec8275d30ca615c9cef2859cca43bce90
+
+```text
+ISOLATION_OK pid=53284
+ISOLATION_OK pid=53284
+COLLECTED=4
+....                                                                     [100%]
+4 passed in 1.72s
+OUTCOMES={"tests/market/test_boundary_discrimination.py::test_boundary_empty": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_equivalence": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_numeric": "passed", "tests/market/test_boundary_discrimination.py::test_boundary_time": "passed"}
+```
+
+内容还原相等：True
+
+### 原样可复跑的独立执行器
+此执行器真实写盘副本，分别启动三个子进程；不修改仓库源码或测试。可选传一个或多个上列 case 名称。
+
+<!-- P14_RUNNER -->
+
+```python
+import os,pathlib,subprocess,json,hashlib,shutil,concurrent.futures,sys,ast,time,tempfile
+source_root=pathlib.Path.cwd().resolve()
+report=(source_root/'docs/adr/review-G2-P1.md').read_text()
+def block(marker,language):
+ return report.split('\n<!-- '+marker+' -->\n',1)[1].split('```'+language+'\n',1)[1].split('\n```',1)[0]
+items=json.loads(block('P14_CASES','json'))
+WORK=pathlib.Path(tempfile.mkdtemp(prefix='g2-p14-replay-')).resolve()
+BASE=WORK/'baseline'
+for home in ('src','tests/market','contracts','data/lake/market'):
+ if (source_root/home).exists():
+  shutil.copytree(source_root/home,BASE/home,ignore=shutil.ignore_patterns('__pycache__','.pytest_cache'))
+(BASE/'tests/__init__.py').write_text('')
+(BASE/'pytest.ini').write_text('[pytest]\nfilterwarnings = ignore::DeprecationWarning\n')
+PY=str(source_root/'.venv-g2/bin/python')
+CHILD=r'''
+import sys,os,json,pathlib,importlib,hashlib
+root=pathlib.Path.cwd(); expected=json.loads(sys.argv[1]); selectors=json.loads(sys.argv[2]); outcomes={}
+def verify():
+ for relative,sha in expected.items():
+  assert hashlib.sha256((root/relative).read_bytes()).hexdigest()==sha
+ for name in ('contract','execution','kernel_a','nautilus_adapter','single_source','partition_check','vision'):
+  module=importlib.import_module('quant_lab.market.'+name)
+  assert pathlib.Path(module.__file__).resolve()==root/'src/quant_lab/market'/(name+'.py'),module.__file__
+ print('ISOLATION_OK pid='+str(os.getpid()),flush=True)
+verify()
+import pytest
+class Evidence:
+ def pytest_collection_finish(self,session):
+  verify()
+  for item in session.items:
+   assert pathlib.Path(item.path).resolve().is_relative_to(root/'tests/market')
+  print('COLLECTED='+str(len(session.items)),flush=True)
+ def pytest_runtest_logreport(self,report):
+  if report.when=='call' or report.failed:
+   outcomes[report.nodeid]=report.outcome
+code=pytest.main(['-c',str(root/'pytest.ini'),'--confcutdir='+str(root),*selectors,'-q','-p','no:cacheprovider','--tb=short'],plugins=[Evidence()])
+print('OUTCOMES='+json.dumps(outcomes,sort_keys=True),flush=True)
+sys.exit(code)
+'''
+def inventory(root):
+ return {str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for h in ('src','tests/market','contracts') for p in sorted((root/h).rglob('*')) if p.is_file() and '__pycache__' not in p.parts}
+def sha(raw):return hashlib.sha256(raw).hexdigest()
+def run(root,selectors):
+ before=inventory(root)
+ expected={k:v for k,v in before.items() if k.startswith('src/quant_lab/market/')}
+ env={k:v for k,v in os.environ.items() if not k.startswith(('PYTHON','PYTEST'))};env.update(PYTHONDONTWRITEBYTECODE='1',PYTHONPATH=str(root/'src'),PYTEST_DISABLE_PLUGIN_AUTOLOAD='1')
+ r=subprocess.run([PY,'-B','-c',CHILD,json.dumps(expected),json.dumps(selectors)],cwd=root,env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=300)
+ assert inventory(root)==before
+ assert 'ISOLATION_OK' in r.stdout and 'COLLECTED=' in r.stdout,r.stdout
+ line=next(l for l in r.stdout.splitlines() if l.startswith('OUTCOMES='))
+ return {'exit':r.returncode,'output':r.stdout,'outcomes':json.loads(line[9:]),'tree_sha256':sha(json.dumps(before,sort_keys=True).encode())}
+def case(index,item):
+ root=WORK/('mutant-'+str(index));root.mkdir()
+ for h in ('src','tests/market','contracts'):
+  shutil.copytree(BASE/h,root/h,ignore=shutil.ignore_patterns('__pycache__'))
+ (root/'tests/__init__.py').write_text('');shutil.copyfile(BASE/'pytest.ini',root/'pytest.ini')
+ # Full-suite archive tests require real public data, shared read-only by symlink.
+ if (BASE/'data').exists():(root/'data').symlink_to(BASE/'data',target_is_directory=True)
+ original=inventory(root);target=root/item['file'];raw=target.read_bytes();source=raw.decode()
+ d={'case':item,'before_sha256':sha(raw)}
+ try:
+  old=item['old']; assert old is None or old in source,(item['name'],'expression absent')
+  mutant=source+item['new'] if old is None else source.replace(old,item['new'],1 if item.get('first') else -1)
+  ast.parse(mutant);assert mutant!=source
+  d['baseline']=run(root,item['tests']);assert d['baseline']['exit']==0,d['baseline']['output']
+  target.write_text(mutant);d['injected_sha256']=sha(target.read_bytes());d['injected']=run(root,item['tests'])
+  if item.get('overlay'):
+   ctrl=root/'src/quant_lab/market/partition_check.py'; cr=ctrl.read_bytes(); cs=cr.decode(); assert 'rep.expected_rows = exp_n' in cs
+   ctrl.write_text(cs.replace('rep.expected_rows = exp_n','rep.expected_rows = exp_n + 1'))
+   d['overlay']=run(root,item['tests']);d['overlay_sha256']=sha(ctrl.read_bytes());ctrl.write_bytes(cr)
+ finally:
+  target.write_bytes(raw)
+  assert inventory(root)==original
+  d['restored_sha256']=sha(target.read_bytes());assert d['restored_sha256']==d['before_sha256']
+  d['restored']=run(root,item['tests'])
+  (WORK/('M%03d.json'%index)).write_text(json.dumps(d,indent=2,ensure_ascii=False))
+  shutil.rmtree(root)
+ print(index,item['name'],'B/I/R',*[d[x]['exit'] for x in ('baseline','injected','restored')],'failures',sum(v=='failed' for v in d['injected']['outcomes'].values()),flush=True)
+ return d
+
+pristine=inventory(source_root)
+selected=list(enumerate(items))
+if len(sys.argv)>1:
+ selected=[(i,x) for i,x in selected if x['name'] in sys.argv[1:]]
+assert selected,'unknown case name'
+# For claims of GREEN, run a known RED on the identical selector in this invocation.
+controls={'S37-middle':'A24-real-inline-latency','S37-tail':'A24-real-inline-latency','A33-UNREACHABLE-CONTROL':'A33-SELECTOR-CONTROL'}
+try:
+ for i,item in selected:
+  if item['name'] in controls:
+   ci,control=next((j,x) for j,x in enumerate(items) if x['name']==controls[item['name']])
+   assert control['tests']==item['tests']
+   evidence=case(ci,control)
+   print(json.dumps(evidence,ensure_ascii=False,indent=2),flush=True)
+   assert evidence['injected']['exit']==1
+  evidence=case(i,item)
+  print(json.dumps(evidence,ensure_ascii=False,indent=2),flush=True)
+  assert evidence['baseline']['exit']==evidence['restored']['exit']==0
+ assert inventory(source_root)==pristine
+ print('ORIGINAL_TREE_SHA_EQUAL True',flush=True)
+finally:
+ shutil.rmtree(WORK)
+```
+
+
+<!-- P14_CASES -->
+
+```json
+[
+  {
+    "name": "CONTROL-expected-plus-one",
+    "file": "src/quant_lab/market/vision.py",
+    "old": "return grid_points_between(a, b, INTERVAL_SECONDS[interval])",
+    "new": "return grid_points_between(a, b, INTERVAL_SECONDS[interval]) + 1",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_vision_count"
+    ]
+  },
+  {
+    "name": "S29-first-gap",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "first_gap = bool(df.height and grid_points_between(cal_from, df[key][0], sec) > 0)",
+    "new": "first_gap = bool(df.height and df[key][0] > cal_from)",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s29_subsecond_calendar_start_has_no_false_first_gap"
+    ]
+  },
+  {
+    "name": "S29-range-only",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "present = df.filter(legal)[key]",
+    "new": "present = df.filter((pl.col(key) >= cal_from) & (pl.col(key) < cal_to))[key]",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s29_off_grid_never_covers_calendar"
+    ]
+  },
+  {
+    "name": "S29-truncated-count",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "exp_n = grid_points_between(cal_from, cal_to, sec)",
+    "new": "exp_n = int((cal_to - cal_from).total_seconds()) // sec",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s29_subsecond_end_includes_last_grid_point"
+    ]
+  },
+  {
+    "name": "S31-remove-output-gate",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "    check_policy_hash_consistency(df)\n",
+    "new": "",
+    "tests": [
+      "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes"
+    ]
+  },
+  {
+    "name": "S31-sanitized-copy",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "    check_policy_hash_consistency(df)\n",
+    "new": "    check_policy_hash_consistency(df.with_columns(pl.lit(\"sanitized\").alias(\"policy_hash\")))\n",
+    "tests": [
+      "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes"
+    ]
+  },
+  {
+    "name": "S31-redacted-version",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "{r['policy_version']} →",
+    "new": "REDACTED →",
+    "tests": [
+      "tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes"
+    ]
+  },
+  {
+    "name": "S38-remove-domain",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "if value < 0:",
+    "new": "if False:",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s38_policy_rejects_negative_latency"
+    ]
+  },
+  {
+    "name": "S38-explicit-only",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "if exp_t_start < self.t_dec:",
+    "new": "if self.t_start is not None and self.t_start < self.t_dec:",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s38_resolved_start_checked_for_both_spellings"
+    ]
+  },
+  {
+    "name": "S39-discard-return",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "expected = grid_points_between(a, until, interval_s)",
+    "new": "grid_points_between(a, min(b, dt.datetime.now(dt.UTC)), INTERVAL_SECONDS[\"1m\"])\n        expected = 0",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage"
+    ]
+  },
+  {
+    "name": "S39-inline-count",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "expected = grid_points_between(a, until, interval_s)",
+    "new": "expected = int((min(b, dt.datetime.now(dt.UTC)) - a).total_seconds() // INTERVAL_SECONDS[\"1m\"])",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage"
+    ]
+  },
+  {
+    "name": "S39-wrong-helper-value",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "return max(0, last_idx - first_idx + 1)",
+    "new": "return max(0, last_idx - first_idx + 1) + 7",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s39_loader_grid_return_controls_coverage"
+    ]
+  },
+  {
+    "name": "S33-wrong-expected",
+    "file": "src/quant_lab/market/vision.py",
+    "old": "return grid_points_between(a, b, INTERVAL_SECONDS[interval])",
+    "new": "return grid_points_between(a, b, INTERVAL_SECONDS[interval]) + 1",
+    "tests": [
+      "tests/market/test_review_p1_round10.py::test_s33_aligned_calendar_equivalence"
+    ]
+  },
+  {
+    "name": "modified-existing-first-point-sentinel",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "expected = first_grid_point(self.t_start, interval_s)",
+    "new": "expected = self.t_start",
+    "tests": [
+      "tests/market/test_constants_effective.py::test_grid_math_single_source_and_exact_to_microsecond"
+    ]
+  },
+  {
+    "name": "A24-real-caller-missing",
+    "file": "src/quant_lab/market/vision.py",
+    "old": "return grid_points_between(a, b, INTERVAL_SECONDS[interval])",
+    "new": "return int((b - a).total_seconds() // INTERVAL_SECONDS[interval])",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry"
+    ]
+  },
+  {
+    "name": "A24-real-caller-extra",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _unregistered_grid_probe():\n    return grid_points_between(a, b, 60)\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry"
+    ]
+  },
+  {
+    "name": "A24-gate-missing-disabled",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "        if missing:\n",
+    "new": "        if False:\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[missing]"
+    ]
+  },
+  {
+    "name": "A24-gate-extra-disabled",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "        if extra:\n",
+    "new": "        if False:\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_registry_gate_fails_when_mutated[extra]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-latency",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return t + dt.timedelta(seconds=policy.latency_s)\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-latency",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P1_inline_latency\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[latency]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-int-seconds",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return int((b - a).total_seconds())\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-int-seconds",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P2_int_total_seconds\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[int-seconds]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-duration-div",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return (b - a).total_seconds() // interval_s\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-duration-div",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P3_duration_div\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[duration-div]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-start-or",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return req.t_start or req.t_dec\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-start-or",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P4_t_start_or_t_dec\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[start-or]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-expiry-add",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return t + dt.timedelta(seconds=req.entry_ttl_s)\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-expiry-add",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P5_inline_entry_ttl\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[expiry-add]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-middle-grid",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return o - prev > iv\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-middle-grid",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P6_inline_grid_comparison\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[middle-grid]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-tail-grid",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    return prev + iv < end\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-tail-grid",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P6_inline_grid_comparison\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[tail-grid]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-ttl-expression",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    ttl = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-ttl-expression",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-expression]"
+    ]
+  },
+  {
+    "name": "A24-real-inline-ttl-branches",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _inline_probe():\n    ttl = plan.expiry.entry_ttl_s\n    if ttl is None:\n        ttl = policy.entry_ttl_s\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A24-disable-pattern-ttl-branches",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_lint_gate_fails_on_injected_violation[ttl-branches]"
+    ]
+  },
+  {
+    "name": "A24-foreign-freeze",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "        out.extend(lint.hits)",
+    "new": "        out.extend(hit for hit in lint.hits if not hit[2].startswith(\"research/\"))",
+    "tests": [
+      "tests/market/test_single_source.py::test_foreign_hits_registry_is_exact"
+    ]
+  },
+  {
+    "name": "S32-build-start-bypass",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "horizon_end = derived_t_start(t_dec, policy) + dt.timedelta(seconds=derived_window_s(plan, policy, ttl))",
+    "new": "horizon_end = t_dec + dt.timedelta(seconds=policy.latency_s + derived_window_s(plan, policy, ttl))",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry",
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "S35-ttl-before",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "\"entry_ttl_s\": resolve_entry_ttl_s(plan, pol)",
+    "new": "\"entry_ttl_s\": pol.entry_ttl_s",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry"
+    ]
+  },
+  {
+    "name": "S35-ttl-after",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "exp_ttl = resolve_entry_ttl_s(self.order_plan, pol)",
+    "new": "exp_ttl = pol.entry_ttl_s",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry"
+    ]
+  },
+  {
+    "name": "S35-ttl-builder",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "ttl = resolve_entry_ttl_s(plan, policy)",
+    "new": "ttl = policy.entry_ttl_s",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry"
+    ]
+  },
+  {
+    "name": "S35-expiry-A-timeline",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)\n        if deadline <= end:",
+    "new": "deadline = self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)\n        if deadline <= end:",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry",
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "S35-expiry-A-entries",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)\n        for i, (e, p, q) in enumerate(legs):",
+    "new": "deadline = self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)\n        for i, (e, p, q) in enumerate(legs):",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry",
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "S35-expiry-B",
+    "file": "src/quant_lab/market/nautilus_adapter.py",
+    "old": "deadline = entry_expiry_at(t_start, req.entry_ttl_s)",
+    "new": "deadline = t_start + dt.timedelta(seconds=req.entry_ttl_s)",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry",
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "S37-middle",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if opened != expected:",
+    "new": "if opened < expected:",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "S37-tail",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if grid_points_between(expected, end, interval_s) > 0:",
+    "new": "if expected < end - dt.timedelta(seconds=60):",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ]
+  },
+  {
+    "name": "A28-partition-count",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "exp_n = grid_points_between(cal_from, cal_to, sec)",
+    "new": "exp_n = max(0, int((cal_to - cal_from).total_seconds()) // sec)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_partition_grid"
+    ]
+  },
+  {
+    "name": "A28-partition-first",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "first_grid_point(t, sec) == t",
+    "new": "int(t.timestamp()) % sec == 0",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_partition_grid"
+    ]
+  },
+  {
+    "name": "A28-partition-middle",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "grid_points_between(prev[i] + step, df[key][i], sec) > 0",
+    "new": "grid_points_between(prev[i] + step, df[key][i], sec) >= 0",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_partition_grid"
+    ]
+  },
+  {
+    "name": "A28-vision-count",
+    "file": "src/quant_lab/market/vision.py",
+    "old": "return grid_points_between(a, b, INTERVAL_SECONDS[interval])",
+    "new": "return int((b - a).total_seconds()) // INTERVAL_SECONDS[interval] + 1",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_vision_count"
+    ]
+  },
+  {
+    "name": "A28-kernel-first",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "expected = first_grid_point(self.t_start, interval_s)",
+    "new": "expected = self.t_start",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_kernel_grid"
+    ]
+  },
+  {
+    "name": "A28-kernel-middle",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if opened != expected:",
+    "new": "if opened < expected:",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_kernel_grid"
+    ]
+  },
+  {
+    "name": "A28-kernel-tail",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if grid_points_between(expected, end, interval_s) > 0:",
+    "new": "if expected < end - dt.timedelta(seconds=60):",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_kernel_grid"
+    ]
+  },
+  {
+    "name": "A28-lake-count",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "expected = grid_points_between(a, until, interval_s)",
+    "new": "expected = max(0, int((min(b, dt.datetime.now(dt.UTC)) - a).total_seconds()) // INTERVAL_SECONDS[\"1m\"])",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_lake_grid"
+    ]
+  },
+  {
+    "name": "A28-lake-start",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "a = req.resolved_t_start(_rp(req.policy_version)) - dt.timedelta(seconds=window_before_s)",
+    "new": "a = (req.t_start or req.t_dec) - dt.timedelta(seconds=window_before_s)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_start"
+    ]
+  },
+  {
+    "name": "A28-start-validator",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "exp_t_start = derived_t_start(self.t_dec, pol)",
+    "new": "exp_t_start = (self.t_dec + dt.timedelta(seconds=pol.latency_s)).replace(microsecond=0)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_start"
+    ]
+  },
+  {
+    "name": "A28-start-resolver",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "return self.t_start if self.t_start is not None else derived_t_start(self.t_dec, policy)",
+    "new": "return self.t_start if self.t_start is not None else (self.t_dec + dt.timedelta(seconds=policy.latency_s)).replace(microsecond=0)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_start"
+    ]
+  },
+  {
+    "name": "A28-start-builder",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "horizon_end = derived_t_start(t_dec, policy) + dt.timedelta(seconds=derived_window_s(plan, policy, ttl))",
+    "new": "horizon_end = (t_dec + dt.timedelta(seconds=policy.latency_s)).replace(microsecond=0) + dt.timedelta(seconds=derived_window_s(plan, policy, ttl))",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_start"
+    ]
+  },
+  {
+    "name": "A28-start-lower-bound",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "if self.horizon_end <= exp_t_start:",
+    "new": "if self.horizon_end < exp_t_start:",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_start"
+    ]
+  },
+  {
+    "name": "A28-window-validator",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "window = self.horizon_end - exp_t_start",
+    "new": "window = dt.timedelta(seconds=int((self.horizon_end - exp_t_start).total_seconds()))",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_window"
+    ]
+  },
+  {
+    "name": "A28-window-builder",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "horizon_end = derived_t_start(t_dec, policy) + dt.timedelta(seconds=derived_window_s(plan, policy, ttl))",
+    "new": "horizon_end = derived_t_start(t_dec, policy) + dt.timedelta(seconds=ttl + (plan.expiry.max_holding_s or policy.max_horizon_s))",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_window"
+    ]
+  },
+  {
+    "name": "A28-window-derived-validator",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "derived_s = derived_window_s(self.order_plan, pol, exp_ttl)",
+    "new": "derived_s = exp_ttl + (self.order_plan.expiry.max_holding_s or pol.max_horizon_s)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_window"
+    ]
+  },
+  {
+    "name": "A28-ttl-before",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "\"entry_ttl_s\": resolve_entry_ttl_s(plan, pol)",
+    "new": "\"entry_ttl_s\": pol.entry_ttl_s",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_ttl"
+    ]
+  },
+  {
+    "name": "A28-ttl-validator",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "exp_ttl = resolve_entry_ttl_s(self.order_plan, pol)",
+    "new": "exp_ttl = pol.entry_ttl_s",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_ttl"
+    ]
+  },
+  {
+    "name": "A28-ttl-builder",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "ttl = resolve_entry_ttl_s(plan, policy)",
+    "new": "ttl = policy.entry_ttl_s",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_ttl"
+    ]
+  },
+  {
+    "name": "A28-expiry-timeline",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)\n        if deadline <= end:",
+    "new": "deadline = (self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)).replace(microsecond=0)\n        if deadline <= end:",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_expiry_timeline"
+    ]
+  },
+  {
+    "name": "A28-expiry-timeline-bound",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if deadline <= end:",
+    "new": "if deadline < end:",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_expiry_timeline"
+    ]
+  },
+  {
+    "name": "A28-expiry-orders",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)\n        for i, (e, p, q) in enumerate(legs):",
+    "new": "deadline = (self.t_start + dt.timedelta(seconds=self.req.entry_ttl_s)).replace(microsecond=0)\n        for i, (e, p, q) in enumerate(legs):",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_expiry_orders"
+    ]
+  },
+  {
+    "name": "A28-expiry-b",
+    "file": "src/quant_lab/market/nautilus_adapter.py",
+    "old": "deadline = entry_expiry_at(t_start, req.entry_ttl_s)",
+    "new": "deadline = (t_start + dt.timedelta(seconds=req.entry_ttl_s)).replace(microsecond=0)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_expiry_b"
+    ]
+  },
+  {
+    "name": "A28-expiry-b-bound",
+    "file": "src/quant_lab/market/nautilus_adapter.py",
+    "old": "TimeInForce.GTD if deadline <= end else TimeInForce.GTC",
+    "new": "TimeInForce.GTD if deadline < end else TimeInForce.GTC",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_expiry_b"
+    ]
+  },
+  {
+    "name": "P7-disable-annotated",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_ttl_standard_nodes[annotated]"
+    ]
+  },
+  {
+    "name": "P7-disable-augmented",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_ttl_standard_nodes[augmented]"
+    ]
+  },
+  {
+    "name": "P7-disable-named",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_ttl_standard_nodes[named]"
+    ]
+  },
+  {
+    "name": "P7-disable-return",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_ttl_standard_nodes[return]"
+    ]
+  },
+  {
+    "name": "P7-disable-comprehension",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_ttl_standard_nodes[comprehension]"
+    ]
+  },
+  {
+    "name": "P7-disable-return-field",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P7_inline_ttl_resolution\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_ttl_standard_nodes[return-field]"
+    ]
+  },
+  {
+    "name": "P6-defuse-delta = o - prev",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "value = self.local_defs.get(value.id, value)",
+    "new": "value = value",
+    "tests": [
+      "tests/market/test_single_source.py::test_grid_local_definition[delta = o - prev]"
+    ]
+  },
+  {
+    "name": "P6-defuse-delta: int = o - prev",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "value = self.local_defs.get(value.id, value)",
+    "new": "value = value",
+    "tests": [
+      "tests/market/test_single_source.py::test_grid_local_definition[delta: int = o - prev]"
+    ]
+  },
+  {
+    "name": "P6-defuse-delta -= prev",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "value = self.local_defs.get(value.id, value)",
+    "new": "value = value",
+    "tests": [
+      "tests/market/test_single_source.py::test_grid_local_definition[delta -= prev]"
+    ]
+  },
+  {
+    "name": "augmented-duration-augmented",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P3_duration_div\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_augmented_binary_patterns[duration-augmented]"
+    ]
+  },
+  {
+    "name": "augmented-expiry-augmented",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P5_inline_entry_ttl\", node)",
+    "new": "pass",
+    "tests": [
+      "tests/market/test_single_source.py::test_augmented_binary_patterns[expiry-augmented]"
+    ]
+  },
+  {
+    "name": "S40-middle-split-bypass",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if opened != expected:",
+    "new": "if opened < expected:",
+    "tests": [
+      "tests/market/test_single_source.py"
+    ]
+  },
+  {
+    "name": "S41-annotated-ttl",
+    "file": "src/quant_lab/market/vision.py",
+    "old": null,
+    "new": "\ndef _audit_ttl(plan, policy):\n    ttl: int = plan.expiry.entry_ttl_s if plan.expiry.entry_ttl_s is not None else policy.entry_ttl_s\n    return ttl\n",
+    "tests": [
+      "tests/market/test_single_source.py"
+    ]
+  },
+  {
+    "name": "S42-kernel-truncate-open",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "opens = sorted(b.open_time for b in bars if b.open_time >= self.t_start and b.open_time < end)",
+    "new": "opens = sorted(b.open_time.replace(microsecond=0) for b in bars if b.open_time >= self.t_start and b.open_time < end)",
+    "tests": [
+      "tests/market/test_single_source.py"
+    ]
+  },
+  {
+    "name": "NEW-kernel-accept-missing",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if opened != expected:",
+    "new": "if False:",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_kernel_grid",
+      "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar"
+    ]
+  },
+  {
+    "name": "NEW-kernel-reject-aligned",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if opened != expected:",
+    "new": "if opened == expected:",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_kernel_public_interior_bar"
+    ]
+  },
+  {
+    "name": "NEW-loader-truncate",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "opened = bar.open_time",
+    "new": "opened = bar.open_time.replace(microsecond=0)",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_lake_grid",
+      "tests/market/test_single_source.py::test_differential_lake_public_interior_bar"
+    ]
+  },
+  {
+    "name": "NEW-loader-count-only",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "        present = set()\n        for bar in out:\n            opened = bar.open_time\n            if first_grid_point(opened, interval_s) != opened:\n                complete = False\n                quality_ok[0] = False\n                problems.append(f\"{data_type} off-grid bar open_time={opened.isoformat()} interval_s={interval_s}\")\n                continue\n            if opened < until:\n                present.add(opened)\n        if len(present) != expected:\n            complete = False\n            problems.append(f\"{data_type} 期望 {expected} 根，实际 {len(present)} 根合法唯一网格 bar（原始 {len(out)} 行）\")\n",
+    "new": "        present = {bar.open_time for bar in out}\n        if len(present) != expected:\n            complete = False\n",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_lake_grid",
+      "tests/market/test_single_source.py::test_differential_lake_public_interior_bar"
+    ]
+  },
+  {
+    "name": "NEW-loader-reject-aligned",
+    "file": "src/quant_lab/market/execution.py",
+    "old": "expected = grid_points_between(a, until, interval_s)",
+    "new": "expected = grid_points_between(a, until, interval_s) + 1",
+    "tests": [
+      "tests/market/test_single_source.py::test_differential_lake_public_interior_bar"
+    ]
+  },
+  {
+    "name": "B19-M25 suppress inline ban",
+    "file": "src/quant_lab/market/single_source.py",
+    "old": "self._hit(\"P8_inline_force_close\", node)",
+    "new": "pass # injected missing P8",
+    "tests": [
+      "tests/market/test_force_close_net_r.py::test_force_close_inline_ban_independent"
+    ],
+    "first": true
+  },
+  {
+    "name": "B19-M31 inline expression real tree gate",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "\n__all__ = [",
+    "new": "\ndef forbidden_valuation():\n    return (mark - res.entry_avg_price) * qty\n\n__all__ = [",
+    "tests": [
+      "tests/market/test_single_source.py::test_no_inline_reexpression_of_single_sources_anywhere_in_src"
+    ],
+    "first": true
+  },
+  {
+    "name": "S45-partition-negative-tolerance",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "first_grid_point(t, sec) == t",
+    "new": "(first_grid_point(t, sec) - t <= dt.timedelta(microseconds=1))",
+    "tests": [
+      "tests/market/test_single_source.py"
+    ]
+  },
+  {
+    "name": "S45-partition-negative-fullT",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "first_grid_point(t, sec) == t",
+    "new": "(first_grid_point(t, sec) - t <= dt.timedelta(microseconds=1))",
+    "tests": [
+      "tests/market"
+    ]
+  },
+  {
+    "name": "S37-first-registration-bypass",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "expected = first_grid_point(self.t_start, interval_s)",
+    "new": "expected = self.t_start",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry",
+      "tests/market/test_single_source.py::test_single_source_use_counts_match_registry",
+      "tests/market/test_single_source.py::test_differential_kernel_grid"
+    ]
+  },
+  {
+    "name": "S37-tail-registration-bypass",
+    "file": "src/quant_lab/market/kernel_a.py",
+    "old": "if grid_points_between(expected, end, interval_s) > 0:",
+    "new": "if expected < end:",
+    "tests": [
+      "tests/market/test_single_source.py::test_single_source_call_sites_match_registry",
+      "tests/market/test_single_source.py::test_single_source_use_counts_match_registry"
+    ]
+  },
+  {
+    "name": "A36-TIME",
+    "file": "src/quant_lab/market/partition_check.py",
+    "old": "first_grid_point(t, sec) == t",
+    "new": "(first_grid_point(t, sec) - t <= dt.timedelta(microseconds=1))",
+    "tests": [
+      "tests/market/test_boundary_discrimination.py",
+      "tests/market/test_single_source.py::test_differential_partition_grid"
+    ],
+    "overlay": true
+  },
+  {
+    "name": "A36-NUMERIC",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "check_decimal(self.risk_budget, \"risk_budget\")",
+    "new": "check_decimal(Decimal(float(self.risk_budget)), \"risk_budget\")",
+    "tests": [
+      "tests/market/test_boundary_discrimination.py",
+      "tests/market/test_single_source.py::test_differential_partition_grid"
+    ],
+    "overlay": true
+  },
+  {
+    "name": "A36-EMPTY",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "\"entry_fractions\": ef if data.get(\"entry_fractions\") is None else data[\"entry_fractions\"]",
+    "new": "\"entry_fractions\": ef if not data.get(\"entry_fractions\") else data[\"entry_fractions\"]",
+    "tests": [
+      "tests/market/test_boundary_discrimination.py",
+      "tests/market/test_single_source.py::test_differential_partition_grid"
+    ],
+    "overlay": true
+  },
+  {
+    "name": "A36-EQUIVALENCE",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "return self.t_start if self.t_start is not None else derived_t_start(self.t_dec, policy)",
+    "new": "return self.t_start + dt.timedelta(microseconds=1) if self.t_start is not None else derived_t_start(self.t_dec, policy)",
+    "tests": [
+      "tests/market/test_boundary_discrimination.py",
+      "tests/market/test_single_source.py::test_differential_partition_grid"
+    ],
+    "overlay": true
+  },
+  {
+    "name": "A37-PRIORITY",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "CENSOR_PRIORITY = (\"SYMBOL_TIME_INVALID\", \"RULE_HISTORY_MISSING\", \"BAR_GAP\", \"MARK_STALE\", \"FUNDING_SCHEDULE_GAP\", \"LABEL_RIGHT_CENSORED\")",
+    "new": "CENSOR_PRIORITY = (\"LABEL_RIGHT_CENSORED\", \"SYMBOL_TIME_INVALID\", \"RULE_HISTORY_MISSING\", \"BAR_GAP\", \"MARK_STALE\", \"FUNDING_SCHEDULE_GAP\")",
+    "tests": [
+      "tests/market/test_boundary_discrimination.py",
+      "tests/market/test_single_source.py::test_differential_partition_grid"
+    ],
+    "overlay": false
+  },
+  {
+    "name": "A33-MATRIX-CONTROL",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "return max(0, last_idx - first_idx + 1)",
+    "new": "return 0",
+    "tests": [
+      "tests/market/test_boundary_discrimination.py",
+      "tests/market/test_single_source.py::test_differential_partition_grid"
+    ],
+    "overlay": false
+  },
+  {
+    "name": "A33-UNREACHABLE-CONTROL",
+    "file": "src/quant_lab/market/vision.py",
+    "old": "return grid_points_between(a, b, INTERVAL_SECONDS[interval])",
+    "new": "return grid_points_between(a, b, INTERVAL_SECONDS[interval]) + 1",
+    "tests": [
+      "tests/market/test_boundary_discrimination.py::test_boundary_time",
+      "tests/market/test_boundary_discrimination.py::test_boundary_numeric",
+      "tests/market/test_boundary_discrimination.py::test_boundary_empty",
+      "tests/market/test_boundary_discrimination.py::test_boundary_equivalence"
+    ]
+  },
+  {
+    "name": "A33-SELECTOR-CONTROL",
+    "file": "src/quant_lab/market/contract.py",
+    "old": "return max(0, last_idx - first_idx + 1)",
+    "new": "return 0",
+    "tests": [
+      "tests/market/test_boundary_discrimination.py::test_boundary_time",
+      "tests/market/test_boundary_discrimination.py::test_boundary_numeric",
+      "tests/market/test_boundary_discrimination.py::test_boundary_empty",
+      "tests/market/test_boundary_discrimination.py::test_boundary_equivalence"
+    ],
+    "overlay": false
+  }
+]
+```
+
+
+### 交付入口复核
+
+报告内 M 入口按原样命令运行 A33-UNREACHABLE-CONTROL：先对相同四节点选择器运行控制得到 4 failed，再运行不可达对照得到 4 passed；退出码 0，末行 ORIGINAL_TREE_SHA_EQUAL True。
+G 入口按原样命令运行：新增、删除、修改均返回 0/1/0，退出码 0。此两项是内嵌命令可执行性的复核，主批计数仍为 M000–M102。
+交付时 market 源码和测试共 91 个文件的路径集合与 SHA256 均等于独立批前快照；本会话未写这些文件。
+
+<!-- P14_HISTORY_BYTES_BEGIN -->
 ## 十三审判定表
 
 本轮为第十二轮独立 P1 review（十三审），审查方 Codex。终裁 **fail**。
@@ -16528,3 +24279,7 @@ PY
 
 证据完整性：完成
 十三审终裁：fail
+
+
+证据完整性：完成
+十四审终裁：pass

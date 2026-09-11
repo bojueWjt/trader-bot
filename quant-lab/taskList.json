@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T07:39:19Z",
+  "updatedAt": "2026-09-11T08:08:25Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -482,10 +482,18 @@
         "section": "§24 A38",
         "summary": "准 G2 所请细化 A33/A34 并给出更强形式：对照的职责是证明本批『取证器+选择器』组合能把绿变红，选择器碰不到的对照只可能产出绿而该绿不携带信息（健康+不可达与取证器失效同样产绿），而 A33 存在理由正是失效产出绿；自带验证——对照在本批选择器下变红则可达性由该红本身证明，故收敛为『对照必须在本批实际选择器下变红』；据此消歧『同批』以选择器同一性定义而非会话或墙钟；与 A36 同一谓词（判别性而非红过），规则用于检验别人是判别性用于检验自己也必须是；立判例 6 与一般义务——G2 在 A24 要求他人调用点登记集合相等而自身快照护栏是单向检查，同一文件内 assert_declared 用集合语义抓到新增而 assert_matches 没有，故凡为他人立下的检查性质要求立规者须同期审计自己的同类工具并记录，因立规时注意力在被规范对象不在自己手里的工具；A36 首条对角线已验（S45 前向 1µs 容差→时间类 RED 其余三类 GREEN）",
         "by": "G0/427ed064 R68"
+      },
+      {
+        "n": 66,
+        "at": "2026-09-11T08:08:24Z",
+        "file": "contracts/README.md",
+        "section": "§24.5",
+        "summary": "G0 按 §24.3 自审 test_e2e_synthetic.py：自证会红通过（注入 R28 原缺陷→2 failed，清理后 8 passed）；判别性检查查出自身缺陷——构造『有成交但无人走完结局』突变（价格恒为入场中值）两门全绿，实际分布 right_censored 78/rejected 2，而断言写的是 len(kinds)>=2，两个零星 rejected 即满足，声称检查『样本非退化』实际检查『至少两种标签』，与 G0 反复裁给他人的形态同一（断言字面与声称意图不符、零星取值即满足字面）；修正为断言走完结局样本（tp_hit/stopped/filled_closed）占比≥1/4，修正后同一突变下非退化门 RED 主断言 GREEN，对角线成立，基线 8 passed；记明 §24.3 立于上轮而其作者下轮即被它查出自身缺陷，佐证立规时注意力不在自己手里的工具上",
+        "by": "G0/427ed064 R69"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.42",
+    "version": "v1.43",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -804,7 +812,7 @@
     "market": {
       "owner": "G2",
       "status": "in_progress",
-      "progress": 0.97,
+      "progress": 0.91,
       "blockers": [],
       "provides": [
         "data/lake/market/{bronze,silver,_manifest}",
@@ -822,7 +830,7 @@
         "note": "[G0/427ed064 R50 · B20] **G2 撤回其 §5 结论，G0 读源核实属实，我的 B18 前提确实错了。** maxt.py:85 calendar_blocks 按日历整除切块（raw=int((t-origin)/L)）、**不因样本重叠合并**、整簇归最早 t_dec 块、n_nonempty 只数共同支持 W>0 的块——**max-t 的重采样单位是日历块，连通分量会因重叠合并，两者不是同一个量**。三口径对照（按实际单位）：1d 22/24、3d 8/8、5d 5/5、7d 4/4——**B 在各观察窗不劣于 A**；只有连通分量口径让 B 看起来灾难性地差，而它恰恰不是 max-t 用的单位。B18 §5 / B19 §4 中『删失率与有效簇数反向、B 以有效样本为代价』**作废**，B 的无偏是净得。**新记第三种失效形态**：继『永不触发』(A22/A24) 与『因噪声触发』(A27) 之后——**用错单位的度量不只是量不准，它会把一个不存在的取舍写进决策**。门本身工作正常，但度量的是另一个量，产出看似可信实则虚构的权衡并据此改变裁定。**前两种让门失效，这一种让决策失真**；G0 的 B18 正是被它改变过的裁定。通则：用于准入/下限/取舍论证的统计量必须与所服务的推断过程同单位，且须逐字对照实现（如『口径= maxt.calendar_blocks 的 n_nonempty』）。最小下限采纳 G2 四条：口径取 n_nonempty；**下限与 block_len 成对声明**（只写块数不写块长，同一数字可对应任意强度）且 block_len ≥ horizon + purge/embargo；同时钉 cross 与 max_span；数据量由切分算术给出——5d 下 Q 块需每折 Q×5 天（Q=20→100 天）。**research_horizon_s = 5d 解除占位**（其占位依据已被本裁定撤销）；新增 P2 前置：基于 5d 的 θ 声明须满足每折日历长度要求，否则只作描述性报告，属 G-STAT-CLAIM 实质内容。**2024-01 单月在 5d 下仅 5 块——这是数据量结论不是取值结论**；把后者误报成前者会让人去调一个本来正确的参数。",
         "at": "2026-09-11T05:19:35Z"
       },
-      "lastUpdate": "2026-09-11T07:39:19Z",
+      "lastUpdate": "2026-09-11T07:55:13Z",
       "tasks": [
         {
           "id": "M-01",
@@ -881,7 +889,7 @@
         {
           "id": "M-10",
           "title": "[Codex review] P1 里程碑 review（M-03..M-09），必修项闭合",
-          "status": "doing",
+          "status": "done",
           "verify": "test -f docs/adr/review-G2-P1.md && grep -Eq \"^证据完整性[：:][[:space:]]*完成[[:space:]]*$\" docs/adr/review-G2-P1.md && ! grep -Eq \"稍后回填|待回填|暂承接|待本轮独立核验|待补充证据|^[[:space:]]*TODO\" docs/adr/review-G2-P1.md && grep -E \"终裁[：:]\" docs/adr/review-G2-P1.md | tail -1 | grep -Eq \"终裁[：:][[:space:]]*\\*{0,2}pass\\*{0,2}[[:space:]]*$\"",
           "verifyHistory": [
             {
@@ -1213,6 +1221,14 @@
         {
           "t": "16:39",
           "n": "**S45 + A36 + A37(2) 已闭合并经我独立复核（测量时刻 16:37:10，180s 内无 .py 写入）。**\n**我亲跑的验收**：`tests/market` **358 passed**（+14）；`test_single_source.py` 48 passed；**`test_boundary_discrimination.py` 14 passed**；A `22/0`；AB 逐项与基线一致、UNEXPLAINED 0。护栏：G2 范围内差异 **0 个**（G0 已提交，HEAD=a59a0bf），批后 40 个文件逐一回到批前快照。\n**A36 判别性矩阵我独立复核，对角线成立**：注入 S45 原样「前向 1µs 容差」后——**时间类 RED / 数值 GREEN / 空缺失 GREEN / 等价对 GREEN**。**只红本类、他类全绿**，这是 A36 要的判别性，不是\"又跑了一批全红的突变\"。承包方自报四条对角线全部成立（前向 1µs 容差→时间；risk_budget 经 float 校验→数值；显式空分配被默认值吞掉→空/缺失；显式 t_start 额外偏移→等价对），我复核了其中第一条。\n**我在复核中犯了一个错，并由此得到一条 A33 的细化，值得单记**：我第一次的同批活性对照用的是 `vision.expected_rows + 1`，结果**四类全绿**。我差点据此怀疑取证器失效——但真因是**这四条 `test_boundary_*` 根本不测 `expected_rows`**，那是一条**本批选择器碰不到的对照**。它全绿不证明取证器坏了，**只证明我选错了对照**。换成消费方入口的无条件破坏（`grid_points_between` 恒返回 0）后，四类全部 RED，活性成立。\n**细化（建议 G0 考虑写进 A33）**：**活性对照必须对「本批实际使用的选择器」已知必红，而不只是\"在某处已知必红\"。** 一条选择器碰不到的对照，其绿与取证器失效产生的绿**无法区分**——而这正是 A33 立意要防的那个不对称（失效产出的是绿）。**换言之：对照的判别性要求，和 A36 对边界突变的判别性要求，是同一条。**\n**A37(2) 落地形态**：生产逻辑**仅补注释、未改优先级行为**（`CENSOR_PRIORITY` 方向本就正确），`contract.py` 明确写出偏向 `unevaluable` 及其依据——**统计效率 vs 结论污染的代价差异**；并配 10 条删失优先级回归（`test_a37_evidence_wins_over_label`，`label_first` 两向参数化），把已正确的偏向变成可读、可审、可被回归钉住的。\n**S44（我的护栏）已修并三向自证**，不在承包方范围，其回执明确\"S44 未触碰\"。"
+        },
+        {
+          "t": "16:46",
+          "n": "**收 G0 R68/A38。我按其\"立规者须同期审计自己同类工具\"的一般义务做了审计，查出一个我自己的结构性缺陷并已修。**\n**A38 更强形式我接受**：整条规则收敛为一句——**对照必须在本批实际使用的选择器下变红**（自带验证：对照红了，可达性就由那个红本身证明，不需另做可达性论证）。并消歧 A34 的\"同批\"：**以选择器同一性定义，不以会话或墙钟分组定义**——我那次对照与被测同处一次会话、按字面满足\"同批\"，却与被测不同选择器，歧义正在此。G0 补的一句我记下：**规则用于检验别人时是判别性，用于检验自己时也必须是。**\n**审计结果（对照我为他人立的四条：集合相等 / 判别性 / 自证会红 / 基线先于过程）**：`scripts/tree_guard.py` 前三条 ✓（S44 修复后集合相等双向、`selftest` 自证、`snapshot` 先于批次）；**但我的四个突变脚本 `mutate.py`/`mutate_forceclose.py`/`mutate_a28.py`/`verify_s40_s41.py` 没有一个内建活性对照**——每次都是我手工把对照当成一个 case 塞进表里、再靠我自己看它有没有变红。**那正是 A24 §12.2 判过走不通的那条路：依赖人去记得。** 而且**我确实漏过一次**（`vision.expected_rows+1` 配 `test_boundary_*`，四类全绿，我差点据此怀疑一个健康的取证器）。\n**已修（结构性，不是补文档）**：新建 `quant-lab/scripts/mutation_batch.py`，把 A29/A33/A34/A37/A38 从\"记得照做\"变成\"**做不到就拒绝出结果**\"。关键设计：**`control` 是必填参数、无默认值**——一个可以省略对照的批次执行器，等于把 A33 退回成\"记得写\"；对照未在本批选择器下变红即抛 `ControlNotRed`，**本批一切绿结果不得采信**。\n**自证（用我当初犯的那个错做输入）**：传入 `vision.expected_rows+1` 配 `test_boundary_*` → **拒绝出结果**，错误信息写明\"这条绿不携带信息——它由两种情形同样产生：取证器健康但对照不可达、以及取证器失效\"；换成 `grid_points_between` 恒返回 0 → 对照 `4 failed, 10 passed` **RED**，批次放行；批后 40 个文件逐一回到批前快照。\n**G0 已入库我的 market 改动与 `tree_guard.py`**（`4f911a5` / `955f62c`），并确认 A36 首条对角线成立（S45 前向 1µs 容差 → 时间类 RED、其余三类 GREEN）。其余三条待十四审独立复核。"
+        },
+        {
+          "t": "16:55",
+          "n": "**M-10 已 done（看板已落）。十四审终裁 pass，P1 阻断项无。** 测量时刻 16:52:57，G2 范围内工作树差异 0，HEAD=955f62c，写入窗口已关闭。\n**看板 verify 原样前台实跑 rc=0**，并逐条拆解不只看返回码：文件存在 ✓；`证据完整性：完成` **6 条**（九审至十四审各一）；**未完成标记 0 处**；最后一条终裁 = `十四审终裁：pass`；**六条终裁行按时序完整保留**（A21 追加制自九审起连续六轮正确）。\n**我亲跑的全量验收**：`tests/market` **358 passed**；A `kernel=A passed=22 failed=0`；AB rc=0、`MATCH 12 / B_COMMAND_LATENCY 3 / GAP_PRICE 1 / SAME_TS_PRIORITY 4 / GTD_BOUNDARY 1 / B_LIQUIDITY_MODEL 1`、UNEXPLAINED 0。其余里程碑 verify 抽查全绿：vision 11 / partition_check 13 / asof 11 / contract 19 / kernel_a 72 / execution_api 6。\n**十四审证据**：103 组独立磁盘突变；**29 个新增/修改测试节点均证明可失败**、还原 SHA256 相等；A36 四条对角线与 A37 十项删失优先级回归均闭合；**审查方未修改产品代码与测试**。\n**十四轮的形状值得记一句**：一至八审在找同族缺陷的**新站点**；九至十一审转为**\"我的门自身无效\"**；十二至十三审转为**\"门的输入域没覆盖到\"**；**十四审是第一轮既无新缺陷也无新门缺口**。**收敛不是因为找得更细，是因为每一轮都把上一轮的失效模式变成了一道会自动变红的机制。**\n**按 A19 明确写出未做与边界，不留悬空**：(1) **G3 未接入**——`force_close_net_R` 的跨窗口调用登记与使用点计数均为空集（裁定结果，**不得预登记不存在的调用方**），差分列\"无消费方，不适用\"，**义务顺延至 G3 接入时以哨兵证明 θ 随返回值改变**；按 A32 该记录已含理由/债主/触发事件三件。(2) **真实归档验证范围仅 BTCUSDT 2024-01**。(3) 10 项 partial-P2（S02/S04/S06/S07/S10/S11/S12/S13/S34/S36）保留既有边界，`P2_UNSUPPORTED` 四键如实声明。(4) **M-11 是 gated 任务，按用户指令不做**——market 通道因此停在 0.91，这是**有意的**，不是未完成。\n**G2 剩余交付均已落盘**：`report-G2-partial-exit-estimand.md`（B16(2)，主口径 B + A 作强制敏感性）、`report-G2-research-horizon-proposal.md`（`research_horizon_s=5d` 已解除占位）、`note-G2-archive-timestamp-grid.md`（bar 严格网格 / funding 容差的实测依据）、`design-G2-force-close-net-r.md`、`evidence-G2-mutation-round10.md`、`review-G2-P1-verdicts.md`（十四轮终裁台账）。"
         }
       ]
     },
@@ -1539,7 +1555,7 @@
         "note": "[G0 OR-02 R5 19:58Z 本轮自评] 交付：(1) 契约 v1.1→**v1.2**，changeLog #17-#25 共 9 条，备份在 scratchpad/{execution-interface,research-schema,README}.bak-r5.md。新增 execution-interface §5.10 裁定 B8（fraction 可空，与 §5.9 B7 同型）+ 标号勘误（§5.9 标题误写 B5，规范标号 B7，引用以节号为准）；research-schema §9.10.1-9.10.8 = 逐条答复 G1 五项裁决（A8 Decimal(38,12)+struct 键集冻结 / A9 CR-07 最小协议+index.json / A10 远端更严口径准+basis 归因 / A11 codes.py 纯别名确认+作废旧删除指令 / A12 不折叠但必须同簇）+ 9.10.6 fraction 同步 + 9.10.7 需用户决定两项 + 9.10.8 estimand 六键冻结、main 废止。README §3.5 加严为 5.1-5.5（分区归属表/禁根删除/违规即 fail/G1 判例/G0 跑前复核义务）。(2) 三套全量：data 119、market 175、research 214，全 passed。(3) verify：D-07 rc=0（跑前复核删除范围 PASS）、R-09 rc=0、D-10 rc=1、M-10 rc=1。(4) 两份 Codex 均 completed 且均 **fail**：G1 r2 二审终裁 fail（closed 2/16、partially 14/16、新增 T01-T04）、G2 三审终裁 fail（closed 4/14、partial-P2 8、open 2 = S05 覆盖入口 or 选缺口、S14 缺 sha 列/null 时 bars_complete 仍 True）。**D-10 与 M-10 均不够格 done**。(5) **OR-04：2 passed / 4 error（上轮 1 passed / 1 failed / 4 error）**。修好两条自身缺陷（均在 tests/integration/test_e2e_synthetic.py，属 G0）：feature_snapshot 调用参数序与 kwargs 写错（契约 feature-snapshot §3 签名为 feature_snapshot(asts, anchors, *, bars, ...)，无 interval 参数，G3 实现与契约一致，是 G0 测试写错）；Ref 算子 AST 形状写错（Ref arity=1，lag 走 params，正确形状 {\"op\":\"Ref\",\"args\":[{\"field\":\"close\"}],\"params\":{\"lag\":1}}）。剩余 4 条 ERROR 全部收敛为**同一个根因**：market/contract.py:344 OrderPlan.model_validate 对 fraction=None 抛 ValidationError，待 G2 落地 §5.10 B8 即解。StructFieldNotFoundError \"main\" 已定位归 G3（evaluator.py:69 默认 estimand=\"main\" + synthetic.py:172 桩自造 main 键），已立 §9.10.8。(6) **P1 未达标**，缺项：G1 D-10（r2 fail，T01-T04 + 14 partially 待闭合后派 r3）、G2 M-10（三审 fail，S05/S14 两 open 待闭合后派四审）、G3 R-10（未派发，且 verify 仍负向 grep 违反 §9.9 A7，派发前必须改）、OR-04 未全绿（阻在 B8）、G1 A8 dtype 迁移、G3 estimand/桩同构修复。(7) 需用户决定：制品备份恢复与保留期清理协议（CR-07 剩余，牵涉 consent 闸门）、risk_acknowledged_by_user 何时翻 true。六项闸门维持 pending，本轮无窗口绕闸迹象（G3 report 的 G-STAT-CLAIM/G-LICENSE-SEARCH 均 pending 且 claim_status=descriptive_only，正确）。下轮：核 G2 是否落 B8、G1 是否落 A8 dtype 与 index.json、G3 是否修 estimand 与清账本复跑、三份 review 是否重派。",
         "at": "2026-09-10T20:00:13Z"
       },
-      "lastUpdate": "2026-09-11T07:38:01Z",
+      "lastUpdate": "2026-09-11T08:08:25Z",
       "tasks": [
         {
           "id": "OR-01",
@@ -1722,6 +1738,10 @@
         {
           "t": "16:38",
           "n": "[G0/427ed064 OR-02 R67] 测量 07:29Z→07:36Z。**A35 必报量**：src 48/48、tests 56/58（未跟踪两个为 G2 在途 verify_s42_s43.py / verify_s43_archive.py；`verify_s45_a36.py` 本轮已入库）。**实跑**：data **225 passed**、market **357 passed**（344→357；首跑 1 failed 未复现，属写入邻近）、integration **8 passed**。**research 记不判**：轮初距今 273 秒可判，**但在 G0 跑测试期间被改写**，复核时距今 114 秒回到窗口内。其 2 failed 为 A31 陈旧对（test_S17_real_low_power_truthful_fail_accepted + test_A31_report_must_be_generated_by_current_code）——**G3 再次在生成报告后改了 nullmodel.py**，A31 的门当场报出，属门在履职。**提交时序规则本轮被自身执行代价证否，已修订（§23.5）**：原『三窗口均出写入窗口才提交』连续两轮阻止提交，而要避免的风险（捕获半写文件）**是按模块的不是全局的**。改为按模块判定：本轮提交 data+market（4f911a5，19 文件）并收入 scripts/tree_guard.py（§21.2 要求），research 保留至其下个空闲窗口。**一条规则连续两轮阻止它本该促成的事，就该被检查是不是比必要更严**——与 A26 同源：过严的规则不会被遵守，只会被绕过或搁置。十三审终裁 fail、G3 四审终裁 fail；P1 缺项仍为 M-10 与 R-10。"
+        },
+        {
+          "t": "17:08",
+          "n": "[G0/427ed064 OR-02 R69] 测量 07:49Z。A35 必报量：src 48/48、**tests 60/60（首次 100%）**。写入窗口：data 12400s、market 177s、research 864s，**三者均可判**。实跑：data **225**、market **358**、integration **8**；research **2 failed**（A31 陈旧对：test_S17_real_low_power_truthful_fail_accepted + test_A31_report_must_be_generated_by_current_code，G3 再次在生成报告后改了 nullmodel.py，门在履职）。**本轮主要工作是 G0 按 §24.3 自审其工具，并查出自身门的一处缺陷（详见 §24.5）**：`test_e2e_sample_is_not_degenerate` 的断言写的是 `len(kinds) >= 2`，而一个 `right_censored 78 / rejected 2`、**无人走完任何结局**的样本即可满足它并通过。**声称检查『样本非退化』，实际检查『至少出现两种标签』**——与 G0 反复裁给他人的形态完全相同。已改为断言走完结局样本占比 ≥ 1/4，并以判别性突变证明：同一突变下**非退化门 RED、主断言 GREEN**，对角线成立。"
         }
       ]
     }

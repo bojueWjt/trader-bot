@@ -112,8 +112,12 @@ def test_e2e_sample_is_not_degenerate(execution):
     filled = execution.filter(pl.col("fill_status") != "none").height
     assert filled >= n // 2, f"成交样本仅 {filled}/{n} —— 样本退化，θ 无意义"
     kinds = set(execution["outcome_kind"].drop_nulls().to_list())
-    assert len(kinds) >= 2, f"outcome_kind 单一取值 {kinds} —— 样本退化"
     assert not kinds <= {"rejected", "unevaluable"}, f"全部为未挂出/不可评估 {kinds} —— 没有实验"
+    # G0 R69 自审修正：原断言只查「取值数 ≥ 2」，78 个 right_censored + 2 个 rejected 即可满足，
+    # 而那是一个「什么都没走完」的样本。退化与否要看**有没有真正走完的结局**，不是标签种类数。
+    resolved = execution.filter(pl.col("outcome_kind").is_in(["tp_hit", "stopped", "filled_closed"])).height
+    assert resolved >= execution.height // 4, (
+        f"走完结局的样本仅 {resolved}/{execution.height} —— 全部停在删失/未挂出，θ 建立在无人走完的样本上")
 
 
 # --------------------------------------------------------------- G3 接缝
