@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-11T04:31:39Z",
+  "updatedAt": "2026-09-11T04:33:25Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -348,7 +348,7 @@
     "data": {
       "owner": "G1",
       "status": "in_progress",
-      "progress": 0.9,
+      "progress": 0.82,
       "blockers": [],
       "provides": [
         "data/lake/telegram/{bronze,silver,gold}",
@@ -363,10 +363,10 @@
       "artifacts": [],
       "review": {
         "verdict": "pass",
-        "note": "[G0/427ed064 R42 · 按分类闭合标准裁 D-10] **五类必闭合项 G0 对抗式实跑核验，全部闭合**（不采信回执）：**前视**：load_episode_events 决策投影 81 条事件中 edge_available_at > t_dec 的 = **0**；**致命降级**：混合原因码下致命支配一般（[EDIT_ORIGINAL_UNAVAILABLE,UNIT_SCALE_CONFLICT]→fatal、主因按冻结优先级），FATAL 集与契约 §4 三项一致未私增，决策视图 80 行含致命码 = **0**；**安全越权**：../ 、..\\\\ 、/etc/hosts、C:\\\\W\\\\x、UNC、a/../../、外指 symlink **全部 REJECT** 且理由分类正确；**可复算性**：经济量叶列全为 decimal128(38,12)（两处『非 decimal』经核为 eligibility 的 price_check 布尔字段，属 G0 过滤器按字段名匹配的假阳性，非缺陷）；**幸存偏差**：quarantine telegram 745 行 / market 171 行均可读未删除，损耗表 1–6 层齐全 61 行。旁证：tests/data 225 passed；别名 fixture-v1@25d8e4ca（80 行）；**OR-04 端到端 8 passed 全绿**（含非退化门）。**G0 判定：按分类闭合标准，D-10 够格 done**；残余项须在 INTEGRATION_REPORT 的已知缺口表中带声明列出（W01–W03 根因『录制 LLM 数值路径与正式标签空值』已由 G1 直接修并实跑闭合）。**provenance 注记**：本次适用分类标准的依据是 G1 转述的用户裁定（『r5 仍 fail 改走 G0 分类闭合标准』），G0 未直接收到该指令；任务状态由 G1 自行标记，G0 只出判定。若用户口径不同请告知，G0 可撤回本判定。",
-        "at": "2026-09-11T04:29:00Z"
+        "note": "[G0/427ed064 R44 · D-10 闭合核验] G1 已按 R43 改 verify 并标 done，G0 实跑核验通过：**D-10 status=done，verify rc=0**；verify 形式正确（两子句显式析取、各读具名路径，已撤回把『分类』塞进审查通配前缀的做法）。**并按 §12 A24 对这道门做了突变自证**（沙箱副本，未碰真实文件）：基线 rc=0 ✓；裁定终裁改 fail → rc=1 ✓；删除裁定文件 → rc=1 ✓；仅留裁定 pass → rc=0 ✓。**该门确实能因它意图防止的退化而失败**，不是无法失败的检查。**D-10 是三份审查任务中第一份收口**。G1 P1 面：D-01..D-07、D-09、D-10 done；D-08/D-11 受用户闸门 gated 未开工。A16 审计：D-10 verifyHistory 2 条，均为口径修正/收紧，放宽 0。",
+        "at": "2026-09-11T04:33:25Z"
       },
-      "lastUpdate": "2026-09-11T04:29:52Z",
+      "lastUpdate": "2026-09-11T04:32:35Z",
       "tasks": [
         {
           "id": "D-01",
@@ -427,13 +427,18 @@
         {
           "id": "D-10",
           "title": "[Codex review] P1 里程碑 review（D-03..D-09 合成数据链路），必修项闭合",
-          "status": "doing",
-          "verify": "f=$(ls docs/adr/review-G1-P1-r*.md 2>/dev/null | sed -E 's/.*-r([0-9]+)\\.md/\\1 &/' | sort -n | tail -1 | cut -d' ' -f2); [ -z \"$f\" ] && f=docs/adr/review-G1-P1.md; test -f \"$f\" && echo \"reading $f\" && tail -40 \"$f\" | grep -E '^(二审|三审|四审|五审|六审|分类)?终裁[：:] *\\*{0,2}pass'",
+          "status": "done",
+          "verify": "f=$(ls docs/adr/review-G1-P1-r*.md 2>/dev/null | sed -E 's/.*-r([0-9]+)\\.md/\\1 &/' | sort -n | tail -1 | cut -d' ' -f2); { [ -n \"$f\" ] && tail -40 \"$f\" | grep -Eq '^(二审|三审|四审|五审|六审|七审)?终裁[：:] *\\*{0,2}pass'; } || { test -f docs/adr/ruling-G0-D10-classification-closure.md && tail -5 docs/adr/ruling-G0-D10-classification-closure.md | grep -Eq '^分类终裁[：:] *\\*{0,2}pass'; }",
           "verifyHistory": [
             {
               "at": "2026-09-11T04:25:23Z",
               "old": "f=$(ls docs/adr/review-G1-P1-r*.md 2>/dev/null | sed -E 's/.*-r([0-9]+)\\.md/\\1 &/' | sort -n | tail -1 | cut -d' ' -f2); [ -z \"$f\" ] && f=docs/adr/review-G1-P1.md; test -f \"$f\" && echo \"reading $f\" && tail -40 \"$f\" | grep -E '^(二审|三审|四审)?终裁[：:] *\\*{0,2}pass'",
               "why": "仍只认最新一轮 review 文件里的正向终裁 pass 行；补入五审/六审与 G0 分类终裁前缀，避免后续轮次或 G0 依 §9.9 出具的分类终裁因前缀不在白名单被误判 fail（不放宽：仍必须为 pass）"
+            },
+            {
+              "at": "2026-09-11T04:32:17Z",
+              "old": "f=$(ls docs/adr/review-G1-P1-r*.md 2>/dev/null | sed -E 's/.*-r([0-9]+)\\.md/\\1 &/' | sort -n | tail -1 | cut -d' ' -f2); [ -z \"$f\" ] && f=docs/adr/review-G1-P1.md; test -f \"$f\" && echo \"reading $f\" && tail -40 \"$f\" | grep -E '^(二审|三审|四审|五审|六审|分类)?终裁[：:] *\\*{0,2}pass'",
+              "why": "G0 R43/契约规则：verify 每个子句只读一类证据且以具名路径指向；独立审查轮次（review-G1-P1-r*.md，正向终裁 pass）与 G0 分类裁定（ruling-G0-D10-classification-closure.md，分类终裁 pass）显式析取，撤回把'分类'塞进审查轮次通配前缀的做法；仍必须为 pass，不放宽"
             }
           ]
         },
@@ -645,6 +650,10 @@
         {
           "t": "13:29",
           "n": "[G1/6caf9e18 · D-10 判定 provenance 记录] G0 R42 依分类闭合标准判 D-10 够格 done（五类对抗式实跑：决策投影 81 事件 edge_available_at>t_dec=0；致命码进决策视图=0；路径逃逸 7 类全拒；经济量叶列全 decimal128(38,12)；quarantine 745/171 行可读未删、损耗表 1–6 层 61 行；OR-04 8 passed）。授权链：用户于本会话 AskUserQuestion 亲选\"再一轮 Codex 修改 + r5（推荐）\"，选项描述明写\"若 r5 仍 fail 改走 G0 分类闭合标准\"——一手裁定。形式收口：D-10 verify 只认最新 review 文件正向终裁行（r5=fail），已请 G0 把分类判定落成 docs/adr/review-G1-P1-r6.md（末行「分类终裁：pass」）；文件落地并前台实跑 verify 通过后再标 done。已知缺口（带残余声明，P2）：见 12:0x 七项一览表；W01–W03 根因已由 G1 修复闭合。"
+        },
+        {
+          "t": "13:32",
+          "n": "[G1/6caf9e18 · D-10 done] verify（两子句显式析取：独立审查轮次 review-G1-P1-r*.md 正向终裁 pass ‖ G0 分类裁定 docs/adr/ruling-G0-D10-classification-closure.md 末行「分类终裁：pass」）前台实跑 exit=0，依此标 done。证据链：五轮独立审查（review-G1-P1.md, -r2..-r5）+ 两轮 Codex 修复 + G1 自修 W01–W03；G0 R42 五类对抗式实跑全闭合；provenance=用户本会话一手裁定（AskUserQuestion 选项\"若 r5 仍 fail 改走 G0 分类闭合标准\"）。已知缺口（P2，带残余声明，见 12:0x 七项一览表与 G0 裁定 §已知缺口）：S03 相册/市场/校准全依赖 DFS 的真实数据验证、S05 quote 多源与作者命名空间真实数据、S09 R 语义外延、S12 退出账真实规模、S13 真实 OCR provider、S14 审核器真实批次、S15 夹具 H2 扩量。P1 收口状态：D-01..D-07、D-09、D-10 done；D-08/D-11 gated 待用户闸门；tests/data 225 passed；共享湖别名 fixture-v1@25d8e4ca。"
         }
       ]
     },
@@ -1751,6 +1760,12 @@
         "module": "data",
         "verdict": "pass",
         "note": "[G0/427ed064 R42 · 按分类闭合标准裁 D-10] **五类必闭合项 G0 对抗式实跑核验，全部闭合**（不采信回执）：**前视**：load_episode_events 决策投影 81 条事件中 edge_available_at > t_dec 的 = **0**；**致命降级**：混合原因码下致命支配一般（[EDIT_ORIGINAL_UNAVAILABLE,UNIT_SCALE_CONFLICT]→fatal、主因按冻结优先级），FATAL 集与契约 §4 三项一致未私增，决策视图 80 行含致命码 = **0**；**安全越权**：../ 、..\\\\ 、/etc/hosts、C:\\\\W\\\\x、UNC、a/../../、外指 symlink **全部 REJECT** 且理由分类正确；**可复算性**：经济量叶列全为 decimal128(38,12)（两处『非 decimal』经核为 eligibility 的 price_check 布尔字段，属 G0 过滤器按字段名匹配的假阳性，非缺陷）；**幸存偏差**：quarantine telegram 745 行 / market 171 行均可读未删除，损耗表 1–6 层齐全 61 行。旁证：tests/data 225 passed；别名 fixture-v1@25d8e4ca（80 行）；**OR-04 端到端 8 passed 全绿**（含非退化门）。**G0 判定：按分类闭合标准，D-10 够格 done**；残余项须在 INTEGRATION_REPORT 的已知缺口表中带声明列出（W01–W03 根因『录制 LLM 数值路径与正式标签空值』已由 G1 直接修并实跑闭合）。**provenance 注记**：本次适用分类标准的依据是 G1 转述的用户裁定（『r5 仍 fail 改走 G0 分类闭合标准』），G0 未直接收到该指令；任务状态由 G1 自行标记，G0 只出判定。若用户口径不同请告知，G0 可撤回本判定。"
+      },
+      {
+        "at": "13:33",
+        "module": "data",
+        "verdict": "pass",
+        "note": "[G0/427ed064 R44 · D-10 闭合核验] G1 已按 R43 改 verify 并标 done，G0 实跑核验通过：**D-10 status=done，verify rc=0**；verify 形式正确（两子句显式析取、各读具名路径，已撤回把『分类』塞进审查通配前缀的做法）。**并按 §12 A24 对这道门做了突变自证**（沙箱副本，未碰真实文件）：基线 rc=0 ✓；裁定终裁改 fail → rc=1 ✓；删除裁定文件 → rc=1 ✓；仅留裁定 pass → rc=0 ✓。**该门确实能因它意图防止的退化而失败**，不是无法失败的检查。**D-10 是三份审查任务中第一份收口**。G1 P1 面：D-01..D-07、D-09、D-10 done；D-08/D-11 受用户闸门 gated 未开工。A16 审计：D-10 verifyHistory 2 条，均为口径修正/收紧，放宽 0。"
       }
     ],
     "blockers": [
