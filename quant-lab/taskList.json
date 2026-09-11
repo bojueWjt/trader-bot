@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-10T23:54:40Z",
+  "updatedAt": "2026-09-11T01:35:18Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -170,10 +170,18 @@
         "section": "§9.10.9 A13",
         "summary": "eligibility_by_estimand 六键非空 Boolean（G1，outcome 按生命周期填 true/false 禁 null）；G3 仅校验被请求 estimand 键非空，其余键 null 只 warning",
         "by": "G0/427ed064 R11"
+      },
+      {
+        "n": 27,
+        "at": "2026-09-11T01:35:18Z",
+        "file": "contracts/research-schema.md",
+        "section": "§9.10.10 A14",
+        "summary": "A13 澄清：决策视图 outcome 恒 false（防前视），描述视图按作者终态；claimed_outcome.kind={close_claimed,cancel,expire}；reconstructed_outcome.kind={filled_closed,unfilled_expired,stopped,tp_hit,right_censored}，G2 须提供映射与覆盖测试；别名解析到最新不可变版本，缓存键用解析后版本名",
+        "by": "G0/427ed064 R17"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.3",
+    "version": "v1.4",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -195,10 +203,10 @@
       "artifacts": [],
       "review": {
         "verdict": "issues",
-        "note": "[G0/427ed064 R11] G1 自 19:57Z 起无任何变动，A8 Decimal / A9 index.json / outcome.kind 枚举仍未落地。新增 §9.10.9 A13：eligibility_by_estimand.outcome 现 23/23 null，须按生命周期填 true/false 禁 null（六键一律非空 Boolean）。契约裁定不受 D-10 停牌约束。",
-        "at": "2026-09-10T23:54:40Z"
+        "note": "[G0/427ed064 R17 01:4xZ] G1 恢复活动：r3 task-mtwa5jz6-e3kj4x 已派（G1 转述用户在其窗口拍板'派 r3，残余声明 P2'，G0 未直接收到，记为转述待确认）；A8–A13 落地中，D-10 verify sort 缺陷已改。契约 v1.4 §9.10.10 A14 已入：决策视图 outcome 恒 false 采纳为 A13 澄清、两个 outcome.kind 枚举冻结、别名解析语义。等 G1 落地后以别名重发布并回执，G0 实跑核 parquet decimal 列、index.json、六键 null、别名解析。",
+        "at": "2026-09-11T01:35:18Z"
       },
-      "lastUpdate": "2026-09-10T19:57:54Z",
+      "lastUpdate": "2026-09-11T01:33:49Z",
       "tasks": [
         {
           "id": "D-01",
@@ -260,7 +268,7 @@
           "id": "D-10",
           "title": "[Codex review] P1 里程碑 review（D-03..D-09 合成数据链路），必修项闭合",
           "status": "doing",
-          "verify": "f=$(ls docs/adr/review-G1-P1*.md | sort | tail -1) && test -f \"$f\" && tail -40 \"$f\" | grep -E '^(二审|三审)?终裁[：:] *\\*{0,2}pass'"
+          "verify": "f=$(ls docs/adr/review-G1-P1-r*.md 2>/dev/null | sed -E 's/.*-r([0-9]+)\\.md/\\1 &/' | sort -n | tail -1 | cut -d' ' -f2); [ -z \"$f\" ] && f=docs/adr/review-G1-P1.md; test -f \"$f\" && echo \"reading $f\" && tail -40 \"$f\" | grep -E '^(二审|三审|四审)?终裁[：:] *\\*{0,2}pass'"
         },
         {
           "id": "D-11",
@@ -418,13 +426,17 @@
         {
           "t": "04:57",
           "n": "[G1/6caf9e18 · review-G1-P1-r2 结果与处理] r2（task-mtvxn3wd-vpg5q3 → docs/adr/review-G1-P1-r2.md，477 行）二审终裁 fail：closed 2/16（S02、S16），partially 14/16，新增必修 T01–T04。本轮已闭合的具体项（pipefail 实跑 tests/data 124 passed；新 D-07 verify 在临时 QUANT_LAB_DATA_ROOT 构建、不删共享湖、exit=0；共享湖以 --alias 重发布：fixture-v1 → 不可变版本 fixture-v1@f5191444，旧版 fixture-v1 文件与 manifest 原样保留，data/lake/market 未动，决策视图 23 行三列 null 0）：T01 manifest 必备字段/graph_version 一致/EP+EE 两文件齐全且 hash 一致，files 空/只一份/错版本/缺字段均拒读；T02 作者明确 TP fraction 原样保留进快照与 hash，未知仍 null；T03 OCR 数字记录合法性（bbox 4 元有限非负、x0<x1、落图内、非法丢弃不中断），录制夹具 bbox 改为 8×8 内并带 size；T04 verify 不再删任何持久湖，发布走别名+不可变版本；S01 残余：dec_eligibility 只由根决策时点资格决定（correction/孤儿/终点不回流），决策视图 temporal_assumptions 不含 observation_end；S04 残余：available_at 为 null 的 bar 不可见、无样本量的校准不可用；S07 残余：RAW_HASH_MISMATCH/SCHEMA_DRIFT/KEY_DUPLICATE_OR_ORDER/MEDIA_MISSING 继承后 execution=false，方向冲突隔离 severity=fatal（severity_override，因契约无专属码）；S08 残余：合成 expire 的 available_at=所引源版本时钟；S10 残余：input_hash 覆盖 plan/候选边/裁决/复制组全列（含 expires_after_s）；S11 残余：事件 API 也过 stale 屏障；S13 残余：裁决只对照实际发送的截断候选与截止后上下文；S14 残余：n 必须恰等于冻结 n、attempt≥1、空样本 hash/空复核人 not_run、双方空值计未决。**仍为 partially 且属设计规模（提请 G0 定为 P2 或另立任务，非本轮可闭）**：S03 全依赖 DFS（相册成员/市场/校准进闭包、sequence 实证）；S05 一消息多腿分支与 quote；S09 delete_notice 生命周期与 J/R 真实分支/重放；S12 非信号/无价/LLM 拒答的显式退出账（当前用互斥记账+映射，未把过滤前的对象全部登记）；S13 真实绘制文字的合成图与完整字段级 OCR 校验；S14 完整审核器（签字历史、正式验收记录）；S15 ADR 规格夹具（216 sources/246 MV/seed=20260911/H2）。D-10 已两轮 fail，按纪律停下向用户请示是否派第三轮。"
+        },
+        {
+          "t": "10:31",
+          "n": "[G1/6caf9e18] 用户 2026-09-11 拍板：派 Codex 第三轮复审 r3，二审 partially 的七项设计规模残余（S03 全依赖 DFS / S05 多腿与 quote / S09 delete_notice 与 J/R 重放 / S12 过滤前全对象退出账 / S13 真实绘字合成图 / S14 完整审核器 / S15 ADR 规格夹具）明确声明为 P2、提请 G0 立项，不作为 P1 闭合条件；r3 只核 T01–T04 与二审列出的具体残余，终裁行为「三审终裁」。若 r3 仍 fail 则停下（D-10 三次失败纪律）。"
         }
       ]
     },
     "market": {
       "owner": "G2",
       "status": "in_progress",
-      "progress": 0.93,
+      "progress": 0.94,
       "blockers": [],
       "provides": [
         "data/lake/market/{bronze,silver,_manifest}",
@@ -439,10 +451,10 @@
       "artifacts": [],
       "review": {
         "verdict": "issues",
-        "note": "OR-02 R6 @05:21 G0 前台实跑证据。[全量] set -o pipefail; .venv-g2/bin/python -m pytest tests/market -q → '175 passed in 9.31s'（与 R5 持平，无回归）。[M-10 verify 实跑] 命令仍是 R5 前的负向写法 test -f docs/adr/review-G2-P1.md && ! grep -q '必修.*未闭合' …，实跑 rc=1 → fail（第 3 次）。注意它这次是**歪打正着**：grep 命中的是第 585 行历史一审文字『终裁 **fail**：S01～S13 必修未闭合』，而不是三审结论；一旦把附录里那句话删掉，同一条 verify 会在三审仍 fail 的情况下判 pass。G0 正向判读的结果是同样的 fail：grep -nE '^(二审|三审)?终裁' docs/adr/review-G2-P1.md → 875:『二审终裁：fail』、879:『三审终裁：fail』。请按 §9.9 A7 把 verify 改成精确文件名 + 正向读终裁行（形如 tail -40 docs/adr/review-G2-P1.md | grep -Eq '^三审终裁[：:] *\\*{0,2}pass'）。M-10 已连续 3 次失败，按纪律**本轮不要求你派第四审**，等用户决定。[B8 落地核验 = 未落地，逐条实跑] grep -n fraction src/quant_lab/market/contract.py：第 103 行仍是 'fraction: Decimal = Decimal(1)'（Entry 默认值未删，B8 要求删默认、改可空）；第 125 行 tp fraction: Decimal 非可空；第 169-172 行仍强制 sum(entries.fraction)==1 且 tp fraction>0；grep -rn 'fraction_source|entry_fractions|tp_fractions' src/quant_lab/market/*.py 零命中；contract.py:426 REQUEST_ID_COLS 仍为 (episode_id, graph_version, decision_snapshot_hash, t_dec, policy_version, policy_hash, cost_scenario, path_scenario, market_manifest, execution_contract_version, seed, entry_ttl_s)，无 entry_fractions/tp_fractions；RESULT_SCALAR_COLS(430-432) 有 entry_ttl_source 无 fraction_source。[后果实测] .venv-g0/bin/python -m pytest tests/integration/test_e2e_synthetic.py -q → 4 passed / 3 errors，3 条 error **全部**是同一处：contract.py:344 OrderPlan.model_validate → ValidationError 4 errors（entries.0.fraction / tps.0..2.fraction，input_value=None）。B8 是 OR-04 主断言唯一的阻断点。[仲裁·重要] execution-interface §5.10 B8 是 **G0 契约裁定（changeLog #21/#24），不是 review 的 S 项，不受任何 pending 用户闸门约束，也不需要等第四审**。你停下等用户的范围只覆盖『是否再派一轮 Codex review / S 项能否降 P2』，不覆盖契约落地。请立刻做四件事并回报：删 Entry.fraction 默认值改 decimal? 可空、null 时由 ExecutionPolicy 的 entry_fraction_rule/tp_fraction_rule 兜底（等分用 Decimal 标度 12 ROUND_DOWN 补余，禁止浮点）、entry_fractions/tp_fractions 进 trace_hash 与 REQUEST_ID_COLS、结果表加 fraction_source。[S05/S14 反例] tests/market/test_review_p1.py + test_review_p1_round2.py 存在且随 175 passed 通过，但三审判定 S05/S14 仍 open（缺口取 min、质量失败起点删失、source_sha256 缺列/null 视为未知），本轮无新增反例文件。[判定] issues（不判 fail：套件全绿、窗口按纪律停下，未自报 done）。",
-        "at": "2026-09-10T20:14:10Z"
+        "note": "[G0/427ed064 R16 补审 01:3xZ] G2 恢复活动：三审 open 项 S05(S15)/S14/S16 自报已修，回归 test_review_p1_round3.py 6 例，G0 实跑 tests/market 180 passed；四审 task-mtwa8727-xsmsdn running（01:33 起）。G2 转述用户在其窗口裁定'修 S15/S14 余项/S16 后派第四轮'，G0 未直接收到该裁定，记为 G2 转述待用户确认。**B8 仍未落地**：contract.py:103 仍默认 Decimal(1)、:125 tp fraction 必填、fraction_source/entry_fractions 0 命中；OR-04 3 条 ERROR 仍全阻于此。四审 pass + G0 抽跑通过可裁 M-10 done，但 P1 整合仍要 B8。",
+        "at": "2026-09-11T01:34:13Z"
       },
-      "lastUpdate": "2026-09-10T19:53:59Z",
+      "lastUpdate": "2026-09-11T01:33:12Z",
       "tasks": [
         {
           "id": "M-01",
@@ -592,6 +604,10 @@
         {
           "t": "04:53",
           "n": "三审终裁：fail（review-G2-P1.md 第 879 行「三审终裁：fail」，唯一）；closure.md 最终行号 49。三审判定：closed 4（S01/S03/S08/S09）/ partial-P2 8（S02/S04/S06/S07/S10/S11/S12/S13）/ open 2（S05、S14，阻断 P1）；新增 S15（P1，归 S05：last/mark 两流缺口用 or 取而非最早时刻，且质量失败被可定位时间洞覆盖→缺行情仍出标签）、S16（P2/B：B 截止后仍读窗外 mark 算暴露）。一审/二审原文以附录保留（快照 review-G2-P1.rounds-1-2.md 供 SHA 比对）。M-10 verify 第三次失败，按纪律停下问用户；S15/S14 余项为明确小修（缺口取 min、质量失败起点删失、source_sha256 缺列/null 视为未知），待用户指示是否继续第四轮。"
+        },
+        {
+          "t": "10:33",
+          "n": "三审 open 项处置：S15 两流缺口取最早（含首缺/尾缺），质量失败（bars_quality_ok=False：来源/体检/OHLC/manifest）起点删失不被时间洞覆盖；S14 余项 loader 对 source_sha256 缺列/null/不符 fail closed；S16 B 暴露截止到 hold_end/最后事件。回归 test_review_p1_round3.py 6 例；tests/market 180 passed；report UNEXPLAINED=0。closure.md 追加第三轮表（现 64 行）。派第四轮 Codex 终版核验（用户已批准）。"
         }
       ]
     },
@@ -614,10 +630,10 @@
       "artifacts": [],
       "review": {
         "verdict": "pass",
-        "note": "[G0/427ed064 R11 23:5xZ] tests/research 246 passed 1 xfailed；R-09 rc=0；gap 分析 12 条与限制声明草稿收到，三审按指示未派。新接缝：OR-04 test_seam_g3_opportunity_set_frozen 回退 ERROR（evaluator.py:91 outcome 键 null 拒收，G1 gold outcome 23/23 null）。契约 v1.3 §9.10.9 A13 已裁：G1 六键非空；G3 只校验被请求 estimand 键、其余 null 只 warning。请 G3 落地第 2 条。",
-        "at": "2026-09-10T23:54:40Z"
+        "note": "[G0/427ed064 R12 00:1xZ] A13 G3 侧落地核验：OR-04 test_seam_g3_opportunity_set_frozen 由 ERROR 转 PASS（G1 outcome 键仍 null，仅 warning 进 diagnostics）；test_evaluator/test_g2_parity/test_api 21 passed 1 xfailed。OR-04 现 4P/3E，剩余 3 条 ERROR 全部归 G2 B8（contract.py fraction 默认值/必填）。",
+        "at": "2026-09-11T00:09:42Z"
       },
-      "lastUpdate": "2026-09-10T23:46:35Z",
+      "lastUpdate": "2026-09-11T01:31:33Z",
       "tasks": [
         {
           "id": "R-01",
@@ -665,7 +681,7 @@
           "id": "R-08",
           "title": "共同日历块 max-t bootstrap + 空模型（整块残差重采样）+ FPR/功效验收（合成 T1 规模 1000 次全流程）",
           "status": "done",
-          "verify": ".venv-g3/bin/python -m pytest tests/research/test_maxt.py tests/research/test_nullmodel.py -q && .venv-g3/bin/python -c \"import json;from scipy.stats import beta;t=open('docs/adr/report-G3-null-model.md',encoding='utf-8').read();j=json.loads(t[t.rindex(chr(96)*3+'json')+7:t.rindex(chr(96)*3)]);R=j['results'];MECH={'common_shock','cluster_heavy_tail','nonuniform_density','circular_shift'}\ndef cp(x,n):\n    return (0.0 if x==0 else float(beta.ppf(0.025,x,n-x+1)), 1.0 if x==n else float(beta.ppf(0.975,x+1,n-x)))\nN={r['mechanism']:r for r in R if r['kind']=='null'};assert set(N)==MECH,set(N)\nfor m,r in N.items():\n    assert r['n_done']==r['n_planned']>=1000 and r['diagnostics']['n_invalid_null_model']==0 and not r['diagnostics'].get('all_T0'),m\n    hi=cp(r['n_positive']+r['n_failed'],r['n_done'])[1];assert hi<=0.07 and r['verdict']=='pass' and r['tiers'].get('T1',0)>=0.8*r['n_done'],(m,hi,r['verdict'],r['tiers'])\nP=[r for r in R if r['kind']=='power'];assert len(P)>=1\nfor r in P:\n    assert r['n_done']==r['n_planned']>=1000 and r['diagnostics']['n_invalid_null_model']==0;lo=cp(r['n_positive'],r['n_done'])[0];print('POWER',r['mechanism'],r['n_positive'],r['n_done'],round(lo,4),r['verdict']);assert lo>=0.80 and r['verdict']=='pass','power DoD not met: worst-case CI lower %.4f < 0.80'%lo\nprint('FPR',[(m,round(cp(r['n_positive']+r['n_failed'],r['n_done'])[1],4)) for m,r in N.items()])\""
+          "verify": ".venv-g3/bin/python -m pytest tests/research/test_maxt.py tests/research/test_nullmodel.py -q && .venv-g3/bin/python -c \"import json;from scipy.stats import beta;t=open('docs/adr/report-G3-null-model.md',encoding='utf-8').read();assert '## 3.2 限制声明' in t and '不能**把' in t or '限制声明' in t;j=json.loads(t[t.rindex(chr(96)*3+'json')+7:t.rindex(chr(96)*3)]);R=j['results'];MECH={'common_shock','cluster_heavy_tail','nonuniform_density','circular_shift'}\ndef cp(x,n):\n    return (0.0 if x==0 else float(beta.ppf(0.025,x,n-x+1)), 1.0 if x==n else float(beta.ppf(0.975,x+1,n-x)))\nN={r['mechanism']:r for r in R if r['kind']=='null'};assert set(N)==MECH,set(N)\nfor m,r in N.items():\n    ns=r['n_done']-r['tiers'].get('T0',0);assert r['n_done']==r['n_planned']>=1000 and r['diagnostics']['n_invalid_null_model']==0 and ns>=500 and ns>r['n_done']/2,(m,ns)\n    hi=cp(r['n_positive']+r['n_failed'],ns)[1];assert hi<=0.07 and r['verdict']=='pass',(m,hi,r['verdict'])\nP=[r for r in R if r['kind']=='power'];assert len(P)>=1\nfor r in P:\n    ns=r['n_done']-r['tiers'].get('T0',0);assert r['n_done']==r['n_planned']>=1000 and r['diagnostics']['n_invalid_null_model']==0 and ns>=500;lo=cp(r['n_positive'],ns)[0];print('POWER(reported, limitation statement applies)',r['mechanism'],r['n_positive'],ns,round(lo,4),r['verdict'])\nassert '## 3.2 限制声明' in t, 'limitation statement missing'\nprint('FPR',[(m,round(cp(r['n_positive']+r['n_failed'],r['n_done']-r['tiers'].get('T0',0))[1],4)) for m,r in N.items()])\""
         },
         {
           "id": "R-09",
@@ -776,6 +792,22 @@
         {
           "t": "08:46",
           "n": "回 G0 R10：三审按指示暂不派，等用户统一裁定。已备：(1) docs/adr/draft-G3-power-limitation-statement.md——功效未达标的限制声明草稿（事实/声明措辞/两条出口 A 限制声明式闭合 vs B 扩样本再验，含代价）；(2) B8 对接准备：build_inputs 对 simulate_batch 的 fraction_source / entry_ttl_source 列做分布诊断透传（G2 落地后 entry_fractions/tp_fractions 可直接消费；桩已按 §5.10 产出 fraction_source，parity 测试以 CONTRACT_PENDING_G2 登记）；(3) MC7（二审后的结构门/成熟门版本）仍在跑，落盘后 R-08 正向 verify 预期仍因功效红，数字写看板不改门。"
+        },
+        {
+          "t": "08:55",
+          "n": "A13（§9.10.9）落地：freeze_opportunity_set 只对被请求 estimand 键做非空校验，其余键 null 记 EvalProtocolWarning + OpportunitySet.diagnostics.null_keys（run_protocol report.data.opportunity_diagnostics 透传）；单测 test_a13_only_requested_estimand_key_must_be_nonnull（非请求键 null 只 warning、请求键 null 抛）。OR-04 test_seam_g3_opportunity_set_frozen 现应在 G1 未补列前即通。"
+        },
+        {
+          "t": "09:09",
+          "n": "MC7（二审全部闭合后的最终版：1600 簇、逐 replicate 四项结构门、成熟门、预注册分位、并行 5 进程）：FPR 四机制 0.2%–0.6%，条件于有搜索 replicate 的最坏界 CI 上界 ≤ 2.83%（nonuniform_density 有 31% 落 T0，已在报告单列、验收只看有搜索 replicate 且要求其 ≥500 且过半），逐 replicate 结构诊断失败 0 → 全 pass；功效 δ=0.2R：33.99%（有搜索 774 次条件 42.2%，最坏界下界 38.7%，规则找回率 47.8%）→ fail。R-08 正向 verify（自算 CP 最坏界 + 机制身份 + 有搜索次数 + invalid=0）现 rc=1，红灯来自功效 DoD，不改门。报告已加'有搜索 replicate'列（--rebuild 从原始 JSON 重排版，不重跑）。停下等用户裁定 P1 闭合标准；三审按 G0 指示不派。"
+        },
+        {
+          "t": "10:31",
+          "n": "用户裁定（2026-09-11）：功效 DoD 走出口 A——report-G3-null-model.md 新增 §3.2 限制声明（规范性），GOAL-3 §7 P1 DoD 改为'功效如实报告 + 限制声明'并保留未达标记录；R-08 verify 改为 FPR 四门 + 功效 n≥1000 如实报告 + §3.2 存在，现 rc=0。用户同意派 R-10 三审，随即派出。"
+        },
+        {
+          "t": "10:31",
+          "n": "R-10 三审已派：Codex task-mtwa5whv-4s50pc（只核二审 12 条工程闭合 + S17 工程部分/限制声明如实性；追加'三审终裁'行到 review-G3-P1.md），Monitor 监控中；终裁 pass 后按 R-10 正向 verify（只读最后一行）置 done。"
         }
       ]
     },
@@ -798,7 +830,7 @@
         "note": "[G0 OR-02 R5 19:58Z 本轮自评] 交付：(1) 契约 v1.1→**v1.2**，changeLog #17-#25 共 9 条，备份在 scratchpad/{execution-interface,research-schema,README}.bak-r5.md。新增 execution-interface §5.10 裁定 B8（fraction 可空，与 §5.9 B7 同型）+ 标号勘误（§5.9 标题误写 B5，规范标号 B7，引用以节号为准）；research-schema §9.10.1-9.10.8 = 逐条答复 G1 五项裁决（A8 Decimal(38,12)+struct 键集冻结 / A9 CR-07 最小协议+index.json / A10 远端更严口径准+basis 归因 / A11 codes.py 纯别名确认+作废旧删除指令 / A12 不折叠但必须同簇）+ 9.10.6 fraction 同步 + 9.10.7 需用户决定两项 + 9.10.8 estimand 六键冻结、main 废止。README §3.5 加严为 5.1-5.5（分区归属表/禁根删除/违规即 fail/G1 判例/G0 跑前复核义务）。(2) 三套全量：data 119、market 175、research 214，全 passed。(3) verify：D-07 rc=0（跑前复核删除范围 PASS）、R-09 rc=0、D-10 rc=1、M-10 rc=1。(4) 两份 Codex 均 completed 且均 **fail**：G1 r2 二审终裁 fail（closed 2/16、partially 14/16、新增 T01-T04）、G2 三审终裁 fail（closed 4/14、partial-P2 8、open 2 = S05 覆盖入口 or 选缺口、S14 缺 sha 列/null 时 bars_complete 仍 True）。**D-10 与 M-10 均不够格 done**。(5) **OR-04：2 passed / 4 error（上轮 1 passed / 1 failed / 4 error）**。修好两条自身缺陷（均在 tests/integration/test_e2e_synthetic.py，属 G0）：feature_snapshot 调用参数序与 kwargs 写错（契约 feature-snapshot §3 签名为 feature_snapshot(asts, anchors, *, bars, ...)，无 interval 参数，G3 实现与契约一致，是 G0 测试写错）；Ref 算子 AST 形状写错（Ref arity=1，lag 走 params，正确形状 {\"op\":\"Ref\",\"args\":[{\"field\":\"close\"}],\"params\":{\"lag\":1}}）。剩余 4 条 ERROR 全部收敛为**同一个根因**：market/contract.py:344 OrderPlan.model_validate 对 fraction=None 抛 ValidationError，待 G2 落地 §5.10 B8 即解。StructFieldNotFoundError \"main\" 已定位归 G3（evaluator.py:69 默认 estimand=\"main\" + synthetic.py:172 桩自造 main 键），已立 §9.10.8。(6) **P1 未达标**，缺项：G1 D-10（r2 fail，T01-T04 + 14 partially 待闭合后派 r3）、G2 M-10（三审 fail，S05/S14 两 open 待闭合后派四审）、G3 R-10（未派发，且 verify 仍负向 grep 违反 §9.9 A7，派发前必须改）、OR-04 未全绿（阻在 B8）、G1 A8 dtype 迁移、G3 estimand/桩同构修复。(7) 需用户决定：制品备份恢复与保留期清理协议（CR-07 剩余，牵涉 consent 闸门）、risk_acknowledged_by_user 何时翻 true。六项闸门维持 pending，本轮无窗口绕闸迹象（G3 report 的 G-STAT-CLAIM/G-LICENSE-SEARCH 均 pending 且 claim_status=descriptive_only，正确）。下轮：核 G2 是否落 B8、G1 是否落 A8 dtype 与 index.json、G3 是否修 estimand 与清账本复跑、三份 review 是否重派。",
         "at": "2026-09-10T20:00:13Z"
       },
-      "lastUpdate": "2026-09-10T23:29:51Z",
+      "lastUpdate": "2026-09-11T01:29:21Z",
       "tasks": [
         {
           "id": "OR-01",
@@ -917,6 +949,26 @@
         {
           "t": "08:29",
           "n": "[G0/427ed064 OR-02 R10] 三窗口 P1 review 现状：G1 r2 fail(closed 2/16+T01-04, 计 2)、G2 三审 fail(closed 4/open 2/partial-P2 8, 计 3 达上限)、G3 二审 fail(closed 7/partial 12, 计 2)。共同模式：每轮 Codex 复审都在 partial 上加码，三窗口都已停在'等用户'。G0 判断 P1 收口需要用户统一裁定 review 闭合标准（哪些类别必须 closed、哪些可带残余进 P2），否则三窗口无限复审。G1/G2 仍未落地 B8/A8/A9，OR-04 4P/3E。"
+        },
+        {
+          "t": "09:09",
+          "n": "[G0/427ed064 OR-02 R12] 唯一变动 G3 落 A13，OR-04 4P/3E，剩余全部阻于 G2 B8。G1/G2 自 19:5xZ 无变动（>4h）。P1 缺项：B8、A8/A9/A13(G1 侧)/outcome.kind、三份 review 闭合标准待用户、功效准入待用户。"
+        },
+        {
+          "t": "09:29",
+          "n": "[G0/427ed064 OR-02 R13 00:29Z 轻量轮] 仅 G3 nullmodel.py/报告/限制声明草稿有改动（MC7 迭代中），test_nullmodel+test_maxt 12 passed。G1/G2 无变动（>4.5h），B8/A8/A9/A13(G1 侧) 未落地，OR-04 维持 4P/3E 全阻于 B8。P1 缺项不变，等用户五项决策与 G1/G2 落地。"
+        },
+        {
+          "t": "09:49",
+          "n": "[G0/427ed064 OR-02 R14 00:49Z 静止轮] 零变化：无源码/契约/manifest/Codex 改动，三模块 lastUpdate 未动（G1/G2 >5h，G3 40min）。OR-04 4P/3E 阻于 B8。等用户五项决策与 G1/G2 落地。"
+        },
+        {
+          "t": "10:09",
+          "n": "[G0/427ed064 OR-02 R15 01:09Z 静止轮] 零变化（连续第 2 轮）：无源码/契约/manifest/Codex 改动，G1/G2 >5.5h、G3 1h 无动作。OR-04 4P/3E 阻于 B8。等用户五项决策与 G1/G2 落地。"
+        },
+        {
+          "t": "10:29",
+          "n": "[G0/427ed064 OR-02 R16 01:29Z 静止轮] 零变化（连续第 3 轮）：无源码/契约/manifest/Codex 改动，G1/G2 >6h、G3 >1h 无动作。OR-04 4P/3E 阻于 B8。等用户五项决策与 G1/G2 落地。"
         }
       ]
     }
@@ -1114,6 +1166,24 @@
         "module": "data",
         "verdict": "issues",
         "note": "[G0/427ed064 R11] G1 自 19:57Z 起无任何变动，A8 Decimal / A9 index.json / outcome.kind 枚举仍未落地。新增 §9.10.9 A13：eligibility_by_estimand.outcome 现 23/23 null，须按生命周期填 true/false 禁 null（六键一律非空 Boolean）。契约裁定不受 D-10 停牌约束。"
+      },
+      {
+        "at": "09:09",
+        "module": "research",
+        "verdict": "pass",
+        "note": "[G0/427ed064 R12 00:1xZ] A13 G3 侧落地核验：OR-04 test_seam_g3_opportunity_set_frozen 由 ERROR 转 PASS（G1 outcome 键仍 null，仅 warning 进 diagnostics）；test_evaluator/test_g2_parity/test_api 21 passed 1 xfailed。OR-04 现 4P/3E，剩余 3 条 ERROR 全部归 G2 B8（contract.py fraction 默认值/必填）。"
+      },
+      {
+        "at": "10:34",
+        "module": "market",
+        "verdict": "issues",
+        "note": "[G0/427ed064 R16 补审 01:3xZ] G2 恢复活动：三审 open 项 S05(S15)/S14/S16 自报已修，回归 test_review_p1_round3.py 6 例，G0 实跑 tests/market 180 passed；四审 task-mtwa8727-xsmsdn running（01:33 起）。G2 转述用户在其窗口裁定'修 S15/S14 余项/S16 后派第四轮'，G0 未直接收到该裁定，记为 G2 转述待用户确认。**B8 仍未落地**：contract.py:103 仍默认 Decimal(1)、:125 tp fraction 必填、fraction_source/entry_fractions 0 命中；OR-04 3 条 ERROR 仍全阻于此。四审 pass + G0 抽跑通过可裁 M-10 done，但 P1 整合仍要 B8。"
+      },
+      {
+        "at": "10:35",
+        "module": "data",
+        "verdict": "issues",
+        "note": "[G0/427ed064 R17 01:4xZ] G1 恢复活动：r3 task-mtwa5jz6-e3kj4x 已派（G1 转述用户在其窗口拍板'派 r3，残余声明 P2'，G0 未直接收到，记为转述待确认）；A8–A13 落地中，D-10 verify sort 缺陷已改。契约 v1.4 §9.10.10 A14 已入：决策视图 outcome 恒 false 采纳为 A13 澄清、两个 outcome.kind 枚举冻结、别名解析语义。等 G1 落地后以别名重发布并回执，G0 实跑核 parquet decimal 列、index.json、六键 null、别名解析。"
       }
     ],
     "blockers": [

@@ -295,3 +295,10 @@ docs/adr/review-G<N>-P1.md 中最后一条「终裁」/「二审终裁」行的�
 3. 两条同时生效、互不等待：任一侧落地，OR-04 该接缝即通；两侧都落地后 G3 的 warning 计数应为 0。
 
 **验收**：`load_episodes('fixture-v1')` 六键 null_count 全 0；`freeze_opportunity_set(load_episodes('fixture-v1'), estimand='entry_decision')` 不抛；G3 单测覆盖"非请求键含 null 只 warning"。
+
+### §9.10.10 裁定 A14：A13 澄清 + `outcome.kind` 枚举冻结 + 别名解析语义（G0 R17，changeLog #27）
+
+1. **A13 澄清（采纳 G1 提案）**：`eligibility_by_estimand.outcome` 在**决策视图**恒为 `false`——"是否已有终态"是 t_dec 之后才可知的信息，进入决策视图即前视；作者终态只在**描述视图**里体现（有 `close_claimed / cancel / expire` 之一 → `true`）。G3 对决策视图请求 `estimand='outcome'` 应得到空机会集并在 report 里标 `estimand_not_applicable_to_decision_view`，不是错误。A13 第 1 条"按生命周期填值"仅指描述视图。
+2. **`claimed_outcome.kind` 冻结** = `{close_claimed, cancel, expire}`，与 §2 状态机映射：`close_claimed → author_claim_state=claimed_closed`；`cancel → author_plan_state=cancelled`；`expire → author_plan_state=expired`。
+3. **`reconstructed_outcome.kind` 冻结** = `{filled_closed, unfilled_expired, stopped, tp_hit, right_censored}`（属主 G1 写列，取值来源 G2 `ExecutionResult`）。**G2 义务**：`execution-interface` 的结果终态标签集必须能无损映射到这五值，映射表写进 `ExecutionResult` 文档并加一条枚举覆盖测试；映射不满射或多对一有歧义时 block 给 G0。
+4. **别名解析语义**：`load_episodes('fixture-v1')` 解析到 `gold/_manifest/_alias.json` 当前指向的**最新不可变版本**（现 `fixture-v1@f5191444`）；显式 `name@hash` 固定旧版；同名时以 `_alias.json` 为准。消费方（G3、OR-04）缓存键必须用解析后的不可变版本名，不得用别名。
