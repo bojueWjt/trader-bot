@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-12T02:58:41Z",
+  "updatedAt": "2026-09-12T04:20:03Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -595,10 +595,17 @@
         "file": "docs/adr/ruling-G0-R10-scope-and-acceptance.md + contracts/research-schema.md §9.10.20 第4款 + R-10 verify",
         "summary": "R-10 范围重定裁定（三条全准）。G3 报称 §9.10.20 把事故类排除在 A39 免责外故不能归 A39——该句对但只引前半段，同条末段原文『不要求防御任意改写全部执行与验证代码的恶意进程；目标是消除正常导入与缓存混版』，验收边界本就不含对抗；G3 读到第1款即停而结论在末段，是 G0 把禁令写得斩钉截铁、范围限定另起一段放最后造成的。补第4款操作判据：能否在不向 worker 进程内注入代码的前提下复现——能则事故类P1必修，不能则对抗类适用A39不属P1边界；第9-15轮反例均需进程内注入（绑定驻留globals、REGISTRY.min_samples 2→999、TA.wq=None、改默认参数绑定）故属对抗类，退出P1。对价：事故类必须改用结构性关闭不得继续用检测关闭，因为对任意外部 Python callable 自动推导完整行为依赖并判断状态差异是否影响未来行为不可判定，反射路线每修一条必有同族下一条是机械后果。放行条件：白名单必须替代通用运行状态扫描不得叠加在前，移除通用反射本身列为 P1 动作。声明口径强制为能力边界不得写成没有只读快照。验收入口更换：旧 verify 读无界评审线程末行=范围从未定义，十五轮不收敛是必然；新入口为具名能力证据+范围决定，历史 43016 行全保留。A43 自查：第9-15轮反例全部保持 open 进已知缺口表，不得记为闭合或已按A39免责，本裁定改范围不结项。P1/P2 划分与残余风险正式接受（P2负责人G3、触发条件为任何θ声明进入资本配置或生产决策前、完成判据为独立机器由冻结制品重跑按结论层比对）。附裁准许生成身份与判读身份分离，不削弱A31。",
         "by": "G0/427ed064 R-10 裁定"
+      },
+      {
+        "n": 81,
+        "at": "2026-09-12T04:20:03Z",
+        "file": "docs/adr/ruling-G0-R10-scope-and-acceptance.md §10-§11 + R-11 立项",
+        "summary": "R-10 交付核验通过（G0 不采信回执，亲跑新 verify 原文 rc=0 403 passed；paths.py 93 行、_const_key/walk_packages/vars 反射全部不存在故 §2.3 放行条件满足；test_structural_isolation 7 passed 三条判据各带突变；第9-15轮15条反例逐条在已知可漏检栏标 open 并注明需进程内注入故 A43 遵守；retired-tests 5 文件一条未删；能力文档 121 行两行标记在位占位符 0；统计证据带实际值与阈值 4.06% vs 7%、功效 327/768 下界 39.05% 未达 80% 按出口A如实 fail）。补裁：G3 主动交出的依赖内容哈希缺口列 P1——按裁定 §2.1 判据，版本字符串相同而包内容不同可经换源/重打包/直改 site-packages/跨平台轮子四条路径发生，均无需向 worker 注入代码，属事故类必修；成本核验推翻原假设，每个分发的 RECORD 装包时已算好逐文件 sha256（polars 218/219、numpy 926/927、scipy 1430/1431 等），对 RECORD 文本取摘要约十行；须同时声明跨机器制品身份必然不等是正确行为而非缺陷、回执身份相等性只在同一次运行内有意义，否则门退化为假警报（与 R79 walk_packages 覆盖集同源）。处置：R-10 维持 done（入口已满足，为十行加强掀翻十五轮任务是把刚裁掉的循环动力学请回来），另立 R-11 作 P1 阻断项。其余三条未验证项归属确认：跨机器数值复现 P2、被批准代码读隐式状态保持 open 属 A39、完整配置 schema P2。",
+        "by": "G0/427ed064 R-10 核验"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.57",
+    "version": "v1.58",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -1347,11 +1354,9 @@
     },
     "research": {
       "owner": "G3",
-      "status": "blocked",
-      "progress": 0.9,
-      "blockers": [
-        "R-10 卡在 G0 的范围裁定，非技术阻塞。十五轮审查十五次 fail，后七轮全部集中在执行身份编码一条轴；顾问结论是该路线在「任意外部 Python callable」支持域下无收敛点，应改走冻结制品 + 纯数据配置。需 G0 裁定三条（均属其职权，我不自裁）：(a) 是否按新边界重定范围、把通用执行状态反射退出 P1 发布判据；(b) R-10 验收入口是否由「评审文档末行终裁」改为「具名能力证据 + 范围决定」——不改则架构换了仍被旧流程锁住；(c) 只读制品路线列 P1 还是 P2。另：不能沿用我现有边界声明——现行契约 research-schema.md:584 把正常导入缓存/陈旧 pycache/fork 继承引起的混版明确排除在 A39 免责之外，故这条轴不能直接归档为已声明边界，需范围负责人正式接受残余风险。裁定前我不动源码、不发新制品、不派下一轮审查。技术侧现状：R-01..R-09 全部 done 且 verify 实跑通过；tests/research 489 passed（余 2 条待新制品）；十五审必修已修完并自证，含修正其点出的伪对照。"
-      ],
+      "status": "in_progress",
+      "progress": 0.909,
+      "blockers": [],
       "provides": [
         "quant_lab.research.{ops,features,evaluator,protocol,api}",
         "data/lockbox/ledger.parquet",
@@ -1369,7 +1374,7 @@
         "note": "[G0/427ed064 OR-02 R77 · **四套全绿，942 项**] 测量 09:49Z，A40：data/market 近10分钟 0 次、research 1 次（未达活跃阈值）→ 可判；判定后复核 research 仍 1 次（同一次写入，跑测期间无新增），**判定有效**。A35：src 48/48、tests 61/61。**research 首次全绿 351 passed**（上轮 341 passed / 10 failed）——**G3 已把五审全部反例实现**：R5C（结构失败须计入 n_failed）、R5G×4（相关向量形状与域）、R5O（首 replicate 无零失败特权）现全部通过；A31 陈旧级联亦解（报告 18:42:21 晚于 nullmodel.py 17:54:16）。**核心假绿路径已堵**：R5C 断言『把 50 条搬进 invalid 却不计入失败数』必须抛 `未全部计入失败数`——五审指出的『结构失败未强制纳入 n_failed 致条件 FPR 最坏界假绿』现以具名错误拒绝。**当前状态**：data 225 / market 358 / research 351 / integration 8，合计 **942 项全绿**；D-10、M-10 已闭合。**P1 唯一剩余项 R-10 现已不是代码问题，是终裁问题**：`review-G3-P1.md` 末行仍为『五审终裁：fail』，而 R-10 的 verify 机械读末行。G3 需派六审取得 pass 终裁；若六审仍 fail 而残余属 P2 量级，则走 D-10 先例（G0 出具名裁定文件 + verify 显式析取）。**该选择不由 G3 自裁，G0 亦不预判六审结果。**",
         "at": "2026-09-11T09:53:43Z"
       },
-      "lastUpdate": "2026-09-12T02:58:41Z",
+      "lastUpdate": "2026-09-12T04:20:03Z",
       "tasks": [
         {
           "id": "R-01",
@@ -1440,7 +1445,7 @@
         {
           "id": "R-10",
           "title": "[Codex review] P1 里程碑 review（R-03..R-09），必修项闭合",
-          "status": "doing",
+          "status": "done",
           "verify": "test -f docs/adr/capability-G3-execution-identity.md && grep -Eq '^范围决定：ruling-G0-R10-scope-and-acceptance\\.md$' docs/adr/capability-G3-execution-identity.md && grep -Eq '^能力表：完成$' docs/adr/capability-G3-execution-identity.md && ! grep -qE '待回填|稍后补|TODO' docs/adr/capability-G3-execution-identity.md && .venv-g3/bin/python -m pytest tests/research -q -p no:cacheprovider",
           "verifyHistory": [
             {
@@ -1459,6 +1464,12 @@
               "why": "读无界评审线程末行=验收标准等于审查方何时说 pass 而范围从未定义；十五轮不收敛是该入口的必然结果。经 ruling-G0-R10-scope-and-acceptance.md 更换。历史文档 43016 行全部保留。"
             }
           ]
+        },
+        {
+          "id": "R-11",
+          "status": "todo",
+          "title": "依赖内容哈希并入制品身份（裁定 §10，P1 阻断项）",
+          "verify": "test -f docs/adr/capability-G3-execution-identity.md && grep -Eq '内容哈希|RECORD' docs/adr/capability-G3-execution-identity.md && grep -Eq '跨机器.*不等|适用域' docs/adr/capability-G3-execution-identity.md && .venv-g3/bin/python -c \"import sys; sys.path.insert(0,'src'); from quant_lab.research.paths import dependency_manifest as d; m=d(); assert any(len(str(v))==64 for k,v in m.items() if k!='python'), '依赖清单仍只有版本号，未含内容哈希'; print('ok', len(m))\" && .venv-g3/bin/python -m pytest tests/research -q -p no:cacheprovider"
         }
       ],
       "notes": [
@@ -1769,6 +1780,18 @@
         {
           "t": "11:58",
           "n": "[G0 裁定] **R-10 三条全准，见 `docs/adr/ruling-G0-R10-scope-and-acceptance.md`。****理由不是 G3 给的那条**：§9.10.20 末段原文「不要求防御任意改写全部执行与验证代码的恶意进程；目标是消除正常导入与缓存混版」——**验收边界本来就不含对抗**，G3 读到第 1 款就停了，而结论在末段。**是我把禁令写得斩钉截铁、把范围限定另起一段放最后。** 已补第 4 款操作判据。**归属判据**：能不能在不向 worker 进程内注入代码的前提下复现？能=事故类 P1 必修；不能=对抗类适用 A39。**第 9–15 轮反例全部需要进程内注入，属对抗类，退出 P1。****对价（放行条件，不是建议）**：事故类必须改用**结构性关闭**，且**白名单替代通用反射、不得叠加**——移除通用运行状态反射本身列为 P1 动作。否则循环不结束。**A43 自查已过**：第 9–15 轮反例**全部保持 open**、逐条进已知缺口表，**不得记闭合、不得记「已按 A39 免责」**。本裁定改范围、不结项。**验收入口更换**：旧 verify 读一条无界评审线程的末行，等于验收标准=审查方何时说 pass 而范围从未定义；**十五轮不收敛是这个入口的必然结果**。新入口 = 具名能力证据 + 范围决定，历史 43016 行全部保留不动。**残余风险已正式接受**：P2 负责人 G3；触发条件 = 任何 θ 声明进入资本配置或生产决策之前；完成判据 = 独立机器由冻结制品重跑、按结论层比对。"
+        },
+        {
+          "t": "11:59",
+          "n": "【交接状态说明，避免误读】模块已按纪律标记 blocked（task.py 只支持模块级 block，R-10 任务行仍显示 doing，阻塞原因已进 blockers 列表）。\n\n工作树当前是**开发中间态，不是缺陷态**：\n- tests/research 489 passed，2 failed。这 2 条（test_A31_report_must_be_generated_by_current_code、test_S17_real_low_power_truthful_fail_accepted）失败的唯一原因是**盘上报告由上一版代码生成**，而我为十五审必修改了源码。按顾问给的口径，这正是「制品 A 的证据仍然有效，但 A 不自动验收目标 B」的正常状态，不是回归。\n- 未提交改动：src/quant_lab/research/{nullmodel,paths}.py、tests/research/{test_review_p1_round3,round5}.py 修改，tests/research/test_review_p1_round10.py 新增。\n- 我**故意没有**跑第 28 轮 MC 来消除这 2 条失败：机制未冻结时再烧 45 分钟无意义，且会把开发中源码当成正式报告目标——顾问明确反对这一点。\n\n谁接手都可以从这里继续：G0 裁定到位后，若走冻结制品路线，按顾问六步实施并在接口冻结后做**一次**正式全量 MC；若维持现路线，则跑 MC28 让制品与源码对齐后再派十六审（注意 R-10 verify 的轮次枚举已到十五审，十六审需再做一次中性扩展）。"
+        },
+        {
+          "t": "13:14",
+          "n": "【R-10 done，R-01..R-10 全部完成】按 G0 裁定（ruling-G0-R10-scope-and-acceptance.md，契约 v1.57）执行完毕，新 verify 原文实跑 rc=0（403 passed）；R-05/R-07/R-08/R-09 verify 原文 rc 亦全 0。\n\n按裁定四条执行指令逐条落地：\n1. **先移除再重建**（顺序不能反）：删掉 paths.py 里 632 行通用运行状态反射，paths.py 686→93 行，换成 39 行声明式制品身份（冻结源码摘要 + 声明依赖清单，DECLARED_DEPENDENCIES 白名单，缺版本即具名拒绝）。白名单**替代**扫描而非叠加。\n2. 结构性边界：整组 worker 由全新解释器**显式 spawn** 启动；配置收窄为**纯数据**（as_pure_data：精确标量/列表/字符串键字典，非有限浮点与活对象一律具名拒绝），worker 内重建；schema 外字段**拒绝而非忽略**，缺字段也不得用默认值悄悄补齐（_checked_fields）；每 job 回传制品身份，父进程逐份核对。\n3. 三条判别性证明按 A44 写成**类级**并各带突变自证（tests/research/test_structural_isolation.py，7 passed）：未申报状态不得跨进程边界（突变：换 fork 就会跨）／worker 制品身份等于父进程冻结身份（突变：去掉该门坏回执即放行）／配置未申报字段被拒绝（突变：绕开检查缺字段被默认值补齐）。\n4. 声明口径按 §2.4 写成能力边界，报告 §4 与能力文档均不再出现「没有只读快照」式表述。\n\nA43 自查照做：29 个断言已移除机制的用例**移出测试套但保留为文件**（docs/adr/retired-tests/，含退役理由），没有删；第 9–15 轮 15 条对抗类反例逐条进能力表「已知可漏检」栏，注明共同复现前提「需在 worker 进程内执行注入代码」，标 open——**不记为闭合、不记为已按 A39 免责**。\n\n能力文档 docs/adr/capability-G3-execution-identity.md（121 行，无占位符）含五类证据：基线身份（制品/源码/依赖/配置/报告哈希、worker 回执数、各机制 seed0 与前五 seed，供不生成报告的一方独立重跑）；能力表三分且三栏均不为空；统计证据带实际值与阈值（四空机制最坏界上界最大 4.06% vs 阈值 7% 全过，功效 327/768 下界 39.05% 未达 80% 按出口 A 如实 fail）——**不把「测试全绿」当来源完整证明**；使用限制四条（明确禁止把「机器检查通过」表述为「计算发生过」、禁止在 θ 声明进入资本配置前据此放行）；§7 残余风险接受书引用（P2 负责人 G3、触发条件、结论层比对完成判据）。\n\nMC28 是机制冻结后的**一次**正式全量，符合裁定 §5 的实施期跑测安排。制品身份三方对齐（父进程 / 13 份 worker 回执 / 判读方独立重算）。\n\n遗留（已在能力文档 §2.3「未验证」栏列明，非隐瞒）：跨机器数值复现、依赖仅固定版本号不校验包内容哈希、隐式状态读取未穷举、完整配置 schema 属 P2。"
+        },
+        {
+          "t": "13:20",
+          "n": "[G0 核验] **R-10 通过，不采信回执，逐项亲跑**：新 verify 原文 **rc=0 / 403 passed**；`paths.py` **93 行**，`_const_key`/`walk_packages`/`vars(mod)` 反射**全部不存在**——**§2.3「替代而非叠加」放行条件满足**；`test_structural_isolation.py` **7 passed**，三条判据各带突变对照；第 9–15 轮 **15 条反例逐条在「已知可漏检」栏标 open**、均注明需进程内注入，**A43 遵守**；`retired-tests/` **5 个文件一条未删**；能力文档 121 行、两行标记在位、占位符 0；统计证据带实际值与阈值（**4.06% vs 7%**；功效 **327/768**、下界 **39.05%**，未达 80% 按出口 A 如实 fail）。**补裁：G3 主动交出的依赖内容哈希缺口，列 P1，另立 R-11。** 按我自己的判据过一遍——版本串相同而包内容不同，可经换安装源、重打包 wheel、直改 site-packages、跨平台轮子四条路径发生，**四条都不需要向 worker 注入代码，属事故类，必修**。**成本核验推翻了我的原假设**：每个分发的 `RECORD` 装包时**已算好逐文件 sha256**（polars 218/219、numpy 926/927、scipy 1430/1431），对 `RECORD` 文本取摘要即可，**约十行，不必遍历文件树**。**同时必须声明一条，否则造假警报**：内容哈希并入后**跨机器制品身份必然不等**，这是正确行为不是缺陷；回执身份相等性**只在同一次运行内**有意义。与 R79 `walk_packages` 覆盖集那次同源。**R-10 维持 done**：入口已满足，为一处十行的加强掀翻一条十五轮的任务，等于把我刚裁掉的循环动力学请回来。**P1 不因此宣告**，宣告条件加 R-11。其余三条未验证项确认：跨机器数值复现 **P2**；被批准代码读隐式状态**保持 open 属 A39**；完整配置 schema **P2**。"
         }
       ]
     },
@@ -2582,22 +2605,19 @@
     },
     "readyForStitch": false,
     "p1Status": {
-      "at": "2026-09-11T10:37Z",
-      "round": "OR-02 R80",
+      "at": "2026-09-12T04:20Z",
+      "round": "R-10 交付核验",
       "done": false,
-      "suites": {
-        "tests/data": "225 passed",
-        "tests/market": "358 passed",
-        "tests/research": "15 failed / 352 passed",
-        "tests/integration": "8 passed"
-      },
       "legs": {
-        "G1": "D-10 done——**经 G0 裁决书（析取第二支）**，非审查方 pass；review-G1-P1.md 及 r3/r4/r5 终裁均 fail；用户在 G1 会话经 AskUserQuestion 预授权该路径；残余 7 条（S08/S13/S14/V01/W01-W03）",
-        "G2": "M-10 done——十四审终裁 pass（审查方自行给出）",
-        "G3": "R-10 doing——六审终裁 fail，三条必修 R6-G/H/L"
+        "G1": "D-10 done（G0 裁决书，非审查方 pass，残余 7 条）",
+        "G2": "M-10 done（十四审 pass）",
+        "G3": "R-10 done（G0 亲跑新 verify rc=0 / 403 passed）"
       },
-      "blockedByUserGate": false,
-      "note": "六个用户闸门（G-ACCOUNT-SCOPE/G-RETENTION-CLOUD/G-OC-200-3/G-BUDGET-LABOR/G-STAT-CLAIM/G-LICENSE-SEARCH）**无一挡 P1**：各自 affects 均为 D-05/D-08/D-09/D-11/R-05/R-08/R-09/OR-06，不含 D-10/M-10/R-10。P1 只等 R-10。"
+      "remaining": [
+        "R-11 依赖内容哈希（裁定 §10，P1 阻断）",
+        "OR-05 对抗式集成 review（本会话禁止派发）"
+      ],
+      "blockedByUserGate": false
     },
     "reviewRounds": [
       {
