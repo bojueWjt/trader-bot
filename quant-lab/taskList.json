@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-12T04:20:03Z",
+  "updatedAt": "2026-09-12T05:28:31Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -602,10 +602,17 @@
         "file": "docs/adr/ruling-G0-R10-scope-and-acceptance.md §10-§11 + R-11 立项",
         "summary": "R-10 交付核验通过（G0 不采信回执，亲跑新 verify 原文 rc=0 403 passed；paths.py 93 行、_const_key/walk_packages/vars 反射全部不存在故 §2.3 放行条件满足；test_structural_isolation 7 passed 三条判据各带突变；第9-15轮15条反例逐条在已知可漏检栏标 open 并注明需进程内注入故 A43 遵守；retired-tests 5 文件一条未删；能力文档 121 行两行标记在位占位符 0；统计证据带实际值与阈值 4.06% vs 7%、功效 327/768 下界 39.05% 未达 80% 按出口A如实 fail）。补裁：G3 主动交出的依赖内容哈希缺口列 P1——按裁定 §2.1 判据，版本字符串相同而包内容不同可经换源/重打包/直改 site-packages/跨平台轮子四条路径发生，均无需向 worker 注入代码，属事故类必修；成本核验推翻原假设，每个分发的 RECORD 装包时已算好逐文件 sha256（polars 218/219、numpy 926/927、scipy 1430/1431 等），对 RECORD 文本取摘要约十行；须同时声明跨机器制品身份必然不等是正确行为而非缺陷、回执身份相等性只在同一次运行内有意义，否则门退化为假警报（与 R79 walk_packages 覆盖集同源）。处置：R-10 维持 done（入口已满足，为十行加强掀翻十五轮任务是把刚裁掉的循环动力学请回来），另立 R-11 作 P1 阻断项。其余三条未验证项归属确认：跨机器数值复现 P2、被批准代码读隐式状态保持 open 属 A39、完整配置 schema P2。",
         "by": "G0/427ed064 R-10 核验"
+      },
+      {
+        "n": 82,
+        "at": "2026-09-12T05:28:31Z",
+        "file": "taskList.json integration.milestones.P1 + D-10 verify 锚点修复",
+        "summary": "P1 宣告 done。三条腿 verify 原文前台实跑 D-10/M-10/R-10/R-11 全 rc=0，OR-05/OR-06 按 GOAL-0 §5 属 P1 之后才做非前提（原文核对，非凭记忆）。里程碑条目如实记 howEachLegClosed：G1 与 G3 两条腿均为非审查方 pass（G1 五轮全 fail 经分类闭合裁决、G3 十五轮全 fail 经范围重定裁决），G3 的 15 条对抗类反例保持 open 并已正式接受残余风险；另记 notClaimed 四条（不声称已证明计算发生过、不声称功效达标 327/768 下界 39.05%、不声称已回归防护 OR-04 是非退化门、不声称跨机器数值可复现）。另修 D-10 verify 锚点：原锚在 tail -5，R80/R81 G0 自己往该裁决书追加 §6/§7 使文件从 47 涨到 133 行，终裁行落出窗口致 verify 由 rc=0 变 rc=1；裁定本身未变。改为全文锚定精确行加显式无撤回标记检查，判别性已证（改成 fail 则 rc=1，还原 rc=0）。",
+        "by": "G0/427ed064 P1"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.58",
+    "version": "v1.59",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -692,7 +699,7 @@
           "id": "D-10",
           "title": "[Codex review] P1 里程碑 review（D-03..D-09 合成数据链路），必修项闭合",
           "status": "done",
-          "verify": "f=$(ls docs/adr/review-G1-P1-r*.md 2>/dev/null | sed -E 's/.*-r([0-9]+)\\.md/\\1 &/' | sort -n | tail -1 | cut -d' ' -f2); { [ -n \"$f\" ] && tail -40 \"$f\" | grep -Eq '^(二审|三审|四审|五审|六审|七审)?终裁[：:] *\\*{0,2}pass'; } || { test -f docs/adr/ruling-G0-D10-classification-closure.md && tail -5 docs/adr/ruling-G0-D10-classification-closure.md | grep -Eq '^分类终裁[：:] *\\*{0,2}pass'; }",
+          "verify": "f=$(ls docs/adr/review-G1-P1-r*.md 2>/dev/null | sed -E 's/.*-r([0-9]+)\\.md/\\1 &/' | sort -n | tail -1 | cut -d' ' -f2); { [ -n \"$f\" ] && tail -40 \"$f\" | grep -Eq '^(二审|三审|四审|五审|六审|七审)?终裁[：:] *\\*{0,2}pass'; } || { test -f docs/adr/ruling-G0-D10-classification-closure.md && grep -Eq '^分类终裁[：:] *\\*{0,2}pass\\*{0,2}$' docs/adr/ruling-G0-D10-classification-closure.md && ! grep -qE '本裁定撤销|裁定作废|分类终裁.*撤回' docs/adr/ruling-G0-D10-classification-closure.md; }",
           "verifyHistory": [
             {
               "at": "2026-09-11T04:25:23Z",
@@ -703,6 +710,11 @@
               "at": "2026-09-11T04:32:17Z",
               "old": "f=$(ls docs/adr/review-G1-P1-r*.md 2>/dev/null | sed -E 's/.*-r([0-9]+)\\.md/\\1 &/' | sort -n | tail -1 | cut -d' ' -f2); [ -z \"$f\" ] && f=docs/adr/review-G1-P1.md; test -f \"$f\" && echo \"reading $f\" && tail -40 \"$f\" | grep -E '^(二审|三审|四审|五审|六审|分类)?终裁[：:] *\\*{0,2}pass'",
               "why": "G0 R43/契约规则：verify 每个子句只读一类证据且以具名路径指向；独立审查轮次（review-G1-P1-r*.md，正向终裁 pass）与 G0 分类裁定（ruling-G0-D10-classification-closure.md，分类终裁 pass）显式析取，撤回把'分类'塞进审查轮次通配前缀的做法；仍必须为 pass，不放宽"
+            },
+            {
+              "at": "2026-09-12T05:27:30Z",
+              "old": "f=$(ls docs/adr/review-G1-P1-r*.md 2>/dev/null | sed -E 's/.*-r([0-9]+)\\.md/\\1 &/' | sort -n | tail -1 | cut -d' ' -f2); { [ -n \"$f\" ] && tail -40 \"$f\" | grep -Eq '^(二审|三审|四审|五审|六审|七审)?终裁[：:] *\\*{0,2}pass'; } || { test -f docs/adr/ruling-G0-D10-classification-closure.md && tail -5 docs/adr/ruling-G0-D10-classification-closure.md | grep -Eq '^分类终裁[：:] *\\*{0,2}pass'; }",
+              "why": "锚在 tail -5 上；R80/R81 G0 自己往该裁决书追加 §6/§7 后文件从 47 行涨到 133 行，终裁行落出窗口，verify 由 rc=0 变 rc=1。裁定本身未变（第 47 行原样，第 79/133 行两次重申）。改为全文锚定精确行 + 显式检查无撤回标记。"
             }
           ]
         },
@@ -1355,7 +1367,7 @@
     "research": {
       "owner": "G3",
       "status": "in_progress",
-      "progress": 0.909,
+      "progress": 1.0,
       "blockers": [],
       "provides": [
         "quant_lab.research.{ops,features,evaluator,protocol,api}",
@@ -1374,7 +1386,7 @@
         "note": "[G0/427ed064 OR-02 R77 · **四套全绿，942 项**] 测量 09:49Z，A40：data/market 近10分钟 0 次、research 1 次（未达活跃阈值）→ 可判；判定后复核 research 仍 1 次（同一次写入，跑测期间无新增），**判定有效**。A35：src 48/48、tests 61/61。**research 首次全绿 351 passed**（上轮 341 passed / 10 failed）——**G3 已把五审全部反例实现**：R5C（结构失败须计入 n_failed）、R5G×4（相关向量形状与域）、R5O（首 replicate 无零失败特权）现全部通过；A31 陈旧级联亦解（报告 18:42:21 晚于 nullmodel.py 17:54:16）。**核心假绿路径已堵**：R5C 断言『把 50 条搬进 invalid 却不计入失败数』必须抛 `未全部计入失败数`——五审指出的『结构失败未强制纳入 n_failed 致条件 FPR 最坏界假绿』现以具名错误拒绝。**当前状态**：data 225 / market 358 / research 351 / integration 8，合计 **942 项全绿**；D-10、M-10 已闭合。**P1 唯一剩余项 R-10 现已不是代码问题，是终裁问题**：`review-G3-P1.md` 末行仍为『五审终裁：fail』，而 R-10 的 verify 机械读末行。G3 需派六审取得 pass 终裁；若六审仍 fail 而残余属 P2 量级，则走 D-10 先例（G0 出具名裁定文件 + verify 显式析取）。**该选择不由 G3 自裁，G0 亦不预判六审结果。**",
         "at": "2026-09-11T09:53:43Z"
       },
-      "lastUpdate": "2026-09-12T04:20:03Z",
+      "lastUpdate": "2026-09-12T05:18:40Z",
       "tasks": [
         {
           "id": "R-01",
@@ -1467,7 +1479,7 @@
         },
         {
           "id": "R-11",
-          "status": "todo",
+          "status": "done",
           "title": "依赖内容哈希并入制品身份（裁定 §10，P1 阻断项）",
           "verify": "test -f docs/adr/capability-G3-execution-identity.md && grep -Eq '内容哈希|RECORD' docs/adr/capability-G3-execution-identity.md && grep -Eq '跨机器.*不等|适用域' docs/adr/capability-G3-execution-identity.md && .venv-g3/bin/python -c \"import sys; sys.path.insert(0,'src'); from quant_lab.research.paths import dependency_manifest as d; m=d(); assert any(len(str(v))==64 for k,v in m.items() if k!='python'), '依赖清单仍只有版本号，未含内容哈希'; print('ok', len(m))\" && .venv-g3/bin/python -m pytest tests/research -q -p no:cacheprovider"
         }
@@ -1792,6 +1804,10 @@
         {
           "t": "13:20",
           "n": "[G0 核验] **R-10 通过，不采信回执，逐项亲跑**：新 verify 原文 **rc=0 / 403 passed**；`paths.py` **93 行**，`_const_key`/`walk_packages`/`vars(mod)` 反射**全部不存在**——**§2.3「替代而非叠加」放行条件满足**；`test_structural_isolation.py` **7 passed**，三条判据各带突变对照；第 9–15 轮 **15 条反例逐条在「已知可漏检」栏标 open**、均注明需进程内注入，**A43 遵守**；`retired-tests/` **5 个文件一条未删**；能力文档 121 行、两行标记在位、占位符 0；统计证据带实际值与阈值（**4.06% vs 7%**；功效 **327/768**、下界 **39.05%**，未达 80% 按出口 A 如实 fail）。**补裁：G3 主动交出的依赖内容哈希缺口，列 P1，另立 R-11。** 按我自己的判据过一遍——版本串相同而包内容不同，可经换安装源、重打包 wheel、直改 site-packages、跨平台轮子四条路径发生，**四条都不需要向 worker 注入代码，属事故类，必修**。**成本核验推翻了我的原假设**：每个分发的 `RECORD` 装包时**已算好逐文件 sha256**（polars 218/219、numpy 926/927、scipy 1430/1431），对 `RECORD` 文本取摘要即可，**约十行，不必遍历文件树**。**同时必须声明一条，否则造假警报**：内容哈希并入后**跨机器制品身份必然不等**，这是正确行为不是缺陷；回执身份相等性**只在同一次运行内**有意义。与 R79 `walk_packages` 覆盖集那次同源。**R-10 维持 done**：入口已满足，为一处十行的加强掀翻一条十五轮的任务，等于把我刚裁掉的循环动力学请回来。**P1 不因此宣告**，宣告条件加 R-11。其余三条未验证项确认：跨机器数值复现 **P2**；被批准代码读隐式状态**保持 open 属 A39**；完整配置 schema **P2**。"
+        },
+        {
+          "t": "14:18",
+          "n": "【R-11 done，R-01..R-11 全部完成，十一条 verify 原文实跑 rc 全 0】依赖内容哈希已并入制品身份（裁定 §10）。\n\n实现：dependency_manifest 由「只记版本号」改为**版本与内容哈希分列两个字段**。内容身份取每个已安装分发的 RECORD 摘要——装包时已逐文件算好 sha256（实测 polars 218、numpy 926、scipy 1430、pyarrow 754、arch 140、polars-ta 78 条），不必自己遍历文件树；RECORD 不可读即具名拒绝，与「版本不可得即拒绝」同构。为让该拒绝路径可被测试直接驱动，抽出 _distribution_for。\n\n**一处按 verify 原文纠正的设计**：我最初把版本与内容哈希拼成 `1.44.2+content.<sha>` 一串，verify 要求清单里存在整串长度恰好 64 的值，不满足。拼串本身也不对——那等于让「版本相同」与「内容相同」再次混为一谈，而这正是本条要挡的东西。改为 `polars` 与 `polars.content` 两个独立字段。\n\n回归四条（并入 test_structural_isolation.py，共 11 passed）：清单必须逐依赖带 64 位十六进制内容哈希；内容哈希必须等于该分发 RECORD 的 sha256 且 RECORD 确实含逐文件哈希；RECORD 不可读时具名拒绝（用 patch 驱动该路径）；改一个依赖的内容摘要则制品身份必变、还原后回到原值。\n\n**配套的适用域声明已写进能力文档 §1.1（G0 明示不做会造出假警报）**：内容哈希并入后跨机器制品身份**必然不等**（平台轮子不同），这是正确行为不是污染，含义就是「这是另一份制品」。故 **worker 回执的身份相等性只在同一次运行内有意义**（整组 worker 同机 spawn），跨机器不比较身份摘要；§5 的 P2 完成判据本来就按结论层比对。与 R79 walk_packages 覆盖集那次同源：身份摘要不但**覆盖集**要由被标识对象决定，**比较的适用域**也要一并声明。\n\nMC29 是内容哈希并入后的正式全量重跑，能力文档由新制品重新生成（144 行，无占位符，两行标记在位）。四空机制最坏界上界最大 4.06%（阈值 7%）全过；功效 327/768、下界 39.05% 未达 80%，按出口 A 如实 fail。\n\n剩余未验证项（能力文档 §2.3 明列，未隐瞒）：跨机器数值复现属 P2；被批准代码自身读隐式状态未穷举，属 A39 对抗类保持 open；完整配置 schema 属 P2。\n\nP1 现只等 OR-05（对抗式集成 review），本窗口不派发，需用户或其他窗口起。"
         }
       ]
     },
@@ -1814,7 +1830,7 @@
         "note": "[G0 OR-02 R5 19:58Z 本轮自评] 交付：(1) 契约 v1.1→**v1.2**，changeLog #17-#25 共 9 条，备份在 scratchpad/{execution-interface,research-schema,README}.bak-r5.md。新增 execution-interface §5.10 裁定 B8（fraction 可空，与 §5.9 B7 同型）+ 标号勘误（§5.9 标题误写 B5，规范标号 B7，引用以节号为准）；research-schema §9.10.1-9.10.8 = 逐条答复 G1 五项裁决（A8 Decimal(38,12)+struct 键集冻结 / A9 CR-07 最小协议+index.json / A10 远端更严口径准+basis 归因 / A11 codes.py 纯别名确认+作废旧删除指令 / A12 不折叠但必须同簇）+ 9.10.6 fraction 同步 + 9.10.7 需用户决定两项 + 9.10.8 estimand 六键冻结、main 废止。README §3.5 加严为 5.1-5.5（分区归属表/禁根删除/违规即 fail/G1 判例/G0 跑前复核义务）。(2) 三套全量：data 119、market 175、research 214，全 passed。(3) verify：D-07 rc=0（跑前复核删除范围 PASS）、R-09 rc=0、D-10 rc=1、M-10 rc=1。(4) 两份 Codex 均 completed 且均 **fail**：G1 r2 二审终裁 fail（closed 2/16、partially 14/16、新增 T01-T04）、G2 三审终裁 fail（closed 4/14、partial-P2 8、open 2 = S05 覆盖入口 or 选缺口、S14 缺 sha 列/null 时 bars_complete 仍 True）。**D-10 与 M-10 均不够格 done**。(5) **OR-04：2 passed / 4 error（上轮 1 passed / 1 failed / 4 error）**。修好两条自身缺陷（均在 tests/integration/test_e2e_synthetic.py，属 G0）：feature_snapshot 调用参数序与 kwargs 写错（契约 feature-snapshot §3 签名为 feature_snapshot(asts, anchors, *, bars, ...)，无 interval 参数，G3 实现与契约一致，是 G0 测试写错）；Ref 算子 AST 形状写错（Ref arity=1，lag 走 params，正确形状 {\"op\":\"Ref\",\"args\":[{\"field\":\"close\"}],\"params\":{\"lag\":1}}）。剩余 4 条 ERROR 全部收敛为**同一个根因**：market/contract.py:344 OrderPlan.model_validate 对 fraction=None 抛 ValidationError，待 G2 落地 §5.10 B8 即解。StructFieldNotFoundError \"main\" 已定位归 G3（evaluator.py:69 默认 estimand=\"main\" + synthetic.py:172 桩自造 main 键），已立 §9.10.8。(6) **P1 未达标**，缺项：G1 D-10（r2 fail，T01-T04 + 14 partially 待闭合后派 r3）、G2 M-10（三审 fail，S05/S14 两 open 待闭合后派四审）、G3 R-10（未派发，且 verify 仍负向 grep 违反 §9.9 A7，派发前必须改）、OR-04 未全绿（阻在 B8）、G1 A8 dtype 迁移、G3 estimand/桩同构修复。(7) 需用户决定：制品备份恢复与保留期清理协议（CR-07 剩余，牵涉 consent 闸门）、risk_acknowledged_by_user 何时翻 true。六项闸门维持 pending，本轮无窗口绕闸迹象（G3 report 的 G-STAT-CLAIM/G-LICENSE-SEARCH 均 pending 且 claim_status=descriptive_only，正确）。下轮：核 G2 是否落 B8、G1 是否落 A8 dtype 与 index.json、G3 是否修 estimand 与清账本复跑、三份 review 是否重派。",
         "at": "2026-09-10T20:00:13Z"
       },
-      "lastUpdate": "2026-09-11T15:41:49Z",
+      "lastUpdate": "2026-09-12T05:28:31Z",
       "tasks": [
         {
           "id": "OR-01",
@@ -2065,6 +2081,10 @@
         {
           "t": "00:41",
           "n": "[G0/427ed064 OR-02] **P1 现状：只等 R-10，已到八审，仍 fail。** 三条 P1 必修：**R8-H（最深的一条）**——真实双 spawn worker 只改**函数默认参数绑定的 globals**，`base_R_sd` 从 1.69135 变成 4.24194，而磁盘摘要与执行摘要**两种身份全部相等**、零异常，父进程照常发布。`executing_code_digest` 摘的是 code object，**摘不到默认参数值与模块级可变配置**；八审另证 `TA.wq=None`、`REGISTRY['Std'].min_samples` 2→999、`T0` 2024→2030 均不改变摘要。**R7-L**——auto 报告自报 `mode=fixed` 即可摘掉 auto 分布账，八审记**未闭合**（详见上条看板更正）。**R7-G 有限 n 精确数学**——部分闭合：1816 组 Decimal 顶点对拍发现接近 ±1 的消减误差，n=1000/m=1−1e−10 时接受高于真实上界约 4.77 倍的 sd，但绝对量约 1e−8、未突破 0.03 带宽地板，**八审明写不单独升 P1**。G3 当前在跑（3 个进程，`.venv-g3`），按 A40 第三信号记**不判**。"
+        },
+        {
+          "t": "14:28",
+          "n": "[G0] **P1 宣告 done。** 三条腿 verify 原文前台实跑，不采信任何回执：**D-10 rc=0 / M-10 rc=0 / R-10 rc=0（403 passed）/ R-11 rc=0**；模块套件 data 225、market 358、integration 8 全绿。OR-05/OR-06 按 GOAL-0 §5 是 **P1 全绿之后才做**，不是前提（已核原文，非凭记忆）。**里程碑条目如实记了三条腿各自怎么闭合的**：G1 与 G3 **两条腿都不是审查方 pass**——G1 五轮全 fail 经分类闭合裁决，G3 十五轮全 fail 经范围重定裁决，其 15 条对抗类反例**保持 open**、残余风险已由 G0 正式接受。另记 **notClaimed 四条**：不声称已证明计算发生过；不声称功效达标（327/768、下界 39.05%，低于 80%，按出口 A 如实 fail）；不声称已回归防护（OR-04 是非退化门，成交 78/80 对下限 40、走完结局 65/80 对下限 20）；不声称跨机器数值可复现。**顺手修了一处我自己弄坏的门**：D-10 的 verify 锚在 `tail -5`，而 R80/R81 我往那份裁决书追加了 §6/§7，文件从 47 行涨到 133 行，终裁行落出窗口，verify 由 rc=0 变 **rc=1**。裁定本身没变（第 47 行原样，79/133 两次重申）。已改为全文锚定精确行 + 显式检查无撤回标记，判别性已证（改 fail 则红、还原则绿）。"
         }
       ]
     }
@@ -2601,21 +2621,38 @@
       "P2_硬化_真实数据": {
         "done": false,
         "gate": "用户闸门拍板后 D-08 1a 实测报告、M-03 真实分区、R-08 FPR/功效达标；A/B 内核定型；OR-05 adversarial review 必修闭合；INTEGRATION_REPORT 交付。仍为 research_only"
+      },
+      "P1_合成数据全线": {
+        "done": true,
+        "doneAt": "2026-09-12",
+        "gate": "三个窗口各自的 P1 review 必修项闭合（GOAL-0 §2.6）。OR-05/OR-06 按 GOAL-0 §5 属 P1 全绿之后才做，非前提。",
+        "evidence": "G0 从看板取 verify 原文前台实跑，不采信任何窗口回执：**D-10 rc=0 / M-10 rc=0 / R-10 rc=0（403 passed）/ R-11 rc=0**。模块套件 data 225、market 358、integration 8 全绿。R-11 判别性 G0 独立复做：只改 polars 内容摘要、版本串不动，制品身份 b4132dd0→fa2b81b7，还原即回，成立；六条依赖内容哈希 G0 独立按 RECORD 重算，逐位相等。",
+        "howEachLegClosed": {
+          "G1/D-10": "**非审查方 pass**。review-G1-P1.md 及 r3/r4/r5 终裁均 fail；经 G0 分类闭合裁决从 verify 析取第二支通过，用户在 G1 会话经 AskUserQuestion 预授权该路径。**残余 7 条**（S08/S13/S14/V01/W01–W03）带声明进 P2。五类必闭合项经 A44 复核：三格突变证明、安全越权降格为枚举覆盖、幸存偏差记为读侧无门缺口。",
+          "G2/M-10": "**审查方自行给出 pass**（十四审）。10 项 partial-P2，P2_UNSUPPORTED 四键如实声明。",
+          "G3/R-10+R-11": "**非审查方 pass**。review-G3-P1.md 十五轮均 fail、43016 行原样保留；经 G0 范围重定裁决改用具名能力证据验收。**第 9–15 轮 15 条对抗类反例保持 open**，列于能力文档已知可漏检栏，G0 已正式接受残余风险（P2 负责人 G3，触发条件为任何 θ 声明进入资本配置或生产决策之前）。"
+        },
+        "notClaimed": [
+          "**不声称**已证明计算发生过（A39 原文不变）",
+          "**不声称**功效达标：327/768、下界 39.05%，低于 80%，按出口 A 如实 fail",
+          "**不声称**已回归防护：OR-04 是非退化门，成交 78/80 对下限 40、走完结局 65/80 对下限 20（A46）",
+          "**不声称**跨机器数值可复现：内容哈希并入后跨机器制品身份必然不等，按结论层比对（P2）"
+        ]
       }
     },
     "readyForStitch": false,
     "p1Status": {
-      "at": "2026-09-12T04:20Z",
-      "round": "R-10 交付核验",
-      "done": false,
+      "at": "2026-09-12T05:28Z",
+      "done": true,
+      "round": "P1 宣告",
       "legs": {
-        "G1": "D-10 done（G0 裁决书，非审查方 pass，残余 7 条）",
-        "G2": "M-10 done（十四审 pass）",
-        "G3": "R-10 done（G0 亲跑新 verify rc=0 / 403 passed）"
+        "G1": "D-10 done",
+        "G2": "M-10 done",
+        "G3": "R-10 + R-11 done"
       },
       "remaining": [
-        "R-11 依赖内容哈希（裁定 §10，P1 阻断）",
-        "OR-05 对抗式集成 review（本会话禁止派发）"
+        "OR-05 对抗式集成 review（P1 后做，本会话禁止派发）",
+        "OR-06 INTEGRATION_REPORT 定稿"
       ],
       "blockedByUserGate": false
     },

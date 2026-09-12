@@ -1,8 +1,8 @@
 # report-G3-null-model：空模型 FPR / 功效验收（合成 T1 规模，synthetic_validation）
 
-生成本报告的研究代码 sha256：`11ce7efcc1579173f480a7522dda6a57b09a9c6c32d3785c78f6dd2ea1982c40`（A31：制品须由不旧于门代码的版本生成，R-08 verify 机械比对）。
+生成本报告的研究代码 sha256：`e475ea4c3f91c6f39a6cae8539563d4ef58cce167459dfcdce3934463477a90c`（A31：制品须由不旧于门代码的版本生成，R-08 verify 机械比对）。
 
-日期：2026-09-12 04:05 UTC。状态：合成数据实测；**claim_status = descriptive_only**（G-STAT-CLAIM pending），本报告不构成任何研究优势声明，也不替代真实数据前的空模型验收。
+日期：2026-09-12 05:03 UTC。状态：合成数据实测；**claim_status = descriptive_only**（G-STAT-CLAIM pending），本报告不构成任何研究优势声明，也不替代真实数据前的空模型验收。
 依据：合并稿 D.5、ADR-G3 §10、Claude 验收 R03（按档分级：T1/T2 各机制 1000 次；T3 200 次预注册更宽精确区间）。
 命令：`python -m quant_lab.research.nullmodel`
 
@@ -19,10 +19,10 @@
 
 | 机制 | 计划 n | 完成 | 失败/insufficient | 阳性 x | FPR 点估计 | FPR 95% CI（区间） | 最坏界（失败计阳性）FPR / CI | 有搜索 replicate（非 T0）n / 最坏界 FPR / CI | 阳性数按块长 L=1/3/7（敏感性，不选） | 档分布 | 耗时 s | 判定 |
 |---|---:|---:|---:|---:|---:|---|---|---|---|---|---:|---|
-| common_shock | 1000 | 1000 | 1 | 2 | 0.20% | [0.02%, 0.72%] | 0.30% / [0.06%, 0.87%] | 842 / 0.36% / [0.07%, 1.04%] | 3 / 3 / 3（主 L 分布 {"L=7": 325, "L=1": 281, "L=3": 394}） | {"T0": 158, "T1": 842} | 2537.6 | **pass** |
-| cluster_heavy_tail | 1000 | 1000 | 3 | 6 | 0.60% | [0.22%, 1.31%] | 0.90% / [0.41%, 1.70%] | 974 / 0.92% / [0.42%, 1.75%] | 7 / 6 / 6（主 L 分布 {"L=3": 505, "L=7": 451, "L=1": 44}） | {"T1": 974, "T0": 26} | 2551.2 | **pass** |
-| nonuniform_density | 1000 | 1000 | 11 | 8 | 0.81% | [0.35%, 1.59%] | 1.90% / [1.15%, 2.95%] | 725 / 2.62% / [1.59%, 4.06%] | 9 / 6 / 8（主 L 分布 {"L=1": 786, "L=3": 119, "L=7": 95}） | {"T1": 725, "T0": 275} | 2643.0 | **pass** |
-| circular_shift | 1000 | 1000 | 0 | 4 | 0.40% | [0.11%, 1.02%] | 0.40% / [0.11%, 1.02%] | 993 / 0.40% / [0.11%, 1.03%] | 4 / 4 / 6（主 L 分布 {"L=1": 980, "L=7": 14, "L=3": 6}） | {"T1": 993, "T0": 7} | 2590.4 | **pass** |
+| common_shock | 1000 | 1000 | 1 | 2 | 0.20% | [0.02%, 0.72%] | 0.30% / [0.06%, 0.87%] | 842 / 0.36% / [0.07%, 1.04%] | 3 / 3 / 3（主 L 分布 {"L=7": 325, "L=1": 281, "L=3": 394}） | {"T0": 158, "T1": 842} | 2047.7 | **pass** |
+| cluster_heavy_tail | 1000 | 1000 | 3 | 6 | 0.60% | [0.22%, 1.31%] | 0.90% / [0.41%, 1.70%] | 974 / 0.92% / [0.42%, 1.75%] | 7 / 6 / 6（主 L 分布 {"L=3": 505, "L=7": 451, "L=1": 44}） | {"T1": 974, "T0": 26} | 2096.1 | **pass** |
+| nonuniform_density | 1000 | 1000 | 11 | 8 | 0.81% | [0.35%, 1.59%] | 1.90% / [1.15%, 2.95%] | 725 / 2.62% / [1.59%, 4.06%] | 9 / 6 / 8（主 L 分布 {"L=1": 786, "L=3": 119, "L=7": 95}） | {"T1": 725, "T0": 275} | 2114.7 | **pass** |
+| circular_shift | 1000 | 1000 | 0 | 4 | 0.40% | [0.11%, 1.02%] | 0.40% / [0.11%, 1.02%] | 993 / 0.40% / [0.11%, 1.03%] | 4 / 4 / 6（主 L 分布 {"L=1": 980, "L=7": 14, "L=3": 6}） | {"T1": 993, "T0": 7} | 2134.2 | **pass** |
 
 - 最坏机制 FPR CI 上界：2.95%（阈值 7%）。所有机制均须过门，不混池稀释。
 - T0 replicate（基线 DEFF 降档 → cap=0 无搜索）必然 no_claim，不作 FPR 证据；验收以「有搜索 replicate」条件最坏界为准，并要求其占多数且 ≥ 500 次。
@@ -31,7 +31,7 @@
 
 | 机制 | 计划 n | 完成 | 失败 | 检出 x | 功效点估计 | 功效 95% CI | 最坏界（失败计未检出）功效 / CI | 规则找回率 | base_R sd（噪声） | 耗时 s | 判定 |
 |---|---:|---:|---:|---:|---:|---|---|---:|---:|---:|---|
-| common_shock | 1000 | 1000 | 34 | 327 | 33.85% | [30.87%, 36.93%] | 32.70% / [29.80%, 35.71%]（有搜索 768：42.58% / [39.05%, 46.16%]） | 42.4% | 1.77 | 2490.1 | **fail** |
+| common_shock | 1000 | 1000 | 34 | 327 | 33.85% | [30.87%, 36.93%] | 32.70% / [29.80%, 35.71%]（有搜索 768：42.58% / [39.05%, 46.16%]） | 42.4% | 1.77 | 2023.8 | **fail** |
 
 - 功效未达标时按 D.5「未达标限制声明或扩新样本」处理：本档（T1，约 1600 簇 / 4013 机会，噪声 sd≈1.77R）对 δ=0.2R 的全流程功效见上表；§3.1 给出效应/噪声/样本规模的适用范围。流程的功效瓶颈在 selection（内层 max-t 只见训练窗一半样本）。
 
@@ -84,7 +84,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
 
 另有三条记账约束（R5-C / R5-G / R5-O）：**(a)** `tiers.invalid + tiers.error ≤ n_failed`，且主 L 分布只覆盖真正进入流水线的 replicate——结构早退者不该有主 L；结构失败必须真正计进失败数，否则三分母最坏界会被低估到足以翻转 7% 准入。**(b)** 跨品种相关向量按冻结世界核对齐全集与顺序（3 品种恰好 3 对，见上表 `pairs`），取值须为有限实数且落在 [-1,1]，缺项/重复/越界一律拒收。**(c)** 上表展示的 `shuffle_guard` 只是第一个 replicate 的快照，**不是**「首个必须零失败」的门；它失败时必须在 per-check 与 invalid 总量里有对应记账。
 
-生成身份（A31 / R5-H）：MC 起跑冻结父进程源码摘要，**每个 worker 另行回传自己起跑与收尾的摘要**，父进程逐份核对，任何不等或缺回执都拒绝落盘。本报告的 worker 回执数：13，回执摘要集合：['11ce7efcc1579173f480a7522dda6a57b09a9c6c32d3785c78f6dd2ea1982c40']。**结构性隔离，不是事后检测**（G0 R-10 裁定 §2.2/§2.3）：本轮起**移除**对任意运行状态的通用反射，改为让未申报的状态根本过不去进程边界——整组 worker 由**全新解释器**（显式 spawn）启动、配置以**纯数据**过界并在 worker 内重建、每个 job 回传**制品身份**（冻结源码摘要 + 声明依赖清单），父进程逐份核对。父进程制品身份：4055bdc516258d82…；worker 制品身份集合：['4055bdc516258d82…']；依赖清单：{'python': '3.12.13', 'polars': '1.44.2', 'numpy': '2.5.3', 'polars-ta': '0.5.17', 'arch': '8.0.0', 'scipy': '1.18.1', 'pyarrow': '25.0.1'}。
+生成身份（A31 / R5-H）：MC 起跑冻结父进程源码摘要，**每个 worker 另行回传自己起跑与收尾的摘要**，父进程逐份核对，任何不等或缺回执都拒绝落盘。本报告的 worker 回执数：13，回执摘要集合：['e475ea4c3f91c6f39a6cae8539563d4ef58cce167459dfcdce3934463477a90c']。**结构性隔离，不是事后检测**（G0 R-10 裁定 §2.2/§2.3）：本轮起**移除**对任意运行状态的通用反射，改为让未申报的状态根本过不去进程边界——整组 worker 由**全新解释器**（显式 spawn）启动、配置以**纯数据**过界并在 worker 内重建、每个 job 回传**制品身份**（冻结源码摘要 + 声明依赖清单），父进程逐份核对。父进程制品身份：b4132dd0fb97bff2…；worker 制品身份集合：['b4132dd0fb97bff2…']；依赖清单：{'python': '3.12.13', 'polars': '1.44.2', 'polars.content': 'dfa5912b550157894282a7811d5a8fb4d964aee377e837368a8b3bedee124665', 'numpy': '2.5.3', 'numpy.content': 'd6cd2ad35dd8b8bc0ec88549c333a512114d87e86d9b4f8d4841e84bca8e01af', 'polars-ta': '0.5.17', 'polars-ta.content': '1cbaff9394c025530fcfdb9679d06e6d32b1f8508ae61f12afe5daf77a225848', 'arch': '8.0.0', 'arch.content': '9e45797a64490791ad8c5a8f192ca74e20aed908e94cf19d08fdc0ab88373868', 'scipy': '1.18.1', 'scipy.content': 'd95b7aa2c03940de0bec301021a5753ff3577b5b7ce28e6342d59f9d8556258a', 'pyarrow': '25.0.1', 'pyarrow.content': '0cdfa685a44039ca8ed79959783bae7c71c25dcd0447aed7bc8062ced14e4c93'}。
 
 **能力边界**（A39，方法边界而非待办）：对支持域内的**事故类**混版——陈旧 `__pycache__`、fork 继承父进程模块对象、普通导入顺序——本系统以结构性隔离关闭。对**对抗类**（复现必须在 worker 进程内执行代码去绑定 globals、改注册表项、改类属性或默认参数），**本系统不声称防护**，且该防护对任意 callable 不可判定。判别一条反例属哪类只问一句：**能不能在不向 worker 进程内注入代码的前提下复现**。详见 docs/adr/capability-G3-execution-identity.md。
 
@@ -98,7 +98,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
 
 ## 6. 资源与限制
 
-- 总耗时 19864s；单 replicate 均值 3.010s；峰值 RSS 见 report.json。
+- 总耗时 15483s；单 replicate 均值 2.346s；峰值 RSS 见 report.json。
 - 限制：合成世界的相关结构是预注册假设，不等于真实频道数据；T3 档（200 次）未运行；块长敏感性只报告不选择；max-t 是依赖假设下近似，不是有限样本保证。
 - 任何真实数据的 θ 声明须另行通过 G-STAT-CLAIM、最终 V 窗口与 latency=1s 敏感性；本报告结果只描述。
 
@@ -120,25 +120,31 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
   "pipeline_block_len_days": null,
   "worker_receipts_confirmed": 13,
   "worker_code_sha256": [
-   "11ce7efcc1579173f480a7522dda6a57b09a9c6c32d3785c78f6dd2ea1982c40"
+   "e475ea4c3f91c6f39a6cae8539563d4ef58cce167459dfcdce3934463477a90c"
   ],
   "worker_artifact_identity": [
-   "4055bdc516258d827eb5e5eaac21d42b038f07fa15cddfb04d383753613d0abd"
+   "b4132dd0fb97bff25e0416a9ad7fc3fb0831d877d3df39380fff5d5035950e48"
   ],
-  "parent_artifact_identity": "4055bdc516258d827eb5e5eaac21d42b038f07fa15cddfb04d383753613d0abd",
+  "parent_artifact_identity": "b4132dd0fb97bff25e0416a9ad7fc3fb0831d877d3df39380fff5d5035950e48",
   "artifact_manifest": {
-   "source": "11ce7efcc1579173f480a7522dda6a57b09a9c6c32d3785c78f6dd2ea1982c40",
+   "source": "e475ea4c3f91c6f39a6cae8539563d4ef58cce167459dfcdce3934463477a90c",
    "deps": {
     "python": "3.12.13",
     "polars": "1.44.2",
+    "polars.content": "dfa5912b550157894282a7811d5a8fb4d964aee377e837368a8b3bedee124665",
     "numpy": "2.5.3",
+    "numpy.content": "d6cd2ad35dd8b8bc0ec88549c333a512114d87e86d9b4f8d4841e84bca8e01af",
     "polars-ta": "0.5.17",
+    "polars-ta.content": "1cbaff9394c025530fcfdb9679d06e6d32b1f8508ae61f12afe5daf77a225848",
     "arch": "8.0.0",
+    "arch.content": "9e45797a64490791ad8c5a8f192ca74e20aed908e94cf19d08fdc0ab88373868",
     "scipy": "1.18.1",
-    "pyarrow": "25.0.1"
+    "scipy.content": "d95b7aa2c03940de0bec301021a5753ff3577b5b7ce28e6342d59f9d8556258a",
+    "pyarrow": "25.0.1",
+    "pyarrow.content": "0cdfa685a44039ca8ed79959783bae7c71c25dcd0447aed7bc8062ced14e4c93"
    }
   },
-  "research_code_sha256": "11ce7efcc1579173f480a7522dda6a57b09a9c6c32d3785c78f6dd2ea1982c40"
+  "research_code_sha256": "e475ea4c3f91c6f39a6cae8539563d4ef58cce167459dfcdce3934463477a90c"
  },
  "results": [
   {
@@ -169,7 +175,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T0": 158,
     "T1": 842
    },
-   "wall_s": 2537.6,
+   "wall_s": 2047.7,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -389,7 +395,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 974,
     "T0": 26
    },
-   "wall_s": 2551.2,
+   "wall_s": 2096.1,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -609,7 +615,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 725,
     "T0": 275
    },
-   "wall_s": 2643.0,
+   "wall_s": 2114.7,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -829,7 +835,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 993,
     "T0": 7
    },
-   "wall_s": 2590.4,
+   "wall_s": 2134.2,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1049,7 +1055,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T0": 232,
     "T1": 768
    },
-   "wall_s": 2490.1,
+   "wall_s": 2023.8,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1269,7 +1275,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 173,
     "T0": 27
    },
-   "wall_s": 694.0,
+   "wall_s": 594.2,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1489,7 +1495,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 190,
     "T0": 10
    },
-   "wall_s": 1331.7,
+   "wall_s": 926.5,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1709,7 +1715,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T0": 65,
     "T1": 135
    },
-   "wall_s": 629.0,
+   "wall_s": 518.3,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1929,7 +1935,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 173,
     "T0": 27
    },
-   "wall_s": 1303.5,
+   "wall_s": 896.1,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -2149,7 +2155,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T0": 93,
     "T1": 107
    },
-   "wall_s": 591.2,
+   "wall_s": 449.0,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -2369,7 +2375,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 145,
     "T0": 55
    },
-   "wall_s": 1017.5,
+   "wall_s": 760.6,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -2589,7 +2595,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T0": 172,
     "T1": 28
    },
-   "wall_s": 571.3,
+   "wall_s": 324.9,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -2808,7 +2814,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 51,
     "T0": 149
    },
-   "wall_s": 913.4,
+   "wall_s": 596.8,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
