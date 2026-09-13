@@ -8023,8 +8023,17 @@ LEGACY_REDIS_CONTAINER="$(
   python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["legacy_container"])' \
     "$REDIS_CAPACITY_EVIDENCE"
 )"
-docker inspect "$LEGACY_REDIS_CONTAINER" >/dev/null \
-  || die "legacy Redis container from capacity evidence is missing"
+if ! docker inspect "$LEGACY_REDIS_CONTAINER" >/dev/null 2>&1; then
+  # Same-epoch application maintenance does not switch Redis. A pruned legacy
+  # container may be replaced as rollback evidence by its exact retained RDB
+  # and image, after the original cold/capacity and live identity gates above.
+  require_checksum_artifact "verify_retired_redis_artifacts.py"
+  python3 "$STAGING/verify_retired_redis_artifacts.py" \
+    "$REDIS_COLD_BACKUP_MANIFEST" "$REDIS_CAPACITY_EVIDENCE" \
+    "$DEPLOY_GATE_MODE" > "$BACKUP_ROOT/retired-redis-artifacts.json" \
+    || die "legacy Redis container is missing and retained artifacts failed verification"
+  echo "== missing legacy Redis container: exact retained rollback artifacts verified"
+else
 [ "$(docker inspect --format '{{.State.Running}}' "$LEGACY_REDIS_CONTAINER")" = "false" ] \
   || die "legacy Redis container must remain stopped"
 LEGACY_REDIS_INSPECT="$(docker inspect "$LEGACY_REDIS_CONTAINER")"
@@ -8062,6 +8071,7 @@ source = Path(str(mount.get("Source") or "")).resolve()
 if source != Path(str(backup.get("source_data_root") or "")).resolve():
     raise SystemExit("legacy Redis volume differs from cold backup evidence")
 PY
+fi
 
 # host-side target
 API_TGT="$T/services/control-plane/api/read_api.py"

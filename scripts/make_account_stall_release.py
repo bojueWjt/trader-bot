@@ -130,6 +130,10 @@ RELEASE_FILES = (
     ),
     ("scripts/redis_capacity_config.py", "redis_capacity_config.py"),
     (
+        "scripts/verify_retired_redis_artifacts.py",
+        "verify_retired_redis_artifacts.py",
+    ),
+    (
         "scripts/refresh_redis_capacity_evidence.py",
         "refresh_redis_capacity_evidence.py",
     ),
