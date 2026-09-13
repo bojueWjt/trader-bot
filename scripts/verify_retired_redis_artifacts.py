@@ -18,7 +18,7 @@ from uuid import uuid4
 def run(*args: str) -> str:
     result = subprocess.run(args, capture_output=True, text=True, timeout=45)
     if result.returncode:
-        raise RuntimeError(f"rollback verification command failed: {args[0]}")
+        raise RuntimeError(f"rollback verification command failed: {args[0]} exit={result.returncode}")
     return result.stdout
 
 
@@ -35,10 +35,13 @@ def check_rdb(root: Path, image_id: str, rdb: Path) -> str:
     token = uuid4().hex
     name = f"trader-retired-redis-check-{token}"
     label = f"trader.evidence.check={token}"
+    metadata = rdb.stat()
+    owner = f"{metadata.st_uid}:{metadata.st_gid}"
     try:
         return run(
             "docker", "run", "--rm", "--name", name, "--label", label,
-            "--network", "none", "--read-only", "--memory", "256m",
+            "--network", "none", "--read-only", "--user", owner,
+            "--memory", "256m",
             "--cpus", "0.5", "--pids-limit", "32", "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges", "--entrypoint",
             "redis-check-rdb", "-v", f"{root}:/backup:ro", image_id,

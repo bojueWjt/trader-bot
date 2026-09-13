@@ -95,6 +95,7 @@ class RetiredRedisArtifactsTest(unittest.TestCase):
         self.assertIn("--network", first)
         self.assertIn("none", first)
         self.assertIn("--read-only", first)
+        self.assertEqual(first[first.index("--user") + 1], f"{self.rdb.stat().st_uid}:{self.rdb.stat().st_gid}")
 
     def test_checker_failure_cleans_daemon_container(self):
         with patch.object(module, "run", side_effect=[RuntimeError("checker failed"), "checker-id\n", "", ""]):
