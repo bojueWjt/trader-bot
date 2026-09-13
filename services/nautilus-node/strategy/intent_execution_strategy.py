@@ -39,6 +39,7 @@ from runtime.live_canary_execution import (
 from runtime.intent_execution_inbox import (
     IntentDispatchResult,
     IntentExecutionIdentity,
+    IntentExecutionRecord,
     IntentExecutionState,
     IntentRegisterResult,
     JsonIntentExecutionInbox,
@@ -46,6 +47,8 @@ from runtime.intent_execution_inbox import (
 )
 from strategy.intent_execution_planner import (
     CANCEL_ORDER,
+    CANCEL_ORDER_ALIASES,
+    MANAGEMENT_ACTIONS,
     InstrumentSpec,
     ManagementPlan,
     OrderDenied,
@@ -87,6 +90,7 @@ class _DurableIoTask:
     intent: Any = False
     intent_execution: IntentExecutionIdentity | bool = False
     intent_payload: Mapping[str, Any] | bool = False
+    reconcile_confirmation_freezes: bool = False
     client_order_ids: tuple[str, ...] = ()
     plans: tuple[OrderPlan, ...] = ()
     live_canary_execution: LiveCanaryExecutionIdentity | bool = False
@@ -2468,6 +2472,7 @@ class IntentExecutionStrategy(Strategy):
                 intent=intent,
                 intent_execution=execution_identity,
                 intent_payload=intent_payload,
+                reconcile_confirmation_freezes=bool(self.symbol_open_freezes),
                 continuation={"kind": "intent_received"},
             )
         )
@@ -2488,6 +2493,7 @@ class IntentExecutionStrategy(Strategy):
             intent=intent,
             intent_execution=execution_identity,
             intent_payload=_intent_execution_payload(intent),
+            reconcile_confirmation_freezes=bool(self.symbol_open_freezes),
         )
         try:
             outcome = self._process_intent_receive_task(task)
@@ -2535,6 +2541,10 @@ class IntentExecutionStrategy(Strategy):
             self._record_denial(denial)
             self._report_denial(intent, denial)
             return
+        self._reconcile_durable_confirmation_freezes(
+            outcome.get("confirmation_records", ()),
+        )
+        self._reconcile_durable_confirmation_freezes((durable_record,))
         if expired_dispatched_management(durable_record, self._now()):
             self.log.warning(
                 "expired_management_replay_skipped "
@@ -2567,9 +2577,6 @@ class IntentExecutionStrategy(Strategy):
             return
         if durable_record.state is IntentExecutionState.DISPATCHED:
             if self._durable_intent_orders_exist(durable_record):
-                self._clear_durable_intent_confirmation(
-                    durable_record
-                )
                 if durable_async:
                     self._submit_durable_io_task(
                         _DurableIoTask(
@@ -2587,6 +2594,7 @@ class IntentExecutionStrategy(Strategy):
                     self._intent_execution_inbox.mark_exchange_confirmed(
                         execution_identity
                     )
+                    self._clear_durable_intent_confirmation(durable_record)
                     self._processed_intent_ids.add(
                         execution_identity.intent_id
                     )
@@ -3403,10 +3411,10 @@ class IntentExecutionStrategy(Strategy):
                 record is not False
                 and self._durable_intent_orders_exist(record)
             ):
-                self._clear_durable_intent_confirmation(record)
                 self._intent_execution_inbox.mark_exchange_confirmed(
                     intent_execution
                 )
+                self._clear_durable_intent_confirmation(record)
                 self._processed_intent_ids.add(
                     intent_execution.intent_id
                 )
@@ -4009,7 +4017,7 @@ class IntentExecutionStrategy(Strategy):
             outcome = self._process_management_prepare_task(task)
         elif task.kind is _DurableIoTaskKind.MANAGEMENT_COMPLETE:
             self._process_management_complete_task(task)
-            outcome = True
+            outcome = self._intent_execution_inbox.get(task.intent_execution)
         elif task.kind is _DurableIoTaskKind.MANAGEMENT_REJECT:
             identity = task.intent_execution
             if not isinstance(identity, IntentExecutionIdentity):
@@ -4023,10 +4031,11 @@ class IntentExecutionStrategy(Strategy):
             self._intent_execution_inbox.mark_rejected(
                 identity, task.continuation["rejection_reason"],
             )
-            outcome = True
+            outcome = self._intent_execution_inbox.get(identity)
         elif task.kind is _DurableIoTaskKind.RECOVERY_CONFIRMED:
             self._process_recovery_confirmed_task(task)
-            outcome = True
+            if isinstance(task.intent_execution, IntentExecutionIdentity):
+                outcome = self._intent_execution_inbox.get(task.intent_execution)
         elif task.kind is _DurableIoTaskKind.CANARY_MARK_DISPATCHED:
             identity = task.live_canary_execution
             if not isinstance(
@@ -4187,11 +4196,13 @@ class IntentExecutionStrategy(Strategy):
             self._on_management_prepared_result(result)
             return
         if kind in {"management_completed", "management_rejected"}:
+            self._reconcile_durable_confirmation_freezes((result.outcome,))
             identity = result.task.intent_execution
             if isinstance(identity, IntentExecutionIdentity):
                 self._processed_intent_ids.add(identity.intent_id)
             return
         if kind == "intent_recovery_confirmed":
+            self._reconcile_durable_confirmation_freezes((result.outcome,))
             identity = result.task.intent_execution
             if isinstance(identity, IntentExecutionIdentity):
                 self._processed_intent_ids.add(identity.intent_id)
@@ -4438,7 +4449,6 @@ class IntentExecutionStrategy(Strategy):
                     record is not False
                     and self._durable_intent_orders_exist(record)
                 ):
-                    self._clear_durable_intent_confirmation(record)
                     self._commit_durable_entry_prepare()
                     self._queue_recovery_confirmation(task)
                     return
@@ -4867,9 +4877,19 @@ class IntentExecutionStrategy(Strategy):
                 )
             )
             record = self._intent_execution_inbox.get(identity)
+        confirmation_records = ()
+        if task.reconcile_confirmation_freezes:
+            symbol = _canonical_symbol(identity.instrument_id)
+            confirmation_records = tuple(
+                candidate
+                for candidate in self._intent_execution_inbox.records()
+                if candidate.account_id == identity.account_id
+                and _canonical_symbol(candidate.instrument_id) == symbol
+            )
         return {
             "record": record,
             "register_result": register_result,
+            "confirmation_records": confirmation_records,
         }
 
     def _process_prepare_submit_task(
@@ -7053,6 +7073,30 @@ class IntentExecutionStrategy(Strategy):
             reason,
         )
 
+    def _reconcile_durable_confirmation_freezes(
+        self,
+        records: Iterable[IntentExecutionRecord],
+    ) -> None:
+        """Apply durable evidence on the actor thread without resetting a symbol.
+
+        Old versions registered management dispatch markers as unconfirmed
+        entries. Those markers must not block new entries. Entry dispatches,
+        including rejected/expired ones, still need exchange confirmation;
+        a control-plane rejection alone is not evidence that no order exists.
+        """
+        for record in records:
+            if not isinstance(record, IntentExecutionRecord):
+                continue
+            if record.account_id != self.config.account_id:
+                continue
+            if (
+                record.action not in MANAGEMENT_ACTIONS
+                and record.action not in CANCEL_ORDER_ALIASES
+                and record.state is not IntentExecutionState.EXCHANGE_CONFIRMED
+            ):
+                continue
+            self._clear_durable_intent_confirmation(record)
+
     def _clear_durable_intent_confirmation(
         self,
         record: Any,
@@ -7069,6 +7113,8 @@ class IntentExecutionStrategy(Strategy):
             )
         )
         for client_order_id in client_order_ids:
+            if not is_robot_client_order_id(client_order_id):
+                continue
             self._pending_order_confirmations.pop(
                 client_order_id,
                 None,
@@ -7487,10 +7533,10 @@ class IntentExecutionStrategy(Strategy):
                     record is not False
                     and self._durable_intent_orders_exist(record)
                 ):
-                    self._clear_durable_intent_confirmation(record)
                     self._intent_execution_inbox.mark_exchange_confirmed(
                         intent_execution
                     )
+                    self._clear_durable_intent_confirmation(record)
                     return True
                 denial = OrderDenied(
                     "intent_exchange_confirmation_required",

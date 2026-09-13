@@ -62,6 +62,34 @@ retention window.
 The node must not auto-switch to `ACTIVE`; operator/control-plane resume remains
 required after readiness.
 
+## Intent Confirmation Freezes
+
+Account `HALTED` and symbol-level entry freezes are independent gates. `RESUME`
+does not reconcile an uncertain order, and clearing process memory is not
+exchange evidence.
+
+When an incoming intent encounters existing confirmation freezes, the durable
+I/O worker reads the inbox records for that account and symbol. The actor then
+removes only matching legacy management markers (`cancel`/`cancel_order`, exits,
+and protection updates), or entry markers already durably exchange-confirmed.
+This allows the next intent to reconcile a leftover management freeze without
+restarting the node or replaying the old management operation. The old operation's
+durable outcome is preserved; removing its incorrect entry marker does not
+assert that its management side effect succeeded.
+
+Unconfirmed entry/add dispatches remain protected even when expired or rejected.
+A control-plane rejection does not prove that a submitted order is absent.
+Other pending orders, protection-repair freezes, and manual order IDs are not
+cleared. Unknown freeze reasons stay blocked. Recovery confirmation must persist
+before its actor continuation clears a freeze; failed writes and results arriving
+after shutdown cannot release it.
+
+Regression coverage is in
+`tests/execution/open/test_intent_execution_strategy_shell.py` and
+`tests/nautilus/runtime/test_intent_execution_inbox.py`. These are local simulated
+execution tests; passing them does not establish that a production node has
+loaded the patch or that a particular exchange order is resolved.
+
 ## Duplicate Fill Hook
 
 The persistence idempotency key is:

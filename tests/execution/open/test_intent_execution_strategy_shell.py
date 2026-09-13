@@ -500,6 +500,204 @@ class StrategyShellTest(unittest.TestCase):
                 self.assertTrue(strategy.wait_for_durable_io(timeout_seconds=1.0))
                 strategy.on_stop()
 
+    def test_new_entry_reconciles_legacy_management_freezes_without_restart(self) -> None:
+        for action in (
+            "cancel_order", "move_stop_loss", "move_stop_to_entry",
+            "replace_take_profits", "close_position", "partial_close",
+        ):
+            for state in (IntentExecutionState.DISPATCHED, IntentExecutionState.REJECTED):
+                with self.subTest(action=action, state=state), tempfile.TemporaryDirectory() as directory:
+                    strategy = _NoReceiptDurableIntentStrategy(Path(directory))
+                    old = _durable_entry_intent()
+                    old.action = action
+                    old.valid_until = strategy._now() - timedelta(hours=25)
+                    identity, marker = _seed_legacy_confirmation(strategy, old, state)
+                    following = _durable_entry_intent()
+
+                    strategy._handle_intent(following)
+
+                    self.assertNotIn(marker, strategy._pending_order_confirmations)
+                    self.assertNotIn("SOLUSDT", strategy._symbol_open_freezes)
+                    self.assertEqual(strategy.submitted_orders, [encode_client_order_id(following.intent_id)])
+                    # Reconciliation does not fabricate exchange confirmation
+                    # or rewrite the outcome of the old management operation.
+                    self.assertEqual(strategy._intent_execution_inbox.get(identity).state, state)
+                    strategy.on_stop()
+
+    def test_durable_confirmed_entry_clears_legacy_freeze_before_next_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            strategy = _NoReceiptDurableIntentStrategy(Path(directory))
+            old = _durable_entry_intent()
+            _, marker = _seed_legacy_confirmation(
+                strategy, old, IntentExecutionState.EXCHANGE_CONFIRMED,
+            )
+            following = _durable_entry_intent()
+
+            strategy._handle_intent(following)
+
+            self.assertNotIn(marker, strategy._pending_order_confirmations)
+            self.assertEqual(strategy.submitted_orders, [encode_client_order_id(following.intent_id)])
+            strategy.on_stop()
+
+    def test_reconciliation_preserves_unknown_entries_even_when_rejected_or_expired(self) -> None:
+        for action in ("open_position", "add_position"):
+            for state in (IntentExecutionState.DISPATCHED, IntentExecutionState.REJECTED):
+                with self.subTest(action=action, state=state), tempfile.TemporaryDirectory() as directory:
+                    strategy = _NoReceiptDurableIntentStrategy(Path(directory))
+                    old = _durable_entry_intent()
+                    old.action = action
+                    old.valid_until = strategy._now() - timedelta(hours=25)
+                    _, marker = _seed_legacy_confirmation(strategy, old, state)
+                    cancel = _durable_entry_intent()
+                    cancel.action = "cancel_order"
+                    _, cancel_marker = _seed_legacy_confirmation(strategy, cancel)
+
+                    strategy._handle_intent(_durable_entry_intent())
+
+                    self.assertNotIn(cancel_marker, strategy._pending_order_confirmations)
+                    self.assertIn(marker, strategy._pending_order_confirmations)
+                    self.assertIn("SOLUSDT", strategy.symbol_open_freezes)
+                    self.assertEqual(strategy.submitted_orders, [])
+                    self.assertEqual(strategy.denials[-1].reason, "symbol_new_open_frozen")
+                    strategy.on_stop()
+
+    def test_reconciliation_preserves_protection_failures_and_other_symbols(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            strategy = _NoReceiptDurableIntentStrategy(Path(directory))
+            old = _durable_entry_intent()
+            old.action = "cancel_order"
+            _, marker = _seed_legacy_confirmation(strategy, old)
+            other = _durable_entry_intent()
+            other.action = "cancel_order"
+            other.instrument_id = "BTCUSDT-PERP.BINANCE"
+            _, other_marker = _seed_legacy_confirmation(strategy, other)
+            strategy._freeze_symbol_new_opens("SOLUSDT", "protection repair failed")
+            strategy._pending_order_confirmations["aos_manual"] = "SOLUSDT-PERP.BINANCE"
+
+            strategy._handle_intent(_durable_entry_intent())
+
+            self.assertNotIn(marker, strategy._pending_order_confirmations)
+            self.assertIn(other_marker, strategy._pending_order_confirmations)
+            self.assertIn("aos_manual", strategy._pending_order_confirmations)
+            self.assertEqual(strategy.symbol_open_freezes["SOLUSDT"], "protection repair failed")
+            self.assertEqual(strategy.symbol_open_freezes["BTCUSDT"], str(other.intent_id))
+            self.assertEqual(strategy.submitted_orders, [])
+            strategy.on_stop()
+
+    def test_freeze_reconciliation_runs_on_actor_after_durable_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            strategy = _NoReceiptDurableIntentStrategy(Path(directory))
+            old = _durable_entry_intent()
+            old.action = "cancel_order"
+            _, marker = _seed_legacy_confirmation(strategy, old)
+            following = _durable_entry_intent()
+            strategy._queue_intent_receive(following)
+            self.assertTrue(strategy.wait_for_durable_io(timeout_seconds=1.0))
+            self.assertIn(marker, strategy._pending_order_confirmations)
+
+            strategy.drain_durable_io_mailbox()
+
+            self.assertNotIn(marker, strategy._pending_order_confirmations)
+            self.assertTrue(_pump_durable_until(
+                strategy, lambda: bool(strategy.submitted_orders), timeout=1.0,
+            ))
+            self.assertEqual(strategy.submitted_orders, [encode_client_order_id(following.intent_id)])
+            strategy.on_stop()
+
+    def test_exchange_recovery_does_not_clear_freeze_before_persistence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            strategy = _NoReceiptDurableIntentStrategy(Path(directory))
+            old = _durable_entry_intent()
+            _, marker = _seed_legacy_confirmation(strategy, old)
+            strategy.exchange_order_ids.add(marker)
+            with patch.object(strategy._intent_execution_inbox, "mark_exchange_confirmed", side_effect=OSError("disk failed")):
+                with self.assertRaisesRegex(OSError, "disk failed"):
+                    strategy._handle_intent(old)
+
+            self.assertIn(marker, strategy._pending_order_confirmations)
+            self.assertIn("SOLUSDT", strategy.symbol_open_freezes)
+            self.assertEqual(strategy.submitted_orders, [])
+            strategy.on_stop()
+
+    def test_async_exchange_recovery_clears_only_after_durable_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            strategy = _NoReceiptDurableIntentStrategy(Path(directory))
+            old = _durable_entry_intent()
+            identity, marker = _seed_legacy_confirmation(strategy, old)
+            strategy.exchange_order_ids.add(marker)
+            strategy._queue_intent_receive(old)
+            self.assertTrue(strategy.wait_for_durable_io(timeout_seconds=1.0))
+
+            strategy.drain_durable_io_mailbox(max_results=1)
+            self.assertTrue(strategy.wait_for_durable_io(timeout_seconds=1.0))
+            self.assertEqual(
+                strategy._intent_execution_inbox.get(identity).state,
+                IntentExecutionState.EXCHANGE_CONFIRMED,
+            )
+            self.assertIn(marker, strategy._pending_order_confirmations)
+
+            strategy.drain_durable_io_mailbox()
+
+            self.assertNotIn(marker, strategy._pending_order_confirmations)
+            self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
+            self.assertEqual(strategy.submitted_orders, [])
+            strategy.on_stop()
+
+    def test_confirmation_snapshot_does_not_clear_another_accounts_freeze(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            strategy = _NoReceiptDurableIntentStrategy(Path(directory))
+            old = _durable_entry_intent()
+            old.action = "cancel_order"
+            old.account_id = "account-c"
+            _, marker = _seed_legacy_confirmation(strategy, old)
+
+            strategy._handle_intent(_durable_entry_intent())
+
+            self.assertIn(marker, strategy._pending_order_confirmations)
+            self.assertEqual(strategy.submitted_orders, [])
+            strategy.on_stop()
+
+    def test_management_completion_reconciles_its_legacy_marker(self) -> None:
+        for kind, continuation, state in (
+            (_DurableIoTaskKind.MANAGEMENT_COMPLETE, "management_completed", IntentExecutionState.EXCHANGE_CONFIRMED),
+            (_DurableIoTaskKind.MANAGEMENT_REJECT, "management_rejected", IntentExecutionState.REJECTED),
+        ):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                strategy = _NoReceiptDurableIntentStrategy(Path(directory))
+                old = _durable_entry_intent()
+                old.action = "cancel_order"
+                identity, marker = _seed_legacy_confirmation(strategy, old)
+                strategy._submit_durable_io_task(_DurableIoTask(
+                    kind=kind,
+                    intent_execution=identity,
+                    continuation={"kind": continuation, "rejection_reason": "order_already_terminal"},
+                ))
+                self.assertTrue(strategy.wait_for_durable_io(timeout_seconds=1.0))
+                self.assertIn(marker, strategy._pending_order_confirmations)
+
+                strategy.drain_durable_io_mailbox()
+
+                self.assertNotIn(marker, strategy._pending_order_confirmations)
+                self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
+                self.assertEqual(strategy._intent_execution_inbox.get(identity).state, state)
+                self.assertEqual(strategy.submitted_orders, [])
+                strategy.on_stop()
+
+    def test_late_confirmation_snapshot_cannot_unfreeze_a_stopped_strategy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            strategy = _NoReceiptDurableIntentStrategy(Path(directory))
+            old = _durable_entry_intent()
+            old.action = "cancel_order"
+            _, marker = _seed_legacy_confirmation(strategy, old)
+            strategy._queue_intent_receive(_durable_entry_intent())
+            self.assertTrue(strategy.wait_for_durable_io(timeout_seconds=1.0))
+
+            strategy.on_stop()
+            strategy.drain_durable_io_mailbox()
+
+            self.assertIn(marker, strategy._pending_order_confirmations)
+            self.assertEqual(strategy.submitted_orders, [])
+
     def test_dispatched_entry_replay_preserves_freeze_even_after_expiry(self) -> None:
         for action in ("open_position", "add_position"):
             for expired in (False, True):
@@ -6030,6 +6228,26 @@ def _live_canary_intent(
             },
         },
     )
+
+
+def _seed_legacy_confirmation(
+    strategy: IntentExecutionStrategy,
+    intent: SimpleNamespace,
+    state: IntentExecutionState = IntentExecutionState.DISPATCHED,
+) -> tuple[IntentExecutionIdentity, str]:
+    """Model the old process's phantom freeze, including its dispatch marker."""
+    identity = _durable_identity(intent)
+    marker = encode_client_order_id(intent.intent_id, sequence=99)
+    inbox = strategy._intent_execution_inbox
+    inbox.register_received(identity, _durable_payload(intent))
+    inbox.begin_dispatch(identity, (marker,))
+    if state is IntentExecutionState.REJECTED:
+        inbox.mark_rejected(identity, "legacy rejection")
+    if state is IntentExecutionState.EXCHANGE_CONFIRMED:
+        inbox.mark_exchange_confirmed(identity)
+    strategy._pending_order_confirmations[marker] = intent.instrument_id
+    strategy._freeze_symbol_new_opens(intent.instrument_id, str(intent.intent_id))
+    return identity, marker
 
 
 def _durable_entry_intent() -> SimpleNamespace:
