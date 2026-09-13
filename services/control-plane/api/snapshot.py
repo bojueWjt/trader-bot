@@ -22,14 +22,58 @@ from psycopg2.extras import RealDictCursor
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 SCHEMA_PATH = _REPO_ROOT / "packages" / "contracts" / "v1" / "system_snapshot.v1.json"
 
-DEFAULT_STALENESS_MS = 60_000
+HEARTBEAT_STALENESS_MS = 60_000
+MIRROR_STALENESS_MS = 300_000
+DEFAULT_STALENESS_MS = MIRROR_STALENESS_MS
 RECENT_LIMIT = 50
+
+
+def _mirror_age_ms(
+    cur,
+    now: datetime,
+    expected_account_ids: list[str],
+) -> int:
+    """Age of the oldest expected account mirror; negative values encode unavailable states.
+
+    The mirror is polled from the venue every ~45s, so its age is the honest measure of how
+    fresh the exchange truth is. Execution events are only produced by fills/placements and
+    can legitimately go quiet for hours, so they must not drive the stale verdict."""
+    cur.execute("SELECT to_regclass('public.exchange_state_mirror') IS NOT NULL AS present")
+    if not cur.fetchone()["present"]:
+        return -1
+    if not expected_account_ids:
+        return -1
+    cur.execute(
+        "SELECT account_id, updated_at FROM exchange_state_mirror "
+        "WHERE account_id = ANY(%s)",
+        (expected_account_ids,),
+    )
+    mirror_rows = cur.fetchall()
+    updated_by_account = {
+        str(row["account_id"]): row["updated_at"]
+        for row in mirror_rows
+    }
+    for account_id in expected_account_ids:
+        if account_id not in updated_by_account:
+            return -2
+    oldest = min(updated_by_account.values())
+    return max(0, int((now - oldest).total_seconds() * 1000))
+
+
+def _stale_verdict(*, missing_nodes: list[str], reconciliation_state: str, mirror_age_ms: int, threshold_ms: int) -> bool:
+    return bool(
+        missing_nodes
+        or reconciliation_state == "failed"
+        or mirror_age_ms == -2
+        or (mirror_age_ms >= 0 and mirror_age_ms > threshold_ms)
+    )
 
 
 def build_system_snapshot(
     conn,
     *,
     staleness_threshold_ms: int = DEFAULT_STALENESS_MS,
+    heartbeat_threshold_ms: int = HEARTBEAT_STALENESS_MS,
     now: datetime | None = None,
     limit: int = RECENT_LIMIT,
 ) -> dict[str, Any]:
@@ -89,20 +133,35 @@ def build_system_snapshot(
         )
         cur.execute("SELECT max(ts_event) AS last_event FROM execution_events")
         last_event = cur.fetchone()["last_event"]
+        expected_account_ids = [
+            str(account["account_id"])
+            for account in accounts
+        ]
+        mirror_age_ms = _mirror_age_ms(
+            cur,
+            now,
+            expected_account_ids,
+        )
 
     equity = sum(float(a.get("equity") or 0) for a in accounts)
     margin = sum(float(a.get("margin") or 0) for a in accounts)
 
+    # projection_lag_ms stays informational: distance to the last execution event.
     projection_lag_ms = 0
     if last_event is not None:
         projection_lag_ms = max(0, int((now - last_event).total_seconds() * 1000))
 
     reconciliation_state = _worst_reconciliation_state(accounts)
-    missing_nodes = _missing_nodes(node_health, now, staleness_threshold_ms)
-    stale = bool(
-        (last_event is not None and projection_lag_ms > staleness_threshold_ms)
-        or reconciliation_state == "failed"
-        or missing_nodes
+    missing_nodes = _missing_nodes(
+        node_health,
+        now,
+        heartbeat_threshold_ms,
+    )
+    stale = _stale_verdict(
+        missing_nodes=missing_nodes,
+        reconciliation_state=reconciliation_state,
+        mirror_age_ms=mirror_age_ms,
+        threshold_ms=staleness_threshold_ms,
     )
 
     snapshot = {

@@ -35,7 +35,7 @@ WATCHER_BUILDER_RELEASE_PATH = "build_immutable_watcher_image.py"
 HERMES_FEEDER_SOURCE_PATH = "scripts/hermes_signal_feeder.py"
 HERMES_FEEDER_RELEASE_PATH = "host/hermes_signal_feeder.py"
 HERMES_FEEDER_REQUIRED_SHA256 = (
-    "4bd121f9e34ca887568b00d2331ca7299d36941702e244751529e4384e3ee7b4"
+    "755883051da5f955432d431897df01c290469f78913c64dfddd254c9fe88a914"
 )
 V3_TRADE_SOURCE_PATH = (
     "hermes-profile/skills/trading/v3-trader/scripts/v3_trade.py"
@@ -145,6 +145,17 @@ REQUIRED_HOST_PATHS = {
     "host/pools.py",
 }
 EXPECTED_RELEASE_FILE_MAP = {
+    "scripts/verify_retired_redis_artifacts.py": "verify_retired_redis_artifacts.py",
+    "services/control-plane/api/position_protection.py": "host/api_extensions/position_protection.py",
+    "services/control-plane/api/v1_mirror.py": "host/api_extensions/v1_mirror.py",
+    "services/control-plane/api/v1_trace.py": "host/api_extensions/v1_trace.py",
+    "services/control-plane/api/v1_outcomes.py": "host/api_extensions/v1_outcomes.py",
+    "services/control-plane/api/outcomes_kpis.py": "host/api_extensions/outcomes_kpis.py",
+    "services/control-plane/order_management/alerts.py": "host/order_management/alerts.py",
+    "packages/execution-domain/execution_domain/account_execution_ledger.py": "host/execution_domain/account_execution_ledger.py",
+    "services/control-plane/order_management/order_reducer.py": "host/order_management/order_reducer.py",
+    "services/control-plane/db/repository.py": "host/repository.py",
+    "scripts/rebuild_orders_projection.py": "scripts/rebuild_orders_projection.py",
     "scripts/hk-deploy-20260803.sh": "hk-deploy-20260803.sh",
     "scripts/hk-gen-recreate-patched.py": "hk-gen-recreate-patched.py",
     "scripts/release_manifest.py": "release_manifest.py",
@@ -386,15 +397,15 @@ def _commit_path(root: Path, path: Path, message: str) -> None:
 def test_release_builder_includes_operator_query_reads_migration() -> None:
     assert (
         release.SCHEMA_EPOCHS["db"]
-        == "0017_operator_query_projection_reads"
+        == "0018_projection_reliability"
     )
-    assert release.MIGRATION_FILES[-4:] == (
+    assert release.MIGRATION_FILES[-6:-2] == (
         release.MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP,
         release.MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_DOWN,
         release.MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP,
         release.MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN,
     )
-    assert release.MIGRATION_STEPS[-1] == {
+    assert release.MIGRATION_STEPS[-2] == {
         "version": "0017",
         "name": "operator_query_projection_reads",
         "up": release.MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP,
@@ -486,7 +497,7 @@ def test_release_builder_writes_complete_checksummed_payload(
         "python_dependencies": ["psycopg2"],
         "migration_files": list(release.MIGRATION_FILES),
         "steps": [dict(item) for item in release.MIGRATION_STEPS],
-        "db_schema_epoch": "0017_operator_query_projection_reads",
+        "db_schema_epoch": "0018_projection_reliability",
         "manifest": release.MIGRATION_MANIFEST_NAME,
         "manifest_sha256": hashlib.sha256(
             (output / release.MIGRATION_MANIFEST_NAME).read_bytes()
@@ -571,7 +582,7 @@ def test_release_builder_writes_complete_checksummed_payload(
     )
     assert (
         migration_manifest["schema_epoch"]
-        == "0017_operator_query_projection_reads"
+        == "0018_projection_reliability"
     )
     assert {
         item["path"]

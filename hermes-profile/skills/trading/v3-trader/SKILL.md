@@ -16,15 +16,28 @@ description: 通过 trader-v3 控制面下单、管理合约仓位、查询交�
 4. **开仓必须传稳定 `--ref`**:频道信号使用 `tg-sig-c<频道ID>-m<消息ID>`,口头指令使用 `operator-<稳定操作ID>`。同一 ref 重复提交不会重复下单(返回 `replayed_existing_intent: true`)——这是防止超时重试变双仓的唯一保险。
 4.1 **开仓来源铁律(2026-07-18 加固)**:每次 open 必须同时带 `--channel` 和规范 `--ref`。频道信号使用 `--channel -<频道ID> --ref tg-sig-c<频道ID>-m<消息ID>`(分批入场可追加 `-e1/-e2`);用户口头操作使用 `--channel operator --ref operator-<稳定操作ID>`。channel 与 ref 中的频道不一致时脚本会本地拒发。
 5. **开仓前只查同一交易计划是否重复**:先用 positions/orders/status 检查。只有确认是**同一来源消息、同一 ref，或同一计划被重复转发/重发**时才停止，避免重复下单。不同频道、不同消息或不同交易计划，即使币种、方向、入场价区高度重合，也必须使用各自独立 ref，按各自参数独立提交；不得仅因已有同币种仓位或其他计划挂单而跳过。
-5.1 **区间信号必须原样提交 zone，禁止擅自压成单点限价（用户固定约定）**：只要信号给出明确入场区间（如 `66800-67400`、`145-148附近`），必须使用 `--entry-type zone --price-min <下界> --price-max <上界>`，把完整区间交给 trader-v3 的分层、定量和执行设计（系统对 zone 自动按 55/30/15 风险份额分三档）；不得自行取中点、上沿、下沿或所谓“更优点位”改成单笔 `limit`。区间边界一律按信号原值传入，**禁止自行平移或收窄**；若区间/点位带“附近、左右、大约、约”等模糊字眼，加 `--entry-offset` 旗标（CLI 会自动做 0.1% 让利：多单上移、空单下移），精确点位不加旗标、原值执行。若已误挂单点且尚未成交，先撤销错误挂单，确认交易所镜像已消失，再用新 ref 提交 zone。
+5.1 **区间信号必须原样提交 zone，禁止擅自压成单点限价（用户固定约定）**：只要信号给出明确入场区间（如 `66800-67400`、`145-148附近`），必须使用 `--entry-type zone --price-min <下界> --price-max <上界>`，把完整区间交给 trader-v3 的分层、定量和执行设计（系统对 zone 自动按 55/30/15 风险份额分三档）；不得自行取中点、上沿、下沿或所谓“更优点位”改成单笔 `limit`。区间边界一律按信号原值传入，**禁止自行平移或收窄**；若区间/点位带“附近、左右、大约、约”等模糊字眼，加 `--entry-offset` 旗标（CLI 自动做 0.1% 让利：多单上移、空单下移），精确点位不加旗标、原值执行。若已误挂单点且尚未成交，先撤销错误挂单，确认交易所镜像已消失，再用新 ref 提交 zone。
+5.2 **正文与附图小数位冲突的核验纪律**：若正文入场/止损与附图报价相差 10 倍、100 倍等数量级，禁止只看正文机械下单，也禁止仅凭常识猜测。先放大附图核对品种、实时 BUY/SELL 报价、明确 TP 标签，并检查哪套数量级能同时满足“多单 SL<入场<TP / 空单 TP<入场<SL”。只有附图像素清晰、多个独立价格标签共同证明是系统性漏零/错位时，才可统一校正正文数字；`--reason` 必须写明正文与附图冲突及校正依据，最终反馈也必须告知用户。图片仍不清晰或只能证明部分参数时，不执行并如实报告冲突。
+5.3 **分批第二腿口径以铁律 15 为准**：第一腿已成交则跳过后续腿，禁止再提交会撞 `position_exists` 的 open。若执行层仍返回 `denied:position_exists`，禁止换 ref 重试、禁止改成 partial/管理动作冒充加仓，回复「已有仓、不加仓」。
 6. **减仓之后必须重整保护单**:执行 partial 后,立刻用 `set-sl` + `set-tps` 按剩余仓位重挂止损止盈(旧单数量已对不上)。信号只说"调整止损/止盈"时,用 set-sl / set-tps,不要平仓重开。
+   - **TP 数量基准（E）**：`partial_close`（CLI `partial`）成交后，先用 `v3_query positions` 重新读取目标仓位的当前剩余 `quantity`，再为 `replace_take_profits`（CLI `set-tps`）重算各档数量；`--qty` 各档数量之和须小于等于当前剩余量。禁止沿用信号原始数量或减仓前数量作为 `--qty`。
+   - **错误例子**：原始数量为 29416，减仓后当前仓位为 23638，单档 `set-tps --tp <目标价> --qty 29416` 会因 `29416 > 23638` 被拒绝。**正确例子**：省略 `--qty`，由系统按当前仓位均分；或单档传 `--qty 23638`，多档按当前剩余量重新分配。例子中的 23638 仅适用于本次查询，实际执行以重新查询的当前数量为准。
+   - **部分平仓后的异步复核纪律（2026-09-06）**：执行回报中的请求数量可能因交易所数量步进被向上/向下取整（例如请求 183.6，实际成交 184），且 `v3_trade.py status` 的投影可能先于 `v3_query positions/orders` 镜像更新。partial 返回后必须重新查询 `v3_query positions` 与 `orders`，以 exchange_state_mirror 的实际剩余数量和保护单为准；不要仅凭首次回报计算后续保护数量。
+   - **移损撤改单竞争处理**：`set-sl` 若返回 `rejected`，且详情为旧保护单已在撤单过程中进入终态（如 `order_cancel_failed` / `order disappeared ... terminal status NEW`），不要立刻换新 `--ref` 重复提交。先等待镜像刷新并查询 `positions/orders`；若目标止损尚未生效，再用原操作 ref 重试，最后必须以 exchange_state_mirror 核实止损数量与价格。若镜像已显示目标止损，不再重复下单，即使原 intent 状态仍显示 rejected，也要如实报告该中间异常与最终状态。
+   - **归属 ref 精确性补充**：频道管理动作的 `--entry-ref` 必须使用能在意向审计链中解析到实际开仓腿的完整 client ref（分批首腿例如 `...-e1`），不能只传不带腿后缀的父消息 ref；`--parent-intent-id` 不能替代归属解析。若返回 `channel authorization attribution failed`，禁止换新 ref 盲重试；先用 `v3_query intent` 核对实际开仓 ref，再沿用原操作 ref 重试。
+   - **保护单异步镜像补充**：管理动作返回 `rejected` 但 execution events 只有 accepted 时，仍必须再次查询 `positions/orders`；如果 exchange_state_mirror 已显示目标保护价/数量已生效，以镜像为最终事实，并同时报告中间 rejected/撤单竞争异常，不重复提交。
+   - **裸仓修复与节点停机补充（2026-09-09）**：收到裸仓告警后，先以 `positions/orders` 的 exchange_state_mirror 确认当前仓位和止损确实缺失，再从该仓位最近的同频道管理审计链取最近有效止损价；不得把更早的原始 SL 覆盖后来已确认的保本/移损价。若使用父消息 `entry-ref` 返回 `channel authorization attribution failed`，立即查询开仓 intent 的完整 `client_ref`（分批首腿通常带 `-e1`），不得换管理操作 ref；沿用原操作 ref、改为完整首腿 ref 重试。若原操作 ref 已 replay/terminal 且镜像复核仍无保护，只有在已完成等待、原 ref 重试和再次 mirror 验证后，才可使用新的、可复现的裸仓修复 ref 提交一次，不得盲目循环换 ref。新请求若仅返回 `approved` 且无 execution events，必须查询 `nodes` 与 `status`；account 节点为 `HALTED` 时，止损尚未生效，最终反馈必须明确“已提交但未执行”、HALT 原因和单号，不能说成已补挂成功。
 6. **百分比减仓规则**:已有仓位更新信号里出现“减仓/平仓/止盈/锁定/落袋 + X%”时,默认解释为“按当前持仓数量减掉 X%”,即先 `positions` 读取当前 `quantity`,计算 `partial --quantity = quantity * X%` 后执行。尤其用户已明确约定：`锁定10%利润` 按“减仓当前仓位 10%”处理,不能因为没有给 base quantity 而跳过。只有文本明确写“锁定利润到 X% / 止损锁 X%收益 / 保本+X%”这类不是仓位比例的表达时,才不要减仓,改为移动止损或转人工复核。
 7. **美股/股票标的映射规则**:如果信号标的是美股股票代码或疑似股票代号(如 MU、MSTR、TSLA、NVDA 等),不要直接判定“非加密标的不可交易”。必须先检索/查询是否存在对应的 Binance 合约 USDT 标的(通常为 `<TICKER>USDT`,例如 `MU` -> `MUUSDT`)；存在则按该 USDT 合约处理,不存在才跳过并说明未找到可交易合约。
 9. **模糊点位量化与 0.1% 成交让利（用户固定约定，2026-08-03 修订）**：信号写“略破 / 小幅突破 / 稍微超过”但未给精确数值时，不再转 PENDING，统一按基准位向突破方向外扩 **0.3%** 得出精确价。**入场让利判据看措辞不看数字形态**：入场点位/区间带“附近、左右、大约、约”等模糊字眼时，入场价原值传入并加 `--entry-offset`（CLI 自动 0.1% 让利：多单上移、空单下移，Decimal 精确计算，禁止 Hermes 自己手工平移入场价以免叠加）；信号给出精确入场点位时**必须原值执行、不加旗标、不做任何让利**。止盈/止损的 0.1% 精确化仍由 Hermes 计算：空单止盈在目标位上方 0.1%，多单止盈在目标位下方 0.1%；空单止损在算出的突破价上方再放宽 0.1%，多单止损在算出的跌破价下方再放宽 0.1%。计算后仍须服从交易所 tick size，最终价格向有利于成交/避免过早触发的方向取到合法精度。审计理由中注明所用规则（如“按用户约定：略破0.3%”，入场让利由 CLI 自动注明）。
 10. 执行结果(成交/拒绝/超时)必须原样反馈给用户,不要美化失败。
 11. **复盘/总结类消息零交易动作(2026-07-14 事故规则)**:消息主体是已实现盈亏回顾(含战绩百分比)、策略复盘、经验教训、行情感想,且没有给出新的带点位的操作指令——一律不产生任何交易动作(不开、不平、不减、不动保护单),回复「🔕 这条是复盘/总结帖,不操作」,只记入上下文。存疑时按复盘处理并请用户确认:宁可漏动作,不可误动作。
+11.1 **Cash 频道观察帖**：Cash 频道的「关注区域 + 失效位 + 潜在反弹区域」格式一律按观察帖处理，仅记录上下文并汇报「🔕 Cash频道: 观察帖，不操作」。即使包含具体价格，也保持零交易动作；禁止把关注区域、失效位和潜在反弹区域自动拼成入场、止损和止盈参数下单。
 12. **动仓前必验归属(频道纪律,2026-07-14 事故规则)**:处理频道消息时你只代表该频道。任何 close/partial/set-sl/set-tps 之前,必须先确认目标仓位的入场归属:用 `v3_query intents --symbol <symbol>` 找到该仓在场的入场 intent,再 `v3_query intent <id前8位>` 看审计链源头是哪个频道的消息。归属不是本频道 → **不动**,回复「该仓位归属 XX 频道的信号,本频道消息不操作它」。用户口头指令不受此限,但回复必须说明被操作仓位的归属。同一币种同方向若混有多个频道的在场入场(多笔不同来源的入场 intent 都未平),禁止整仓 close——改为按本频道入场数量 partial,或转用户确认。
 13. **管理动作参数纪律(2026-07-14 加固)**:close/partial/set-sl/set-tps/cancel 必须带 --ref(该次操作自己的稳定幂等号,如 close-btc-tg-sig-...-m5026;超时重试必须复用同一个 ref,禁止换 ref 重试)。处理频道消息时,close/partial 还必须带 --channel <本频道id> 和 --entry-ref <目标仓位入场时的 client_ref>;控制面会根据原开仓 intent 或原订单规范化最终执行账号,频道改绑只影响新增风险。服务端会记录归属校验结果,返回里的 attribution.would_reject=true 说明归属存疑,必须在回复中向用户说明。查不到入场 ref 的仓位(历史仓/手动仓)→ 不动,转用户确认。
+14. **开仓信号时效(2026-09-05 漏单事故规则)**:开仓类信号若消息发布时间距当前超过 30 分钟，只汇报不执行（回复标注 ⏰过期）。仓位管理类（移损/止盈/平仓）不受此限，但必须先核对当前仓位与归属。无法确认发布时间时，开仓类一律只汇报不执行。
+15. **分批第二腿不加仓(2026-09-05 产品口径 β)**:同一条信号多个入场价时，第一腿用 `open`（`--ref …-e1`）。后续腿仅当第一腿尚未成交（无同向仓、无该 ref 的在场挂单）时才再 `open`（`--ref …-e2`）。第一腿已成交则跳过后续腿，回复说明「已有仓、不加仓」，禁止再提交会撞 `position_exists` 的 open。
+16. **引用式参数解析(2026-09-12)**:信号(含 PDF 附件)写「沿用上期/previous setup 的止损与 DCA 区」但未给具体数值时,先用 `v3_query messages <频道>` 回溯上一期同币种 setup 原文,解析出 SL/二入价后照常执行(例:m4497 PDF 引用 m4487 → SL 74557、DCA 75578;时效按新消息自己的时间算)。回溯不到唯一的上期 setup 才转人工确认,禁止凭印象填数。另:目标币种空仓但镜像残留旧保护单(reduce-only)不阻塞 open——控制面开仓流程会自动清理旧 LONG 侧保护并按新仓数量重挂精确止损(实测 m4498 开仓后旧 SL/TP 残单消失、新 SL 精确覆盖),无对应仓位的对侧脏单如实上报即可。
 
 ## 查询系统(v3_query.py — 回答任何"现在什么情况"之前先查它)
 
@@ -37,6 +50,9 @@ Q=/srv/hermes/profiles/trader/skills/trading/v3-trader/scripts/v3_query.py
 python3 $Q channels                    # 信号频道列表(消息数/最近时间)
 python3 $Q messages 舒琴 --limit 5     # 某频道最近N条消息;支持 舒琴/titan/gauls/coinalert/operator 或频道id
                                        # 返回的 media.path 是本机图片路径,直接查看图片即可解读图
+                                       # 若媒体是 PDF:先 pip install pypdf,用 PdfReader 逐页 extract_text() 读文本层
+                                       # (Titan 等频道的 PDF 常带完整文本层,不依赖视觉服务即可取全部参数);
+                                       # 文本层为空再提取 page.images 存盘交给 vision 逐张识别
 python3 $Q positions                   # 持仓+每个仓位的止损/止盈保护单(币安真相,45s镜像)
 python3 $Q orders                      # 在场挂单(含挂龄小时数、是否系统单)+条件单
 python3 $Q intents --limit 10          # 最近交易意向(含风控理由);可加 --status rejected --symbol ETHUSDT
@@ -70,17 +86,17 @@ python3 $V3 open BTCUSDT short --sl 63000 --tp 60000,58500 \
   --source-message-id tg-sig-c1002136478186-m12345 \
   --ref tg-sig-c1002136478186-m12345
 
-# 一条信号含多个入场价(首次入场+加仓/分批): 每个价位单独一笔 open,
-# --ref 必须加稳定后缀区分(-e1 首入、-e2 加仓),否则第二笔会被幂等去重吞掉。
-# 每笔独立自动定量(各约2%风险);若信号明示加仓量更小,给加仓单显式 --notional。
+# 一条信号含多个入场价: 第一腿 open 用 -e1。后续腿仅当第一腿尚未成交时才再 open(-e2);
+# 第一腿已成交则跳过,不要再提交会撞 position_exists 的 open(铁律 15)。
 python3 $V3 open BTCUSDT short --entry-type limit --price 62663 --sl 64229 \
   --reason "频道信号首入" --account account-a \
   --channel -1002136478186 --authorized-by-type channel \
   --authorized-by-id -1002136478186 \
   --source-message-id tg-sig-c1002136478186-m4374 \
   --ref tg-sig-c1002136478186-m4374-e1
+# 仅当第一腿尚未成交时才挂 -e2；已成交则跳过。
 python3 $V3 open BTCUSDT short --entry-type limit --price 63457 --sl 64229 \
-  --reason "频道信号加仓" --account account-a \
+  --reason "频道信号第二腿,仅在第一腿未成交时" --account account-a \
   --channel -1002136478186 --authorized-by-type channel \
   --authorized-by-id -1002136478186 \
   --source-message-id tg-sig-c1002136478186-m4374 \
@@ -209,17 +225,21 @@ python3 $V3 positions
 
 流程:
 
-1. 先跑 `report_data.py` 拿数字摘要。
-2. 用 `v3_query.py messages <频道> --limit <N>` 回看各频道当期消息,总结每个活跃频道交易员的行情观点。
-3. 组装报告 JSON。`channel_views` 必填,每个活跃频道都要有 `{channel,trader,stance,summary,symbols}`；其中 `stance` 只能使用 `bearish`、`bullish`、`mixed`、`neutral` 四个英文枚举值之一。`sections.overview_md` 也必填(本期概览,3-6行);有拒单/裸仓/系统异常时 `sections.risk_md` 必填;周报建议再写 `market_md`(大盘走势与关键位)和 `actions_md`(下周计划)。
+1. 先跑 `/srv/hermes/profiles/trader/scripts/report_data.py` 拿数字摘要。该脚本是预跑摘要口径；发布前仍须用 `v3_query.py positions/orders/nodes/reconcile` 复核实时真相，若两者冲突，以 exchange_state_mirror 与 nodes 实时查询为准，并把口径冲突写入 `risk_md`。
+2. 用 `v3_query.py channels` 先确定窗口内活跃频道，再用 `v3_query.py messages <频道> --limit <N>` 回看各频道当期消息,总结每个活跃频道交易员的行情观点。周报的窗口必须以任务注入的7天摘要/明确period为准；不要因为 `report_data.py` 输出“最近1天”就把周报误做成日报。频道只有 lifecycle/hermes-agent 系统消息而没有当期交易员原文时，不得编造新观点；可明确写“本期无交易员新增观点”，并区分历史计划与系统执行状态。`hermes-operator`/人工操作频道若在窗口内活跃，可作为 `neutral` 的 channel_view 记录“仅有口头执行记录、无独立行情观点”，不要从执行日志推导交易员立场。
+3. 组装报告 JSON。`channel_views` 必填,每个窗口内活跃频道都要有 `{channel,trader,stance,summary,symbols}`；其中 `stance` 只能使用 `bearish`、`bullish`、`mixed`、`neutral` 四个英文枚举值之一。`sections.overview_md` 也必填(本期概览,3-6行);有拒单/裸仓/系统异常时 `sections.risk_md` 必填;周报建议再写 `market_md`(大盘走势与关键位)和 `actions_md`(下周计划)。
 4. 有值得展示的盘面图,先 `python3 v3_report.py upload <图片路径>` 上传,再把返回的 asset URL 写进 `images[].url`。
 5. 发布: `python3 v3_report.py publish --type daily --json report.json` 或 `--type weekly`。
 6. 把 `v3_report.py` **返回的完整 URL 原样**发给用户（当前域是 `https://jp-bot.balen.wang/reports/...html`）。禁止改域名，尤其禁止改成 `hk.balen.wang`。
 
 铁律:
 
+- **四账户收盘(硬性)**: HTML 报告由服务端按 `account-a/b/c/d` 自动出收盘卡。发给用户的 TG 消息必须四个账号都点名收盘,缺一不可。每个账号写:已实现盈亏、当前仓(没有就写空仓)、浮动盈亏。空仓空成交也要写「空仓,今日无平仓」。禁止把四账户揉成一句总盈亏交差。日报最终收盘短消息必须按 `account-a`、`account-b`、`account-c`、`account-d` 四个账户逐一列出,禁止合并成一句总盈亏。每个账户都写:已实现盈亏、当前仓位（方向/数量/入场价）、浮动盈亏；空仓且无平仓时明确写“空仓,今日无平仓”。最后单独一行放 publish 打印的完整URL。
 - 禁止发 watcher 界面截图代替日报/周报。
 - 禁止跳过频道观点总结;`channel_views` 是用户明确要求的报告核心。
 - 脚本失败时只转述可读原因,不要把堆栈或原始 JSON 发给用户。
 - 发给用户的报告链接必须是 publish 脚本打印的那一行，禁止按记忆或示例域名改写。
-- `trade_outcomes` watermark 必须覆盖报告窗口尾。hourly timer 是主路径；若 publish 返回 503 且原因含 `window tail not materialized`，先 `systemctl start trader-v3-trade-outcomes.service`（幂等 upsert），再重试发布。禁止在物化滞后时把 KPI 全 0 的报告发出去。
+- `trade_outcomes` watermark 必须覆盖报告窗口尾。hourly timer 是主路径；若 publish 返回 503 且原因含 `window tail not materialized`，说明服务端按当前报告时点检查的窗口尾可能已超过预跑摘要的固定时间（即使 payload 的 `period.end` 看起来正确），先 `systemctl start trader-v3-trade-outcomes.service`（幂等 upsert），再重试发布。该 unit 是 oneshot，成功执行后通常仍显示 `inactive/dead`；不要用 `systemctl is-active` 判断成败，应执行 `systemctl show trader-v3-trade-outcomes.service -p Result -p ExecMainStatus -p ActiveState -p SubState`，确认 `Result=success` 且 `ExecMainStatus=0` 后重试。禁止在物化滞后时把 KPI 全 0 的报告发出去。
+- publish 成功后必须用 `web_extract`（或等价HTTP读取）验证返回的完整URL可访问且报告正文中的标题、日期和核心指标正确，再把该URL原样作为收盘消息最后一行。报告页的 HTML `<title>` 可能固定显示 `Hermes Report`，不得仅凭该通用标题误判验证失败，应检查正文一级标题与指标。
+- 日报成交统计需区分“原始成交回报行数”和“唯一成交订单数”：`v3_query.py fills` 可能因事件镜像保留同一 `client_order_id`、同一时间/数量/价格的重复回报。不得把重复回报误报成多笔独立成交；报告中可同时注明原始回报数与去重后的唯一订单数。
+- 预跑摘要中的“账户收盘/持仓”若与发布前 `positions` 实时镜像差异明显，最终报告和收盘短消息一律采用实时镜像，并在 `risk_md` 或概览中明确说明口径冲突；不得混用两套仓位拼接结果。

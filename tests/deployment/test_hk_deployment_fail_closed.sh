@@ -126,7 +126,7 @@ test_hardening_deploy_contract_is_fail_closed() {
   assert_contains "$text" '"operator_query_projection_reads",'
   assert_contains "$text" 'release migration metadata mismatch: steps'
   assert_contains "$text" \
-    'release migration metadata lacks four-account files'
+    'release migration metadata lacks canonical files'
   assert_contains "$text" 'apply_and_verify_database_migration'
   assert_contains "$text" 'VALUES (%s, %s, %s)'
   assert_contains "$text" 'for version, name, sql, digest in migrations'

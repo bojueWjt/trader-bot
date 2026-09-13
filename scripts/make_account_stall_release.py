@@ -162,6 +162,12 @@ RELEASE_FILES = (
     ("infra/docker/nautilus/uv.node.lock", "uv.node.lock"),
     ("services/control-plane/api/read_api.py", "host/read_api.py"),
     ("services/control-plane/api/snapshot.py", "host/snapshot.py"),
+    ("services/control-plane/api/position_protection.py", "host/api_extensions/position_protection.py"),
+    ("services/control-plane/api/v1_mirror.py", "host/api_extensions/v1_mirror.py"),
+    ("services/control-plane/api/v1_trace.py", "host/api_extensions/v1_trace.py"),
+    ("services/control-plane/api/v1_outcomes.py", "host/api_extensions/v1_outcomes.py"),
+    ("services/control-plane/api/outcomes_kpis.py", "host/api_extensions/outcomes_kpis.py"),
+    ("services/control-plane/order_management/alerts.py", "host/order_management/alerts.py"),
     (
         "services/control-plane/decision_gateway/gateway.py",
         "host/decision_gateway/gateway.py",
@@ -353,7 +359,7 @@ REQUIRED_HERMES_RELEASE_PATHS = {
 }
 HERMES_FEEDER_SOURCE_PATH = "scripts/hermes_signal_feeder.py"
 HERMES_FEEDER_REQUIRED_SHA256 = (
-    "4bd121f9e34ca887568b00d2331ca7299d36941702e244751529e4384e3ee7b4"
+    "755883051da5f955432d431897df01c290469f78913c64dfddd254c9fe88a914"
 )
 REQUIRED_CONTROL_PLANE_HOST_RELEASE_PATHS = {
     "host/read_api.py",

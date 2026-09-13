@@ -16,7 +16,7 @@ import math
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -70,11 +70,15 @@ from pools import (  # noqa: E402
 
 from snapshot import (  # noqa: E402
     DEFAULT_STALENESS_MS,
+    HEARTBEAT_STALENESS_MS,
+    _mirror_age_ms,
     _missing_nodes,
+    _stale_verdict,
     _worst_reconciliation_state,
     build_system_snapshot,
     validate_snapshot,
 )
+from position_protection import protection_status  # noqa: E402
 
 READER_TOKEN_ENV = {
     "SYSTEM_OBSERVER_TOKEN": "system_observer",
@@ -3083,6 +3087,9 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
             payload["health_degraded_reasons"] = health_degraded_reasons
             cur.execute(
                 """
+                WITH previous_heartbeat AS (
+                    SELECT status FROM node_heartbeats WHERE node_id = %s
+                )
                 INSERT INTO node_heartbeats (
                     node_id,
                     account_id,
@@ -3188,8 +3195,12 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
                             IS DISTINCT FROM EXCLUDED.redis_fencing_epoch
                     )
                 )
+                RETURNING
+                    (SELECT status FROM previous_heartbeat) AS previous_status,
+                    node_heartbeats.status AS new_status
                 """,
                 (
+                    node_id,
                     node_id,
                     bound_account_id,
                     str(body.get("trading_state") or "UNKNOWN"),
@@ -3219,8 +3230,29 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
                     exchange_evidence_accepted,
                 ),
             )
+            # Old status is read back via the CTE above (previous_heartbeat)
+            # riding on this same INSERT/UPSERT statement -- no extra DB
+            # round trip is added to the heartbeat hot path.
+            heartbeat_transition_row = cur.fetchone()
             if cur.rowcount != 1:
                 _raise_writer_fence("stale heartbeat writer")
+            _handle_node_heartbeat_status_transition(
+                conn,
+                node_id=node_id,
+                account_id=bound_account_id,
+                previous_status=(
+                    heartbeat_transition_row[0]
+                    if heartbeat_transition_row
+                    else None
+                ),
+                new_status=(
+                    heartbeat_transition_row[1]
+                    if heartbeat_transition_row
+                    else None
+                ),
+                halt_reason=body.get("halt_reason"),
+                observed_at=datetime.now(timezone.utc),
+            )
             if exchange_evidence_complete:
                 _revoke_changed_portfolio_baselines(
                     cur,
@@ -3252,6 +3284,107 @@ def node_heartbeat(node_id: str, body: dict = Body(default={}),
         return receipt
     finally:
         conn.close()
+
+
+_node_halt_alert_log = logging.getLogger("control_plane.node_halt_alert")
+
+
+def _handle_node_heartbeat_status_transition(
+    conn,
+    *,
+    node_id: str,
+    account_id: str | None,
+    previous_status: str | None,
+    new_status: str | None,
+    halt_reason: str | None,
+    observed_at: datetime,
+) -> None:
+    """Alert + audit a HALTED boundary crossing observed on this heartbeat.
+
+    Fail-closed HALT is a safety feature, not a bug: this function only adds
+    *observability* for it (2026-09-01 postmortem: an 8h fail-closed HALT
+    produced zero alerts and zero audit rows). It must never make the
+    heartbeat request fail, so callers wrap this call in a SAVEPOINT and
+    swallow+log any exception raised here.
+    """
+    if not new_status:
+        return
+    # Cheap inline pre-check so the overwhelming majority of heartbeats
+    # (no HALTED boundary crossed) never pay for a SAVEPOINT, a module
+    # import, or a second cursor -- those only happen on the rare
+    # transition heartbeat. This mirrors (and is re-verified by) the
+    # canonical check in order_management.alerts.condition_from_node_status_transition
+    # once we're inside the try block below.
+    previous_upper = str(previous_status or "").strip().upper() or None
+    current_upper = str(new_status or "").strip().upper()
+    entered_halt = current_upper == "HALTED" and previous_upper != "HALTED"
+    left_halt = previous_upper == "HALTED" and current_upper != "HALTED"
+    if not entered_halt and not left_halt:
+        return
+    with conn.cursor() as sp:
+        sp.execute("SAVEPOINT node_halt_alert")
+    try:
+        _cp_paths()
+        from audit import record_audit_event
+        from order_management.alerts import (
+            AlertEngine,
+            OutboxNotificationSink,
+            condition_from_node_status_transition,
+        )
+        from datetime import timedelta
+
+        condition = condition_from_node_status_transition(
+            account_id=account_id,
+            node_id=node_id,
+            previous_status=previous_status,
+            new_status=new_status,
+            halt_reason=halt_reason,
+            observed_at=observed_at,
+        )
+        if condition is None:
+            with conn.cursor() as sp:
+                sp.execute("RELEASE SAVEPOINT node_halt_alert")
+            return
+        engine = AlertEngine(
+            cooldown=timedelta(minutes=5),
+            sink=OutboxNotificationSink(conn),
+        )
+        if not condition.is_active:
+            # A fresh, request-scoped engine has no memory of the prior
+            # firing alert; the DB-verified transition itself is the proof
+            # this recovery is real, so seed the active-key set explicitly.
+            engine.seed_active_key(condition.alert_key)
+        engine.evaluate(condition, now=observed_at)
+        record_audit_event(
+            conn,
+            event_type="node.halted" if condition.is_active else "node.resumed",
+            aggregate_type="node",
+            aggregate_id=node_id,
+            actor=f"node:{node_id}",
+            payload={
+                "node_id": node_id,
+                "account_id": account_id,
+                "halt_reason": halt_reason,
+                "previous_status": previous_status,
+                "new_status": new_status,
+                "observed_at": observed_at.isoformat(),
+            },
+        )
+    except Exception as exc:
+        with conn.cursor() as sp:
+            sp.execute("ROLLBACK TO SAVEPOINT node_halt_alert")
+        _node_halt_alert_log.error(
+            "node_halt_alert_failed node_id=%s account_id=%s "
+            "previous_status=%s new_status=%s error=%s",
+            node_id,
+            account_id,
+            previous_status,
+            new_status,
+            f"{type(exc).__name__}: {exc}",
+        )
+    else:
+        with conn.cursor() as sp:
+            sp.execute("RELEASE SAVEPOINT node_halt_alert")
 
 
 def _heartbeat_release_receipt(
@@ -5185,7 +5318,13 @@ def _symbol(instrument_id: str | None) -> str | None:
     return instrument_id.split("-", 1)[0]
 
 
-def _envelope(cur, *, now: datetime | None = None, threshold_ms: int = DEFAULT_STALENESS_MS) -> dict:
+def _envelope(
+    cur,
+    *,
+    now: datetime | None = None,
+    threshold_ms: int = DEFAULT_STALENESS_MS,
+    heartbeat_threshold_ms: int = HEARTBEAT_STALENESS_MS,
+) -> dict:
     """Compute the SystemSnapshotV1 §2.2 envelope from the live projections — identical
     semantics to snapshot.build_system_snapshot, reused here so every /v1 row payload
     carries the same freshness verdict the snapshot endpoint reports."""
@@ -5198,8 +5337,19 @@ def _envelope(cur, *, now: datetime | None = None, threshold_ms: int = DEFAULT_S
     last_event = cur.fetchone()["t"]
     lag = max(0, int((now - last_event).total_seconds() * 1000)) if last_event is not None else 0
     recon = _worst_reconciliation_state(accounts)
-    missing = _missing_nodes(nodes, now, threshold_ms)
-    stale = bool((last_event is not None and lag > threshold_ms) or recon == "failed" or missing)
+    missing = _missing_nodes(nodes, now, heartbeat_threshold_ms)
+    # Stale follows exchange-mirror age, heartbeat gaps and failed reconciliation; the
+    # execution-event lag is reported but no longer drives the verdict (quiet hours are normal).
+    stale = _stale_verdict(
+        missing_nodes=missing,
+        reconciliation_state=recon,
+        mirror_age_ms=_mirror_age_ms(
+            cur,
+            now,
+            [str(account["account_id"]) for account in accounts],
+        ),
+        threshold_ms=threshold_ms,
+    )
     return {
         "schema_version": "1.0",
         "data_source": "postgres_projection",
@@ -5220,9 +5370,78 @@ def _valid_uuid(value: str) -> str | None:
         return None
 
 
+def _parse_history_hours(raw: str | None) -> int | None:
+    """GET /v1/accounts?history_hours=.. (contracts/backend-api.md §8).
+
+    Absent parameter -> None (caller must leave the response byte-identical
+    to the pre-§8 shape). Present but out of [1, 168] or non-integer -> 400,
+    matching this module's existing manual-validation error style (not
+    FastAPI's default 422 Query() constraint violations).
+    """
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail="history_hours must be an integer between 1 and 168",
+        )
+    if not (1 <= value <= 168):
+        raise HTTPException(
+            status_code=400,
+            detail="history_hours must be an integer between 1 and 168",
+        )
+    return value
+
+
+def _decimal_str(value) -> str:
+    return "0" if value is None else str(value)
+
+
+_EQUITY_HISTORY_BUCKET_SECONDS = 1800
+_EQUITY_HISTORY_MAX_POINTS = 336
+
+
+def _equity_history(conn, hours: int, accounts_expected: int) -> tuple[list[dict], dict]:
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=hours)
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            "SELECT bucket_at, SUM(equity) AS equity_sum, SUM(available) AS available_sum, "
+            "COUNT(*) AS accounts_sampled "
+            "FROM account_equity_samples WHERE bucket_at >= %s "
+            "GROUP BY bucket_at ORDER BY bucket_at ASC LIMIT %s",
+            (since, _EQUITY_HISTORY_MAX_POINTS),
+        )
+        bucket_rows = [dict(r) for r in cur.fetchall()]
+        cur.execute("SELECT min(sampled_at) AS first_sample_at FROM account_equity_samples")
+        first_row = cur.fetchone()
+    total = [
+        {
+            "t": _iso(row["bucket_at"]),
+            "equity": _decimal_str(row["equity_sum"]),
+            "available": _decimal_str(row["available_sum"]),
+            "accounts_sampled": int(row["accounts_sampled"]),
+        }
+        for row in bucket_rows
+    ]
+    meta = {
+        "bucket_seconds": _EQUITY_HISTORY_BUCKET_SECONDS,
+        "accounts_expected": accounts_expected,
+        "since": since.isoformat(),
+        "first_sample_at": _iso(first_row["first_sample_at"]) if first_row else None,
+    }
+    return total, meta
+
+
 @app.get("/v1/accounts")
-def v1_accounts(authorization: str | None = Header(default=None)):
+def v1_accounts(
+    history_hours: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     require_reader(authorization)
+    parsed_history_hours = _parse_history_hours(history_hours)
     conn = _read_conn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -5246,7 +5465,16 @@ def v1_accounts(authorization: str | None = Header(default=None)):
                 "reconciliation_state": r["reconciliation_state"],
                 "updated_at": _iso(r["updated_at"]),
             })
-        return {**env, "accounts": accounts}
+        result = {**env, "accounts": accounts}
+        if parsed_history_hours is not None:
+            equity_history_total, equity_history_meta = _equity_history(
+                conn, parsed_history_hours, accounts_expected=len(accounts)
+            )
+            result["data"] = {
+                "equity_history_total": equity_history_total,
+                "equity_history_meta": equity_history_meta,
+            }
+        return result
     finally:
         conn.close()
 
@@ -5261,6 +5489,7 @@ def v1_nodes(authorization: str | None = Header(default=None)):
             cur.execute(
                 """
                 SELECT nh.node_id, nh.account_id, nh.status, nh.version, nh.payload, nh.last_seen_at,
+                       nh.release_id,
                        (SELECT count(*) FROM positions_projection p
                           WHERE p.account_id = nh.account_id AND p.status = 'open') AS open_position_count,
                        (SELECT count(DISTINCT p.instrument_id) FROM positions_projection p
@@ -5289,6 +5518,8 @@ def v1_nodes(authorization: str | None = Header(default=None)):
                     [],
                 ),
                 "version": r["version"],
+                "release_id": r.get("release_id"),
+                "halt_reason": payload.get("halt_reason"),
             })
         return {**env, "nodes": nodes}
     finally:
@@ -5336,6 +5567,7 @@ def v1_orders(status: str | None = None, authorization: str | None = Header(defa
                 "remaining": max(0.0, qty - filled),
                 "created_at": _iso(r.get("ts_event") or r.get("updated_at")),
                 "trade_id": str(r["intent_id"]) if r.get("intent_id") else None,
+                "account_id": r.get("account_id"),
             })
         return {**env, "orders": orders}
     finally:
@@ -5354,6 +5586,11 @@ def v1_positions(authorization: str | None = Header(default=None)):
                 "ORDER BY updated_at DESC LIMIT 200"
             )
             rows = [dict(r) for r in cur.fetchall()]
+            cur.execute("SELECT account_id, payload FROM exchange_state_mirror")
+            mirrors = {
+                row["account_id"]: (row["payload"] or {})
+                for row in cur.fetchall()
+            }
         positions = []
         for r in rows:
             payload = r.get("payload") or {}
@@ -5362,6 +5599,15 @@ def v1_positions(authorization: str | None = Header(default=None)):
             notional = _f(payload.get("notional"))
             if notional is None and qty is not None and entry is not None:
                 notional = qty * entry
+            account_id = r.get("account_id")
+            mirror = mirrors.get(account_id) or {}
+            protection = protection_status(
+                symbol=_symbol(r.get("instrument_id")),
+                position_side=r.get("side"),
+                quantity=r.get("quantity"),
+                open_orders=mirror.get("open_orders") or [],
+                algo_orders=mirror.get("algo_orders") or [],
+            )
             positions.append({
                 "position_id": r.get("position_id"),
                 "instrument_symbol": _symbol(r.get("instrument_id")),
@@ -5381,6 +5627,8 @@ def v1_positions(authorization: str | None = Header(default=None)):
                 "signal_id": payload.get("signal_id") or payload.get("intent_id"),
                 "intent_id": payload.get("intent_id"),
                 "raw_signal": payload.get("raw_signal"),
+                "account_id": account_id,
+                "protection": protection,
             })
         return {**env, "positions": positions}
     finally:
@@ -5416,6 +5664,7 @@ def v1_trades(authorization: str | None = Header(default=None)):
                 "realized_pnl": _f(payload.get("realized_pnl") or r.get("unrealized_pnl")),
                 "opened_at": _iso(payload.get("opened_at")),
                 "closed_at": _iso(r.get("updated_at")),
+                "account_id": r.get("account_id"),
             })
         return {**env, "trades": trades}
     finally:
@@ -5837,7 +6086,7 @@ def _operator_account_registry() -> dict[str, dict]:
                 status_code=503,
                 detail=(
                     f"operator account registry {account_id}.effective_equity "
-                    "is unsupported; configure risk_capital_multiplier in the "
+                    "is unsupported; configure risk_capital_addon in the "
                     "watcher account registry"
                 ),
             )
@@ -5862,7 +6111,7 @@ def _watcher_account_is_enabled(row, account_columns: set[str]) -> bool:
     return not status or status in {"1", "active", "enabled", "true"}
 
 
-def _channel_risk_capital_multiplier(
+def _channel_risk_capital_addon(
     channel_id: str,
     account_id: str,
 ) -> float:
@@ -5898,7 +6147,7 @@ def _channel_risk_capital_multiplier(
                 "account_type",
                 "parent_account_id",
                 "execution_account_id",
-                "risk_capital_multiplier",
+                "risk_capital_addon",
             }
             if not required_account_columns <= account_columns:
                 raise HTTPException(
@@ -5923,8 +6172,8 @@ def _channel_risk_capital_multiplier(
                 "WHERE parent.account_id = account.parent_account_id "
                 "AND lower(trim(parent.account_type)) = 'main') "
                 "AS parent_main_account_count",
-                "account.risk_capital_multiplier "
-                "AS risk_capital_multiplier",
+                "account.risk_capital_addon "
+                "AS risk_capital_addon",
             ]
             for field_name in ("is_enabled", "enabled", "status"):
                 if field_name in account_columns:
@@ -6019,21 +6268,21 @@ def _channel_risk_capital_multiplier(
             detail="watcher channel route target account is disabled",
         )
     try:
-        multiplier = float(row["risk_capital_multiplier"])
+        addon = float(row["risk_capital_addon"])
     except (TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=503,
-            detail="watcher channel risk capital multiplier is invalid",
+            detail="watcher channel risk capital addon is invalid",
         ) from exc
-    if not math.isfinite(multiplier) or multiplier <= 0:
+    if not math.isfinite(addon) or addon < 0:
         raise HTTPException(
             status_code=503,
-            detail="watcher channel risk capital multiplier is invalid",
+            detail="watcher channel risk capital addon is invalid",
         )
-    return multiplier
+    return addon
 
 
-def _account_risk_capital_multiplier(account_id: str) -> float:
+def _account_risk_capital_addon(account_id: str) -> float:
     import sqlite3
 
     try:
@@ -6054,12 +6303,12 @@ def _account_risk_capital_multiplier(account_id: str) -> float:
                 "account_type",
                 "parent_account_id",
                 "execution_account_id",
-                "risk_capital_multiplier",
+                "risk_capital_addon",
             }
             if not required_account_columns <= account_columns:
                 raise HTTPException(
                     status_code=503,
-                    detail="watcher account risk schema is unavailable",
+                    detail="watcher account routing schema is unavailable",
                 )
             fields = [
                 "account.account_id AS account_id",
@@ -6070,8 +6319,8 @@ def _account_risk_capital_multiplier(account_id: str) -> float:
                 "AND lower(trim(parent.account_type)) = 'main') "
                 "AS parent_main_account_count",
                 "account.execution_account_id AS execution_account_id",
-                "account.risk_capital_multiplier "
-                "AS risk_capital_multiplier",
+                "account.risk_capital_addon "
+                "AS risk_capital_addon",
             ]
             for field_name in ("is_enabled", "enabled", "status"):
                 if field_name in account_columns:
@@ -6137,18 +6386,18 @@ def _account_risk_capital_multiplier(account_id: str) -> float:
             detail="watcher account risk configuration is disabled",
         )
     try:
-        multiplier = float(row["risk_capital_multiplier"])
+        addon = float(row["risk_capital_addon"])
     except (TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=503,
-            detail="watcher account risk capital multiplier is invalid",
+            detail="watcher account risk capital addon is invalid",
         ) from exc
-    if not math.isfinite(multiplier) or multiplier <= 0:
+    if not math.isfinite(addon) or addon < 0:
         raise HTTPException(
             status_code=503,
-            detail="watcher account risk capital multiplier is invalid",
+            detail="watcher account risk capital addon is invalid",
         )
-    return multiplier
+    return addon
 
 
 def _channel_from_signal_ref(value) -> str | bool:
@@ -6948,7 +7197,7 @@ def _symbol_risk_ratio(symbol: str) -> float:
 def _size_open_order(explicit_notional, symbol, account_id, side, entry_type,
                      entry_price, entry_price_min, entry_price_max,
                      stop_loss, leverage, caps, checks,
-                     risk_capital_multiplier=False) -> float:
+                     risk_capital_addon=False) -> float:
     """Risk-based sizing: notional = equity * risk_ratio / stop_distance.
     Hard cap (fail closed): loss at stop <= max_risk_fraction of equity.
     Without a stop loss the order cannot be risk-checked, so an explicit
@@ -6961,19 +7210,32 @@ def _size_open_order(explicit_notional, symbol, account_id, side, entry_type,
         )
     real_equity = state["real_equity"]
     available_balance = state["available_balance"]
+    if isinstance(risk_capital_addon, bool):
+        raise HTTPException(
+            status_code=503,
+            detail="account risk capital addon is invalid",
+        )
     try:
-        multiplier = float(risk_capital_multiplier)
+        addon = float(risk_capital_addon)
     except (TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=503,
-            detail="account risk capital multiplier is unavailable",
+            detail="account risk capital addon is unavailable",
         ) from exc
-    if not math.isfinite(multiplier) or multiplier <= 0:
+    if not math.isfinite(addon) or addon < 0:
         raise HTTPException(
             status_code=503,
-            detail="account risk capital multiplier is invalid",
+            detail="account risk capital addon is invalid",
         )
-    effective_equity = real_equity * multiplier
+    effective_equity = real_equity + addon
+    if effective_equity <= 0:
+        raise HTTPException(
+            status_code=503,
+            detail="account effective equity is not positive",
+        )
+    multiplier = None
+    if real_equity > 0:
+        multiplier = effective_equity / real_equity
     checks.append(
         {
             "name": "account_equity_basis",
@@ -6981,6 +7243,7 @@ def _size_open_order(explicit_notional, symbol, account_id, side, entry_type,
             "real_equity": real_equity,
             "available_balance": available_balance,
             "effective_equity": effective_equity,
+            "risk_capital_addon": addon,
             "risk_capital_multiplier": multiplier,
         }
     )
@@ -7507,22 +7770,22 @@ def operator_order(
     client_ref = str(body.get("client_ref") or "").strip()
     open_raw_channel = "hermes-operator"
     open_has_provenance = False
-    open_risk_capital_multiplier: float | bool = False
+    open_risk_capital_addon: float | bool = False
     if action == "open_position":
         open_raw_channel, open_has_provenance = _open_source_channel(
             body,
             client_ref,
         )
         if open_raw_channel not in ("hermes-operator", "operator"):
-            open_risk_capital_multiplier = (
-                _channel_risk_capital_multiplier(
+            open_risk_capital_addon = (
+                _channel_risk_capital_addon(
                     open_raw_channel,
                     account_id,
                 )
             )
         else:
-            open_risk_capital_multiplier = (
-                _account_risk_capital_multiplier(account_id)
+            open_risk_capital_addon = (
+                _account_risk_capital_addon(account_id)
             )
     authorization_evidence: dict | None = None
     open_request_semantics: dict | bool = False
@@ -7865,7 +8128,7 @@ def operator_order(
             symbol, account_id, side, entry_type,
             entry_price, entry_price_min, entry_price_max,
             stop_loss, leverage, sizing_caps, checks,
-            open_risk_capital_multiplier,
+            open_risk_capital_addon,
         )
     elif action == "partial_close":
         quantity = _op_num(body.get("quantity"), "quantity", required=True)
@@ -8126,6 +8389,7 @@ def operator_order(
         order_plan["equity"] = {
             "real_equity": equity_evidence["real_equity"],
             "available_balance": equity_evidence["available_balance"],
+            "risk_capital_addon": equity_evidence["risk_capital_addon"],
             "risk_capital_multiplier": (
                 equity_evidence["risk_capital_multiplier"]
             ),
@@ -8451,6 +8715,11 @@ def operator_order(
                                 if equity_evidence
                                 else False
                             ),
+                            "risk_capital_addon": (
+                                equity_evidence["risk_capital_addon"]
+                                if equity_evidence
+                                else False
+                            ),
                             "risk_capital_multiplier": (
                                 equity_evidence["risk_capital_multiplier"]
                                 if equity_evidence
@@ -8581,6 +8850,14 @@ def role_database_health():
     }
 
 
+from v1_mirror import router as v1_mirror_router  # noqa: E402
+from v1_trace import router as v1_trace_router  # noqa: E402
+
+# Copy APIRoute objects (same as settings.router). include_router() leaves
+# _IncludedRouter which build_role_app skips, so operator-query would 404.
+app.router.routes.extend(v1_mirror_router.routes)
+app.router.routes.extend(v1_trace_router.routes)
+
 _install_retryable_db_error_handler(app)
 all_role_app = app
 
@@ -8601,3 +8878,10 @@ def create_app(role: AppRole | str | None = None) -> FastAPI:
 
 
 app = create_app()
+
+from v1_outcomes import router as v1_outcomes_router  # noqa: E402
+
+# Copy APIRoute objects (same as settings.router). include_router() would
+# leave an _IncludedRouter that build_role_app skips (APIRoute-only).
+app.router.routes.extend(v1_outcomes_router.routes)
+

@@ -4,6 +4,7 @@ const fs = require("fs");
 const { TelegramClient, Api } = require("telegram");
 const { StringSession } = require("telegram/sessions");
 const { NewMessage } = require("telegram/events");
+const { MTProtoSender } = require("telegram/network/MTProtoSender");
 const { createWatchedEntryHandler } = require("./lib/watched-entry-routing");
 const {
   chatIdFromEntity,
@@ -18,6 +19,7 @@ const {
 const {
   buildTelegramClientOptions,
   describeTelegramProxy,
+  installTelegramReconnectBackoff,
 } = require("./lib/telegram-proxy");
 const {
   ensureTelegramMessagesTable,
@@ -33,7 +35,6 @@ const {
 process.on("uncaughtException", (err) => {
   const stack = safeErrorStack(err);
   console.error(`[FATAL] uncaughtException: ${safeErrorMessage(err)}\n${stack}`);
-  // 不退出，让 PM2 的 exp_backoff 处理
 });
 process.on("unhandledRejection", (reason) => {
   console.error(`[FATAL] unhandledRejection: ${safeErrorMessage(reason)}`);
@@ -75,6 +76,135 @@ let qrLoginState = null; // { url, phase, done, error, passwordResolve, client }
 let connected = false;
 let watchedMessages = []; // recent messages ring buffer
 const MAX_MESSAGES = 500;
+const DISCONNECT_EXIT_MS = 120000;
+const STALE_PROBE_MS = 20 * 60 * 1000;
+const HEALTH_STALE_MS = 15 * 60 * 1000;
+const POLL_MAX_AGE_MS = 30 * 60 * 1000;
+const PROBE_TIMEOUT_MS = 10000;
+const EXIT_ALERT_TIMEOUT_MS = 5000;
+let lastUpdateAt = Date.now();
+let disconnectedSince = false;
+let hasConnected = false;
+let watcherMonitoring = false;
+let watcherExiting = false;
+let probeInFlight = false;
+let startingListener = false;
+let pollTimer = false;
+
+async function sendWatcherAlert(text) {
+  console.log(`[watcher] ${text}`);
+  const token = (process.env.WATCHER_ALERT_BOT_TOKEN || "").trim();
+  const chatId = (process.env.WATCHER_ALERT_CHAT_ID || "").trim();
+  if (!token || !chatId) {
+    console.log("[watcher] Alert skipped: missing WATCHER_ALERT_BOT_TOKEN/WATCHER_ALERT_CHAT_ID");
+    return;
+  }
+
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text: `[watcher] ${text}` }),
+      signal: AbortSignal.timeout(3000),
+    });
+    const result = await response.json();
+    if (!response.ok || !result || result.ok !== true) {
+      console.error("[watcher] Alert delivery rejected by Telegram");
+    }
+  } catch {
+    console.error("[watcher] Alert delivery failed");
+  }
+}
+
+function exitWatcher(reason, disconnected = false) {
+  if (watcherExiting) {
+    return;
+  }
+  watcherExiting = true;
+  console.error(`[watcher] Exiting with code 1: ${reason}`);
+  let exitRequested = false;
+  const exitTimer = setTimeout(finishExit, EXIT_ALERT_TIMEOUT_MS);
+  function finishExit() {
+    if (exitRequested) {
+      return;
+    }
+    exitRequested = true;
+    clearTimeout(exitTimer);
+    process.exit(1);
+  }
+  const alerts = [];
+  if (disconnected) {
+    alerts.push(sendWatcherAlert("Disconnected for at least 120 seconds"));
+  }
+  alerts.push(sendWatcherAlert(`Exiting with code 1: ${reason}`));
+  Promise.allSettled(alerts).then(finishExit);
+}
+
+function isTelegramConnected() {
+  if (!client || client.connected !== true || client._reconnecting) {
+    return false;
+  }
+  const { _sender: sender } = client;
+  if (sender && (sender.isReconnecting || sender.userDisconnected === true)) {
+    return false;
+  }
+  return true;
+}
+
+function observeConnection() {
+  connected = isTelegramConnected();
+  if (!watcherMonitoring || watcherExiting) {
+    return;
+  }
+  if (!connected) {
+    if (disconnectedSince === false) {
+      disconnectedSince = Date.now();
+    }
+    return;
+  }
+  if (disconnectedSince !== false) {
+    disconnectedSince = false;
+    if (hasConnected) {
+      void sendWatcherAlert("Reconnected successfully");
+    }
+  }
+  hasConnected = true;
+}
+
+async function checkWatcherHealth() {
+  if (!watcherMonitoring || watcherExiting) {
+    return;
+  }
+  observeConnection();
+  if (disconnectedSince !== false && Date.now() - disconnectedSince >= DISCONNECT_EXIT_MS) {
+    exitWatcher("continuous Telegram disconnect exceeded 120 seconds", true);
+    return;
+  }
+  if (probeInFlight || Date.now() - lastUpdateAt <= STALE_PROBE_MS) {
+    return;
+  }
+  probeInFlight = true;
+  let probeTimer = false;
+  const probeClient = client;
+  try {
+    const deadline = new Promise((resolve, reject) => {
+      probeTimer = setTimeout(() => reject(new Error("Telegram probe timed out")), PROBE_TIMEOUT_MS);
+    });
+    await Promise.race([probeClient.getMessages("me", { limit: 1 }), deadline]);
+    if (client === probeClient && watcherMonitoring && !watcherExiting) {
+      lastUpdateAt = Date.now();
+    }
+  } catch (err) {
+    if (watcherMonitoring && client === probeClient && Date.now() - lastUpdateAt > STALE_PROBE_MS) {
+      exitWatcher(`no updates for over 20 minutes and getMessages probe failed: ${safeErrorMessage(err)}`);
+    }
+  } finally {
+    clearTimeout(probeTimer);
+    probeInFlight = false;
+  }
+}
+
+setInterval(checkWatcherHealth, 5000);
 
 // Load persisted messages on startup
 try {
@@ -157,6 +287,7 @@ const handleWatchedEntry = createWatchedEntryHandler({
 
 // --- Telegram ---
 async function createClient(apiId, apiHash, sessionStr) {
+  installTelegramReconnectBackoff(MTProtoSender);
   const session = new StringSession(sessionStr || "");
   const clientOptions = buildTelegramClientOptions();
   const c = new TelegramClient(session, Number(apiId), apiHash, clientOptions);
@@ -169,13 +300,30 @@ async function startListening() {
   if (!cfg.apiId || !cfg.apiHash || !cfg.session) {
     return;
   }
+  if (startingListener || watcherExiting) {
+    return;
+  }
+  startingListener = true;
+  watcherMonitoring = true;
+  disconnectedSince = Date.now();
+  hasConnected = false;
 
   try {
+    clearInterval(pollTimer);
+    if (client) {
+      await client.destroy();
+    }
     client = await createClient(cfg.apiId, cfg.apiHash, cfg.session);
+    const listeningClient = client;
 
     // Register event handlers BEFORE connecting
     // Debug: log ALL raw updates (except connection state / user status)
     client.addEventHandler((update) => {
+      if (!watcherMonitoring || client !== listeningClient || watcherExiting) {
+        return;
+      }
+      lastUpdateAt = Date.now();
+      observeConnection();
       const name = updateName(update);
       if (name !== "UpdateConnectionState" && name !== "UpdateUserStatus") {
         console.log("[raw-update]", name);
@@ -184,6 +332,9 @@ async function startListening() {
 
     // Handle new messages from raw updates (more reliable than NewMessage event)
     client.addEventHandler(async (update) => {
+      if (!watcherMonitoring || client !== listeningClient || watcherExiting) {
+        return;
+      }
       try {
         const name = update.className;
         let message = null;
@@ -225,7 +376,7 @@ async function startListening() {
           if (message.fromId) {
             const senderId = message.fromId.userId || message.fromId.channelId;
             if (senderId) {
-              const entity = await client.getEntity(senderId);
+              const entity = await listeningClient.getEntity(senderId);
               senderName = entity.firstName || entity.title || entity.username || "";
               if (entity.lastName) {
                 senderName += " " + entity.lastName;
@@ -238,14 +389,14 @@ async function startListening() {
         try {
           const peerId = message.peerId.channelId || message.peerId.chatId;
           if (peerId) {
-            const chat = await client.getEntity(peerId);
+            const chat = await listeningClient.getEntity(peerId);
             chatTitle = chat.title || chat.username || chatId;
           }
         } catch {}
 
         let mediaInfo = false;
         try {
-          mediaInfo = await loadMessageMedia(client, message);
+          mediaInfo = await loadMessageMedia(listeningClient, message);
         } catch (err) {
           console.log(`[media] Download failed: ${safeErrorMessage(err)}`);
         }
@@ -260,6 +411,9 @@ async function startListening() {
           date: new Date(message.date * 1000).toISOString(),
         };
 
+        if (!watcherMonitoring || client !== listeningClient || watcherExiting) {
+          return;
+        }
         handleWatchedEntry(entry);
         console.log(`[${chatTitle}] ${senderName}: ${text || "(media)"}`);
       } catch (err) {
@@ -268,6 +422,9 @@ async function startListening() {
     });
 
     await client.connect();
+    if (!watcherMonitoring || watcherExiting) {
+      return;
+    }
 
     const authorized = await client.checkAuthorization();
     if (!authorized) {
@@ -275,7 +432,9 @@ async function startListening() {
       return;
     }
     console.log("[watcher] Authorized ✓");
-    connected = true;
+    connected = isTelegramConnected();
+    hasConnected = connected;
+    disconnectedSince = false;
 
     // Fetch dialogs to prime the entity cache and activate updates
     console.log("[watcher] Fetching dialogs to activate updates...");
@@ -301,44 +460,41 @@ async function startListening() {
 
     console.log("[watcher] Connected, listening...");
 
-    // --- Telegram 断线自动重连 ---
-    let reconnecting = false;
-    setInterval(async () => {
-      try {
-        if (client && !client.connected && !reconnecting) {
-          reconnecting = true;
-          console.log("[watcher] Connection lost, reconnecting...");
-          try {
-            await client.connect();
-            connected = true;
-            console.log("[watcher] Reconnected ✓");
-          } catch (err) {
-            console.log("[watcher] Reconnect failed:", safeErrorMessage(err));
-            connected = false;
-          }
-          reconnecting = false;
-        }
-      } catch {}
-    }, 30000); // 每 30 秒检查一次
-
     // --- Polling: periodically fetch new messages from watched groups ---
     const lastSeenIds = {}; // chatId -> last message id
+    let pollInFlight = false;
     
     async function pollGroups() {
+      if (!watcherMonitoring || pollInFlight || watcherExiting || client !== listeningClient || !isTelegramConnected()) {
+        return;
+      }
       const currentCfg = loadConfig();
       const watchGroups = currentCfg.watchGroups || [];
       if (watchGroups.length === 0) {
         return;
       }
 
+      pollInFlight = true;
+      try {
+        await pollWatchedGroups(watchGroups);
+      } finally {
+        pollInFlight = false;
+      }
+    }
+
+    async function pollWatchedGroups(watchGroups) {
       for (const groupId of watchGroups) {
         try {
-          const entity = await client.getEntity(groupId);
+          const entity = await listeningClient.getEntity(groupId);
           const pollChatId = chatIdFromEntity(entity, groupId);
           if (!pollChatId) {
             continue;
           }
-          const messages = await client.getMessages(entity, { limit: 5 });
+          const messages = await listeningClient.getMessages(entity, { limit: 5 });
+          if (!watcherMonitoring || client !== listeningClient || watcherExiting) {
+            return;
+          }
+          lastUpdateAt = Date.now();
           
           for (const message of messages.reverse()) {
             const msgKey = `${pollChatId}:${message.id}`;
@@ -346,6 +502,12 @@ async function startListening() {
               continue;
             }
             lastSeenIds[msgKey] = true;
+
+            const messageAt = Number(message.date) * 1000;
+            if (!Number.isFinite(messageAt) || Date.now() - messageAt > POLL_MAX_AGE_MS) {
+              console.debug(`[debug] Skipping stale poll message chatId=${pollChatId} id=${message.id}`);
+              continue;
+            }
 
             // Skip if we already have this in our buffer
             if (watchedMessages.some(m => m.id === message.id && m.chatId === pollChatId)) {
@@ -367,7 +529,7 @@ async function startListening() {
 
             let mediaInfo = false;
             try {
-              mediaInfo = await loadMessageMedia(client, message);
+              mediaInfo = await loadMessageMedia(listeningClient, message);
             } catch (err) {
               console.log(`[media] Download failed: ${safeErrorMessage(err)}`);
             }
@@ -382,6 +544,9 @@ async function startListening() {
               date: new Date(message.date * 1000).toISOString(),
             };
 
+            if (!watcherMonitoring || client !== listeningClient || watcherExiting) {
+              return;
+            }
             handleWatchedEntry(entry);
             console.log(`[poll] [${chatTitle}] ${senderName}: ${(message.text || "(media)").substring(0, 80)}`);
           }
@@ -392,17 +557,27 @@ async function startListening() {
     }
 
     // Initial poll to seed recent messages
+    pollTimer = setInterval(pollGroups, 15000);
     await pollGroups();
-    // Poll every 15 seconds
-    setInterval(pollGroups, 15000);
 
   } catch (err) {
     console.error("[watcher] Connection error:", safeErrorMessage(err));
     connected = false;
+  } finally {
+    startingListener = false;
   }
 }
 
 // --- API Routes ---
+
+app.get("/healthz", (req, res) => {
+  const isConnected = isTelegramConnected();
+  let statusCode = 200;
+  if (watcherExiting || !isConnected || Date.now() - lastUpdateAt > HEALTH_STALE_MS) {
+    statusCode = 503;
+  }
+  res.status(statusCode).json({ lastUpdateAt, connected: isConnected });
+});
 
 // Get current status
 app.get("/api/status", (req, res) => {
@@ -665,6 +840,9 @@ app.get("/api/messages", (req, res) => {
 
 // Disconnect
 app.post("/api/disconnect", async (req, res) => {
+  watcherMonitoring = false;
+  disconnectedSince = false;
+  clearInterval(pollTimer);
   if (client) {
     await client.disconnect();
     connected = false;
