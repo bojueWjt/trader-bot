@@ -8028,6 +8028,7 @@ if ! docker inspect "$LEGACY_REDIS_CONTAINER" >/dev/null 2>&1; then
   # container may be replaced as rollback evidence by its exact retained RDB
   # and image, after the original cold/capacity and live identity gates above.
   require_checksum_artifact "verify_retired_redis_artifacts.py"
+  mkdir -p -m 0700 "$BACKUP_ROOT"
   python3 "$STAGING/verify_retired_redis_artifacts.py" \
     "$REDIS_COLD_BACKUP_MANIFEST" "$REDIS_CAPACITY_EVIDENCE" \
     "$DEPLOY_GATE_MODE" > "$BACKUP_ROOT/retired-redis-artifacts.json" \
