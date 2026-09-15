@@ -125,6 +125,15 @@ def process_one_decision(
                 )
 
             account_id = decision["intent"].get("target_account_id") or policy.default_account_id
+            if (
+                str(row.get("action") or "") in _LIVE_OPEN_ACTIONS
+                and account_id
+            ):
+                # Same lock as reservations._lock_account and operator entry.
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s), 0)",
+                    (account_id,),
+                )
             positions = _load_positions(cur, account_id) if account_id else []
             risk_state = (
                 _load_risk_state(cur, account_id, row["instrument_symbol"])
