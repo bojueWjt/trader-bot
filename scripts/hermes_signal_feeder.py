@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
-"""Feed NEW Telegram watcher messages to the Hermes agent.
+"""Feed NEW Telegram watcher messages to canonical ingress and the live Hermes path.
 
-Hermes (trader profile) is the trading decision maker: for every new channel
-message it must (1) tell the user on Telegram what arrived, (2) decide whether
-it is an actionable signal, (3) place the order through the v3-trader skill if
-so, and (4) report the outcome. This feeder only transports messages — it makes
-no trading judgement itself.
-
-Read-only on watcher-trading.db. Cursor = "telegram_messages:<id>" of the last
-handled raw watcher row. Every new row must reach canonical PostgreSQL ingress
-before Hermes is allowed to process it. A message that keeps failing is skipped
-after MAX_ATTEMPTS so one poison message cannot wedge the queue.
+Shadow phase (G0): persist+enqueue immediately on an independent persist cursor
+so later accounts are not blocked by an earlier model. The existing STATE cursor
+plus hermes cron remains the sole live writer until G3 cutover. The new queue
+produces shadow decisions only and must not consume the legacy outbox.
 """
 from __future__ import annotations
 
@@ -65,6 +59,7 @@ WATCHER_TRADING_DB = resolve_trading_db_path()
 WATCHER_ROOT = "/var/lib/docker/volumes/trader_signal-data/_data"  # container /data -> here
 V3_MEDIA = "/srv/trader-v3/media"
 STATE = "/srv/trader-v3/scripts/.hermes_feeder_cursor"
+PERSIST_STATE = "/srv/trader-v3/scripts/.hermes_feeder_persist_cursor"
 PENDING_STATE = "/srv/trader-v3/scripts/.hermes_feeder_pending.json"
 QUARANTINE_STATE = "/srv/trader-v3/scripts/.hermes_feeder_quarantine.json"
 LOCK = "/srv/trader-v3/scripts/.hermes_feeder.lock"
@@ -198,6 +193,30 @@ def save_cursor(value: str) -> None:
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, STATE)
+
+
+def persist_state_path() -> str:
+    """Honor the configured persist cursor path (production or explicit fixture)."""
+    return PERSIST_STATE
+
+
+def load_persist_cursor() -> str | None:
+    try:
+        return open(persist_state_path()).read().strip() or None
+    except FileNotFoundError:
+        return None
+
+
+def save_persist_cursor(value: str) -> None:
+    path = persist_state_path()
+    tmp = path + ".tmp"
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(value)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
 
 
 def load_pending_delivery() -> dict[str, Any] | None:
@@ -500,19 +519,26 @@ def fetch_new(
         WHERE current.id > ?
           AND NOT EXISTS (
               SELECT 1
-              FROM telegram_messages AS earlier
-              WHERE earlier.id < current.id
-                AND COALESCE(earlier.channel_id, '') =
-                    COALESCE(current.channel_id, '')
-                AND COALESCE(earlier.msg_id, -1) =
-                    COALESCE(current.msg_id, -1)
+              FROM telegram_messages AS prev
+              WHERE prev.id = (
+                  SELECT MAX(earlier.id)
+                  FROM telegram_messages AS earlier
+                  WHERE earlier.id < current.id
+                    AND COALESCE(earlier.channel_id, '') =
+                        COALESCE(current.channel_id, '')
+                    AND COALESCE(earlier.msg_id, -1) =
+                        COALESCE(current.msg_id, -1)
+              )
+              AND COALESCE(prev.text, '') = COALESCE(current.text, '')
+              AND COALESCE(prev.media_filename, '') =
+                  COALESCE(current.media_filename, '')
           )
         ORDER BY current.id
         LIMIT ?
         """,
         (cursor_id, limit),
     ).fetchall()
-    return [normalize_watcher_row(row) for row in rows]
+    return [_fetched_watcher_signal(conn, row) for row in rows]
 
 
 def _row_get(row: Any, key: str, default: Any = None) -> Any:
@@ -721,11 +747,13 @@ def canonical_ingress_payload(signal: Any) -> dict[str, Any]:
         else:
             message_kind = "media"
     watcher_message_id = _row_get(signal, "watcher_message_id")
+    supplied_source_ts = payload.get("source_ts")
+    source_ts_unknown = supplied_source_ts in (None, "")
     return {
         "source": "telegram",
         "channel_id": channel_id,
         "source_message_id": message_id,
-        "source_version": "v1",
+        "source_version": _watcher_source_version(signal),
         "source_received_at": str(
             _row_get(signal, "received_at") or ""
         ),
@@ -742,15 +770,173 @@ def canonical_ingress_payload(signal: Any) -> dict[str, Any]:
             ),
             "sender": str(payload.get("sender") or ""),
             "media": payload.get("media") or [],
+            "receive_ts": str(_row_get(signal, "received_at") or ""),
+            "source_ts": None if source_ts_unknown else str(supplied_source_ts),
+            "source_ts_unknown": source_ts_unknown,
+            "source_received_at_is_not_source_ts": True,
         },
     }
 
 
-def submit_canonical_ingress(signal: Any) -> dict[str, Any]:
+def _fetched_watcher_signal(conn: sqlite3.Connection, row: Any) -> dict[str, Any]:
+    signal = normalize_watcher_row(row)
+    signal["source_version"] = _source_version_for_watcher_row(conn, row)
+    return signal
+
+
+def _source_version_for_watcher_row(conn: sqlite3.Connection, row: Any) -> str:
+    channel_id = str(_row_get(row, "channel_id") or "").strip()
+    message_id = str(_row_get(row, "msg_id") or "").strip()
+    row_id = int(_row_get(row, "id"))
+    first = conn.execute(
+        """
+        SELECT MIN(id) AS first_id
+        FROM telegram_messages
+        WHERE COALESCE(channel_id, '') = ?
+          AND COALESCE(CAST(msg_id AS TEXT), '') = ?
+        """,
+        (channel_id, message_id),
+    ).fetchone()
+    first_id = None
+    if first is not None:
+        try:
+            first_id = first["first_id"]
+        except (KeyError, IndexError, TypeError):
+            first_id = first[0]
+    if first_id is None or row_id == int(first_id):
+        return "v1"
+    return f"edit:{row_id}"
+
+
+def _watcher_source_version(signal: Any) -> str:
+    explicit = _row_get(signal, "source_version")
+    if explicit:
+        return str(explicit)
+    payload = _payload(signal)
+    nested = payload.get("source_version")
+    if nested:
+        return str(nested)
+    return "v1"
+
+
+def persist_and_enqueue_signal(
+    signal: Any,
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Persist a watcher row to ingress and enqueue per-account work.
+
+    Does not invoke Hermes, cron, or a model.
+    """
+    extra: dict[str, Any] = {"action": "evaluate"}
+    try:
+        route = resolve_channel_account(_signal_channel(signal))
+        extra["account_id"] = route.execution_account_id
+        extra["target_account_id"] = route.target_account_id
+    except ChannelRouteError as exc:
+        extra["account_id"] = "unassigned"
+        extra["route_error"] = str(exc)
+    if dry_run:
+        log(
+            "DRY-RUN would persist+enqueue "
+            f"{_signal_cursor(signal)} account={extra.get('account_id')}"
+        )
+        return {"inserted": True, "dry_run": True, **extra}
+    return submit_canonical_ingress(signal, extra_fields=extra)
+
+
+def persist_new_watcher_messages(
+    conn: sqlite3.Connection,
+    cursor: str | None,
+    *,
+    dry_run: bool,
+) -> tuple[str | None, int]:
+    rows = fetch_new(conn, cursor)
+    if not rows:
+        return cursor, 0
+    last_cursor = cursor
+    persisted = 0
+    for signal in rows:
+        if dry_run:
+            last_cursor = _signal_cursor(signal)
+            persisted += 1
+            continue
+        try:
+            persist_and_enqueue_signal(signal, dry_run=False)
+        except CanonicalIngressError as exc:
+            if _is_systemic_ingress_error(exc):
+                return last_cursor, persisted
+            _record_persist_poison(signal, exc)
+            last_cursor = _signal_cursor(signal)
+            save_persist_cursor(last_cursor)
+            continue
+        last_cursor = _signal_cursor(signal)
+        persisted += 1
+        save_persist_cursor(last_cursor)
+    return last_cursor, persisted
+
+
+def _is_systemic_ingress_error(exc: CanonicalIngressError) -> bool:
+    """401/403/404/5xx/unavailable are service failures. Only row validation is poison."""
+    text = str(exc).lower()
+    row_specific = (
+        "http 400",
+        "invalid_payload",
+        "invalid payload",
+        "ingressvalidationerror",
+    )
+    return not any(marker in text for marker in row_specific)
+
+
+def _record_persist_poison(signal: Any, exc: CanonicalIngressError) -> None:
+    detail = str(exc)
+    _record_quarantine(
+        [signal],
+        "ingress_poison",
+        time.time(),
+        reason_detail=detail,
+    )
+    log(
+        "persist poison quarantined "
+        f"{_signal_cursor(signal)}: {detail[:240]}"
+    )
+
+
+def _submit_direct_ingress(
+    payload: dict[str, Any],
+    database_url: str,
+) -> dict[str, Any]:
+    ingress_root = str(Path(__file__).resolve().parents[1] / "services" / "ingress")
+    if ingress_root not in sys.path:
+        sys.path.insert(0, ingress_root)
+    from ingress.service import IngressValidationError, ingest_raw_telegram_update
+
+    try:
+        return ingest_raw_telegram_update(payload, database_url)
+    except IngressValidationError as exc:
+        raise CanonicalIngressError(str(exc)) from exc
+    except CanonicalIngressError:
+        raise
+    except Exception as exc:
+        raise CanonicalIngressError(
+            f"direct canonical ingress failed: {exc}"
+        ) from exc
+
+
+def submit_canonical_ingress(
+    signal: Any,
+    extra_fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = canonical_ingress_payload(signal)
+    if extra_fields:
+        payload.update({k: v for k, v in extra_fields.items() if v is not None})
+    direct_url = os.environ.get("INGRESS_DATABASE_URL", "").strip()
+    if direct_url:
+        return _submit_direct_ingress(payload, direct_url)
     if not INGRESS_API_TOKEN:
         raise CanonicalIngressError("INGRESS_API_TOKEN is required")
     body = json.dumps(
-        canonical_ingress_payload(signal),
+        payload,
         ensure_ascii=True,
         sort_keys=True,
     ).encode("utf-8")
@@ -1332,7 +1518,7 @@ def _ensure_canonical_ingress(
         if cursor in completed:
             continue
         try:
-            result = submit_canonical_ingress(signal)
+            result = persist_and_enqueue_signal(signal, dry_run=False)
         except CanonicalIngressError as exc:
             attempts = int(pending.get("ingress_attempts") or 0) + 1
             pending["ingress_attempts"] = attempts
@@ -1618,6 +1804,7 @@ def _record_quarantine(
     batch: list[Any],
     reason_code: str,
     now_ts: float,
+    reason_detail: str | None = None,
 ) -> bool:
     quarantine = load_quarantine()
     entries = quarantine["entries"]
@@ -1629,6 +1816,7 @@ def _record_quarantine(
         "last_cursor": _signal_cursor(batch[-1]),
         "channel_id": _quarantine_channel_id(batch),
         "reason_code": reason_code,
+        "reason": str(reason_detail or reason_code)[:1000],
         "quarantined_at": _coerce_now(now_ts).isoformat(),
     }
     save_quarantine(quarantine)
@@ -1977,6 +2165,7 @@ def main() -> None:
         return
 
     cursor = load_cursor()
+    persist_cursor = load_persist_cursor()
     if cursor is not None and _watcher_cursor_id(cursor) is None:
         log(
             "legacy feeder cursor detected; initializing the watcher "
@@ -1986,7 +2175,10 @@ def main() -> None:
         if not args.dry_run:
             clear_pending_delivery()
     reconcile_committed_pending(cursor)
-    log(f"feeder start cursor={cursor!r} dry_run={args.dry_run}")
+    log(
+        f"feeder start cursor={cursor!r} persist_cursor={persist_cursor!r} "
+        f"dry_run={args.dry_run}"
+    )
 
     while True:
         try:
@@ -1999,6 +2191,18 @@ def main() -> None:
                     log(f"initialized cursor to latest={cursor!r} (history is not replayed)")
                     if cursor and not args.dry_run:
                         save_cursor(cursor)
+                if persist_cursor is None:
+                    persist_cursor = cursor
+                    if persist_cursor and not args.dry_run:
+                        save_persist_cursor(persist_cursor)
+                while True:
+                    persist_cursor, persisted = persist_new_watcher_messages(
+                        conn,
+                        persist_cursor,
+                        dry_run=args.dry_run,
+                    )
+                    if persisted == 0:
+                        break
                 while True:
                     rows = fetch_new(conn, cursor)
                     batch = select_deliverable_batch(rows)

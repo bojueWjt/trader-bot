@@ -49,10 +49,128 @@ class IntentExecutionPlannerManageTest(unittest.TestCase):
         order = result.orders[0]
         self.assertEqual(order.order_type, "MARKET")
         self.assertEqual(order.side, "SELL")
-        self.assertEqual(order.quantity, "0.125")
+        self.assertEqual(order.quantity, "0.124")
         self.assertTrue(order.reduce_only)
         self.assertIn("lifecycle_role=exit", order.tags)
         self.assertIn(f"position_id={POSITION_ID}", order.tags)
+
+    def test_partial_close_20_percent_uses_current_position_and_rounds_down(self) -> None:
+        intent = _intent(
+            action="partial_close",
+            target_position_id=POSITION_ID,
+            order_plan={"type": "market", "fraction": "0.2"},
+        )
+
+        result = plan_intent_execution(intent, _context())
+
+        self.assertIsInstance(result, ManagementPlan)
+        assert isinstance(result, ManagementPlan)
+        self.assertEqual(result.orders[0].quantity, "0.100")
+        self.assertTrue(result.orders[0].reduce_only)
+
+    def test_partial_close_20_percent_retry_is_deterministic(self) -> None:
+        intent = _intent(
+            action="partial_close",
+            target_position_id=POSITION_ID,
+            order_plan={"type": "market", "fraction": "0.2"},
+        )
+        first = plan_intent_execution(intent, _context())
+        second = plan_intent_execution(intent, _context())
+        assert isinstance(first, ManagementPlan)
+        assert isinstance(second, ManagementPlan)
+        self.assertEqual(first.orders[0].quantity, second.orders[0].quantity)
+        self.assertEqual(first.orders[0].quantity, "0.100")
+
+    def test_partial_close_missing_ratio_is_denied_not_full_close(self) -> None:
+        intent = _intent(
+            action="partial_close",
+            target_position_id=POSITION_ID,
+            order_plan={"type": "market"},
+        )
+
+        result = plan_intent_execution(intent, _context())
+
+        self.assertEqual(
+            result,
+            OrderDenied(reason="unsupported_order_spec", detail="quantity_or_fraction_required"),
+        )
+
+    def test_partial_close_illegal_fraction_is_denied_not_full_close(self) -> None:
+        for fraction in ("0", "-0.2", "1.2", "20"):
+            with self.subTest(fraction=fraction):
+                intent = _intent(
+                    action="partial_close",
+                    target_position_id=POSITION_ID,
+                    order_plan={"type": "market", "fraction": fraction},
+                )
+                result = plan_intent_execution(intent, _context())
+                self.assertEqual(
+                    result,
+                    OrderDenied(reason="unsupported_order_spec", detail="fraction"),
+                )
+
+    def test_partial_close_quantity_and_fraction_together_are_denied(self) -> None:
+        intent = _intent(
+            action="partial_close",
+            target_position_id=POSITION_ID,
+            order_plan={"type": "market", "quantity": "0.1", "fraction": "0.2"},
+        )
+
+        result = plan_intent_execution(intent, _context())
+
+        self.assertEqual(
+            result,
+            OrderDenied(reason="unsupported_order_spec", detail="quantity_and_fraction"),
+        )
+
+    def test_partial_close_percent_that_rounds_to_zero_is_denied_not_bumped_to_full(self) -> None:
+        intent = _intent(
+            action="partial_close",
+            target_position_id=POSITION_ID,
+            order_plan={"type": "market", "fraction": "0.2"},
+        )
+        context = _context(
+            instrument=InstrumentSpec(
+                instrument_id=INSTRUMENT_ID,
+                price_increment="0.01",
+                quantity_increment="1",
+            ),
+            position=_position(),
+        )
+        # position is 0.5, 20% = 0.1, increment 1 → rounds down to 0
+        result = plan_intent_execution(intent, context)
+        self.assertEqual(
+            result,
+            OrderDenied(reason="unsupported_order_spec", detail="quantity"),
+        )
+
+    def test_close_position_with_20_percent_fraction_is_denied_not_silently_full(self) -> None:
+        intent = _intent(
+            action="close_position",
+            target_position_id=POSITION_ID,
+            order_plan={"type": "market", "fraction": "0.2"},
+        )
+
+        result = plan_intent_execution(intent, _context())
+
+        self.assertEqual(
+            result,
+            OrderDenied(reason="ambiguous_partial_on_close", detail="0.10<0.5"),
+        )
+
+    def test_close_position_with_partial_quantity_is_denied_not_silently_full(self) -> None:
+        intent = _intent(
+            action="close_position",
+            target_position_id=POSITION_ID,
+            order_plan={"type": "market", "quantity": "0.1"},
+        )
+
+        result = plan_intent_execution(intent, _context())
+
+        self.assertEqual(
+            result,
+            OrderDenied(reason="ambiguous_partial_on_close", detail="0.1<0.5"),
+        )
 
     def test_close_position_uses_full_position_quantity_and_reduce_only(self) -> None:
         intent = _intent(

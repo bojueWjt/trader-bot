@@ -14,8 +14,14 @@ from uuid import UUID, uuid4
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SERVICE_ROOT = REPO_ROOT / "services" / "nautilus-node"
-sys.path.insert(0, str(SERVICE_ROOT))
+DOMAIN_ROOT = REPO_ROOT / "packages" / "execution-domain"
+for _path in (str(SERVICE_ROOT), str(DOMAIN_ROOT)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
+from execution_domain.account_execution_ledger import (  # noqa: E402
+    ReconciledExecutionState,
+)
 from strategy.intent_execution_planner import (  # noqa: E402
     InstrumentSpec,
     OrderDenied,
@@ -259,7 +265,7 @@ class IntentExecutionPlannerTest(unittest.TestCase):
         )
         self.assertEqual(
             plan_intent_execution(add_wrong_side, _context(position=_position("LONG"))),
-            OrderDenied(reason="position_side_mismatch", detail="LONG"),
+            OrderDenied(reason="position_required", detail=INSTRUMENT_ID),
         )
 
     def test_unsupported_order_spec_fails_closed(self) -> None:
@@ -289,6 +295,34 @@ class IntentExecutionPlannerTest(unittest.TestCase):
         )
 
 
+def _venue_snapshot_for_position(position: PositionSnapshot | None) -> dict[str, Any]:
+    if position is None or str(position.quantity) in {"", "0"}:
+        return {"positions": [], "open_orders": [], "algo_orders": []}
+    symbol = str(position.instrument_id).split("-", 1)[0]
+    return {
+        "positions": [
+            {
+                "symbol": symbol,
+                "position_amt": position.quantity,
+                "position_side": position.side,
+            }
+        ],
+        "open_orders": [],
+        "algo_orders": [],
+    }
+
+
+def _fresh_reconciled(position: PositionSnapshot | None = None) -> ReconciledExecutionState:
+    cache = () if position is None else (position,)
+    return ReconciledExecutionState.build(
+        account_id=ACCOUNT_ID,
+        venue_snapshot=_venue_snapshot_for_position(position),
+        venue_fetched_at=NOW - timedelta(seconds=5),
+        cache_positions=cache,
+        now=NOW,
+    )
+
+
 def _context(**overrides: Any) -> PlannerContext:
     values = {
         "account_id": ACCOUNT_ID,
@@ -302,7 +336,10 @@ def _context(**overrides: Any) -> PlannerContext:
         "position": None,
         "existing_intent_ids": frozenset(),
     }
+    supplied_reconciled = "reconciled_state" in overrides
     values.update(overrides)
+    if not supplied_reconciled and not values.get("simulation"):
+        values["reconciled_state"] = _fresh_reconciled(values.get("position"))
     return PlannerContext(**values)
 
 

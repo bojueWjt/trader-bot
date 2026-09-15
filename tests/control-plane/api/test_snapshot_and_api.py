@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -298,17 +297,7 @@ def test_system_snapshot_schema_accepts_live_market_and_exchange_rows(db_conn):
     assert snap["data"]["exchange_state"][0]["stale"] is True
 
 
-def test_live_mirror_validates_the_canonical_system_snapshot():
-    mirror_path = REPO_ROOT / ".live-mirror" / "api" / "read_api.py"
-    spec = importlib.util.spec_from_file_location(
-        "_snapshot_schema_live_mirror",
-        mirror_path,
-    )
-    assert spec is not None
-    assert spec.loader is not None
-    mirror = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mirror)
-
+def test_canonical_read_api_validates_system_snapshot():
     snapshot = {
         "schema_version": "1.0",
         "data_source": "postgres_projection",
@@ -333,5 +322,8 @@ def test_live_mirror_validates_the_canonical_system_snapshot():
             "audit_trail": [],
         },
     }
+    source = Path(read_api.__file__).resolve()
+    canonical = (REPO_ROOT / "services" / "control-plane" / "api" / "read_api.py").resolve()
+    assert source == canonical
+    assert hasattr(read_api, "validate_snapshot")
     read_api.validate_snapshot(snapshot)
-    mirror.validate_snapshot(snapshot)

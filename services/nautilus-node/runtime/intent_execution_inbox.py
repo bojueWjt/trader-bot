@@ -245,6 +245,8 @@ class JsonIntentExecutionInbox:
             record = self._required_record(payload, normalized)
             if record.state is IntentExecutionState.EXCHANGE_CONFIRMED:
                 return None, False
+            if record.state is IntentExecutionState.REJECTED:
+                return None, False
             if record.state is not IntentExecutionState.DISPATCHED:
                 raise IntentExecutionInboxError(
                     "intent must be dispatched before exchange confirmation"
@@ -284,16 +286,25 @@ class JsonIntentExecutionInbox:
             key, record = match
             if record.state is IntentExecutionState.EXCHANGE_CONFIRMED:
                 return True, False
-            if record.state is not IntentExecutionState.DISPATCHED:
+            if record.state is not IntentExecutionState.DISPATCHED and (
+                record.state is not IntentExecutionState.REJECTED
+            ):
                 raise IntentExecutionInboxError(
                     "intent must be dispatched before exchange confirmation"
                 )
             confirmed_ids = set(
                 record.exchange_confirmed_client_order_ids
             )
+            if target in confirmed_ids:
+                return True, False
             confirmed_ids.add(target)
-            state = IntentExecutionState.DISPATCHED
-            if confirmed_ids.issuperset(record.client_order_ids):
+            # Operation outcome stays REJECTED; only DISPATCHED may become
+            # exchange_confirmed, and only from per-leg venue evidence.
+            state = record.state
+            if (
+                state is IntentExecutionState.DISPATCHED
+                and confirmed_ids.issuperset(record.client_order_ids)
+            ):
                 state = IntentExecutionState.EXCHANGE_CONFIRMED
             updated = replace(
                 record,
@@ -343,6 +354,64 @@ class JsonIntentExecutionInbox:
             return None, True
 
         self._mutate(mutate)
+
+    def mark_rejected_by_client_order_id(
+        self,
+        client_order_id: str,
+        reason: str,
+    ) -> IntentExecutionRecord | Literal[False]:
+        target = str(client_order_id).strip()
+        rejection_reason = str(reason).strip()
+        if not target or not rejection_reason:
+            return False
+        if not self._path.exists():
+            return False
+
+        def mutate(
+            payload: dict[str, Any],
+        ) -> tuple[IntentExecutionRecord | Literal[False], bool]:
+            match = self._record_entry_for_client_order_id(
+                payload,
+                target,
+            )
+            if match is False:
+                return False, False
+            key, record = match
+            if record.state is IntentExecutionState.EXCHANGE_CONFIRMED:
+                return False, False
+            if (
+                record.state is IntentExecutionState.REJECTED
+                and record.rejection_reason == rejection_reason
+            ):
+                return record, False
+            updated = replace(
+                record,
+                state=IntentExecutionState.REJECTED,
+                rejection_reason=rejection_reason,
+                updated_at=_utc_now(),
+            )
+            payload["records"][key] = _serialize_record(updated)
+            return updated, True
+
+        return self._mutate(mutate)
+
+    def get_by_client_order_id(
+        self,
+        client_order_id: str,
+    ) -> IntentExecutionRecord | Literal[False]:
+        target = str(client_order_id).strip()
+        if not target:
+            return False
+
+        def read(
+            payload: dict[str, Any],
+        ) -> IntentExecutionRecord | Literal[False]:
+            match = self._record_entry_for_client_order_id(payload, target)
+            if match is False:
+                return False
+            return match[1]
+
+        return self._read_locked(read)
 
     def get(
         self,

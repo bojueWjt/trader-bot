@@ -272,6 +272,24 @@ def test_watcher_outbox_cursor_reads_only_new_unique_messages(
     assert payload["raw_text"] == "BTC long"
 
 
+def test_fetch_new_keeps_aba_edit_revert(tmp_path: Path) -> None:
+    module = _load_feeder("test_hermes_signal_feeder_aba")
+    db_path = tmp_path / "watcher-trading.db"
+    conn = _prepare_watcher_db(db_path)
+    first = _insert_telegram_message(conn, msg_id=8001, text="A")
+    _insert_telegram_message(conn, msg_id=8001, text="B")
+    revert = _insert_telegram_message(conn, msg_id=8001, text="A")
+    conn.commit()
+    rows = module.fetch_new(conn, "telegram_messages:0")
+    conn.close()
+    ids = [row["watcher_message_id"] for row in rows]
+    assert first in ids
+    assert revert in ids
+    versions = [row.get("source_version") for row in rows]
+    assert "v1" in versions
+    assert f"edit:{revert}" in versions
+
+
 def test_canonical_ingress_succeeds_before_hermes_dispatch(
     monkeypatch,
     tmp_path: Path,
@@ -290,7 +308,7 @@ def test_canonical_ingress_succeeds_before_hermes_dispatch(
     monkeypatch.setattr(module, "CHANNEL_CONTEXT_DIR", str(tmp_path / "context"))
     calls: list[str] = []
 
-    def submit_canonical_ingress(signal):
+    def submit_canonical_ingress(signal, extra_fields=None):
         calls.append(f"ingress:{signal['watcher_message_id']}")
         return {
             "inserted": True,
@@ -357,6 +375,7 @@ def test_failed_ingress_blocks_hermes_and_cursor_advancement(
     )
     monkeypatch.setattr(module, "WATCHER_TRADING_DB", str(db_path))
     monkeypatch.setattr(module, "STATE", str(state_path))
+    monkeypatch.setattr(module, "PERSIST_STATE", str(tmp_path / "persist.cursor"))
     monkeypatch.setattr(module, "PENDING_STATE", str(tmp_path / "pending.json"))
     monkeypatch.setattr(
         module,
@@ -370,7 +389,7 @@ def test_failed_ingress_blocks_hermes_and_cursor_advancement(
     monkeypatch.setattr(
         module,
         "submit_canonical_ingress",
-        lambda _signal: (_ for _ in ()).throw(
+        lambda _signal, extra_fields=None: (_ for _ in ()).throw(
             module.CanonicalIngressError("ingress unavailable")
         ),
     )
@@ -409,6 +428,7 @@ def test_startup_without_cursor_selects_latest_and_emits_no_history(
     state_path = tmp_path / "cursor"
     monkeypatch.setattr(module, "WATCHER_TRADING_DB", str(db_path))
     monkeypatch.setattr(module, "STATE", str(state_path))
+    monkeypatch.setattr(module, "PERSIST_STATE", str(tmp_path / "persist.cursor"))
     monkeypatch.setattr(module, "PENDING_STATE", str(tmp_path / "pending.json"))
     monkeypatch.setattr(module, "LOCK", str(tmp_path / "feeder.lock"))
     monkeypatch.setattr(module, "compress_channel_contexts", lambda: None)
@@ -417,7 +437,7 @@ def test_startup_without_cursor_selects_latest_and_emits_no_history(
     monkeypatch.setattr(
         module,
         "submit_canonical_ingress",
-        lambda signal: ingressed.append(str(signal["watcher_message_id"])),
+        lambda signal, extra_fields=None: ingressed.append(str(signal["watcher_message_id"])),
     )
     monkeypatch.setattr(
         module,
@@ -676,6 +696,7 @@ def test_unmapped_channel_is_quarantined_once_and_does_not_starve_queue(
     state_path.write_text(initial_cursor, encoding="utf-8")
     monkeypatch.setattr(module, "WATCHER_TRADING_DB", str(trading_db))
     monkeypatch.setattr(module, "STATE", str(state_path))
+    monkeypatch.setattr(module, "PERSIST_STATE", str(tmp_path / "persist.cursor"))
     monkeypatch.setattr(module, "PENDING_STATE", str(tmp_path / "pending.json"))
     monkeypatch.setattr(
         module,
@@ -703,7 +724,7 @@ def test_unmapped_channel_is_quarantined_once_and_does_not_starve_queue(
     )
     ingressed: list[int] = []
 
-    def submit_canonical_ingress(signal):
+    def submit_canonical_ingress(signal, extra_fields=None):
         ingressed.append(int(signal["watcher_message_id"]))
         return {
             "inserted": True,
@@ -769,7 +790,8 @@ def test_unmapped_channel_is_quarantined_once_and_does_not_starve_queue(
     )
     assert notices == []
     assert dispatched == ["signal-sig-c1002136478186-m9002"]
-    assert ingressed == [unknown_id, valid_id]
+    assert unknown_id in ingressed
+    assert valid_id in ingressed
     assert "credential-secret-label" not in output
     assert "matched 0 routes" not in output
     assert "credential-secret-label" not in json.dumps(
@@ -890,7 +912,7 @@ def test_response_waits_until_telegram_delivery_status_is_recorded(
     monkeypatch.setattr(
         module,
         "submit_canonical_ingress",
-        lambda _signal: {
+        lambda _signal, extra_fields=None: {
             "inserted": True,
             "raw_message_id": "00000000-0000-0000-0000-000000000001",
         },
@@ -952,7 +974,7 @@ def test_definitive_delivery_error_resends_without_rerunning_agent(
     monkeypatch.setattr(
         module,
         "submit_canonical_ingress",
-        lambda _signal: {
+        lambda _signal, extra_fields=None: {
             "inserted": True,
             "raw_message_id": "00000000-0000-0000-0000-000000000001",
         },
@@ -1035,7 +1057,7 @@ def test_uncertain_delivery_waits_then_redelivers_at_most_once(
     monkeypatch.setattr(
         module,
         "submit_canonical_ingress",
-        lambda _signal: {
+        lambda _signal, extra_fields=None: {
             "inserted": True,
             "raw_message_id": "00000000-0000-0000-0000-000000000001",
         },

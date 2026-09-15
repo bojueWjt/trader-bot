@@ -5179,6 +5179,90 @@ def node_orders(
 _TERMINAL_ORDER_STATES = (
     "filled", "canceled", "cancelled", "rejected", "expired", "denied", "closed", "done",
 )
+_FILL_ORDER_STATES = frozenset({"filled", "partially_filled", "partial"})
+_DENY_ORDER_STATES = frozenset({"denied", "rejected"})
+_PROTECTION_LIFECYCLE_ROLES = frozenset({"stop_loss", "take_profit"})
+
+
+def _payload_mapping(payload) -> dict:
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, str) and payload.strip():
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(decoded, dict):
+            return decoded
+    return {}
+
+
+def _order_denial_reason_from_row(row: dict) -> str:
+    payload = _payload_mapping((row or {}).get("payload"))
+    return str(payload.get("reason") or payload.get("detail") or "").strip()
+
+
+def _order_lifecycle_role(row: dict) -> str:
+    role = str((row or {}).get("lifecycle_role") or "").strip()
+    if role:
+        return role
+    payload = _payload_mapping((row or {}).get("payload"))
+    role = str(payload.get("lifecycle_role") or "").strip()
+    if role:
+        return role
+    for tag in payload.get("tags") or ():
+        text = str(tag)
+        if text.startswith("lifecycle_role="):
+            return text.split("=", 1)[1].strip()
+    return ""
+
+
+def _is_protection_order_row(row: dict) -> bool:
+    if _order_lifecycle_role(row) in _PROTECTION_LIFECYCLE_ROLES:
+        return True
+    order_type = str(
+        (row or {}).get("order_type")
+        or _payload_mapping((row or {}).get("payload")).get("order_type")
+        or ""
+    ).upper()
+    return order_type in _PROTECTIVE_ORDER_TYPES
+
+
+def _intent_operation_status(
+    *,
+    intent_status: str,
+    orders,
+    denial_reason: str,
+) -> str:
+    has_fill = False
+    has_entry_deny = False
+    saw_entry = False
+    all_entry_complete = True
+    for order in orders or ():
+        row = dict(order)
+        if _is_protection_order_row(row):
+            continue
+        saw_entry = True
+        status = str(row.get("status") or "").strip()
+        try:
+            filled_qty = float(row.get("filled_quantity") or 0)
+        except (TypeError, ValueError):
+            filled_qty = 0.0
+        if status in _FILL_ORDER_STATES or filled_qty > 0:
+            has_fill = True
+        if status in _DENY_ORDER_STATES:
+            has_entry_deny = True
+        if status != "filled":
+            all_entry_complete = False
+    if not saw_entry:
+        all_entry_complete = False
+    if has_fill:
+        if has_entry_deny or not all_entry_complete:
+            return "partial"
+        return "filled"
+    if has_entry_deny or denial_reason:
+        return "rejected"
+    return intent_status
 
 
 def _read_conn() -> "psycopg2.extensions.connection":
@@ -5361,6 +5445,22 @@ def v1_orders(status: str | None = None, authorization: str | None = Header(defa
         for r in rows:
             qty = _f(r.get("quantity")) or 0.0
             filled = _f(r.get("filled_quantity")) or 0.0
+            present_status = str(r.get("status") or "").strip()
+            denial_reason = _order_denial_reason_from_row(r)
+            events = []
+            if present_status in _DENY_ORDER_STATES and denial_reason:
+                events.append(
+                    {
+                        "event_type": (
+                            "OrderDenied"
+                            if present_status == "denied"
+                            else "OrderRejected"
+                        ),
+                        "status": present_status,
+                        "detail": denial_reason,
+                        "message": denial_reason,
+                    }
+                )
             orders.append({
                 "order_id": r.get("client_order_id") or str(r.get("order_projection_id")),
                 "client_order_id": r.get("client_order_id"),
@@ -5370,7 +5470,7 @@ def v1_orders(status: str | None = None, authorization: str | None = Header(defa
                 "side": r.get("side"),
                 "order_type": r.get("order_type"),
                 "type": r.get("order_type"),
-                "status": r.get("status"),
+                "status": present_status,
                 "price": _f(r.get("price")),
                 "average_price": _f(r.get("average_fill_price")),
                 "quantity": qty,
@@ -5380,7 +5480,13 @@ def v1_orders(status: str | None = None, authorization: str | None = Header(defa
                 "remaining": max(0.0, qty - filled),
                 "created_at": _iso(r.get("ts_event") or r.get("updated_at")),
                 "trade_id": str(r["intent_id"]) if r.get("intent_id") else None,
+                "intent_id": str(r["intent_id"]) if r.get("intent_id") else None,
                 "account_id": r.get("account_id"),
+                "lifecycle_role": _order_lifecycle_role(r) or None,
+                "denial_reason": (
+                    denial_reason if present_status in _DENY_ORDER_STATES else ""
+                ),
+                "events": events,
             })
         return {**env, "orders": orders}
     finally:
@@ -5783,12 +5889,15 @@ def v1_review_reject(decision_id: str, body: dict = Body(default={}),
 
 _OPERATOR_ACTIONS = (
     "open_position",
+    "add_position",
     "close_position",
     "partial_close",
     "move_stop_loss",
     "replace_take_profits",
     "cancel_order",
 )
+_OPERATOR_ENTRY_ACTIONS = frozenset({"open_position", "add_position"})
+_MIRROR_EVIDENCE_MAX_AGE_SECONDS = 180.0
 # Protection management: no new exposure (node places reduce-only orders sized to
 # the live position), so these skip notional sizing entirely.
 _OPERATOR_PROTECT_ACTIONS = ("move_stop_loss", "replace_take_profits")
@@ -6524,12 +6633,17 @@ def _operator_open_request_semantics(
     symbol: str,
     client_ref: str,
     authorization: dict,
+    action: str = "open_position",
 ) -> dict:
     canonical = _canonical_order_request(body, authorization)
     canonical.pop("live_open_gate", None)
     payload = {
-        "version": "operator-open-v1",
-        "action": "open_position",
+        "version": (
+            "operator-open-v1"
+            if action == "open_position"
+            else "operator-entry-v1"
+        ),
+        "action": action,
         "account_id": account_id,
         "instrument_id": symbol,
         "client_ref": client_ref,
@@ -6548,6 +6662,1141 @@ def _operator_open_request_semantics(
     }
 
 
+def _entry_source_idempotency_key(account_id: str, client_ref: str) -> str:
+    return hashlib.sha256(
+        f"operator|{account_id}|{client_ref}".encode()
+    ).hexdigest()
+
+
+def _entry_replay_idempotency_key(
+    account_id: str,
+    client_ref: str,
+    replay_of: str,
+) -> str:
+    return hashlib.sha256(
+        f"operator|{account_id}|{client_ref}|replay|{replay_of}".encode()
+    ).hexdigest()
+
+
+def _signed_decimal(value) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not amount.is_finite():
+        return None
+    return amount
+
+
+def _account_risk_increase_lock(cur, account_id: str) -> None:
+    """Serialize operator entry with risk.reservations and gateway open/add writes.
+
+    Same two-argument lock as ``reservations._lock_account``. Occupancy math in
+    this module covers the operator entry writer only; it does not claim that
+    every control-plane risk-increase path uses the same formula.
+    """
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(hashtext(%s), 0)",
+        (account_id,),
+    )
+
+
+def _parse_position_snapshot(raw) -> tuple[str, list[dict] | None]:
+    """Return (ok|malformed|missing, items). Malformed is never treated as flat."""
+    if raw is None:
+        return "missing", None
+    if isinstance(raw, list):
+        items: list[dict] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                return "malformed", None
+            items.append(item)
+        return "ok", items
+    if isinstance(raw, dict):
+        if "positions" not in raw:
+            return "malformed", None
+        inner = raw.get("positions")
+        if not isinstance(inner, list):
+            return "malformed", None
+        items = []
+        for item in inner:
+            if not isinstance(item, dict):
+                return "malformed", None
+            items.append(item)
+        return "ok", items
+    return "malformed", None
+
+
+def _position_book_side(item: dict) -> str:
+    for field_name in ("position_side", "side"):
+        raw = str(item.get(field_name) or "").strip().lower()
+        if raw in ("long", "buy"):
+            return "long"
+        if raw in ("short", "sell"):
+            return "short"
+    amount = _signed_decimal(
+        item.get("position_amt")
+        if item.get("position_amt") is not None
+        else item.get("quantity")
+    )
+    if amount is None or amount == 0:
+        return ""
+    return "short" if amount < 0 else "long"
+
+
+def _position_quantity_abs(item: dict) -> Decimal | None:
+    for field_name in ("position_amt", "quantity", "qty", "size"):
+        amount = _signed_decimal(item.get(field_name))
+        if amount is not None:
+            return abs(amount)
+    return None
+
+
+def _position_item_notional(item: dict) -> Decimal | None:
+    explicit = _signed_decimal(item.get("notional"))
+    if explicit is not None:
+        return abs(explicit)
+    quantity = _position_quantity_abs(item)
+    if quantity is None:
+        return None
+    if quantity == 0:
+        return Decimal("0")
+    for field_name in (
+        "mark_price",
+        "entry_price",
+        "avg_entry_price",
+        "last_price",
+    ):
+        price = _signed_decimal(item.get(field_name))
+        if price is not None and price > 0:
+            return quantity * price
+    return None
+
+
+def _symbol_book_presence(items: list[dict], symbol: str) -> dict[str, bool]:
+    presence = {"long": False, "short": False}
+    quantities = _symbol_side_quantities(items, symbol)
+    for side in ("long", "short"):
+        qty = quantities[side]
+        presence[side] = qty is None or qty > 0
+    return presence
+
+
+def _symbol_side_quantities(
+    items: list[dict],
+    symbol: str,
+) -> dict[str, Decimal | None]:
+    totals = {"long": Decimal("0"), "short": Decimal("0")}
+    unknown = {"long": False, "short": False}
+    for item in items:
+        if _snapshot_item_symbol(item) != symbol:
+            continue
+        quantity = _position_quantity_abs(item)
+        side = _position_book_side(item)
+        if side not in totals:
+            if quantity is None or quantity > 0:
+                unknown["long"] = True
+                unknown["short"] = True
+            continue
+        if quantity is None:
+            unknown[side] = True
+            continue
+        totals[side] += quantity
+    return {
+        side: None if unknown[side] else totals[side]
+        for side in ("long", "short")
+    }
+
+
+def _account_position_notional(items: list[dict]) -> Decimal | None:
+    total = Decimal("0")
+    for item in items:
+        quantity = _position_quantity_abs(item)
+        if quantity is None:
+            return None
+        if quantity == 0:
+            continue
+        notional = _position_item_notional(item)
+        if notional is None:
+            return None
+        total += notional
+    return total
+
+
+def _aware_datetime(value) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _venue_quantities_conflict(
+    left: dict[str, Decimal | None],
+    right: dict[str, Decimal | None],
+) -> bool:
+    for side in ("long", "short"):
+        left_qty = left[side]
+        right_qty = right[side]
+        if left_qty is None or right_qty is None:
+            if left_qty != right_qty:
+                return True
+            continue
+        if left_qty != right_qty:
+            return True
+    return False
+
+
+def _load_entry_venue_view(cur, *, account_id: str, symbol: str) -> dict:
+    now = datetime.now(timezone.utc)
+    mirror_items: list[dict] | None = None
+    mirror_fresh = False
+    mirror_present = False
+    mirror_malformed = False
+    cur.execute(
+        """
+        SELECT payload, updated_at
+        FROM exchange_state_mirror
+        WHERE account_id=%s
+        """,
+        (account_id,),
+    )
+    mirror_row = cur.fetchone()
+    if mirror_row is not None:
+        mirror_present = True
+        updated_at = _aware_datetime(mirror_row[1])
+        if _timestamp_is_fresh_with_max_age(
+            updated_at,
+            now,
+            _MIRROR_EVIDENCE_MAX_AGE_SECONDS,
+        ):
+            status, items = _parse_position_snapshot(mirror_row[0])
+            if status != "ok":
+                mirror_malformed = True
+            else:
+                mirror_fresh = True
+                mirror_items = items
+
+    heartbeat_items: list[dict] | None = None
+    heartbeat_fresh = False
+    heartbeat_conflicted = False
+    heartbeat_malformed = False
+    heartbeat_stale = False
+    cur.execute(
+        """
+        SELECT positions, positions_snapshot_at, payload, last_seen_at
+        FROM node_heartbeats
+        WHERE account_id=%s
+        ORDER BY last_seen_at DESC
+        LIMIT 1
+        """,
+        (account_id,),
+    )
+    heartbeat_row = cur.fetchone()
+    if heartbeat_row is not None:
+        payload = heartbeat_row[2] if isinstance(heartbeat_row[2], dict) else {}
+        recon = str(payload.get("reconciliation_state") or "").strip().lower()
+        seen_at = _aware_datetime(heartbeat_row[3])
+        snapshot_at = _aware_datetime(heartbeat_row[1] or heartbeat_row[3])
+        seen_fresh = _timestamp_is_fresh(seen_at, now)
+        snapshot_fresh = _timestamp_is_fresh_with_max_age(
+            snapshot_at,
+            now,
+            60.0,
+        )
+        if recon in {"failed", "conflicted", "unknown"} and seen_fresh:
+            heartbeat_conflicted = True
+        elif recon == "healthy" and snapshot_fresh:
+            status, items = _parse_position_snapshot(heartbeat_row[0])
+            if status != "ok":
+                heartbeat_malformed = True
+            else:
+                heartbeat_fresh = True
+                heartbeat_items = items
+        else:
+            heartbeat_stale = True
+
+    projection_items: list[dict] = []
+    cur.execute(
+        """
+        SELECT instrument_id, side::text, quantity, avg_entry_price,
+               mark_price
+        FROM positions_projection
+        WHERE account_id=%s AND status='open'
+        """,
+        (account_id,),
+    )
+    for row in cur.fetchall():
+        projection_items.append(
+            {
+                "instrument_id": row[0],
+                "side": row[1],
+                "quantity": row[2],
+                "entry_price": row[3],
+                "mark_price": row[4],
+            }
+        )
+
+    state = "unknown"
+    venue_items: list[dict] | None = None
+    if heartbeat_conflicted or heartbeat_malformed or mirror_malformed:
+        state = "conflict" if heartbeat_conflicted else "unknown"
+    elif mirror_fresh and heartbeat_fresh:
+        assert mirror_items is not None
+        assert heartbeat_items is not None
+        if _venue_quantities_conflict(
+            _symbol_side_quantities(mirror_items, symbol),
+            _symbol_side_quantities(heartbeat_items, symbol),
+        ):
+            state = "conflict"
+        else:
+            venue_items = mirror_items
+            state = "known"
+    elif mirror_fresh:
+        venue_items = mirror_items or []
+        state = "known"
+    elif heartbeat_fresh:
+        venue_items = heartbeat_items or []
+        state = "known"
+    elif mirror_present or heartbeat_row is not None:
+        state = "stale" if heartbeat_stale or mirror_present else "unknown"
+
+    if state == "known" and venue_items is not None:
+        venue_presence = _symbol_book_presence(venue_items, symbol)
+        projection_presence = _symbol_book_presence(projection_items, symbol)
+        for side in ("long", "short"):
+            if projection_presence[side] and not venue_presence[side]:
+                state = "conflict"
+                break
+
+    notional = None
+    presence = {"long": False, "short": False}
+    if state == "known" and venue_items is not None:
+        notional = _account_position_notional(venue_items)
+        presence = _symbol_book_presence(venue_items, symbol)
+        if notional is None:
+            state = "unknown"
+    return {
+        "state": state,
+        "presence": presence,
+        "notional": notional,
+    }
+
+
+_PROTECTION_ORDER_TYPES = frozenset(
+    {
+        "STOP",
+        "STOP_MARKET",
+        "STOP_LOSS",
+        "STOP_LOSS_LIMIT",
+        "TAKE_PROFIT",
+        "TAKE_PROFIT_MARKET",
+        "TAKE_PROFIT_LIMIT",
+        "TRAILING_STOP_MARKET",
+    }
+)
+_FILL_EVENT_TYPES = frozenset({"OrderFilled", "OrderPartiallyFilled"})
+_VENUE_ACCEPT_EVENT_TYPES = frozenset(
+    {"OrderAccepted", "OrderWorking", "OrderFilled", "OrderPartiallyFilled"}
+)
+_VENUE_FAIL_EVENT_TYPES = frozenset(
+    {
+        "OrderDenied",
+        "OrderRejected",
+        "OrderCanceled",
+        "OrderCancelled",
+        "OrderExpired",
+        "IntentDenied",
+        "IntentRejected",
+    }
+)
+_PRE_VENUE_ORDER_STATES = frozenset(
+    {"initialized", "submitted", "pending_submit", "planned"}
+)
+_VENUE_WORKING_ORDER_STATES = frozenset(
+    {
+        "accepted",
+        "working",
+        "new",
+        "open",
+        "pending_cancel",
+        "pending_update",
+        "partially_filled",
+        "partial",
+    }
+)
+_RELEASED_ENTRY_ORDER_STATES = frozenset(
+    {
+        "canceled",
+        "cancelled",
+        "rejected",
+        "expired",
+        "denied",
+        "closed",
+        "done",
+        "failed",
+    }
+)
+_OCCUPANCY_INTENT_STATUSES = frozenset(
+    {
+        "approved",
+        "rejected",
+        "denied",
+        "failed",
+        "cancelled",
+        "canceled",
+        "expired",
+    }
+)
+_RESERVING_INTENT_STATUSES = frozenset({"approved"})
+
+
+def _order_is_entry_working(status, order_type, payload) -> bool:
+    if str(status or "").strip().lower() in _TERMINAL_ORDER_STATES:
+        return False
+    if isinstance(payload, dict) and payload.get("reduce_only") is True:
+        return False
+    if str(order_type or "").upper() in _PROTECTION_ORDER_TYPES:
+        return False
+    return True
+
+
+def _entry_order_risk_class(status, order_type, payload) -> str:
+    """Classify an orders_projection row for occupancy.
+
+    ignore: protection / reduce-only (not entry risk)
+    filled / released: no remaining occupancy here (fills live in venue notional)
+    pre_venue / venue_working: remaining unfilled entry risk
+    unknown: lost/empty/unrecognized — caller must fail closed
+    """
+    if isinstance(payload, dict) and payload.get("reduce_only") is True:
+        return "ignore"
+    if str(order_type or "").upper() in _PROTECTION_ORDER_TYPES:
+        return "ignore"
+    normalized = str(status or "").strip().lower()
+    if normalized == "filled":
+        return "filled"
+    if normalized in _PRE_VENUE_ORDER_STATES:
+        return "pre_venue"
+    if normalized in _VENUE_WORKING_ORDER_STATES:
+        return "venue_working"
+    if normalized in _RELEASED_ENTRY_ORDER_STATES:
+        return "released"
+    return "unknown"
+
+
+def _leg_plan_notional(item: dict) -> Decimal | None:
+    explicit = _signed_decimal(item.get("notional") or item.get("max_notional"))
+    if explicit is not None and explicit > 0:
+        return explicit
+    quantity = _signed_decimal(item.get("quantity") or item.get("qty"))
+    price = _signed_decimal(
+        item.get("price") or item.get("sizing_price") or item.get("limit_price")
+    )
+    if quantity is not None and quantity > 0 and price is not None and price > 0:
+        return quantity * price
+    return None
+
+
+def _planned_entry_legs(order_plan) -> list[dict] | None:
+    """Stable entry legs from persisted order_plan. None = cannot tell."""
+    plan = order_plan if isinstance(order_plan, dict) else {}
+    tranche_sources: list[list] = []
+    plan_type = str(plan.get("type") or "")
+    if isinstance(plan.get("tranches"), list) and plan_type in {
+        "zone_ladder",
+        "entry_batch",
+    }:
+        tranche_sources.append(plan["tranches"])
+    batch = plan.get("entry_batch")
+    if isinstance(batch, dict) and isinstance(batch.get("tranches"), list):
+        tranche_sources.append(batch["tranches"])
+    if len(tranche_sources) > 1:
+        return None
+    if tranche_sources:
+        legs: list[dict] = []
+        seen: set[int] = set()
+        for item in tranche_sources[0]:
+            if not isinstance(item, dict):
+                return None
+            try:
+                seq = int(item.get("seq"))
+            except (TypeError, ValueError):
+                return None
+            if seq <= 0 or seq in seen:
+                return None
+            seen.add(seq)
+            notional = _leg_plan_notional(item)
+            if notional is None or notional <= 0:
+                return None
+            legs.append({"seq": seq, "notional": notional})
+        return legs or None
+    return [{"seq": 1, "notional": _leg_plan_notional(plan)}]
+
+
+def _projection_entry_seq(intent_id, client_order_id, payload) -> int | None:
+    if isinstance(payload, dict) and payload.get("seq") is not None:
+        try:
+            return int(payload["seq"])
+        except (TypeError, ValueError):
+            return None
+    identity = _entry_order_identity(str(client_order_id or ""))
+    if identity is False:
+        return None
+    projected_intent, sequence = identity
+    if projected_intent != str(intent_id):
+        return None
+    return sequence
+
+
+def _require_entry_budget(budget) -> Decimal:
+    if not isinstance(budget, dict):
+        raise HTTPException(
+            status_code=409,
+            detail="approved unfinished intent risk_budget is invalid",
+        )
+    budget_notional = _signed_decimal(budget.get("max_notional"))
+    if budget_notional is None or budget_notional < 0:
+        raise HTTPException(
+            status_code=409,
+            detail="approved unfinished intent max_notional is invalid",
+        )
+    return budget_notional
+
+
+def _order_is_pre_venue_entry(status, order_type, payload) -> bool:
+    if str(status or "").strip().lower() not in _PRE_VENUE_ORDER_STATES:
+        return False
+    return _order_is_entry_working(status, order_type, payload)
+
+
+def _order_is_venue_accepted_working(status, order_type, payload) -> bool:
+    if _order_is_pre_venue_entry(status, order_type, payload):
+        return False
+    return _order_is_entry_working(status, order_type, payload)
+
+
+def _entry_remaining_notional(
+    *,
+    quantity,
+    filled,
+    price,
+    budget_notional: Decimal | None = None,
+) -> Decimal:
+    filled_d = _signed_decimal(filled) or Decimal("0")
+    qty_d = _signed_decimal(quantity)
+    if qty_d is None or qty_d < 0:
+        raise HTTPException(
+            status_code=409,
+            detail="working entry order quantity is unknown",
+        )
+    remaining_qty = qty_d - filled_d
+    if remaining_qty <= 0:
+        return Decimal("0")
+    price_d = _signed_decimal(price)
+    if price_d is not None and price_d > 0:
+        return remaining_qty * price_d
+    if qty_d > 0 and budget_notional is not None and budget_notional > 0:
+        return budget_notional * remaining_qty / qty_d
+    raise HTTPException(
+        status_code=409,
+        detail="working entry order remaining notional is unknown",
+    )
+
+
+def _account_snapshot_at(cur, account_id: str) -> datetime | None:
+    cur.execute(
+        """
+        SELECT updated_at, payload->>'account_snapshot_fetched_at'
+        FROM accounts_projection
+        WHERE account_id=%s
+        LIMIT 1
+        """,
+        (account_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    updated = _aware_datetime(row[0])
+    fetched = None
+    raw_fetched = str(row[1] or "").strip()
+    if raw_fetched:
+        try:
+            fetched = _aware_datetime(
+                datetime.fromisoformat(raw_fetched.replace("Z", "+00:00"))
+            )
+        except ValueError:
+            fetched = None
+    times = [value for value in (updated, fetched) if value is not None]
+    if not times:
+        return None
+    return min(times)
+
+
+def _snapshot_predates_accept(
+    snapshot_at: datetime | None,
+    ts_event,
+) -> bool:
+    accept_at = _aware_datetime(ts_event)
+    if snapshot_at is None or accept_at is None:
+        return True
+    return snapshot_at < accept_at
+
+
+def _entry_intent_occupancy(cur, account_id: str) -> dict[str, Decimal]:
+    """Split occupancy so each notional is counted once.
+
+    off_venue: not yet accepted by the venue (inbox / initialized /
+    submitted) plus approved unsent planned entry legs from order_plan.
+    venue_working: remaining unfilled qty on venue-accepted entry orders
+    (GTC still on book even past valid_until, including after the parent
+    intent is rejected).
+    available_hold: off_venue plus accepted remaining whose account
+    snapshot predates accept (margin not yet in available_balance).
+    Filled size lives in venue position notional, not here.
+    risk_budget.max_notional is a ceiling, not an unsent-leg remainder.
+    Lost/unknown entry legs fail closed instead of releasing risk.
+    """
+    snapshot_at = _account_snapshot_at(cur, account_id)
+    cur.execute(
+        """
+        SELECT intent_id::text,
+               risk_budget,
+               valid_until < clock_timestamp(),
+               status::text,
+               order_plan
+        FROM trade_intents
+        WHERE account_id=%s
+          AND action::text IN ('open_position', 'add_position')
+          AND status::text IN (
+                'approved', 'rejected', 'denied', 'failed',
+                'cancelled', 'canceled', 'expired'
+          )
+        """,
+        (account_id,),
+    )
+    off_venue = Decimal("0")
+    venue_working = Decimal("0")
+    available_hold = Decimal("0")
+    for row in cur.fetchall():
+        intent_id, budget, expired = row[0], row[1], row[2]
+        intent_status = (
+            str(row[3] or "").strip().lower() if len(row) > 3 else "approved"
+        )
+        order_plan = row[4] if len(row) > 4 else {}
+        still_reserving = intent_status in _RESERVING_INTENT_STATUSES
+        cur.execute(
+            """
+            SELECT status, order_type, quantity, filled_quantity, price,
+                   payload, ts_event, client_order_id
+            FROM orders_projection
+            WHERE intent_id=%s
+            """,
+            (intent_id,),
+        )
+        orders = cur.fetchall()
+        has_any_order = False
+        entry_seen = False
+        projected_seqs: set[int] = set()
+        unsequenced_entry = 0
+        pre_venue_remaining = Decimal("0")
+        venue_remaining = Decimal("0")
+        unconfirmed_remaining = Decimal("0")
+        budget_notional: Decimal | None = None
+        for order in orders:
+            has_any_order = True
+            status = order[0]
+            order_type = order[1]
+            quantity = order[2]
+            filled = order[3]
+            price = order[4]
+            payload = order[5]
+            ts_event = order[6] if len(order) > 6 else None
+            client_order_id = order[7] if len(order) > 7 else None
+            kind = _entry_order_risk_class(status, order_type, payload)
+            if kind == "ignore":
+                continue
+            if kind == "unknown":
+                raise HTTPException(
+                    status_code=409,
+                    detail="entry occupancy is unknown",
+                )
+            entry_seen = True
+            seq = _projection_entry_seq(intent_id, client_order_id, payload)
+            if seq is None:
+                unsequenced_entry += 1
+            else:
+                projected_seqs.add(seq)
+            if kind == "pre_venue":
+                remaining = _entry_remaining_notional(
+                    quantity=quantity,
+                    filled=filled,
+                    price=price,
+                    budget_notional=None,
+                )
+                pre_venue_remaining += remaining
+                continue
+            if kind == "venue_working":
+                remaining = _entry_remaining_notional(
+                    quantity=quantity,
+                    filled=filled,
+                    price=price,
+                    budget_notional=None,
+                )
+                venue_remaining += remaining
+                if _snapshot_predates_accept(snapshot_at, ts_event):
+                    unconfirmed_remaining += remaining
+        if has_any_order and not entry_seen:
+            raise HTTPException(
+                status_code=409,
+                detail="entry occupancy is unknown",
+            )
+        venue_working += venue_remaining
+        off_venue += pre_venue_remaining
+        available_hold += pre_venue_remaining + unconfirmed_remaining
+        if entry_seen:
+            if still_reserving:
+                planned = _planned_entry_legs(order_plan)
+                if planned is None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="entry occupancy is unknown",
+                    )
+                if unsequenced_entry and (
+                    len(planned) != 1 or projected_seqs or unsequenced_entry != 1
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="entry occupancy is unknown",
+                    )
+                if unsequenced_entry == 1 and len(planned) == 1:
+                    projected_seqs.add(int(planned[0]["seq"]))
+                extra = projected_seqs - {int(leg["seq"]) for leg in planned}
+                if extra:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="entry occupancy is unknown",
+                    )
+                for leg in planned:
+                    if int(leg["seq"]) in projected_seqs:
+                        continue
+                    notional = leg.get("notional")
+                    if notional is None or notional <= 0:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="unsent entry leg notional is unknown",
+                        )
+                    off_venue += notional
+                    available_hold += notional
+            continue
+        cur.execute(
+            """
+            SELECT event_type
+            FROM execution_events
+            WHERE intent_id=%s
+            """,
+            (intent_id,),
+        )
+        events = {str(event_row[0] or "") for event_row in cur.fetchall()}
+        if events & _FILL_EVENT_TYPES:
+            if still_reserving:
+                raise HTTPException(
+                    status_code=409,
+                    detail="entry occupancy is unknown",
+                )
+            continue
+        cur.execute(
+            "SELECT count(*) FROM execution_commands WHERE intent_id=%s",
+            (intent_id,),
+        )
+        command_count = int((cur.fetchone() or [0])[0] or 0)
+        if events & _VENUE_ACCEPT_EVENT_TYPES:
+            raise HTTPException(
+                status_code=409,
+                detail="venue working occupancy is unknown",
+            )
+        if not still_reserving:
+            continue
+        if events & _VENUE_FAIL_EVENT_TYPES and command_count == 0:
+            continue
+        if expired and command_count == 0 and not events:
+            continue
+        planned = _planned_entry_legs(order_plan)
+        planned_total = Decimal("0")
+        if planned:
+            sized = True
+            for leg in planned:
+                notional = leg.get("notional")
+                if notional is None or notional <= 0:
+                    sized = False
+                    break
+                planned_total += notional
+            if sized and planned_total > 0:
+                off_venue += planned_total
+                available_hold += planned_total
+                continue
+        budget_notional = _require_entry_budget(budget)
+        off_venue += budget_notional
+        available_hold += budget_notional
+    return {
+        "off_venue": off_venue,
+        "venue_working": venue_working,
+        "available_hold": available_hold,
+    }
+
+
+def _assert_entry_capital_reservation(
+    cur,
+    *,
+    account_id: str,
+    new_notional: float,
+    leverage,
+    caps: dict,
+    venue: dict,
+    checks: list,
+) -> None:
+    state = str(venue.get("state") or "unknown")
+    venue_notional = venue.get("notional")
+    if state != "known" or venue_notional is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "risk-increasing order rejected: venue position state is "
+                f"{state}"
+            ),
+        )
+    hard_leverage = leverage or caps["max_leverage"]
+    try:
+        leverage_dec = Decimal(str(hard_leverage))
+        new_dec = Decimal(str(new_notional))
+        venue_dec = Decimal(str(venue_notional))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="capital reservation inputs are invalid",
+        ) from exc
+    if leverage_dec <= 0 or new_dec < 0 or venue_dec < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="capital reservation inputs are invalid",
+        )
+    cur.execute(
+        """
+        SELECT equity, available_balance
+        FROM accounts_projection
+        WHERE account_id=%s
+        LIMIT 1
+        """,
+        (account_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(
+            status_code=503,
+            detail=f"fresh account financial state unavailable for {account_id}",
+        )
+    equity = _signed_decimal(row[0])
+    available = _signed_decimal(row[1])
+    if equity is None or available is None or equity <= 0 or available < 0:
+        raise HTTPException(
+            status_code=503,
+            detail=f"fresh account financial state unavailable for {account_id}",
+        )
+    occupancy = _entry_intent_occupancy(cur, account_id)
+    off_venue = occupancy["off_venue"]
+    venue_working = occupancy["venue_working"]
+    available_hold = occupancy.get("available_hold", off_venue)
+    available_ceiling = available * leverage_dec
+    equity_ceiling = equity * leverage_dec
+    available_used = available_hold + new_dec
+    total_used = venue_dec + venue_working + off_venue + new_dec
+    if available_used > available_ceiling:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"notional occupancy {available_used:.0f}U exceeds "
+                f"available_balance*leverage {available_ceiling:.0f}U "
+                f"(off-venue reservation {off_venue:.0f}U + "
+                f"unconfirmed {available_hold - off_venue:.0f}U + "
+                f"new {new_dec:.0f}U)"
+            ),
+        )
+    if total_used > equity_ceiling:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"notional occupancy {total_used:.0f}U exceeds "
+                f"real_equity*leverage {equity_ceiling:.0f}U "
+                f"(venue {venue_dec:.0f}U + working {venue_working:.0f}U "
+                f"+ off-venue {off_venue:.0f}U + new {new_dec:.0f}U)"
+            ),
+        )
+    checks.append(
+        {
+            "name": "capital_reservation",
+            "passed": True,
+            "venue_notional": float(venue_dec),
+            "venue_working_notional": float(venue_working),
+            "off_venue_reservation": float(off_venue),
+            "available_hold": float(available_hold),
+            "new_notional": float(new_dec),
+            "available_ceiling": float(available_ceiling),
+            "equity_ceiling": float(equity_ceiling),
+        }
+    )
+
+
+def _assert_add_venue_state(
+    venue: dict,
+    *,
+    side: str,
+    checks: list,
+) -> None:
+    state = str(venue.get("state") or "unknown")
+    if state in {"unknown", "stale", "conflict"}:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"add_position rejected: venue position state is {state}"
+            ),
+        )
+    presence = venue.get("presence") or {}
+    if not presence.get(side):
+        raise HTTPException(
+            status_code=400,
+            detail="position_required",
+        )
+    checks.append(
+        {
+            "name": "venue_position_state",
+            "passed": True,
+            "state": state,
+            "same_side": True,
+        }
+    )
+
+
+def _add_position_canary_denial(
+    *,
+    account_id: str,
+    rollout: dict | None,
+    raw_permit_id,
+) -> str | None:
+    if raw_permit_id not in (None, ""):
+        return "canary_open_position_only"
+    if account_id != "account-a":
+        return None
+    phase = str((rollout or {}).get("phase") or "").strip()
+    if not phase:
+        return None
+    if phase == _ROLLOUT_PHASE_FLEET_COMPLETE:
+        return None
+    return "canary_open_position_only"
+
+
+def _normalize_intended_action(body: dict, action: str) -> str:
+    raw = str(body.get("intended_action") or "").strip()
+    if not raw:
+        return action
+    aliases = {
+        "open": "open_position",
+        "open_position": "open_position",
+        "add": "add_position",
+        "add_position": "add_position",
+        "开仓": "open_position",
+        "加仓": "add_position",
+    }
+    return aliases.get(raw, raw)
+
+
+def _source_entry_intent_rows(cur, account_id: str, client_ref: str) -> list[tuple]:
+    source_key = _entry_source_idempotency_key(account_id, client_ref)
+    cur.execute(
+        """
+        SELECT intent_id::text,
+               action::text,
+               status::text,
+               idempotency_key,
+               order_plan,
+               valid_until,
+               risk_budget
+        FROM trade_intents
+        WHERE account_id=%s
+          AND action::text IN ('open_position', 'add_position')
+        """,
+        (account_id,),
+    )
+    rows = cur.fetchall()
+    matched_ids: set[str] = set()
+    matched: list[tuple] = []
+
+    def _matches_source(row) -> bool:
+        plan = row[4] if isinstance(row[4], dict) else {}
+        authorization = (
+            plan.get("authorization")
+            if isinstance(plan.get("authorization"), dict)
+            else {}
+        )
+        source_id = str(authorization.get("source_message_id") or "").strip()
+        return row[3] == source_key or source_id == client_ref
+
+    for row in rows:
+        if _matches_source(row):
+            matched.append(row)
+            matched_ids.add(row[0])
+    changed = True
+    while changed:
+        changed = False
+        for row in rows:
+            if row[0] in matched_ids:
+                continue
+            plan = row[4] if isinstance(row[4], dict) else {}
+            parent = str(plan.get("replay_of") or "").strip()
+            if parent and parent in matched_ids:
+                matched.append(row)
+                matched_ids.add(row[0])
+                changed = True
+    return matched
+
+
+def _intent_has_success_or_inflight(cur, intent_id: str, status: str) -> bool:
+    normalized = str(status or "").lower()
+    cur.execute(
+        """
+        SELECT count(*)
+        FROM execution_events
+        WHERE intent_id=%s
+          AND event_type IN ('OrderFilled', 'OrderPartiallyFilled')
+        """,
+        (intent_id,),
+    )
+    has_fill = int(cur.fetchone()[0] or 0) > 0
+    if has_fill:
+        return True
+    cur.execute(
+        """
+        SELECT status, order_type, payload
+        FROM orders_projection
+        WHERE intent_id=%s
+        """,
+        (intent_id,),
+    )
+    has_working = False
+    for order_status, order_type, payload in cur.fetchall():
+        if _order_is_entry_working(order_status, order_type, payload):
+            has_working = True
+            break
+    if has_working:
+        return True
+    if normalized == "approved":
+        return True
+    return False
+
+
+def _source_identity_live_replay(
+    cur,
+    *,
+    account_id: str,
+    client_ref: str,
+) -> tuple | None:
+    for row in _source_entry_intent_rows(cur, account_id, client_ref):
+        if _intent_has_success_or_inflight(cur, row[0], row[2]):
+            return row
+    return None
+
+
+def _validate_replay_of(
+    cur,
+    *,
+    replay_of: str,
+    account_id: str,
+    client_ref: str,
+) -> dict:
+    cur.execute(
+        """
+        SELECT intent_id::text,
+               account_id,
+               action::text,
+               status::text,
+               idempotency_key,
+               order_plan
+        FROM trade_intents
+        WHERE intent_id=%s
+        """,
+        (replay_of,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=400,
+            detail="replay_of does not reference a trade intent",
+        )
+    if row[1] != account_id:
+        raise HTTPException(
+            status_code=400,
+            detail="replay_of account does not match account_id",
+        )
+    if str(row[2] or "").lower() not in _OPERATOR_ENTRY_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="replay_of action is not an entry intent",
+        )
+    if str(row[3] or "").lower() != "rejected":
+        raise HTTPException(
+            status_code=409,
+            detail="replay_of is only allowed for a rejected intent",
+        )
+    expected_key = _entry_source_idempotency_key(account_id, client_ref)
+    plan = row[5] if isinstance(row[5], dict) else {}
+    authorization = plan.get("authorization")
+    source_id = ""
+    if isinstance(authorization, dict):
+        source_id = str(authorization.get("source_message_id") or "").strip()
+    if row[4] != expected_key and source_id != client_ref:
+        raise HTTPException(
+            status_code=409,
+            detail="replay_of does not match source identity",
+        )
+    live = _source_identity_live_replay(
+        cur,
+        account_id=account_id,
+        client_ref=client_ref,
+    )
+    if live is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "source identity already has an in-flight or filled intent; "
+                "replay that intent instead of submitting a new add"
+            ),
+        )
+    cur.execute(
+        "SELECT count(*) FROM execution_commands WHERE intent_id=%s",
+        (replay_of,),
+    )
+    if int(cur.fetchone()[0] or 0) > 0:
+        raise HTTPException(
+            status_code=409,
+            detail="replay_of has execution commands; cannot resubmit",
+        )
+    cur.execute(
+        "SELECT count(*) FROM execution_events WHERE intent_id=%s",
+        (replay_of,),
+    )
+    if int(cur.fetchone()[0] or 0) > 0:
+        raise HTTPException(
+            status_code=409,
+            detail="replay_of has execution events; cannot resubmit",
+        )
+    return {
+        "intent_id": row[0],
+        "action": row[2],
+        "status": row[3],
+    }
+
+
 def _operator_open_replay(
     database_url: str,
     *,
@@ -6557,9 +7806,7 @@ def _operator_open_replay(
     authorization: dict,
     request_semantics: dict,
 ) -> dict | bool:
-    idempotency_key = hashlib.sha256(
-        f"operator|{account_id}|{client_ref}".encode()
-    ).hexdigest()
+    idempotency_key = _entry_source_idempotency_key(account_id, client_ref)
     conn = _database_connection(database_url)
     try:
         with conn.cursor() as cur:
@@ -6570,7 +7817,8 @@ def _operator_open_replay(
                        valid_until,
                        order_plan,
                        risk_budget,
-                       target_position_id
+                       target_position_id,
+                       action::text
                 FROM trade_intents
                 WHERE idempotency_key=%s
                 """,
@@ -6613,19 +7861,20 @@ def _operator_open_replay(
     risk_budget = row[4]
     if not isinstance(risk_budget, dict):
         risk_budget = {}
+    persisted_action = str(row[6] or "open_position")
     return {
         "intent_id": row[0],
         "status": row[1],
         "replay": True,
         "account_id": account_id,
         "instrument_id": symbol,
-        "action": "open_position",
+        "action": persisted_action,
         "order_plan": order_plan,
         "execution_preview": _safe_execution_preview(
             order_plan,
             risk_budget,
             symbol,
-            "open_position",
+            persisted_action,
         ),
         "risk_budget": risk_budget,
         "valid_until": (
@@ -6656,17 +7905,24 @@ def _attribution_intent(database_url: str, account_id: str, entry_ref: str):
     try:
         with conn.cursor() as cur:
             for candidate in accounts:
-                idem = hashlib.sha256(
-                    f"operator|{candidate}|{entry_ref}".encode()
-                ).hexdigest()
+                idem = _entry_source_idempotency_key(candidate, entry_ref)
                 cur.execute(
                     "SELECT ti.intent_id::text, ti.action::text, ti.instrument_id, "
                     "ti.account_id, ti.order_plan, rm.channel_id, rm.source_message_id "
                     "FROM trade_intents ti "
                     "JOIN hermes_decisions hd ON hd.decision_id = ti.hermes_decision_id "
                     "JOIN raw_messages rm ON rm.id = hd.raw_message_id "
-                    "WHERE ti.idempotency_key=%s",
-                    (idem,),
+                    "WHERE ti.account_id=%s "
+                    "AND ti.action::text IN ('open_position', 'add_position') "
+                    "AND ("
+                    " ti.idempotency_key=%s "
+                    " OR rm.source_message_id=%s "
+                    " OR COALESCE(ti.order_plan->'authorization'->>'source_message_id','')=%s"
+                    ") "
+                    "ORDER BY (ti.status::text = 'approved') DESC, "
+                    "ti.created_at DESC "
+                    "LIMIT 1",
+                    (candidate, idem, entry_ref, entry_ref),
                 )
                 row = cur.fetchone()
                 if row:
@@ -6704,7 +7960,7 @@ def _channel_management_entry_account(
     entry_plan = order_plan or {}
     entry_side = str(entry_plan.get("side") or "").strip().lower()
     identity_matches = (
-        entry_action == "open_position"
+        entry_action in ("open_position", "add_position")
         and _attribution_symbol(entry_symbol) == symbol
         and owner_channel == channel
     )
@@ -7605,7 +8861,24 @@ def operator_order(
     open_raw_channel = "hermes-operator"
     open_has_provenance = False
     open_risk_capital_addon: float | bool = False
-    if action == "open_position":
+    intended_action = _normalize_intended_action(body, action)
+    signal_intent = str(body.get("signal_intent") or "").strip() or False
+    replay_of = None
+    raw_replay_of = body.get("replay_of")
+    if raw_replay_of not in (None, ""):
+        if action != "add_position":
+            raise HTTPException(
+                status_code=400,
+                detail="replay_of is only valid for add_position",
+            )
+        try:
+            replay_of = str(UUID(str(raw_replay_of).strip()))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="replay_of must be a uuid",
+            ) from exc
+    if action in _OPERATOR_ENTRY_ACTIONS:
         open_raw_channel, open_has_provenance = _open_source_channel(
             body,
             client_ref,
@@ -7649,13 +8922,13 @@ def operator_order(
         else:
             entry_time_in_force = "GTC"
     database_url = os.environ.get("DATABASE_URL")
-    if action == "open_position" and not client_ref:
+    if action in _OPERATOR_ENTRY_ACTIONS and not client_ref:
         raise HTTPException(
             status_code=400,
-            detail="open_position requires client_ref (idempotency key): use the "
+            detail=f"{action} requires client_ref (idempotency key): use the "
                    "signal message id, or a stable slug for verbal orders",
         )
-    if action == "open_position" and not dry_run:
+    if action in _OPERATOR_ENTRY_ACTIONS and not dry_run:
         if not database_url:
             raise HTTPException(
                 status_code=503,
@@ -7713,18 +8986,25 @@ def operator_order(
             symbol=symbol,
             client_ref=client_ref,
             authorization=authorization_evidence,
+            action=action,
         )
-        replay = _operator_open_replay(
-            database_url,
-            account_id=account_id,
-            symbol=symbol,
-            client_ref=client_ref,
-            authorization=authorization_evidence,
-            request_semantics=open_request_semantics,
-        )
-        if replay is not False:
-            return replay
+        if replay_of is None:
+            replay = _operator_open_replay(
+                database_url,
+                account_id=account_id,
+                symbol=symbol,
+                client_ref=client_ref,
+                authorization=authorization_evidence,
+                request_semantics=open_request_semantics,
+            )
+            if replay is not False:
+                return replay
     raw_canary_permit_id = body.get("canary_permit_id")
+    if action == "add_position" and raw_canary_permit_id not in (None, ""):
+        raise HTTPException(
+            status_code=400,
+            detail="canary_open_position_only",
+        )
     canary_open = (
         action == "open_position"
         and not dry_run
@@ -7927,9 +9207,9 @@ def operator_order(
                 # Stop present but nothing declared: record the factual policy
                 # instead of rejecting (operational continuity).
                 protection_policy = "stop_only"
-    if action == "open_position":
+    if action in _OPERATOR_ENTRY_ACTIONS:
         if side not in ("long", "short"):
-            raise HTTPException(status_code=400, detail="side must be long|short for open_position")
+            raise HTTPException(status_code=400, detail=f"side must be long|short for {action}")
         explicit_notional = _op_num(
             body.get("notional_usdt"),
             "notional_usdt",
@@ -8044,7 +9324,7 @@ def operator_order(
 
     raw_channel = "hermes-operator"
     has_provenance = False
-    if action == "open_position":
+    if action in _OPERATOR_ENTRY_ACTIONS:
         raw_channel = open_raw_channel
         has_provenance = open_has_provenance
 
@@ -8077,7 +9357,7 @@ def operator_order(
     )
     if (
         authorization_evidence["authorized_by_type"] == "channel"
-        and action == "open_position"
+        and action in _OPERATOR_ENTRY_ACTIONS
     ):
         if raw_channel != authorization_evidence["authorized_by_id"]:
             raise HTTPException(
@@ -8090,7 +9370,7 @@ def operator_order(
                 detail="channel authorization requires source_channel or canonical client_ref",
             )
     if (
-        action == "open_position"
+        action in _OPERATOR_ENTRY_ACTIONS
         and raw_channel not in ("hermes-operator", "operator")
         and authorization_evidence["authorized_by_type"] != "channel"
     ):
@@ -8253,7 +9533,7 @@ def operator_order(
     if attribution:
         order_plan["attribution"] = attribution
     request_semantics = False
-    if action == "open_position":
+    if action in _OPERATOR_ENTRY_ACTIONS:
         if open_request_semantics is False:
             open_request_semantics = _operator_open_request_semantics(
                 body=body,
@@ -8261,9 +9541,15 @@ def operator_order(
                 symbol=symbol,
                 client_ref=client_ref,
                 authorization=authorization_evidence,
+                action=action,
             )
         request_semantics = open_request_semantics
         order_plan["request_semantics"] = request_semantics
+        order_plan["intended_action"] = intended_action
+        if signal_intent:
+            order_plan["signal_intent"] = signal_intent
+        if replay_of:
+            order_plan["replay_of"] = replay_of
     elif action in _OPERATOR_MANAGEMENT_ACTIONS:
         request_semantics = _operator_request_semantics(
             action=action,
@@ -8305,10 +9591,15 @@ def operator_order(
     intent_id = str(uuid4())
     if supplied_canary_intent_id:
         intent_id = supplied_canary_intent_id
-    if action == "open_position":
-        idem = hashlib.sha256(
-            f"operator|{account_id}|{client_ref}".encode()
-        ).hexdigest()
+    if action in _OPERATOR_ENTRY_ACTIONS:
+        if replay_of:
+            idem = _entry_replay_idempotency_key(
+                account_id,
+                client_ref,
+                replay_of,
+            )
+        else:
+            idem = _entry_source_idempotency_key(account_id, client_ref)
     else:
         idem = hashlib.sha256(
             f"operator-v2|{account_id}|{action}|{symbol}|"
@@ -8320,6 +9611,8 @@ def operator_order(
     conn = _database_connection(database_url)
     try:
         with conn.cursor() as cur:
+            if action in _OPERATOR_ENTRY_ACTIONS:
+                _account_risk_increase_lock(cur, account_id)
             cur.execute(
                 "SELECT pg_advisory_xact_lock("
                 "hashtextextended(%s, 0))",
@@ -8360,6 +9653,43 @@ def operator_order(
                             status_code=409,
                             detail="idempotency key request payload mismatch",
                         )
+                if action in _OPERATOR_ENTRY_ACTIONS:
+                    live_source = _source_identity_live_replay(
+                        cur,
+                        account_id=account_id,
+                        client_ref=client_ref,
+                    )
+                    if (
+                        live_source is not None
+                        and live_source[0] != existing[0]
+                    ):
+                        live_plan = (
+                            live_source[4]
+                            if isinstance(live_source[4], dict)
+                            else {}
+                        )
+                        live_budget = (
+                            live_source[6]
+                            if isinstance(live_source[6], dict)
+                            else {}
+                        )
+                        return {
+                            "intent_id": live_source[0],
+                            "status": live_source[2],
+                            "replay": True,
+                            "account_id": account_id,
+                            "instrument_id": symbol,
+                            "action": live_source[1],
+                            "order_plan": live_plan,
+                            "risk_budget": live_budget,
+                            "valid_until": (
+                                live_source[5].isoformat()
+                                if live_source[5]
+                                else None
+                            ),
+                            "authorization": live_plan.get("authorization"),
+                            "target_position_id": target_position_id,
+                        }
                 replay_response = {
                     "intent_id": existing[0], "status": existing[1], "replay": True,
                     "valid_until": existing[2].isoformat() if existing[2] else None,
@@ -8375,12 +9705,23 @@ def operator_order(
                         "protection_policy"
                     ]
                 return replay_response
-            if action == "open_position":
+            if action in _OPERATOR_ENTRY_ACTIONS:
                 rollout = _current_reviewed_rollout_state(
                     cur,
                     lock=True,
                 )
                 live_open_gate = _live_open_gate_from_rollout(rollout)
+                if action == "add_position":
+                    canary_denial = _add_position_canary_denial(
+                        account_id=account_id,
+                        rollout=rollout,
+                        raw_permit_id=raw_canary_permit_id,
+                    )
+                    if canary_denial:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=canary_denial,
+                        )
                 if account_id in _ROLLOUT_ACCOUNTS:
                     if live_open_gate is False:
                         raise HTTPException(
@@ -8406,6 +9747,72 @@ def operator_order(
                     order_plan["rollout_phase"] = (
                         live_open_gate["rollout_phase"]
                     )
+                if replay_of:
+                    live_source = _source_identity_live_replay(
+                        cur,
+                        account_id=account_id,
+                        client_ref=client_ref,
+                    )
+                    if live_source is not None:
+                        live_plan = (
+                            live_source[4]
+                            if isinstance(live_source[4], dict)
+                            else {}
+                        )
+                        live_budget = (
+                            live_source[6]
+                            if isinstance(live_source[6], dict)
+                            else {}
+                        )
+                        live_replay = {
+                            "intent_id": live_source[0],
+                            "status": live_source[2],
+                            "replay": True,
+                            "account_id": account_id,
+                            "instrument_id": symbol,
+                            "action": live_source[1],
+                            "order_plan": live_plan,
+                            "risk_budget": live_budget,
+                            "valid_until": (
+                                live_source[5].isoformat()
+                                if live_source[5]
+                                else None
+                            ),
+                            "authorization": live_plan.get("authorization"),
+                            "target_position_id": target_position_id,
+                        }
+                        if live_plan.get("protection_policy") is not None:
+                            live_replay["protection_policy"] = live_plan[
+                                "protection_policy"
+                            ]
+                        return live_replay
+                    replay_source = _validate_replay_of(
+                        cur,
+                        replay_of=replay_of,
+                        account_id=account_id,
+                        client_ref=client_ref,
+                    )
+                    order_plan["replay_of"] = replay_source["intent_id"]
+                venue = _load_entry_venue_view(
+                    cur,
+                    account_id=account_id,
+                    symbol=symbol,
+                )
+                if action == "add_position":
+                    _assert_add_venue_state(
+                        venue,
+                        side=side,
+                        checks=checks,
+                    )
+                _assert_entry_capital_reservation(
+                    cur,
+                    account_id=account_id,
+                    new_notional=float(notional or 0),
+                    leverage=leverage,
+                    caps=caps,
+                    venue=venue,
+                    checks=checks,
+                )
             canary_evidence = None
             if canary_open:
                 if canary_actual_notional is None:
@@ -8451,6 +9858,9 @@ def operator_order(
                             "allow_duplicate=true to silence this warning"
                         )
                         break
+            raw_source_message_id = client_ref
+            if replay_of:
+                raw_source_message_id = f"{client_ref}|replay|{replay_of}"
             cur.execute(
                 "INSERT INTO raw_messages (id, source, channel_id, source_message_id, source_version, "
                 "source_received_at, author_id, content_hash, message_text, raw_payload) "
@@ -8458,7 +9868,7 @@ def operator_order(
                 (
                     raw_id,
                     raw_channel,
-                    client_ref,
+                    raw_source_message_id,
                     now,
                     authorization_evidence["authorized_by_id"],
                     hashlib.sha256(
@@ -8555,6 +9965,9 @@ def operator_order(
                         {
                             "authorization": authorization_evidence,
                             "action": action,
+                            "intended_action": intended_action,
+                            "signal_intent": signal_intent,
+                            "replay_of": replay_of or False,
                             "account_id": account_id,
                             "instrument_id": symbol,
                             "client_ref": client_ref,
@@ -8606,6 +10019,7 @@ def operator_order(
         "account_id": account_id,
         "instrument_id": symbol,
         "action": action,
+        "intended_action": intended_action,
         "order_plan": order_plan,
         "execution_preview": _safe_execution_preview(order_plan, risk_budget, symbol, action),
         "risk_budget": risk_budget,
@@ -8620,6 +10034,43 @@ def operator_order(
     if attribution:
         response["attribution"] = attribution
     return response
+
+
+def _operator_denial_reason(*, intent: dict, events, conn) -> str:
+    for event in reversed(list(events or ())):
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("event_type") or "")
+        if event_type not in {"OrderDenied", "OrderRejected"}:
+            continue
+        payload = _payload_mapping(event.get("payload"))
+        reason = str(payload.get("reason") or payload.get("detail") or "").strip()
+        if reason:
+            return reason
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT payload
+            FROM audit_events
+            WHERE aggregate_type = 'trade_intent'
+              AND aggregate_id = %s
+              AND event_type LIKE 'intent_ack.%%'
+            ORDER BY created_at DESC
+            LIMIT 16
+            """,
+            (str(intent.get("intent_id") or ""),),
+        )
+        for row in cur.fetchall() or ():
+            payload = _payload_mapping(row.get("payload") if row else None)
+            if str(payload.get("status") or "").lower() != "rejected":
+                continue
+            detail = str(payload.get("detail") or "").strip()
+            reason = _intent_ack_rejection_reason(detail) or detail
+            if reason:
+                return reason
+    if str(intent.get("status") or "").lower() == "rejected":
+        return "rejected"
+    return ""
 
 
 @app.get("/v1/operator/orders/{intent_id}")
@@ -8647,7 +10098,8 @@ def operator_order_status(intent_id: str, authorization: str | None = Header(def
             if intent is None:
                 raise HTTPException(status_code=404, detail="intent not found")
             cur.execute(
-                "SELECT client_order_id, status::text, filled_quantity, average_fill_price, updated_at "
+                "SELECT client_order_id, status::text, filled_quantity, average_fill_price, "
+                "updated_at, lifecycle_role, payload, order_type "
                 "FROM orders_projection WHERE intent_id=%s ORDER BY updated_at",
                 (intent_id,),
             )
@@ -8664,10 +10116,32 @@ def operator_order_status(intent_id: str, authorization: str | None = Header(def
                 (intent_id,),
             )
             events = cur.fetchall()
+        intent_out = dict(intent)
+        order_rows = [dict(row) for row in orders or ()]
+        denial_reason = _operator_denial_reason(
+            intent=intent_out,
+            events=events,
+            conn=conn,
+        )
+        if denial_reason:
+            intent_out["denial_reason"] = denial_reason
+        operation_status = _intent_operation_status(
+            intent_status=str(intent_out.get("status") or ""),
+            orders=order_rows,
+            denial_reason=denial_reason,
+        )
+        return jsonable_encoder(
+            {
+                "intent": intent_out,
+                "status": operation_status,
+                "denial_reason": denial_reason,
+                "orders": order_rows,
+                "execution_events": events,
+                "open_positions": positions,
+            }
+        )
     finally:
         conn.close()
-    return jsonable_encoder({"intent": intent, "orders": orders,
-                             "execution_events": events, "open_positions": positions})
 
 
 @app.get("/health/role", name="role_database_health")

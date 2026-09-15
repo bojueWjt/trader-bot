@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -11,11 +12,14 @@ from psycopg2 import errors
 
 
 CONTROL_PLANE = Path(__file__).resolve().parents[2] / "control-plane"
-if str(CONTROL_PLANE) not in sys.path:
-    sys.path.insert(0, str(CONTROL_PLANE))
+HERMES_QUEUE = Path(__file__).resolve().parents[2] / "hermes-worker" / "queue"
+for _path in (CONTROL_PLANE, HERMES_QUEUE):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
 from db.connection import connect, transaction  # noqa: E402
 from db.repository import ingest_raw_message_with_outbox  # noqa: E402
+import signal_queue  # noqa: E402
 
 
 SOURCE = "telegram"
@@ -36,7 +40,11 @@ def ingest_raw_telegram_update(payload: dict[str, Any], database_url: str | None
             with transaction(conn):
                 existing_id = _find_existing_raw_message_id(conn, request)
                 if existing_id is not None:
-                    return _duplicate_result(existing_id)
+                    queued = _enqueue_signal_task(conn, str(existing_id), request)
+                    result = _duplicate_result(existing_id)
+                    result["task_id"] = queued.task_id
+                    result["task_inserted"] = queued.inserted
+                    return result
 
                 raw_message_id = uuid4()
                 outbox_event_id = uuid4()
@@ -68,23 +76,34 @@ def ingest_raw_telegram_update(payload: dict[str, Any], database_url: str | None
                             "channel_id": request["channel_id"],
                             "source_message_id": request["source_message_id"],
                             "source_version": request["source_version"],
+                            "account_id": request.get("account_id"),
                         },
                         "trace_id": raw_message_id,
                     },
                 )
                 _insert_media_assets(conn, inserted_raw_id, request["media_assets"])
+                queued = _enqueue_signal_task(conn, str(inserted_raw_id), request)
                 return {
                     "inserted": True,
                     "raw_message_id": str(inserted_raw_id),
                     "outbox_event_id": str(inserted_outbox_id),
                     "source_version": request["source_version"],
+                    "task_id": queued.task_id,
+                    "task_inserted": queued.inserted,
+                    "related_task_id": queued.related_task_id,
+                    "account_id": request.get("account_id") or signal_queue.DEFAULT_ACCOUNT_ID,
                 }
         except errors.UniqueViolation:
             conn.rollback()
             existing_id = _find_existing_raw_message_id(conn, request)
             if existing_id is None:
                 raise
-            return _duplicate_result(existing_id)
+            with transaction(conn):
+                queued = _enqueue_signal_task(conn, str(existing_id), request)
+            result = _duplicate_result(existing_id)
+            result["task_id"] = queued.task_id
+            result["task_inserted"] = queued.inserted
+            return result
     finally:
         conn.close()
 
@@ -110,6 +129,9 @@ def _normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "reply_to": payload.get("reply_to"),
         "raw_payload": payload.get("raw_payload", {}),
         "media_assets": _normalize_media_assets(payload.get("media_assets", [])),
+        "account_id": _optional_text(payload, "account_id"),
+        "action": _optional_text(payload, "action"),
+        "route_error": _optional_text(payload, "route_error"),
     }
 
     if not isinstance(request["raw_payload"], dict):
@@ -188,6 +210,11 @@ def _raw_payload(request: dict[str, Any]) -> dict[str, Any]:
     raw_payload["message_kind"] = request["message_kind"]
     raw_payload["reply_to"] = request.get("reply_to")
     raw_payload["source_received_at"] = request["source_received_at"]
+    raw_payload.setdefault("receive_ts", request["source_received_at"])
+    raw_payload.setdefault("source_ts", None)
+    raw_payload.setdefault("source_ts_unknown", raw_payload.get("source_ts") is None)
+    raw_payload["source_received_at_is_not_source_ts"] = True
+    raw_payload["persist_at"] = datetime.now(timezone.utc).isoformat()
     raw_payload["media_assets"] = [
         {
             "sha256": asset["sha256"],
@@ -261,6 +288,22 @@ def _insert_media_assets(conn, raw_message_id: UUID, media_assets: list[dict[str
                     asset.get("downloaded_at"),
                 ),
             )
+
+
+def _enqueue_signal_task(conn, raw_message_id: str, request: dict[str, Any]):
+    skipped_reason = request.get("route_error")
+    return signal_queue.enqueue_signal_task(
+        conn,
+        raw_message_id=raw_message_id,
+        source_platform=SOURCE,
+        channel_id=request["channel_id"],
+        source_message_id=request["source_message_id"],
+        edit_version=request["source_version"],
+        account_id=request.get("account_id"),
+        action=request.get("action"),
+        expires_at=signal_queue.signal_expires_at(request["source_received_at"]),
+        skipped_reason=str(skipped_reason) if skipped_reason else None,
+    )
 
 
 def _duplicate_result(raw_message_id: UUID) -> dict[str, Any]:

@@ -365,7 +365,7 @@ def node_dedupe_key(row: dict[str, Any]) -> str:
 
 def format_intent_message(row: dict[str, Any]) -> str:
     accepted = row.get("event_type") == "intent_ack.accepted"
-    title = "✅ Intent 已批准"
+    title = "✅ Intent 已受理，待执行"
     if not accepted:
         title = "⛔ Intent 已拒绝"
     account_id = str(row.get("account_id") or "?")
@@ -382,7 +382,7 @@ def format_intent_message(row: dict[str, Any]) -> str:
         notional_text = "—"
         if notional is not False and notional > 0:
             notional_text = f"{_format_decimal(notional)} USDT"
-        lines.append(f"批准名义 {notional_text}｜intent {short_intent}")
+        lines.append(f"受理名义 {notional_text}｜intent {short_intent}")
     else:
         payload = _mapping(row.get("payload"))
         detail = payload.get("detail")
@@ -963,6 +963,11 @@ def _process_audit_rows(
     seen = set(str(value) for value in _list(state.get("seen_audit_ids")))
     count = 0
     cursor = float(state.get("audit_cursor") or 0)
+    rejected_intent_ids = {
+        str(row.get("intent_id") or "")
+        for row in rows
+        if str(row.get("event_type") or "") == "intent_ack.rejected"
+    }
     for row in rows:
         source_id = str(row.get("source_id") or "")
         row_cursor = float(row.get("cursor") or cursor)
@@ -972,6 +977,11 @@ def _process_audit_rows(
         seen.add(source_id)
         _append_seen(state, "seen_audit_ids", source_id)
         event_type = str(row.get("event_type") or "")
+        if (
+            event_type == "intent_ack.accepted"
+            and str(row.get("intent_id") or "") in rejected_intent_ids
+        ):
+            continue
         if event_type in NODE_EVENT_TYPES:
             message_class = "node"
             dedupe_key = node_dedupe_key(row)
@@ -1060,7 +1070,7 @@ def test_message() -> str:
         [
             "🧪 交易事件通知验收",
             "账户 account-a｜MUUSDT｜做多",
-            "Intent 已批准｜名义 100 USDT",
+            "Intent 已受理，待执行｜名义 100 USDT",
             "安全模拟事件｜不会产生订单",
         ]
     )

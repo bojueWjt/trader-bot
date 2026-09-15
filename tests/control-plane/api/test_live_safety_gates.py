@@ -4344,7 +4344,7 @@ def test_permit_consumption_allows_non_owned_baseline_change(
 ) -> None:
     _seed_heartbeat(
         migrated_db,
-        positions=[{"symbol": "XAUUSDT", "quantity": "1"}],
+        positions=[{"symbol": "XAUUSDT", "quantity": "1", "mark_price": "1"}],
     )
     permit_id = _seed_reviewed_release_and_permit(migrated_db)
     resume = client.post(
@@ -4357,7 +4357,7 @@ def test_permit_consumption_allows_non_owned_baseline_change(
     _seed_heartbeat(
         migrated_db,
         trading_state="ACTIVE",
-        positions=[{"symbol": "XAUUSDT", "quantity": "2"}],
+        positions=[{"symbol": "XAUUSDT", "quantity": "2", "mark_price": "1"}],
         heartbeat_sequence=HEARTBEAT_SEQUENCE + 1,
     )
     response = client.post(

@@ -67,11 +67,10 @@ class ReconciledStateOpenPlannerTest(unittest.TestCase):
         assert isinstance(result, OrderDenied)
         self.assertEqual(result.reason, "position_exists")
 
-    def test_open_proceeds_legacy_when_venue_evidence_is_blind(
+    def test_open_denied_when_venue_evidence_is_unknown(
         self,
     ) -> None:
-        """Owner-operated account: blind evidence never blocks an open —
-        stale/missing venue snapshots fall through to legacy behavior."""
+        """Codex §4: stale/missing venue is UNKNOWN and rejects risk increase."""
         stale = _reconciled(
             venue_snapshot=_venue_long_snapshot(),
             venue_fetched_at=STALE_FETCHED_AT,
@@ -85,9 +84,9 @@ class ReconciledStateOpenPlannerTest(unittest.TestCase):
                     _empty_cache_context(reconciled_state=reconciled),
                 )
 
-                self.assertIsInstance(result, OrderPlan)
-                assert isinstance(result, OrderPlan)
-                self.assertEqual(result.side, "BUY")
+                self.assertIsInstance(result, OrderDenied)
+                assert isinstance(result, OrderDenied)
+                self.assertEqual(result.reason, "position_state_unknown")
 
     def test_open_allowed_when_reconciled_state_is_known_flat(self) -> None:
         intent = _open_intent(side="buy")
@@ -119,8 +118,8 @@ class ReconciledStateOpenPlannerTest(unittest.TestCase):
         assert isinstance(result, OrderPlan)
         self.assertEqual(result.side, "SELL")
 
-    def test_open_with_reconciled_state_none_matches_legacy_behavior(self) -> None:
-        """reconciled_state=None + empty cache -> plan is produced exactly as today."""
+    def test_open_with_reconciled_state_none_is_unknown_in_production(self) -> None:
+        """Production: None reconciled_state is not a cache/open bypass."""
         intent = _open_intent(side="buy")
 
         result = plan_intent_execution(
@@ -128,12 +127,43 @@ class ReconciledStateOpenPlannerTest(unittest.TestCase):
             _empty_cache_context(reconciled_state=None),
         )
 
-        self.assertIsInstance(result, OrderPlan)
-        assert isinstance(result, OrderPlan)
-        self.assertEqual(result.side, "BUY")
+        self.assertIsInstance(result, OrderDenied)
+        assert isinstance(result, OrderDenied)
+        self.assertEqual(result.reason, "position_state_unknown")
+        self.assertEqual(result.detail, "reconciled_state_missing")
 
-    def test_open_cache_fast_path_unchanged_when_cache_holds_position(self) -> None:
-        """Non-empty cache view keeps today's position_exists denial untouched."""
+    def test_open_simulation_without_reconciled_state_uses_cache(self) -> None:
+        """Explicit simulation mode keeps cache-only compatibility."""
+        intent = _open_intent(side="buy")
+
+        allowed = plan_intent_execution(
+            intent,
+            _empty_cache_context(reconciled_state=None, simulation=True),
+        )
+        denied = plan_intent_execution(
+            intent,
+            _context(
+                position=PositionSnapshot(
+                    instrument_id=INSTRUMENT_ID,
+                    side="LONG",
+                    quantity=VENUE_QUANTITY,
+                    position_id=f"{INSTRUMENT_ID}-LONG",
+                ),
+                reconciled_state=None,
+                simulation=True,
+            ),
+        )
+
+        self.assertIsInstance(allowed, OrderPlan)
+        assert isinstance(allowed, OrderPlan)
+        self.assertEqual(allowed.side, "BUY")
+        self.assertEqual(
+            denied,
+            OrderDenied(reason="position_exists", detail=INSTRUMENT_ID),
+        )
+
+    def test_open_denied_when_cache_conflicts_with_fresh_flat_venue(self) -> None:
+        """Cache occupancy cannot override a fresh venue conflict."""
         position = PositionSnapshot(
             instrument_id=INSTRUMENT_ID,
             side="LONG",
@@ -147,14 +177,41 @@ class ReconciledStateOpenPlannerTest(unittest.TestCase):
             _context(
                 position=position,
                 positions=(position,),
-                reconciled_state=_reconciled(venue_snapshot=_venue_flat_snapshot()),
+                reconciled_state=_reconciled(
+                    venue_snapshot=_venue_flat_snapshot(),
+                    cache_positions=(position,),
+                ),
             ),
         )
 
-        self.assertEqual(
-            result,
-            OrderDenied(reason="position_exists", detail=INSTRUMENT_ID),
+        self.assertIsInstance(result, OrderDenied)
+        assert isinstance(result, OrderDenied)
+        self.assertEqual(result.reason, "position_state_conflicted")
+
+    def test_open_cache_and_matching_venue_still_position_exists(self) -> None:
+        position = PositionSnapshot(
+            instrument_id=INSTRUMENT_ID,
+            side="LONG",
+            quantity=VENUE_QUANTITY,
+            position_id=f"{INSTRUMENT_ID}-LONG",
         )
+        intent = _open_intent(side="buy")
+
+        result = plan_intent_execution(
+            intent,
+            _context(
+                position=position,
+                positions=(position,),
+                reconciled_state=_reconciled(
+                    venue_snapshot=_venue_long_snapshot(),
+                    cache_positions=(position,),
+                ),
+            ),
+        )
+
+        self.assertIsInstance(result, OrderDenied)
+        assert isinstance(result, OrderDenied)
+        self.assertEqual(result.reason, "position_exists")
 
 
 def _venue_long_snapshot() -> dict[str, Any]:

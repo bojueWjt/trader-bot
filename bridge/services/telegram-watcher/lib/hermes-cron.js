@@ -1,3 +1,6 @@
+// Signal intake must not use this helper. Watcher is the single Telegram
+// entry (sqlite). Live signal execution during G2 shadow remains the feeder
+// cron path; this module is not the signal scheduler.
 const { execFile } = require("child_process");
 const {
   safeErrorMessage,

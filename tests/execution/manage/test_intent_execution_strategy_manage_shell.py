@@ -483,9 +483,10 @@ class StrategyManageShellTest(unittest.TestCase):
             "0.500",
         )
         tp_plan = plans[1]
+        live_id = encode_client_order_id(intent_id, sequence=12)
         live = (
             _live_order(
-                "tp-live-short",
+                live_id,
                 "MARKET_IF_TOUCHED",
                 "0.199",
                 "28000.11",
@@ -500,7 +501,7 @@ class StrategyManageShellTest(unittest.TestCase):
         )
 
         self.assertEqual(actions, ())
-        self.assertEqual(keep_ids, ("tp-live-short",))
+        self.assertEqual(keep_ids, (live_id,))
         self.assertEqual(replace_ids, set())
 
     def test_live_mit_quantity_two_steps_short_requires_replacement(self) -> None:
@@ -516,9 +517,10 @@ class StrategyManageShellTest(unittest.TestCase):
             "0.500",
         )
         tp_plan = plans[1]
+        live_id = encode_client_order_id(intent_id, sequence=12)
         live = (
             _live_order(
-                "tp-live-short",
+                live_id,
                 "MARKET_IF_TOUCHED",
                 "0.198",
                 "28000.11",
@@ -534,7 +536,7 @@ class StrategyManageShellTest(unittest.TestCase):
 
         self.assertEqual(actions, (tp_plan,))
         self.assertEqual(keep_ids, ())
-        self.assertEqual(replace_ids, {"tp-live-short"})
+        self.assertEqual(replace_ids, {live_id})
 
     def test_cancel_failure_does_not_submit_replacement_or_mark_processed(self) -> None:
         intent = _intent(

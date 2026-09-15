@@ -76,6 +76,9 @@ class PlannerContext:
     existing_intent_ids: frozenset[str] = frozenset()
     effective_settings: Mapping[str, Any] | None = None
     reconciled_state: Any | None = None
+    # Cache-only position checks for simulated engines/tests that have no venue
+    # subsystem. Production must attach reconciled_state; None is UNKNOWN.
+    simulation: bool = False
 
 
 @dataclass(frozen=True)
@@ -295,12 +298,33 @@ def _plan_management_intent(
     orders: tuple[OrderPlan, ...]
 
     if action == PARTIAL_CLOSE:
-        order = _build_exit_order(intent, action, order_plan, context.instrument, position, side)
+        sized = _resolve_exit_quantity(order_plan, position, required=True)
+        if isinstance(sized, OrderDenied):
+            return sized
+        exit_plan = dict(order_plan)
+        exit_plan.pop("fraction", None)
+        exit_plan["quantity"] = sized
+        order = _build_exit_order(intent, action, exit_plan, context.instrument, position, side)
         if isinstance(order, OrderDenied):
             return order
         orders = (order,)
     elif action == CLOSE_POSITION:
+        sized = _resolve_exit_quantity(order_plan, position, required=False)
+        if isinstance(sized, OrderDenied):
+            return sized
+        full = Decimal(str(position.quantity))
+        if sized is not None and sized < full:
+            return OrderDenied(
+                "ambiguous_partial_on_close",
+                f"{format(sized, 'f')}<{format(full, 'f')}",
+            )
+        if sized is not None and sized > full:
+            return OrderDenied(
+                "quantity_exceeds_position",
+                f"{format(sized, 'f')}>{format(full, 'f')}",
+            )
         close_plan = dict(order_plan)
+        close_plan.pop("fraction", None)
         close_plan["quantity"] = position.quantity
         order = _build_exit_order(intent, action, close_plan, context.instrument, position, side)
         if isinstance(order, OrderDenied):
@@ -487,6 +511,37 @@ def _build_order_spec(
     return OrderDenied("unsupported_order_spec", f"type={order_type}")
 
 
+def _resolve_exit_quantity(
+    order_plan: dict[str, Any],
+    position: PositionSnapshot,
+    *,
+    required: bool,
+) -> Decimal | None | OrderDenied:
+    raw_quantity = order_plan.get("quantity")
+    raw_fraction = order_plan.get("fraction")
+    has_quantity = raw_quantity is not None
+    has_fraction = raw_fraction is not None
+    if has_quantity and has_fraction:
+        return OrderDenied("unsupported_order_spec", "quantity_and_fraction")
+    if has_fraction:
+        fraction = _decimal(raw_fraction, "fraction")
+        if isinstance(fraction, OrderDenied):
+            return fraction
+        if fraction <= Decimal("0") or fraction > Decimal("1"):
+            return OrderDenied("unsupported_order_spec", "fraction")
+        return Decimal(str(position.quantity)) * fraction
+    if has_quantity:
+        quantity = _decimal(raw_quantity, "quantity")
+        if isinstance(quantity, OrderDenied):
+            return quantity
+        if quantity <= Decimal("0"):
+            return OrderDenied("unsupported_order_spec", "quantity")
+        return quantity
+    if required:
+        return OrderDenied("unsupported_order_spec", "quantity_or_fraction_required")
+    return None
+
+
 def _build_exit_order(
     intent: Any,
     action: str,
@@ -497,14 +552,13 @@ def _build_exit_order(
 ) -> OrderPlan | OrderDenied:
     normalized = dict(order_plan)
     normalized["side"] = side.lower()
-    if "quantity" not in normalized and "fraction" in normalized:
-        fraction = _decimal(normalized.get("fraction"), "fraction")
-        if isinstance(fraction, OrderDenied):
-            return fraction
-        if fraction <= Decimal("0") or fraction > Decimal("1"):
-            return OrderDenied("unsupported_order_spec", "fraction")
-        normalized["quantity"] = Decimal(str(position.quantity)) * fraction
-    order_spec = _build_order_spec(normalized, instrument)
+    if "quantity" not in normalized or normalized.get("quantity") is None:
+        sized = _resolve_exit_quantity(normalized, position, required=True)
+        if isinstance(sized, OrderDenied):
+            return sized
+        normalized["quantity"] = sized
+        normalized.pop("fraction", None)
+    order_spec = _build_order_spec(normalized, instrument, round_quantity_down=True)
     if isinstance(order_spec, OrderDenied):
         return order_spec
     quantity_denial = _deny_if_quantity_exceeds_position(order_spec.quantity, position.quantity)
@@ -683,6 +737,13 @@ def _select_target_position(
         if requested_side:
             actual_side = str(selected.side).upper()
             if actual_side != requested_side:
+                # Hedge restart can attach the opposite signed qty to the
+                # constructed ...-LONG/SHORT id. Prefer venue on the requested
+                # book instead of denying a management intent that still has
+                # a real position on that book.
+                fallback = _venue_fallback()
+                if fallback is not None:
+                    return fallback
                 return OrderDenied(
                     "position_side_mismatch",
                     f"requested={requested_side},actual={actual_side}",
@@ -924,40 +985,99 @@ def _zone_boundary_price(order_plan: dict[str, Any], instrument: InstrumentSpec)
     return _round_to_increment(boundary, instrument.price_increment, "price")
 
 
+def _same_side_cache_position(
+    context: PlannerContext,
+    expected_side: str,
+) -> PositionSnapshot | None:
+    """Intent-book cache hit. Hedge mode must not use the first nonzero book."""
+
+    for position in _context_positions(context):
+        try:
+            quantity = Decimal(str(position.quantity))
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if quantity == Decimal("0"):
+            continue
+        if str(position.side).upper() == expected_side:
+            return position
+    return None
+
+
+def _opposite_side_cache_position(
+    context: PlannerContext,
+    expected_side: str,
+) -> PositionSnapshot | None:
+    for position in _context_positions(context):
+        try:
+            quantity = Decimal(str(position.quantity))
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if quantity == Decimal("0"):
+            continue
+        if str(position.side).upper() != expected_side:
+            return position
+    return None
+
+
+def _risk_increase_state_denial(
+    context: PlannerContext,
+    assessment: Any,
+) -> Optional[OrderDenied]:
+    """UNKNOWN / stale / conflicted reject risk-increasing entry.
+
+    ``reconciled_state is None`` is production-unknown unless ``simulation``
+    is set. Simulation is cache-only compatibility for engines with no venue.
+    """
+
+    if assessment is None:
+        if context.simulation:
+            return None
+        return OrderDenied("position_state_unknown", "reconciled_state_missing")
+    if assessment.state == "unknown":
+        return OrderDenied("position_state_unknown", assessment.detail)
+    if assessment.state == "conflicted":
+        return OrderDenied("position_state_conflicted", assessment.detail)
+    return None
+
+
 def _validate_position(
     action: str,
     side: str,
     context: PlannerContext,
     instrument_id: str,
 ) -> Optional[OrderDenied]:
-    position = context.position
-    cache_empty = position is None or Decimal(str(position.quantity)) == Decimal("0")
-    if (
-        cache_empty
-        and action == OPEN_POSITION
-        and context.reconciled_state is not None
-    ):
-        # Cache blindness on an open: venue evidence restores the legacy
-        # position_exists guard the empty cache lost. Advisory-only beyond
-        # that (owner-operated account, 2026-08-28 operator directive):
-        # UNKNOWN/CONFLICTED fall through to legacy behavior instead of
-        # blocking the owner's order.
-        expected_side = "LONG" if side == "BUY" else "SHORT"
-        assessment = _reconciled_assessment(context, instrument_id, expected_side)
+    expected_side = "LONG" if side == "BUY" else "SHORT"
+    cache_position = _same_side_cache_position(context, expected_side)
+    assessment = _reconciled_assessment(context, instrument_id, expected_side)
+
+    if action == OPEN_POSITION:
+        untrusted = _risk_increase_state_denial(context, assessment)
+        if untrusted is not None:
+            return untrusted
+        if cache_position is not None:
+            return OrderDenied("position_exists", instrument_id)
         if assessment is not None and assessment.state == "known_open":
             return OrderDenied("position_exists", assessment.detail)
-    if action == OPEN_POSITION:
-        if position is not None and Decimal(str(position.quantity)) != Decimal("0"):
-            return OrderDenied("position_exists", instrument_id)
         return None
 
-    if position is None or Decimal(str(position.quantity)) == Decimal("0"):
+    if action == ADD_POSITION:
+        untrusted = _risk_increase_state_denial(context, assessment)
+        if untrusted is not None:
+            return untrusted
+        if assessment is not None:
+            if assessment.state == "known_flat":
+                return OrderDenied("position_required", instrument_id)
+            if assessment.state == "known_open":
+                return None
+        if cache_position is not None:
+            return None
+        opposite = _opposite_side_cache_position(context, expected_side)
+        if opposite is not None:
+            return OrderDenied("position_side_mismatch", opposite.side.upper())
         return OrderDenied("position_required", instrument_id)
 
-    position_side = position.side.upper()
-    expected = "LONG" if side == "BUY" else "SHORT"
-    if position_side != expected:
-        return OrderDenied("position_side_mismatch", position_side)
+    if cache_position is None:
+        return OrderDenied("position_required", instrument_id)
     return None
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -14,6 +15,11 @@ SERVICE_ROOT = REPO_ROOT / "services" / "nautilus-node"
 sys.path.insert(0, str(SERVICE_ROOT))
 
 from projection.contracts import ApprovedTradeIntentV1, IntentAction  # noqa: E402
+from projection.event_mapper import (  # noqa: E402
+    ORDER_EVENT_TYPES,
+    ProjectionConfig,
+    ProjectionEventMapper,
+)
 
 
 def _intent_payload() -> dict:
@@ -63,3 +69,26 @@ def test_projection_contract_rejects_invalid_management_sizing() -> None:
 
     with pytest.raises(ValidationError, match="management actions must not carry sizing"):
         ApprovedTradeIntentV1.model_validate(payload)
+
+
+def test_order_denied_is_mapped_to_execution_envelope() -> None:
+    assert "OrderDenied" in ORDER_EVENT_TYPES
+    mapper = ProjectionEventMapper(
+        ProjectionConfig(node_id="node-b", account_id="account-b")
+    )
+    intent_id = uuid4()
+    client_order_id = f"B{intent_id.hex}01"
+    envelope = mapper.to_envelope(
+        SimpleNamespace(
+            event_type="OrderDenied",
+            client_order_id=client_order_id,
+            instrument_id="SOLUSDT-PERP.BINANCE",
+            reason="position_exists",
+            ts_event=datetime(2026, 8, 8, 12, tzinfo=timezone.utc),
+        )
+    )
+    assert envelope is not None
+    assert envelope.event_type == "OrderDenied"
+    assert envelope.client_order_id == client_order_id
+    assert envelope.intent_id == intent_id
+    assert envelope.payload.get("reason") == "position_exists"

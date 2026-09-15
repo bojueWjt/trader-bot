@@ -76,10 +76,13 @@
       "transitions": [
         { "from": "planned", "to": "pending_submit", "trigger": "plan_committed" },
         { "from": "planned", "to": "denied", "trigger": "risk_denied_pre_submit" },
+        { "from": "planned", "to": "denied", "trigger": "OrderDenied" },
         { "from": "pending_submit", "to": "submitted", "trigger": "OrderSubmitted" },
         { "from": "pending_submit", "to": "failed", "trigger": "submit_failed_terminal" },
+        { "from": "pending_submit", "to": "denied", "trigger": "OrderDenied" },
         { "from": "submitted", "to": "accepted", "trigger": "OrderAccepted" },
         { "from": "submitted", "to": "rejected", "trigger": "OrderRejected" },
+        { "from": "submitted", "to": "denied", "trigger": "OrderDenied" },
         { "from": "accepted", "to": "working", "trigger": "order_live_on_book" },
         { "from": "accepted", "to": "partially_filled", "trigger": "OrderFilled_partial" },
         { "from": "accepted", "to": "filled", "trigger": "OrderFilled_full" },
@@ -110,6 +113,7 @@
         "OrderFilled": "derive",
         "OrderCanceled": "cancelled",
         "OrderRejected": "rejected",
+        "OrderDenied": "denied",
         "OrderExpired": "expired",
         "OrderUpdated": "self",
         "OrderPendingUpdate": "self",
@@ -117,6 +121,7 @@
       },
       "event_state_map_notes": {
         "OrderFilled": "Reducer derives 'filled' when leaves_qty<=0 (or filled_qty>=quantity) else 'partially_filled'.",
+        "OrderDenied": "Maps to existing failure terminal 'denied'. Explicit edges from planned, pending_submit, and submitted only; accepted/working/partially_filled/filled are not overlayed.",
         "OrderUpdated": "Replace/move-stop acknowledgement; macro-state unchanged (working stays working).",
         "OrderPendingUpdate": "In-flight modify; macro-state unchanged until OrderUpdated or rejection."
       }

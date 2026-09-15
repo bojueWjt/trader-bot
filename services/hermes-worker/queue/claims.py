@@ -27,7 +27,30 @@ REQUIRED_COLUMNS = {
     "error",
     "created_at",
     "lease_expires_at",
+    "attempt",
+    "claim_token",
+    "processing_purpose",
 }
+
+PROCESSING_PURPOSE_LEGACY = "legacy"
+PROCESSING_PURPOSE_SHADOW = "shadow"
+
+# Hermes claim_token is not the node writer fence
+# (x_redis_fencing_epoch / x_runtime_generation / x_lease_fencing_token).
+_RUN_RETURNING = """
+    processing_run_id::text,
+    raw_message_id::text,
+    worker_id,
+    status,
+    lease_expires_at,
+    started_at,
+    finished_at,
+    error,
+    COALESCE(attempt, 0),
+    claim_token::text,
+    account_id,
+    COALESCE(processing_purpose, 'legacy')
+"""
 
 
 @dataclass(frozen=True)
@@ -40,6 +63,10 @@ class ProcessingRun:
     started_at: Any
     finished_at: Any
     error: str | None
+    attempt: int = 0
+    claim_token: str | None = None
+    account_id: str | None = None
+    processing_purpose: str = "legacy"
 
 
 class QueueSchemaError(RuntimeError):
@@ -47,6 +74,10 @@ class QueueSchemaError(RuntimeError):
 
 
 class QueueStateError(RuntimeError):
+    pass
+
+
+class StaleClaimError(QueueStateError):
     pass
 
 
@@ -77,34 +108,51 @@ def claim(
 
             _assert_no_active_run(cur, raw_message_id)
 
-            processing_run_id = str(uuid4())
             cur.execute(
                 """
+                SELECT COALESCE(MAX(attempt), 0)
+                FROM message_processing_runs
+                WHERE raw_message_id = %s
+                  AND COALESCE(processing_purpose, 'legacy') = %s
+                """,
+                (raw_message_id, PROCESSING_PURPOSE_LEGACY),
+            )
+            next_attempt = int(cur.fetchone()[0]) + 1
+            claim_token = str(uuid4())
+            processing_run_id = str(uuid4())
+            cur.execute(
+                f"""
                 INSERT INTO message_processing_runs (
                     processing_run_id,
                     raw_message_id,
                     worker_id,
                     status,
-                    lease_expires_at
+                    lease_expires_at,
+                    attempt,
+                    claim_token,
+                    processing_purpose
                 )
                 VALUES (
                     %s,
                     %s,
                     %s,
                     'started',
-                    now() + (%s * interval '1 second')
+                    now() + (%s * interval '1 second'),
+                    %s,
+                    %s,
+                    %s
                 )
-                RETURNING
-                    processing_run_id::text,
-                    raw_message_id::text,
-                    worker_id,
-                    status,
-                    lease_expires_at,
-                    started_at,
-                    finished_at,
-                    error
+                RETURNING {_RUN_RETURNING}
                 """,
-                (processing_run_id, raw_message_id, worker_id, lease_seconds),
+                (
+                    processing_run_id,
+                    raw_message_id,
+                    worker_id,
+                    lease_seconds,
+                    next_attempt,
+                    claim_token,
+                    PROCESSING_PURPOSE_LEGACY,
+                ),
             )
             run = _run_from_row(cur.fetchone())
             _insert_run_audit(
@@ -114,6 +162,8 @@ def claim(
                 {
                     "outbox_event_id": outbox_event_id,
                     "lease_seconds": lease_seconds,
+                    "attempt": run.attempt,
+                    "claim_token": run.claim_token,
                 },
             )
             return run
@@ -132,42 +182,26 @@ def mark_processing(
             _assert_schema_compatible(cur)
             if lease_seconds is None:
                 cur.execute(
-                    """
+                    f"""
                     UPDATE message_processing_runs
                     SET status = 'processing'
                     WHERE processing_run_id = %s
                       AND status = 'started'
                       AND lease_expires_at > now()
-                    RETURNING
-                        processing_run_id::text,
-                        raw_message_id::text,
-                        worker_id,
-                        status,
-                        lease_expires_at,
-                        started_at,
-                        finished_at,
-                        error
+                    RETURNING {_RUN_RETURNING}
                     """,
                     (str(processing_run_id),),
                 )
             else:
                 cur.execute(
-                    """
+                    f"""
                     UPDATE message_processing_runs
                     SET status = 'processing',
                         lease_expires_at = now() + (%s * interval '1 second')
                     WHERE processing_run_id = %s
                       AND status = 'started'
                       AND lease_expires_at > now()
-                    RETURNING
-                        processing_run_id::text,
-                        raw_message_id::text,
-                        worker_id,
-                        status,
-                        lease_expires_at,
-                        started_at,
-                        finished_at,
-                        error
+                    RETURNING {_RUN_RETURNING}
                     """,
                     (lease_seconds, str(processing_run_id)),
                 )
@@ -181,16 +215,38 @@ def mark_processing(
             return run
 
 
-def complete_run(conn: PsycopgConnection, processing_run_id: UUID | str) -> ProcessingRun:
-    return _finish_run(conn, processing_run_id, "succeeded", None)
+def complete_run(
+    conn: PsycopgConnection,
+    processing_run_id: UUID | str,
+    *,
+    claim_token: str | None = None,
+) -> ProcessingRun:
+    """Legacy outbox completion. Optional claim_token is cutover compatibility.
+
+    New signal tasks must use signal_queue.complete_signal_task, which requires
+    the current claim_token and an unexpired lease.
+    """
+    return _finish_run(
+        conn, processing_run_id, "succeeded", None, claim_token=claim_token
+    )
 
 
 def fail_run(
-    conn: PsycopgConnection, processing_run_id: UUID | str, error: str
+    conn: PsycopgConnection,
+    processing_run_id: UUID | str,
+    error: str,
+    *,
+    claim_token: str | None = None,
 ) -> ProcessingRun:
     if not error:
         raise ValueError("error is required")
-    return _finish_run(conn, processing_run_id, "hermes_failed", error)
+    return _finish_run(
+        conn,
+        processing_run_id,
+        "hermes_failed",
+        error,
+        claim_token=claim_token,
+    )
 
 
 def mark_outbox_failed(
@@ -202,22 +258,15 @@ def mark_outbox_failed(
         with conn.cursor() as cur:
             _assert_schema_compatible(cur)
             cur.execute(
-                """
+                f"""
                 UPDATE message_processing_runs
                 SET status = 'outbox_failed',
                     finished_at = now(),
                     error = %s
                 WHERE raw_message_id = %s
                   AND status IN ('started', 'processing')
-                RETURNING
-                    processing_run_id::text,
-                    raw_message_id::text,
-                    worker_id,
-                    status,
-                    lease_expires_at,
-                    started_at,
-                    finished_at,
-                    error
+                  AND COALESCE(processing_purpose, 'legacy') = 'legacy'
+                RETURNING {_RUN_RETURNING}
                 """,
                 (_format_error(error), str(raw_message_id)),
             )
@@ -225,7 +274,7 @@ def mark_outbox_failed(
             if row is None:
                 processing_run_id = str(uuid4())
                 cur.execute(
-                    """
+                    f"""
                     INSERT INTO message_processing_runs (
                         processing_run_id,
                         raw_message_id,
@@ -233,24 +282,18 @@ def mark_outbox_failed(
                         status,
                         lease_expires_at,
                         finished_at,
-                        error
+                        error,
+                        processing_purpose
                     )
-                    VALUES (%s, %s, %s, 'outbox_failed', now(), now(), %s)
-                    RETURNING
-                        processing_run_id::text,
-                        raw_message_id::text,
-                        worker_id,
-                        status,
-                        lease_expires_at,
-                        started_at,
-                        finished_at,
-                        error
+                    VALUES (%s, %s, %s, 'outbox_failed', now(), now(), %s, %s)
+                    RETURNING {_RUN_RETURNING}
                     """,
                     (
                         processing_run_id,
                         str(raw_message_id),
                         "outbox_publisher",
                         _format_error(error),
+                        PROCESSING_PURPOSE_LEGACY,
                     ),
                 )
                 row = cur.fetchone()
@@ -264,33 +307,56 @@ def _finish_run(
     processing_run_id: UUID | str,
     status: str,
     error: str | None,
+    *,
+    claim_token: str | None = None,
 ) -> ProcessingRun:
     with conn:
         with conn.cursor() as cur:
             _assert_schema_compatible(cur)
-            cur.execute(
-                """
-                UPDATE message_processing_runs
-                SET status = %s,
-                    finished_at = now(),
-                    error = %s
-                WHERE processing_run_id = %s
-                  AND status IN ('started', 'processing')
-                  AND lease_expires_at > now()
-                RETURNING
-                    processing_run_id::text,
-                    raw_message_id::text,
-                    worker_id,
-                    status,
-                    lease_expires_at,
-                    started_at,
-                    finished_at,
-                    error
-                """,
-                (status, _format_error(error) if error is not None else None, str(processing_run_id)),
-            )
+            if claim_token is not None:
+                cur.execute(
+                    f"""
+                    UPDATE message_processing_runs
+                    SET status = %s,
+                        finished_at = now(),
+                        error = %s
+                    WHERE processing_run_id = %s
+                      AND claim_token = %s
+                      AND status IN ('started', 'processing')
+                      AND lease_expires_at > now()
+                    RETURNING {_RUN_RETURNING}
+                    """,
+                    (
+                        status,
+                        _format_error(error) if error is not None else None,
+                        str(processing_run_id),
+                        str(claim_token),
+                    ),
+                )
+            else:
+                cur.execute(
+                    f"""
+                    UPDATE message_processing_runs
+                    SET status = %s,
+                        finished_at = now(),
+                        error = %s
+                    WHERE processing_run_id = %s
+                      AND status IN ('started', 'processing')
+                      AND lease_expires_at > now()
+                    RETURNING {_RUN_RETURNING}
+                    """,
+                    (
+                        status,
+                        _format_error(error) if error is not None else None,
+                        str(processing_run_id),
+                    ),
+                )
             row = cur.fetchone()
             if row is None:
+                if claim_token is not None:
+                    raise StaleClaimError(
+                        f"processing run {processing_run_id} rejected stale or expired claim_token"
+                    )
                 raise QueueStateError(
                     f"processing run {processing_run_id} is not active or its lease expired"
                 )
@@ -340,22 +406,14 @@ def _assert_schema_compatible(cur) -> None:
 
 def _expire_timed_out_runs(cur) -> None:
     cur.execute(
-        """
+        f"""
         UPDATE message_processing_runs
         SET status = 'hermes_timeout',
             finished_at = now(),
             error = COALESCE(error, 'lease expired before completion')
         WHERE status IN ('started', 'processing')
           AND lease_expires_at <= now()
-        RETURNING
-            processing_run_id::text,
-            raw_message_id::text,
-            worker_id,
-            status,
-            lease_expires_at,
-            started_at,
-            finished_at,
-            error
+        RETURNING {_RUN_RETURNING}
         """
     )
     for row in cur.fetchall():
@@ -380,6 +438,7 @@ def _select_claim_candidate(cur):
               FROM message_processing_runs active
               WHERE active.raw_message_id::text = ob.aggregate_id
                 AND active.status IN ('started', 'processing')
+                AND COALESCE(active.processing_purpose, 'legacy') = 'legacy'
           )
         ORDER BY ob.created_at ASC, ob.outbox_event_id ASC
         LIMIT 1
@@ -389,21 +448,24 @@ def _select_claim_candidate(cur):
     return cur.fetchone()
 
 
-def _assert_no_active_run(cur, raw_message_id: str) -> None:
+def _assert_no_active_run(
+    cur, raw_message_id: str, *, purpose: str = PROCESSING_PURPOSE_LEGACY
+) -> None:
     cur.execute(
         """
         SELECT processing_run_id::text
         FROM message_processing_runs
         WHERE raw_message_id = %s
           AND status IN ('started', 'processing')
+          AND COALESCE(processing_purpose, 'legacy') = %s
         FOR UPDATE
         """,
-        (raw_message_id,),
+        (raw_message_id, purpose),
     )
     row = cur.fetchone()
     if row is not None:
         raise QueueStateError(
-            f"raw message {raw_message_id} already has active processing run {row[0]}"
+            f"raw message {raw_message_id} already has active {purpose} processing run {row[0]}"
         )
 
 
@@ -442,6 +504,16 @@ def _insert_run_audit(
 
 
 def _run_from_row(row) -> ProcessingRun:
+    attempt = 0
+    claim_token = None
+    account_id = None
+    if len(row) > 8:
+        attempt = int(row[8] or 0)
+        claim_token = row[9]
+        account_id = row[10]
+    processing_purpose = "legacy"
+    if len(row) > 11:
+        processing_purpose = str(row[11] or "legacy")
     return ProcessingRun(
         processing_run_id=row[0],
         raw_message_id=row[1],
@@ -451,6 +523,10 @@ def _run_from_row(row) -> ProcessingRun:
         started_at=row[5],
         finished_at=row[6],
         error=row[7],
+        attempt=attempt,
+        claim_token=claim_token,
+        account_id=account_id,
+        processing_purpose=processing_purpose,
     )
 
 

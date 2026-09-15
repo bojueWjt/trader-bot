@@ -28,15 +28,21 @@ class ExchangeStateRecorderTest(unittest.TestCase):
 
         self.assertEqual(module.DEFAULT_REFRESH_INTERVAL_SECONDS, 3)
 
-    def test_live_mirror_matches_deployment_source(self) -> None:
-        mirror_path = (
-            REPO_ROOT / ".live-mirror" / "tools" / "exchange_state_recorder.py"
+    def test_canonical_recorder_is_deployment_source(self) -> None:
+        canonical = (
+            REPO_ROOT / "services" / "control-plane" / "tools" / "exchange_state_recorder.py"
         )
-
+        self.assertEqual(MODULE_PATH.resolve(), canonical.resolve())
+        self.assertTrue(canonical.is_file())
+        module = _load_module()
+        self.assertEqual(module.DEFAULT_REFRESH_INTERVAL_SECONDS, 3)
         self.assertEqual(
-            mirror_path.read_bytes(),
-            MODULE_PATH.read_bytes(),
+            set(module.ACCOUNTS),
+            {"account-a", "account-b", "account-c", "account-d"},
         )
+        source = canonical.read_text(encoding="utf-8")
+        self.assertIn("trader-v3-node-a", source)
+        self.assertIn("BINANCE_ACCOUNT_A", source)
 
     def test_recorder_covers_all_four_execution_accounts(self) -> None:
         module = _load_module()

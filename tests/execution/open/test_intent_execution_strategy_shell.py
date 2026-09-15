@@ -49,6 +49,10 @@ from runtime.exchange_cancel_adapter import (  # noqa: E402
     ExchangeOrderRef,
     TerminalExchangeWorker,
 )
+from projection.event_mapper import (  # noqa: E402
+    ProjectionConfig,
+    ProjectionEventMapper,
+)
 from risk.config import (  # noqa: E402
     RiskLimitConfig,
     build_live_risk_engine_kwargs,
@@ -456,23 +460,26 @@ class StrategyShellTest(unittest.TestCase):
             first = _durable_entry_intent()
             second = _durable_entry_intent()
 
-            strategy._handle_intent(first)
+            try:
+                strategy._handle_intent(first)
 
-            self.assertIn(
-                "SOLUSDT",
-                strategy.symbol_open_freezes,
-            )
+                self.assertIn(
+                    "SOLUSDT",
+                    strategy.symbol_open_freezes,
+                )
 
-            strategy._handle_intent(second)
+                strategy._handle_intent(second)
 
-            self.assertEqual(
-                strategy.submitted_orders,
-                [encode_client_order_id(first.intent_id)],
-            )
-            self.assertEqual(
-                strategy.denials[-1].reason,
-                "symbol_new_open_frozen",
-            )
+                self.assertEqual(
+                    strategy.submitted_orders,
+                    [encode_client_order_id(first.intent_id)],
+                )
+                self.assertEqual(
+                    strategy.denials[-1].reason,
+                    "symbol_new_open_frozen",
+                )
+            finally:
+                strategy.on_stop()
 
     def test_dispatched_management_replay_keeps_symbol_open(self) -> None:
         for action in (
@@ -515,13 +522,16 @@ class StrategyShellTest(unittest.TestCase):
                     inbox.register_received(identity, _durable_payload(intent))
                     inbox.begin_dispatch(identity, (client_order_id,))
 
-                    strategy._handle_intent(intent)
-                    strategy._handle_intent(_durable_entry_intent())
+                    try:
+                        strategy._handle_intent(intent)
+                        strategy._handle_intent(_durable_entry_intent())
 
-                    self.assertIn(client_order_id, strategy._pending_order_confirmations)
-                    self.assertIn("SOLUSDT", strategy.symbol_open_freezes)
-                    self.assertEqual(strategy.denials[-1].reason, "symbol_new_open_frozen")
-                    self.assertEqual(strategy.submitted_orders, [])
+                        self.assertIn(client_order_id, strategy._pending_order_confirmations)
+                        self.assertIn("SOLUSDT", strategy.symbol_open_freezes)
+                        self.assertEqual(strategy.denials[-1].reason, "symbol_new_open_frozen")
+                        self.assertEqual(strategy.submitted_orders, [])
+                    finally:
+                        strategy.on_stop()
 
     def test_expired_dispatched_cancel_recovery_warns_and_skips(self) -> None:
         with tempfile.TemporaryDirectory() as state_dir:
@@ -863,10 +873,20 @@ class StrategyShellTest(unittest.TestCase):
                 del callback
                 timers[name] = interval
 
-        strategy = IntentExecutionStrategy(
-            IntentExecutionStrategyConfig(account_id="account-a")
+        class _ClockStubStrategy(IntentExecutionStrategy):
+            # Nautilus Actor.clock is read-only; expose a test clock via subclass.
+            def __init__(self, config, clock) -> None:
+                object.__setattr__(self, "_test_clock", clock)
+                super().__init__(config)
+
+            @property
+            def clock(self):
+                return object.__getattribute__(self, "_test_clock")
+
+        strategy = _ClockStubStrategy(
+            IntentExecutionStrategyConfig(account_id="account-a"),
+            _Clock(),
         )
-        strategy.clock = _Clock()
 
         strategy._register_exchange_state_timer()
 
@@ -4164,6 +4184,7 @@ class StrategyShellTest(unittest.TestCase):
                 first.on_order_denied(
                     SimpleNamespace(client_order_id=client_order_id)
                 )
+                self.assertTrue(first.wait_for_durable_io(timeout_seconds=1.0))
             finally:
                 first.on_stop()
 
@@ -4172,8 +4193,9 @@ class StrategyShellTest(unittest.TestCase):
             self.assertTrue(record)
             self.assertEqual(
                 record.state,
-                IntentExecutionState.DISPATCHED,
+                IntentExecutionState.REJECTED,
             )
+            self.assertEqual(record.exchange_confirmed_client_order_ids, ())
 
             restarted = _DurableIntentStrategy(
                 state_path,
@@ -4189,16 +4211,370 @@ class StrategyShellTest(unittest.TestCase):
                 restarted.denials[-1].reason,
                 "duplicate_intent",
             )
-            self.assertEqual(
-                restarted.symbol_open_freezes["SOLUSDT"],
-                str(intent.intent_id),
-            )
             replayed = inbox.get(identity)
             self.assertTrue(replayed)
             self.assertEqual(
                 replayed.state,
-                IntentExecutionState.DISPATCHED,
+                IntentExecutionState.REJECTED,
             )
+            self.assertEqual(replayed.exchange_confirmed_client_order_ids, ())
+
+    def test_order_denied_persists_rejected_and_mapped_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            state_path = Path(state_dir)
+            intent = _durable_entry_intent()
+            identity = _durable_identity(intent)
+            inbox = JsonIntentExecutionInbox(
+                state_path / "intent-execution-inbox.json"
+            )
+            inbox.register_received(identity, _durable_payload(intent))
+            strategy = _DurableIntentStrategy(state_path)
+            acks: list[tuple[Any, Any]] = []
+            envelopes: list[dict[str, Any]] = []
+            strategy.set_denial_reporter(
+                lambda item, denial: acks.append((item, denial))
+            )
+            strategy.set_protection_event_reporter(
+                lambda event: envelopes.append(event) or True
+            )
+            strategy._handle_intent(intent)
+            client_order_id = encode_client_order_id(intent.intent_id)
+            try:
+                strategy.on_order_denied(
+                    SimpleNamespace(
+                        client_order_id=client_order_id,
+                        reason="Filter failure (-2010)",
+                    )
+                )
+                self.assertTrue(strategy.wait_for_durable_io(timeout_seconds=1.0))
+            finally:
+                strategy.on_stop()
+
+            record = inbox.get(identity)
+            self.assertTrue(record)
+            self.assertEqual(record.state, IntentExecutionState.REJECTED)
+            self.assertEqual(record.exchange_confirmed_client_order_ids, ())
+            self.assertIn("Filter failure", record.rejection_reason)
+            self.assertEqual(len(acks), 1)
+            self.assertEqual(acks[0][1].reason, "order_denied")
+            self.assertEqual(envelopes[-1]["event_type"], "OrderDenied")
+            self.assertEqual(envelopes[-1]["client_order_id"], client_order_id)
+            mapper = _order_denied_mapper()
+            mapped = mapper.to_envelope(
+                SimpleNamespace(
+                    event_type="OrderDenied",
+                    client_order_id=client_order_id,
+                    instrument_id=intent.instrument_id,
+                    reason="Filter failure (-2010)",
+                    ts_event=datetime(2026, 8, 8, 12, tzinfo=timezone.utc),
+                )
+            )
+            self.assertIsNotNone(mapped)
+            self.assertEqual(mapped.event_type, "OrderDenied")
+            self.assertNotEqual(mapped.event_type, "exchange_confirmed")
+
+    def test_order_denied_fsync_does_not_block_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            state_path = Path(state_dir)
+            intent = _durable_entry_intent()
+            identity = _durable_identity(intent)
+            inbox = JsonIntentExecutionInbox(
+                state_path / "intent-execution-inbox.json"
+            )
+            inbox.register_received(identity, _durable_payload(intent))
+            strategy = _DurableIntentStrategy(state_path)
+            strategy._handle_intent(intent)
+            client_order_id = encode_client_order_id(intent.intent_id)
+            fsync_started = Event()
+            release_fsync = Event()
+            inbox_module = __import__(
+                "runtime.intent_execution_inbox",
+                fromlist=["os"],
+            )
+            original_fsync = inbox_module.os.fsync
+
+            def blocking_fsync(fd: int) -> None:
+                fsync_started.set()
+                release_fsync.wait(timeout=1.0)
+                original_fsync(fd)
+
+            try:
+                with patch.object(inbox_module.os, "fsync", blocking_fsync):
+                    started_at = time.monotonic()
+                    strategy.on_order_denied(
+                        SimpleNamespace(client_order_id=client_order_id)
+                    )
+                    elapsed = time.monotonic() - started_at
+                    self.assertLess(elapsed, 0.01)
+                    self.assertTrue(fsync_started.wait(timeout=1.0))
+                    release_fsync.set()
+                    self.assertTrue(
+                        strategy.wait_for_durable_io(timeout_seconds=1.0)
+                    )
+            finally:
+                release_fsync.set()
+                strategy.on_stop()
+
+            record = inbox.get(identity)
+            self.assertTrue(record)
+            self.assertEqual(record.state, IntentExecutionState.REJECTED)
+
+    def test_unknown_robot_deny_emits_without_inbox_record(self) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            state_path = Path(state_dir)
+            inbox = JsonIntentExecutionInbox(
+                state_path / "intent-execution-inbox.json"
+            )
+            strategy = _DurableIntentStrategy(state_path)
+            envelopes: list[dict[str, Any]] = []
+            strategy.set_protection_event_reporter(
+                lambda event: envelopes.append(event) or True
+            )
+            orphan_intent_id = uuid4()
+            orphan = encode_client_order_id(orphan_intent_id)
+            try:
+                strategy.on_order_denied(
+                    SimpleNamespace(
+                        client_order_id=orphan,
+                        instrument_id="SOLUSDT-PERP.BINANCE",
+                        reason="unknown-legacy",
+                    )
+                )
+                self.assertTrue(strategy.wait_for_durable_io(timeout_seconds=1.0))
+            finally:
+                strategy.on_stop()
+
+            self.assertEqual(strategy.durable_io_halted_reason, "")
+            self.assertEqual(inbox.records(), ())
+            self.assertEqual(len(envelopes), 1)
+            self.assertEqual(envelopes[0]["event_type"], "OrderDenied")
+            self.assertEqual(envelopes[0]["client_order_id"], orphan)
+            self.assertEqual(envelopes[0]["reason"], "unknown-legacy")
+            self.assertEqual(envelopes[0]["intent_id"], str(orphan_intent_id))
+
+    def test_corrupt_inbox_deny_fails_closed_and_keeps_reject_event(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            state_path = Path(state_dir)
+            inbox_path = state_path / "intent-execution-inbox.json"
+            inbox_path.write_text("{not-json", encoding="utf-8")
+            intent = _durable_entry_intent()
+            strategy = _DurableIntentStrategy(state_path)
+            envelopes: list[dict[str, Any]] = []
+            strategy.set_protection_event_reporter(
+                lambda event: envelopes.append(event) or True
+            )
+            client_order_id = encode_client_order_id(intent.intent_id)
+            try:
+                strategy.on_order_denied(
+                    SimpleNamespace(
+                        client_order_id=client_order_id,
+                        instrument_id=intent.instrument_id,
+                        reason="lot-size",
+                    )
+                )
+                self.assertTrue(strategy.wait_for_durable_io(timeout_seconds=1.0))
+            finally:
+                strategy.on_stop()
+
+            self.assertTrue(strategy.durable_io_halted_reason)
+            self.assertIn("unreadable", strategy.durable_io_halted_reason)
+            self.assertEqual(len(envelopes), 1)
+            self.assertEqual(envelopes[0]["event_type"], "OrderDenied")
+            self.assertEqual(envelopes[0]["client_order_id"], client_order_id)
+            self.assertEqual(inbox_path.read_text(encoding="utf-8"), "{not-json")
+
+    def test_planner_order_denied_persists_rejected_inbox(self) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            state_path = Path(state_dir)
+            intent = _durable_entry_intent()
+            identity = _durable_identity(intent)
+            inbox = JsonIntentExecutionInbox(
+                state_path / "intent-execution-inbox.json"
+            )
+            inbox.register_received(identity, _durable_payload(intent))
+            strategy = _DurableIntentStrategy(state_path)
+            envelopes: list[dict[str, Any]] = []
+            strategy.set_protection_event_reporter(
+                lambda event: envelopes.append(event) or True
+            )
+            strategy.set_trading_state_getter(lambda: "HALTED")
+            try:
+                strategy._handle_intent(intent)
+                self.assertTrue(strategy.wait_for_durable_io(timeout_seconds=1.0))
+            finally:
+                strategy.on_stop()
+
+            self.assertEqual(strategy.submitted_orders, [])
+            self.assertEqual(strategy.denials[-1].reason, "trading_not_active")
+            record = inbox.get(identity)
+            self.assertTrue(record)
+            self.assertEqual(record.state, IntentExecutionState.REJECTED)
+            self.assertEqual(record.exchange_confirmed_client_order_ids, ())
+            self.assertEqual(envelopes, [])
+
+    def test_management_complete_does_not_confirm_rejected_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            state_path = Path(state_dir)
+            intent = _durable_entry_intent()
+            identity = _durable_identity(intent)
+            inbox = JsonIntentExecutionInbox(
+                state_path / "intent-execution-inbox.json"
+            )
+            inbox.register_received(identity, _durable_payload(intent))
+            strategy = _DurableIntentStrategy(state_path)
+            strategy._handle_intent(intent)
+            client_order_id = encode_client_order_id(intent.intent_id)
+            sentinel_id = encode_client_order_id(intent.intent_id, sequence=99)
+            try:
+                strategy.on_order_denied(
+                    SimpleNamespace(client_order_id=client_order_id)
+                )
+                self.assertTrue(strategy.wait_for_durable_io(timeout_seconds=1.0))
+                strategy._process_management_complete_task(
+                    _DurableIoTask(
+                        kind=_DurableIoTaskKind.MANAGEMENT_COMPLETE,
+                        intent=intent,
+                        intent_execution=identity,
+                    )
+                )
+                inbox.mark_exchange_confirmed_by_client_order_id(sentinel_id)
+                inbox.mark_exchange_confirmed(identity)
+            finally:
+                strategy.on_stop()
+
+            record = inbox.get(identity)
+            self.assertTrue(record)
+            self.assertEqual(record.state, IntentExecutionState.REJECTED)
+            self.assertEqual(record.exchange_confirmed_client_order_ids, ())
+            self.assertNotIn(sentinel_id, record.exchange_confirmed_client_order_ids)
+
+    def test_partial_confirm_then_deny_restart_and_late_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            state_path = Path(state_dir)
+            intent = _durable_entry_intent()
+            identity = _durable_identity(intent)
+            inbox = JsonIntentExecutionInbox(
+                state_path / "intent-execution-inbox.json"
+            )
+            inbox.register_received(identity, _durable_payload(intent))
+            first = encode_client_order_id(intent.intent_id, sequence=1)
+            second = encode_client_order_id(intent.intent_id, sequence=2)
+            third = encode_client_order_id(intent.intent_id, sequence=3)
+            sentinel = encode_client_order_id(intent.intent_id, sequence=99)
+            inbox.begin_dispatch(identity, (first, second, third))
+            strategy = _DurableIntentStrategy(state_path)
+            try:
+                strategy.on_order_accepted(
+                    SimpleNamespace(client_order_id=first)
+                )
+                self.assertTrue(strategy.wait_for_durable_io(timeout_seconds=1.0))
+                strategy.on_order_denied(
+                    SimpleNamespace(
+                        client_order_id=second,
+                        reason="lot size",
+                    )
+                )
+                self.assertTrue(strategy.wait_for_durable_io(timeout_seconds=1.0))
+            finally:
+                strategy.on_stop()
+
+            record = inbox.get(identity)
+            self.assertTrue(record)
+            self.assertEqual(record.state, IntentExecutionState.REJECTED)
+            self.assertEqual(record.exchange_confirmed_client_order_ids, (first,))
+
+            restarted = _DurableIntentStrategy(state_path)
+            try:
+                restarted._handle_intent(intent)
+                self.assertEqual(restarted.submitted_orders, [])
+                restarted.on_order_accepted(
+                    SimpleNamespace(client_order_id=third)
+                )
+                self.assertTrue(
+                    restarted.wait_for_durable_io(timeout_seconds=1.0)
+                )
+                restarted._process_management_complete_task(
+                    _DurableIoTask(
+                        kind=_DurableIoTaskKind.MANAGEMENT_COMPLETE,
+                        intent=intent,
+                        intent_execution=identity,
+                    )
+                )
+                inbox.mark_exchange_confirmed_by_client_order_id(sentinel)
+            finally:
+                restarted.on_stop()
+
+            replayed = inbox.get(identity)
+            self.assertTrue(replayed)
+            self.assertEqual(replayed.state, IntentExecutionState.REJECTED)
+            self.assertEqual(
+                replayed.exchange_confirmed_client_order_ids,
+                (first, third),
+            )
+            self.assertNotIn(sentinel, replayed.exchange_confirmed_client_order_ids)
+
+    def test_restart_with_denied_cache_order_does_not_confirm_or_resubmit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            state_path = Path(state_dir)
+            intent = _durable_entry_intent()
+            identity = _durable_identity(intent)
+            inbox = JsonIntentExecutionInbox(
+                state_path / "intent-execution-inbox.json"
+            )
+            inbox.register_received(identity, _durable_payload(intent))
+            exchange_order_ids: set[str] = set()
+            first = _DurableIntentStrategy(
+                state_path,
+                exchange_order_ids=exchange_order_ids,
+            )
+            first._handle_intent(intent)
+            client_order_id = encode_client_order_id(intent.intent_id)
+            first.on_stop()
+            restarted = _DurableIntentStrategy(
+                state_path,
+                exchange_order_ids=exchange_order_ids,
+            )
+            restarted.exchange_order_statuses[client_order_id] = "DENIED"
+            try:
+                restarted._handle_intent(intent)
+            finally:
+                restarted.on_stop()
+
+            self.assertEqual(restarted.submitted_orders, [])
+            record = inbox.get(identity)
+            self.assertTrue(record)
+            self.assertEqual(record.state, IntentExecutionState.REJECTED)
+            self.assertEqual(record.exchange_confirmed_client_order_ids, ())
+
+    def test_restart_without_ws_evidence_does_not_resubmit(self) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            state_path = Path(state_dir)
+            intent = _durable_entry_intent()
+            identity = _durable_identity(intent)
+            inbox = JsonIntentExecutionInbox(
+                state_path / "intent-execution-inbox.json"
+            )
+            inbox.register_received(identity, _durable_payload(intent))
+            first = _NoReceiptDurableIntentStrategy(state_path)
+            first._handle_intent(intent)
+            client_order_id = encode_client_order_id(intent.intent_id)
+            first.on_stop()
+            restarted = _DurableIntentStrategy(state_path)
+            try:
+                restarted._handle_intent(intent)
+            finally:
+                restarted.on_stop()
+
+            self.assertEqual(first.submitted_orders, [client_order_id])
+            self.assertEqual(restarted.submitted_orders, [])
+            record = inbox.get(identity)
+            self.assertTrue(record)
+            self.assertEqual(record.state, IntentExecutionState.DISPATCHED)
+            self.assertEqual(record.exchange_confirmed_client_order_ids, ())
 
     def test_durable_confirmation_failure_sticky_halts_once(
         self,
@@ -4633,7 +5009,6 @@ class StrategyShellTest(unittest.TestCase):
         self,
     ) -> None:
         callbacks = (
-            "on_order_rejected",
             "on_order_canceled",
             "on_order_expired",
             "on_order_filled",
@@ -5161,10 +5536,30 @@ class StrategyShellTest(unittest.TestCase):
                     source_client_order_id[1:],
                 )
                 self.assertEqual(strategy.scheduled_delays, [])
-                self.assertEqual(len(reported_events), 1)
+                fallback_events = [
+                    event
+                    for event in reported_events
+                    if event.get("event_type")
+                    == "TakeProfitImmediateMarketFallback"
+                ]
+                denied_events = [
+                    event
+                    for event in reported_events
+                    if event.get("event_type") == "OrderDenied"
+                ]
+                self.assertEqual(len(fallback_events), 1)
                 self.assertEqual(
-                    reported_events[0]["event_type"],
+                    fallback_events[0]["event_type"],
                     "TakeProfitImmediateMarketFallback",
+                )
+                self.assertEqual(len(denied_events), 2)
+                self.assertEqual(
+                    denied_events[0]["client_order_id"],
+                    source_client_order_id,
+                )
+                self.assertEqual(
+                    denied_events[1]["client_order_id"],
+                    source_client_order_id,
                 )
                 remaining = strategy._take_profit_remaining_quantities(
                     strategy._entry_protection_stash[str(intent_id)],
@@ -5237,7 +5632,13 @@ class _ProtectionTerminalStrategy(IntentExecutionStrategy):
         self.persisted_before_schedule: dict = {}
         self.submitted_plans: list = []
         super().__init__(
-            IntentExecutionStrategyConfig(account_id="account-a", trading_state="ACTIVE")
+            IntentExecutionStrategyConfig(
+                account_id="account-a",
+                trading_state="ACTIVE",
+                intent_execution_inbox_path=str(
+                    state_dir / "intent-execution-inbox.json"
+                ),
+            )
         )
 
     def _protection_stash_path(self) -> str:
@@ -5317,8 +5718,16 @@ class _TerminalExchangeStrategy(IntentExecutionStrategy):
             lambda symbol: "4" * 64
         )
         self.set_exchange_evidence_provider(
-            _MarginEvidence("100", "100")
+            _MarginEvidence(
+                "100",
+                "100",
+                position_source=self._fixture_cache_positions,
+                now_source=self._now,
+            )
         )
+
+    def _fixture_cache_positions(self):
+        return self._all_open_positions()
 
     def _publish_terminal_command_result(
         self,
@@ -5495,19 +5904,90 @@ class _ActualProtectionWatchdogStrategy(IntentExecutionStrategy):
         return True
 
 
+def _evidence_position_rows_from_cache(positions) -> list[dict]:
+    rows: list[dict] = []
+    for position in positions or ():
+        quantity = str(
+            getattr(position, "quantity", None)
+            or getattr(position, "qty", None)
+            or "0"
+        )
+        if quantity in {"", "0", "0.0", "0.00"}:
+            continue
+        instrument_id = str(
+            getattr(position, "instrument_id", None)
+            or getattr(position, "id", None)
+            or ""
+        )
+        symbol = instrument_id.split("-", 1)[0].split(".", 1)[0].upper()
+        if not symbol:
+            continue
+        side = str(
+            getattr(position, "side", None)
+            or getattr(position, "position_side", None)
+            or "BOTH"
+        ).upper()
+        rows.append(
+            {
+                "symbol": symbol,
+                "quantity": quantity,
+                "position_side": side,
+                "entry_price": str(
+                    getattr(position, "entry_price", "") or ""
+                ),
+                "mark_price": "",
+            }
+        )
+    return rows
+
+
 class _MarginEvidence:
     def __init__(
         self,
         available_balance: str,
         total_margin_balance: str,
+        *,
+        positions: list[dict] | tuple[dict, ...] = (),
+        fetched_at: datetime | None = None,
+        now_source=None,
+        position_source=None,
     ) -> None:
         self.available_balance = available_balance
         self.total_margin_balance = total_margin_balance
+        self._positions = list(positions)
+        self._fetched_at = fetched_at
+        self._now_source = now_source
+        self._position_source = position_source
 
     def margin_snapshot(self) -> dict:
         return {
             "available_balance": self.available_balance,
             "total_margin_balance": self.total_margin_balance,
+        }
+
+    def cached_snapshot(self, *, max_age_seconds: float) -> dict | bool:
+        if max_age_seconds <= 0:
+            raise ValueError("max_age_seconds must be positive")
+        if self._now_source is not None:
+            fetched_at = self._now_source()
+        elif self._fetched_at is not None:
+            fetched_at = self._fetched_at
+        else:
+            fetched_at = datetime.now(timezone.utc)
+        if self._position_source is not None:
+            positions = _evidence_position_rows_from_cache(
+                self._position_source()
+            )
+        else:
+            positions = [dict(row) for row in self._positions]
+        return {
+            "positions": positions,
+            "regular_orders": [],
+            "algo_orders": [],
+            "positions_fetched_at": fetched_at,
+            "regular_orders_fetched_at": fetched_at,
+            "algo_orders_fetched_at": fetched_at,
+            "fetched_at": fetched_at,
         }
 
 
@@ -5621,8 +6101,20 @@ class _CanarySubmitStrategy(IntentExecutionStrategy):
             lambda symbol: "4" * 64
         )
         self.set_exchange_evidence_provider(
-            _MarginEvidence("100", "100")
+            _MarginEvidence(
+                "100",
+                "100",
+                position_source=self._fixture_cache_positions,
+                now_source=self._now,
+            )
         )
+
+    def _fixture_cache_positions(self):
+        return self._cache_positions("BTCUSDT-PERP.BINANCE")
+
+    def _cache_positions(self, instrument_id):
+        del instrument_id
+        return ()
 
     @property
     def live_canary_store(self) -> JsonLiveCanaryExecutionStore:
@@ -5708,6 +6200,7 @@ class _DurableIntentStrategy(IntentExecutionStrategy):
         self.exchange_order_ids = exchange_order_ids
         if self.exchange_order_ids is None:
             self.exchange_order_ids = set()
+        self.exchange_order_statuses: dict[str, str] = {}
         self.crash_after_submit = crash_after_submit
         super().__init__(
             IntentExecutionStrategyConfig(
@@ -5720,7 +6213,12 @@ class _DurableIntentStrategy(IntentExecutionStrategy):
                 ),
             )
         )
-        self.log = logging.getLogger("strategy.intent_execution_strategy")
+
+    @property
+    def log(self):
+        # Nautilus Actor.log is read-only; keep the Python logger the
+        # durable tests capture with assertLogs.
+        return logging.getLogger("strategy.intent_execution_strategy")
 
     def _instrument_spec(self, instrument_id: str) -> InstrumentSpec:
         return InstrumentSpec(
@@ -5738,7 +6236,9 @@ class _DurableIntentStrategy(IntentExecutionStrategy):
             SimpleNamespace(
                 client_order_id=client_order_id,
                 instrument_id="SOLUSDT-PERP.BINANCE",
-                status="ACCEPTED",
+                status=self.exchange_order_statuses.get(
+                    client_order_id, "ACCEPTED"
+                ),
             )
             for client_order_id in self.exchange_order_ids
         )
@@ -5818,6 +6318,7 @@ class _LiveEntrySubmitStrategy(IntentExecutionStrategy):
         fallback_mark_price: str | bool = False,
         fallback_mark_price_at: datetime | None = None,
         state_dir: Path | None = None,
+        environment: str = "live",
     ) -> None:
         self.submitted_orders: list[str] = []
         self.submitted_order_objects: list[object] = []
@@ -5866,7 +6367,7 @@ class _LiveEntrySubmitStrategy(IntentExecutionStrategy):
                 account_id=account_id,
                 node_id=node_id,
                 trading_state="ACTIVE",
-                environment="live",
+                environment=environment,
                 release_id=release_id,
                 live_canary_execution_path=live_canary_execution_path,
                 intent_execution_inbox_path=intent_execution_inbox_path,
@@ -5877,8 +6378,16 @@ class _LiveEntrySubmitStrategy(IntentExecutionStrategy):
             self._fallback_mark_snapshot
         )
         self.set_exchange_evidence_provider(
-            _MarginEvidence("100", "100")
+            _MarginEvidence(
+                "100",
+                "100",
+                position_source=self._fixture_cache_positions,
+                now_source=self._now,
+            )
         )
+
+    def _fixture_cache_positions(self):
+        return self._cache_positions("")
 
     def _cache_instrument(self, instrument_id: str):
         return SimpleNamespace(id=instrument_id)
@@ -6213,6 +6722,12 @@ def _prepared_zone_ladder_result(
             },
         ),
         outcome={},
+    )
+
+
+def _order_denied_mapper() -> ProjectionEventMapper:
+    return ProjectionEventMapper(
+        ProjectionConfig(node_id="node-b", account_id="account-b")
     )
 
 

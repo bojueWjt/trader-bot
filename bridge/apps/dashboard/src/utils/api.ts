@@ -1113,6 +1113,41 @@ function orderPositionFromApi(value: Record<string, unknown>, index: number): Or
   };
 }
 
+export function normalizeExecutionStatus(value: string): string {
+  const status = value.trim().toLowerCase().replace(/[\s-]/g, "_");
+  if (
+    status === "rejected" ||
+    status === "denied" ||
+    status === "orderdenied" ||
+    status === "order_denied" ||
+    status === "orderrejected" ||
+    status === "order_rejected" ||
+    status === "intent_ack.rejected"
+  ) {
+    return "rejected";
+  }
+  if (
+    status === "accepted" ||
+    status === "orderaccepted" ||
+    status === "order_accepted" ||
+    status === "intent_ack.accepted"
+  ) {
+    return "accepted";
+  }
+  if (status === "filled" || status === "orderfilled" || status === "order_filled") {
+    return "filled";
+  }
+  if (
+    status === "partial" ||
+    status === "partially_filled" ||
+    status === "orderpartiallyfilled" ||
+    status === "order_partially_filled"
+  ) {
+    return "partial";
+  }
+  return value || "--";
+}
+
 function orderFromApi(value: Record<string, unknown>, index: number): OrderCenterOrder {
   const amount = firstNumber([value.amount, value.quantity, value.order_amount]);
   const filled = firstNumber([value.filled, value.filled_amount], 0);
@@ -1134,7 +1169,7 @@ function orderFromApi(value: Record<string, unknown>, index: number): OrderCente
     remaining: firstNumber([value.remaining, value.remaining_amount], Math.max(0, amount - filled)),
     role: firstString([value.role, value.order_role], "entry"),
     side: firstString([value.side], "--"),
-    status: firstString([value.status], "--"),
+    status: normalizeExecutionStatus(firstString([value.status, value.intent_status], "--")),
     tradeId: firstString([value.trade_id, value.position_id]),
     type: firstString([value.order_type, value.type], "--")
   };
@@ -1164,7 +1199,7 @@ function orderEventsFromApi(value: Record<string, unknown>): OrderCenterEvent[] 
   return asRecordArray(value.events ?? value.audit_timeline ?? value.timeline).map((event, index) => ({
     id: firstString([event.event_id, event.id], `event-${index}`),
     message: firstString([event.message, event.summary, event.detail, event.status], "order event"),
-    status: firstString([event.status], "--"),
+    status: normalizeExecutionStatus(firstString([event.status, event.event_type], "--")),
     time: firstString([event.occurred_at, event.generated_at, event.created_at, event.timestamp], "--"),
     type: firstString([event.event_type, event.type], "event")
   }));
@@ -1399,7 +1434,8 @@ function reportFromPayload(payload: Record<string, unknown>, date: string, quali
     date,
     funnel: {
       closed: closedTrades,
-      entered: firstNumber([signals.executed_count, signals.accepted_count]),
+      // accepted/HTTP 200 is not a fill; only executed/filled counts as entered.
+      entered: firstNumber([signals.executed_count, signals.filled_count]),
       scanned: asNumber(signals.received_count),
       signaled: asNumber(signals.accepted_count) + asNumber(signals.rejected_count)
     },
