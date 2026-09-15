@@ -96,6 +96,7 @@ describe("manual position operator API", () => {
       expect(request.method).toBe("POST");
       expect(new Headers(request.headers).get("Authorization")).toBe("Bearer existing-login-session");
       expect(body).toMatchObject({ ...expected, account_id: "account-c", symbol: "BTCUSDT", side: "short", position_side: "short", target_position_id: position.id, authorized_by_type: "user" });
+      expect(body.target_position_id).toBe(position.id);
       expect(body).not.toHaveProperty("actor");
       expect(body).not.toHaveProperty("authorized_by_id");
       expect(body).not.toHaveProperty("args");

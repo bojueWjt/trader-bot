@@ -98,7 +98,19 @@ def _insert_node(conn, *, account_id: str, halt_reason: str | None = "manual-hal
         )
 
 
-def _insert_mirror(conn, *, account_id: str, open_orders=None, algo_orders=None) -> None:
+def _venue_position(*, symbol: str, side: str, quantity: str) -> dict:
+    return {
+        "symbol": symbol,
+        "position_side": side.upper(),
+        "position_amt": quantity,
+        "entry_price": "100",
+        "mark_price": "101",
+        "unrealized_pnl": "1",
+        "leverage": "1",
+    }
+
+
+def _insert_mirror(conn, *, account_id: str, open_orders=None, algo_orders=None, positions=None) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -109,7 +121,7 @@ def _insert_mirror(conn, *, account_id: str, open_orders=None, algo_orders=None)
                 account_id,
                 Json(
                     {
-                        "positions": [],
+                        "positions": list(positions or []),
                         "open_orders": list(open_orders or []),
                         "algo_orders": list(algo_orders or []),
                     }
@@ -128,7 +140,11 @@ def _seed_four_accounts(conn) -> None:
             _insert_closed_position(conn, account_id=account_id, symbol="BTCUSDT")
             _insert_order(conn, account_id=account_id, symbol="ETHUSDT")
             _insert_node(conn, account_id=account_id)
-            _insert_mirror(conn, account_id=account_id)
+            _insert_mirror(
+                conn,
+                account_id=account_id,
+                positions=[_venue_position(symbol="ETHUSDT", side="LONG", quantity="1.25")],
+            )
 
 
 def test_t1_8_positions_orders_trades_rows_have_account_id(client, db_conn):
@@ -184,6 +200,7 @@ def test_t1_3_tp_only_is_partial(client, db_conn):
         _insert_mirror(
             db_conn,
             account_id="account-a",
+            positions=[_venue_position(symbol="ETHUSDT", side="LONG", quantity="1.25")],
             algo_orders=[
                 {
                     "symbol": "ETHUSDT",
@@ -208,7 +225,11 @@ def test_t1_3_no_protection_is_unprotected(client, db_conn):
         _insert_open_position(
             db_conn, account_id="account-a", symbol="ETHUSDT", side="short", quantity="2"
         )
-        _insert_mirror(db_conn, account_id="account-a")
+        _insert_mirror(
+            db_conn,
+            account_id="account-a",
+            positions=[_venue_position(symbol="ETHUSDT", side="SHORT", quantity="2")],
+        )
     row = client.get("/v1/positions", headers=AUTH).json()["positions"][0]
     assert row["protection"]["status"] == "unprotected"
     assert row["protection"]["stop_loss"] == []
@@ -224,6 +245,7 @@ def test_t1_3_sl_only_in_algo_orders_is_not_unprotected(client, db_conn):
         _insert_mirror(
             db_conn,
             account_id="account-a",
+            positions=[_venue_position(symbol="ETHUSDT", side="LONG", quantity="1.25")],
             open_orders=[],
             algo_orders=[
                 {
@@ -244,3 +266,35 @@ def test_t1_3_sl_only_in_algo_orders_is_not_unprotected(client, db_conn):
     assert row["protection"]["stop_loss"][0]["is_bot_order"] is True
     assert "quantity" in row
     assert "side" in row
+
+
+def test_open_positions_follow_venue_not_stale_projection(client, db_conn):
+    with transaction(db_conn):
+        _seed_account(db_conn, "account-c")
+        _insert_open_position(
+            db_conn, account_id="account-c", symbol="TAOUSDT", side="long", quantity="0.308"
+        )
+        _insert_open_position(
+            db_conn, account_id="account-c", symbol="ZECUSDT", side="short", quantity="0.864"
+        )
+        _insert_mirror(
+            db_conn,
+            account_id="account-c",
+            positions=[_venue_position(symbol="TAOUSDT", side="LONG", quantity="9.890")],
+        )
+    rows = client.get("/v1/positions", headers=AUTH).json()["positions"]
+    assert [row["position_id"] for row in rows] == ["TAOUSDT-PERP.BINANCE-LONG"]
+    assert rows[0]["quantity"] == 9.89
+    assert rows[0]["side"] == "long"
+    assert rows[0]["account_id"] == "account-c"
+
+
+def test_flat_venue_hides_projection_ghosts(client, db_conn):
+    with transaction(db_conn):
+        _seed_account(db_conn, "account-d")
+        _insert_open_position(
+            db_conn, account_id="account-d", symbol="ETHUSDT", side="long", quantity="1.936"
+        )
+        _insert_mirror(db_conn, account_id="account-d", positions=[])
+    rows = client.get("/v1/positions", headers=AUTH).json()["positions"]
+    assert rows == []

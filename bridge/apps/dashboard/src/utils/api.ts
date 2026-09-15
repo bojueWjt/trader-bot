@@ -1061,6 +1061,13 @@ function positionSideFromApi(value: Record<string, unknown>): "long" | "short" |
   if (side === "long" || side === "buy") {
     return "long";
   }
+  const signed = firstNumber([value.quantity, value.size, value.position_amt, value.amount], Number.NaN);
+  if (Number.isFinite(signed) && signed < 0) {
+    return "short";
+  }
+  if (Number.isFinite(signed) && signed > 0) {
+    return "long";
+  }
   return "";
 }
 

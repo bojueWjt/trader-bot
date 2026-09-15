@@ -81,6 +81,12 @@ from snapshot import (  # noqa: E402
     validate_snapshot,
 )
 from position_protection import protection_status  # noqa: E402
+from position_mapping import (  # noqa: E402
+    annotate_with_projection,
+    canonical_position_id,
+    open_books_from_mirror_payload,
+    position_ids_equivalent,
+)
 from security.permissions import AuthRequired, PermissionDenied  # noqa: E402
 from security.principal import (  # noqa: E402
     PrincipalKind,
@@ -5367,6 +5373,98 @@ def _symbol(instrument_id: str | None) -> str | None:
     return instrument_id.split("-", 1)[0]
 
 
+def _open_positions_for_api(
+    projection_rows: list[dict],
+    mirrors: dict[str, dict],
+) -> list[dict]:
+    """Venue books are authoritative; projection only annotates matching books."""
+    positions: list[dict] = []
+    mirrored_accounts = {str(account_id) for account_id in mirrors}
+    for account_id, payload in mirrors.items():
+        if not isinstance(payload, dict):
+            payload = {}
+        for venue_row in open_books_from_mirror_payload(str(account_id), payload):
+            merged = annotate_with_projection(venue_row, projection_rows) or dict(venue_row)
+            qty = _f(merged.get("quantity"))
+            entry = _f(merged.get("entry_price"))
+            notional = None
+            if qty is not None and entry is not None:
+                notional = qty * entry
+            protection = protection_status(
+                symbol=merged.get("instrument_symbol"),
+                position_side=merged.get("side"),
+                quantity=merged.get("quantity"),
+                open_orders=payload.get("open_orders") or [],
+                algo_orders=payload.get("algo_orders") or [],
+            )
+            positions.append(
+                {
+                    "position_id": merged.get("position_id"),
+                    "instrument_symbol": merged.get("instrument_symbol"),
+                    "instrument_id": merged.get("instrument_id"),
+                    "side": merged.get("side"),
+                    "entry_price": entry,
+                    "mark_price": _f(merged.get("mark_price")),
+                    "unrealized_pnl": _f(merged.get("unrealized_pnl")),
+                    "quantity": qty,
+                    "size": qty,
+                    "notional": notional,
+                    "status": "open",
+                    "opened_at": _iso(merged.get("opened_at")),
+                    "leverage": _f(merged.get("leverage")),
+                    "stop_loss": _f(merged.get("stop_loss")),
+                    "take_profit": _f(merged.get("take_profit")),
+                    "signal_id": merged.get("signal_id") or merged.get("intent_id"),
+                    "intent_id": merged.get("intent_id"),
+                    "raw_signal": merged.get("raw_signal"),
+                    "account_id": merged.get("account_id"),
+                    "protection": protection,
+                }
+            )
+    for row in projection_rows:
+        account_id = str(row.get("account_id") or "")
+        if account_id in mirrored_accounts:
+            continue
+        payload = row.get("payload") or {}
+        qty = _f(row.get("quantity"))
+        entry = _f(row.get("avg_entry_price"))
+        notional = _f(payload.get("notional"))
+        if notional is None and qty is not None and entry is not None:
+            notional = qty * entry
+        canonical = canonical_position_id(row.get("instrument_id"), row.get("side"))
+        positions.append(
+            {
+                "position_id": canonical or row.get("position_id"),
+                "instrument_symbol": _symbol(row.get("instrument_id")),
+                "instrument_id": row.get("instrument_id"),
+                "side": row.get("side"),
+                "entry_price": entry,
+                "mark_price": _f(row.get("mark_price")),
+                "unrealized_pnl": _f(row.get("unrealized_pnl")),
+                "quantity": qty,
+                "size": qty,
+                "notional": notional,
+                "status": row.get("status"),
+                "opened_at": _iso(payload.get("opened_at") or row.get("updated_at")),
+                "leverage": _f(payload.get("leverage")),
+                "stop_loss": _f(payload.get("stop_loss")),
+                "take_profit": _f(payload.get("take_profit")),
+                "signal_id": payload.get("signal_id") or payload.get("intent_id"),
+                "intent_id": payload.get("intent_id"),
+                "raw_signal": payload.get("raw_signal"),
+                "account_id": account_id,
+                "protection": protection_status(
+                    symbol=_symbol(row.get("instrument_id")),
+                    position_side=row.get("side"),
+                    quantity=row.get("quantity"),
+                    open_orders=[],
+                    algo_orders=[],
+                ),
+            }
+        )
+    return positions
+
+
 def _envelope(
     cur,
     *,
@@ -5526,18 +5624,46 @@ def v1_nodes(authorization: str | None = Header(default=None)):
             cur.execute(
                 """
                 SELECT nh.node_id, nh.account_id, nh.status, nh.version, nh.payload, nh.last_seen_at,
-                       nh.release_id,
-                       (SELECT count(*) FROM positions_projection p
-                          WHERE p.account_id = nh.account_id AND p.status = 'open') AS open_position_count,
-                       (SELECT count(DISTINCT p.instrument_id) FROM positions_projection p
-                          WHERE p.account_id = nh.account_id AND p.status = 'open') AS instrument_count
+                       nh.release_id
                 FROM node_heartbeats nh ORDER BY nh.last_seen_at DESC
                 """
             )
             rows = [dict(r) for r in cur.fetchall()]
+            cur.execute("SELECT account_id, payload FROM exchange_state_mirror")
+            mirrors = {
+                row["account_id"]: (row["payload"] or {})
+                for row in cur.fetchall()
+            }
+            cur.execute(
+                "SELECT account_id, instrument_id FROM positions_projection "
+                "WHERE status = 'open'"
+            )
+            projection_open = [dict(r) for r in cur.fetchall()]
+        venue_counts: dict[str, tuple[int, int]] = {}
+        for account_id, payload in mirrors.items():
+            books = open_books_from_mirror_payload(str(account_id), payload if isinstance(payload, dict) else {})
+            venue_counts[str(account_id)] = (
+                len(books),
+                len({row["instrument_id"] for row in books}),
+            )
+        projection_counts: dict[str, tuple[int, int]] = {}
+        for row in projection_open:
+            account_id = str(row.get("account_id") or "")
+            count, instruments = projection_counts.get(account_id, (0, set()))
+            if not isinstance(instruments, set):
+                instruments = set()
+            instruments.add(row.get("instrument_id"))
+            projection_counts[account_id] = (count + 1, instruments)
         nodes = []
         for r in rows:
             payload = r.get("payload") or {}
+            account_id = str(r.get("account_id") or "")
+            if account_id in venue_counts:
+                open_count, instrument_count = venue_counts[account_id]
+            else:
+                count, instruments = projection_counts.get(account_id, (0, set()))
+                open_count = count
+                instrument_count = len(instruments) if isinstance(instruments, set) else 0
             nodes.append({
                 "node_id": r["node_id"],
                 "name": r["node_id"],
@@ -5546,8 +5672,8 @@ def v1_nodes(authorization: str | None = Header(default=None)):
                 "status": r["status"],
                 "readiness": payload.get("readiness"),
                 "last_heartbeat_at": _iso(r["last_seen_at"]),
-                "open_position_count": int(r["open_position_count"] or 0),
-                "instrument_count": int(r["instrument_count"] or 0),
+                "open_position_count": int(open_count or 0),
+                "instrument_count": int(instrument_count or 0),
                 "projection_lag_ms": payload.get("projection_lag_ms"),
                 "reconciliation_state": payload.get("reconciliation_state"),
                 "health_degraded_reasons": payload.get(
@@ -5650,46 +5776,8 @@ def v1_positions(authorization: str | None = Header(default=None)):
                 row["account_id"]: (row["payload"] or {})
                 for row in cur.fetchall()
             }
-        positions = []
-        for r in rows:
-            payload = r.get("payload") or {}
-            qty = _f(r.get("quantity"))
-            entry = _f(r.get("avg_entry_price"))
-            notional = _f(payload.get("notional"))
-            if notional is None and qty is not None and entry is not None:
-                notional = qty * entry
-            account_id = r.get("account_id")
-            mirror = mirrors.get(account_id) or {}
-            protection = protection_status(
-                symbol=_symbol(r.get("instrument_id")),
-                position_side=r.get("side"),
-                quantity=r.get("quantity"),
-                open_orders=mirror.get("open_orders") or [],
-                algo_orders=mirror.get("algo_orders") or [],
-            )
-            positions.append({
-                "position_id": r.get("position_id"),
-                "instrument_symbol": _symbol(r.get("instrument_id")),
-                "instrument_id": r.get("instrument_id"),
-                "side": r.get("side"),
-                "entry_price": entry,
-                "mark_price": _f(r.get("mark_price")),
-                "unrealized_pnl": _f(r.get("unrealized_pnl")),
-                "quantity": qty,
-                "size": qty,
-                "notional": notional,
-                "status": r.get("status"),
-                "opened_at": _iso(payload.get("opened_at") or r.get("updated_at")),
-                "leverage": _f(payload.get("leverage")),
-                "stop_loss": _f(payload.get("stop_loss")),
-                "take_profit": _f(payload.get("take_profit")),
-                "signal_id": payload.get("signal_id") or payload.get("intent_id"),
-                "intent_id": payload.get("intent_id"),
-                "raw_signal": payload.get("raw_signal"),
-                "account_id": account_id,
-                "protection": protection,
-            })
-        return {**env, "positions": positions}
+        positions = _open_positions_for_api(rows, mirrors)
+        return {**env, "positions": positions, "position_source": "exchange_state_mirror"}
     finally:
         conn.close()
 
@@ -9670,9 +9758,10 @@ def operator_order(
     supplied_target_position_id = str(
         body.get("target_position_id") or ""
     ).strip()
-    if (
-        supplied_target_position_id
-        and supplied_target_position_id != str(target_position_id or "")
+    if supplied_target_position_id and not position_ids_equivalent(
+        supplied_target_position_id,
+        str(target_position_id or ""),
+        side=position_side,
     ):
         raise HTTPException(
             status_code=400,

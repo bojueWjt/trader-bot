@@ -8707,6 +8707,7 @@ verify_signal_credential_contract
 verify_dashboard_payload
 
 API_TGT="$T/services/control-plane/api/read_api.py"
+POSITION_MAPPING_TGT="$T/services/control-plane/api/position_mapping.py"
 SNAPSHOT_TGT="$T/services/control-plane/api/snapshot.py"
 DECISION_GATEWAY_TGT="$T/services/control-plane/decision_gateway/gateway.py"
 EXCHANGE_STATE_RECORDER_TGT="$T/services/control-plane/tools/exchange_state_recorder.py"
@@ -8734,6 +8735,7 @@ DB_POOLS_TGT="$T/services/control-plane/db/pools.py"
 DB_REPOSITORY_TGT="$T/services/control-plane/db/repository.py"
 REBUILD_ORDERS_PROJECTION_TGT="$T/scripts/rebuild_orders_projection.py"
 [ -f host/read_api.py ] || die "staging missing host/read_api.py"
+[ -f host/position_mapping.py ] || die "staging missing host/position_mapping.py"
 [ -f host/snapshot.py ] || die "staging missing host/snapshot.py"
 [ -f host/decision_gateway/gateway.py ] \
   || die "staging missing host/decision_gateway/gateway.py"
@@ -10035,6 +10037,12 @@ for mapping in "${SIGNAL_RUNTIME_FILE_MAP[@]}"; do
   fi
 done
 cmp -s host/read_api.py "$API_TGT" || CHANGED_HOST+=("read_api")
+if [ -f "$POSITION_MAPPING_TGT" ]; then
+  cmp -s host/position_mapping.py "$POSITION_MAPPING_TGT" \
+    || CHANGED_HOST+=("position_mapping")
+else
+  CHANGED_HOST+=("position_mapping")
+fi
 cmp -s host/snapshot.py "$SNAPSHOT_TGT" || CHANGED_HOST+=("snapshot")
 cmp -s host/decision_gateway/gateway.py "$DECISION_GATEWAY_TGT" \
   || CHANGED_HOST+=("decision_gateway")
@@ -11154,6 +11162,13 @@ for h in "${CHANGED_HOST[@]:-}"; do
         done
         ;;
 	    read_api) bk "$API_TGT" "host__read_api.py" ;;
+	    position_mapping)
+	      if [ -f "$POSITION_MAPPING_TGT" ]; then
+	        bk "$POSITION_MAPPING_TGT" "host__position_mapping.py"
+	      else
+	        printf '%s\n' "$POSITION_MAPPING_TGT" >> "$BACKUP_ROOT/new-files.txt"
+	      fi
+	      ;;
 	    snapshot) bk "$SNAPSHOT_TGT" "host__snapshot.py" ;;
 	    decision_gateway) bk "$DECISION_GATEWAY_TGT" "host__decision_gateway.py" ;;
       exchange_state_recorder)
@@ -11491,6 +11506,7 @@ for h in "${CHANGED_HOST[@]:-}"; do
         SIGNAL_RUNTIME_RESTART_REQUIRED=1
         ;;
 	    read_api) cat host/read_api.py > "$API_TGT" ;;
+	    position_mapping) cat host/position_mapping.py > "$POSITION_MAPPING_TGT" ;;
 	    snapshot) cat host/snapshot.py > "$SNAPSHOT_TGT" ;;
 	    decision_gateway) cat host/decision_gateway/gateway.py > "$DECISION_GATEWAY_TGT" ;;
       exchange_state_recorder)

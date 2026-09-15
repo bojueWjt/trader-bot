@@ -89,6 +89,7 @@ REQUIRED_HERMES_RELEASE_PATHS = {
 }
 REQUIRED_CONTROL_PLANE_HOST_RELEASE_PATHS = {
     "host/read_api.py",
+    "host/position_mapping.py",
     "host/snapshot.py",
     "host/decision_gateway/gateway.py",
     EXCHANGE_STATE_RECORDER_RELEASE_PATH,
@@ -105,6 +106,7 @@ REQUIRED_BUNDLE_PATHS = {
 }
 REQUIRED_HOST_PATHS = {
     "host/read_api.py",
+    "host/position_mapping.py",
     "host/snapshot.py",
     "host/decision_gateway/gateway.py",
     EXCHANGE_STATE_RECORDER_RELEASE_PATH,
@@ -241,6 +243,7 @@ EXPECTED_RELEASE_FILE_MAP = {
     ): "infra/systemd/trader-v3-redis-namespace-janitor.timer",
     "infra/docker/nautilus/uv.node.lock": "uv.node.lock",
     "services/control-plane/api/read_api.py": "host/read_api.py",
+    "services/control-plane/api/position_mapping.py": "host/position_mapping.py",
     "services/control-plane/api/snapshot.py": "host/snapshot.py",
     (
         "services/control-plane/decision_gateway/gateway.py"

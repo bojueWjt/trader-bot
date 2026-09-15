@@ -215,6 +215,10 @@ RELEASE_FILES = (
     ),
     ("infra/docker/nautilus/uv.node.lock", "uv.node.lock"),
     ("services/control-plane/api/read_api.py", "host/read_api.py"),
+    (
+        "services/control-plane/api/position_mapping.py",
+        "host/position_mapping.py",
+    ),
     ("services/control-plane/api/snapshot.py", "host/snapshot.py"),
     (
         "services/control-plane/decision_gateway/gateway.py",
@@ -415,6 +419,7 @@ HERMES_FEEDER_REQUIRED_SHA256 = (
 )
 REQUIRED_CONTROL_PLANE_HOST_RELEASE_PATHS = {
     "host/read_api.py",
+    "host/position_mapping.py",
     "host/snapshot.py",
     "host/decision_gateway/gateway.py",
     "host/exchange_state_recorder.py",
