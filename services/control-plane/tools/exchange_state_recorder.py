@@ -54,6 +54,22 @@ ON CONFLICT (account_id) DO UPDATE
   SET payload = EXCLUDED.payload, updated_at = EXCLUDED.updated_at
 """
 
+EQUITY_SAMPLE_UPSERT_SQL = """
+INSERT INTO account_equity_samples (
+    account_id, bucket_at, equity, available, margin, sampled_at
+)
+VALUES (
+    %s,
+    to_timestamp(floor(extract(epoch FROM now()) / 1800) * 1800),
+    %s, %s, %s, now()
+)
+ON CONFLICT (account_id, bucket_at) DO UPDATE
+  SET equity = EXCLUDED.equity,
+      available = EXCLUDED.available,
+      margin = EXCLUDED.margin,
+      sampled_at = EXCLUDED.sampled_at
+"""
+
 ACCOUNT_UPSERT_SQL = """
 INSERT INTO accounts_projection (
     account_id,
@@ -426,6 +442,29 @@ def snapshot_account(base: str, key: str, sec: str, opener=None) -> dict:
     }
 
 
+def _record_equity_sample(cur, account_id: str, account: dict) -> None:
+    """Best-effort 30-minute equity/available/margin sample for the app's
+    account equity waveform (contracts/backend-api.md §8).
+
+    Runs as a SAVEPOINT inside the same transaction as the
+    exchange_state_mirror / accounts_projection upserts above: a failure
+    here (e.g. the migration has not landed yet on an older deployment)
+    must never roll back, and must never block, the mirror write every
+    other consumer depends on.
+    """
+    cur.execute("SAVEPOINT account_equity_sample")
+    try:
+        cur.execute(
+            EQUITY_SAMPLE_UPSERT_SQL,
+            (account_id, account["equity"], account["free"], account["margin"]),
+        )
+    except Exception as exc:  # noqa: BLE001 - sampling must never break the mirror write
+        cur.execute("ROLLBACK TO SAVEPOINT account_equity_sample")
+        log(f"{account_id}: equity sample upsert failed, skipping: {exc}")
+    finally:
+        cur.execute("RELEASE SAVEPOINT account_equity_sample")
+
+
 def run_once(conn, base: str, opener=None) -> None:
     for account_id, (container, prefix) in ACCOUNTS.items():
         request_opener = opener
@@ -463,6 +502,7 @@ def run_once(conn, base: str, opener=None) -> None:
                         json.dumps(account_payload),
                     ),
                 )
+                _record_equity_sample(cur, account_id, account)
             conn.commit()
         except Exception:
             conn.rollback()

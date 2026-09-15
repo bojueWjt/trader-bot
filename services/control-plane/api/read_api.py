@@ -17,7 +17,7 @@ import math
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -5583,9 +5583,83 @@ def list_incidents(
         conn.close()
 
 
+def _parse_history_hours(raw: str | None) -> int | None:
+    """GET /v1/accounts?history_hours=.. (contracts/backend-api.md §8).
+
+    Absent parameter -> None (caller must leave the response byte-identical
+    to the pre-§8 shape). Present but out of [1, 168] or non-integer -> 400,
+    matching this module's existing manual-validation error style (not
+    FastAPI's default 422 Query() constraint violations).
+    """
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail="history_hours must be an integer between 1 and 168",
+        )
+    if not (1 <= value <= 168):
+        raise HTTPException(
+            status_code=400,
+            detail="history_hours must be an integer between 1 and 168",
+        )
+    return value
+
+
+def _decimal_str(value) -> str:
+    return "0" if value is None else str(value)
+
+
+_EQUITY_HISTORY_BUCKET_SECONDS = 1800
+_EQUITY_HISTORY_MAX_POINTS = 336
+
+
+def _equity_history(conn, hours: int, account_ids: tuple[str, ...]) -> tuple[list[dict], dict]:
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=hours)
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            "SELECT bucket_at, SUM(equity) AS equity_sum, SUM(available) AS available_sum, "
+            "COUNT(*) AS accounts_sampled "
+            "FROM account_equity_samples WHERE bucket_at >= %s AND bucket_at <= %s "
+            "AND account_id = ANY(%s) "
+            "GROUP BY bucket_at ORDER BY bucket_at ASC LIMIT %s",
+            (since, now, list(account_ids), _EQUITY_HISTORY_MAX_POINTS),
+        )
+        bucket_rows = [dict(r) for r in cur.fetchall()]
+        cur.execute(
+            "SELECT min(sampled_at) AS first_sample_at FROM account_equity_samples "
+            "WHERE account_id = ANY(%s) AND sampled_at <= %s",
+            (list(account_ids), now),
+        )
+        first_row = cur.fetchone()
+    total = [
+        {
+            "t": _iso(row["bucket_at"]),
+            "equity": _decimal_str(row["equity_sum"]),
+            "available": _decimal_str(row["available_sum"]),
+            "accounts_sampled": int(row["accounts_sampled"]),
+        }
+        for row in bucket_rows
+    ]
+    meta = {
+        "bucket_seconds": _EQUITY_HISTORY_BUCKET_SECONDS,
+        "accounts_expected": len(account_ids),
+        "since": since.isoformat(),
+        "first_sample_at": _iso(first_row["first_sample_at"]) if first_row else None,
+    }
+    return total, meta
+
+
 @app.get("/v1/accounts")
-def v1_accounts(authorization: str | None = Header(default=None)):
+def v1_accounts(
+    history_hours: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     require_reader(authorization)
+    parsed_history_hours = _parse_history_hours(history_hours)
     conn = _read_conn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -5609,7 +5683,16 @@ def v1_accounts(authorization: str | None = Header(default=None)):
                 "reconciliation_state": r["reconciliation_state"],
                 "updated_at": _iso(r["updated_at"]),
             })
-        return {**env, "accounts": accounts}
+        result = {**env, "accounts": accounts}
+        if parsed_history_hours is not None:
+            equity_history_total, equity_history_meta = _equity_history(
+                conn, parsed_history_hours, account_ids=_operator_accounts()
+            )
+            result["data"] = {
+                "equity_history_total": equity_history_total,
+                "equity_history_meta": equity_history_meta,
+            }
+        return result
     finally:
         conn.close()
 
