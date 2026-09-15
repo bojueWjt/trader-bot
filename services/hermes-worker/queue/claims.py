@@ -34,6 +34,7 @@ REQUIRED_COLUMNS = {
 
 PROCESSING_PURPOSE_LEGACY = "legacy"
 PROCESSING_PURPOSE_SHADOW = "shadow"
+PROCESSING_PURPOSE_SIGNAL = "signal"
 
 # Hermes claim_token is not the node writer fence
 # (x_redis_fencing_epoch / x_runtime_generation / x_lease_fencing_token).

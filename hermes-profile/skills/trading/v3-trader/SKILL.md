@@ -7,7 +7,9 @@ description: 通过 trader-v3 控制面下单、管理合约仓位、查询交�
 
 ## 你的角色
 
-你(Hermes)是这套交易系统里**唯一的决策者**:无论是频道信号还是用户的口头指令,由你判断是否交易、交易什么、多大仓位。但你**绝不直接碰交易所**——所有订单都通过本 skill 的 `v3_trade.py` 提交到 trader-v3 控制面,由 nautilus 执行节点(唯一允许触达 Binance 的组件)执行。
+交互 Hermes 保留全局查询、诊断和用户授权操作能力。账户 signal worker 只解释该账户的消息，通过持久 claim 提交；它不能使用交互凭证或伪造用户授权。成交跟踪、保护数量收敛和订单恢复由确定性程序负责，不占用 Hermes 对话。所有写入走控制面，只有 Nautilus 执行节点触达交易所。
+
+脚本只依赖 Python 标准库和 HTTP。运行环境显式注入 `V3_CONTROL_PLANE_URL`、交互写凭证 `RISK_ADMIN_TOKEN`、只读凭证 `V3_READ_TOKEN`（也可用 VIEWER_TOKEN）。不读取宿主 `.env`、SQLite、Docker socket 或本机节点端口。信号 worker 不执行这套全局交互 CLI。RESUME 仍只接受用户明确指令。
 
 **铁律:**
 1. 禁止直接调用 Binance/任何交易所 API,禁止使用旧的 crypto-trader skill(已废弃)。
@@ -19,10 +21,8 @@ description: 通过 trader-v3 控制面下单、管理合约仓位、查询交�
 5.1 **区间信号必须原样提交 zone，禁止擅自压成单点限价（用户固定约定）**：只要信号给出明确入场区间（如 `66800-67400`、`145-148附近`），必须使用 `--entry-type zone --price-min <下界> --price-max <上界>`，把完整区间交给 trader-v3 的分层、定量和执行设计（系统对 zone 自动按 55/30/15 风险份额分三档）；不得自行取中点、上沿、下沿或所谓“更优点位”改成单笔 `limit`。区间边界一律按信号原值传入，**禁止自行平移或收窄**；若区间/点位带“附近、左右、大约、约”等模糊字眼，加 `--entry-offset` 旗标（CLI 自动做 0.1% 让利：多单上移、空单下移），精确点位不加旗标、原值执行。若已误挂单点且尚未成交，先撤销错误挂单，确认交易所镜像已消失，再用新 ref 提交 zone。
 5.2 **正文与附图小数位冲突的核验纪律**：若正文入场/止损与附图报价相差 10 倍、100 倍等数量级，禁止只看正文机械下单，也禁止仅凭常识猜测。先放大附图核对品种、实时 BUY/SELL 报价、明确 TP 标签，并检查哪套数量级能同时满足“多单 SL<入场<TP / 空单 TP<入场<SL”。只有附图像素清晰、多个独立价格标签共同证明是系统性漏零/错位时，才可统一校正正文数字；`--reason` 必须写明正文与附图冲突及校正依据，最终反馈也必须告知用户。图片仍不清晰或只能证明部分参数时，不执行并如实报告冲突。
 5.3 **两个明确入场位按铁律15一次提交**：不得拆成两次 open，也不得因第一腿成交就省略第二腿；已有历史 e1 不自动补单。
-5.4 **同向加仓由 CLI 在审批前选定**：`v3_trade.py` 根据新鲜 `exchange_state_mirror` 选择 `open_position` 或 `add_position`，不要只靠本条技能。同向已有仓发 `add`（或 `open`，脚本会改成 add 再 POST）；无同向仓才 open。控制面/节点不会把 open 静默改写成 add。被拒的同源 open 不得靠改 action 自动变成新准许；核对零 execution commands/events 后，显式 `--replay-of <旧intent>` 再提交 add。历史 m6901 **不得自动补执行**。
-6. **减仓之后必须重整保护单**:执行 partial 后,立刻用 `set-sl` + `set-tps` 按剩余仓位重挂止损止盈(旧单数量已对不上)。信号只说"调整止损/止盈"时,用 set-sl / set-tps,不要平仓重开。
-   - **TP 数量基准（E）**：`partial_close`（CLI `partial`）成交后，先用 `v3_query positions` 重新读取目标仓位的当前剩余 `quantity`，再为 `replace_take_profits`（CLI `set-tps`）重算各档数量；`--qty` 各档数量之和须小于等于当前剩余量。禁止沿用信号原始数量或减仓前数量作为 `--qty`。
-   - **错误例子**：原始数量为 29416，减仓后当前仓位为 23638，单档 `set-tps --tp <目标价> --qty 29416` 会因 `29416 > 23638` 被拒绝。**正确例子**：省略 `--qty`，由系统按当前仓位均分；或单档传 `--qty 23638`，多档按当前剩余量重新分配。例子中的 23638 仅适用于本次查询，实际执行以重新查询的当前数量为准。
+5.4 **明确区分开仓与加仓**：`open` 只提交 `open_position`，`add` 只提交 `add_position`。CLI 不按仓位镜像互相改写动作；控制面和节点统一核对新鲜仓位，同向已有仓的 open、没有同向仓的 add 均明确拒绝。被拒同源请求不得靠改动作自动放行；显式 `--replay-of` 仍需服务端核对零执行副作用。历史 m6901 不得自动补执行。
+6. **减仓后的保护数量由节点收敛**：partial 的受理不等于成交；节点按实际已成交数量调整机器人保护，不需要 Hermes 在后台轮询、重复重挂。收到明确的新止损/止盈指令时，才用 `set-sl` / `set-tps` 提交新计划；各档 TP 总量不得超过最新可核对的剩余机器人持仓。节点保护异常需如实报告并查询，不能靠创建 cron 再召唤模型修复。
 6. **百分比减仓规则**:已有仓位更新信号里出现“减仓/平仓/止盈/锁定/落袋 + X%”时,默认解释为“按当前持仓数量减掉 X%”,必须用 `partial --percent X`（或先读 `positions` 再传 `--quantity = quantity * X%`）。**禁止把 20%/50% 写成 `close`**：`close` 永远全平；缺比例、0%、>100%、或解析失败必须停手上报，不得改走 `close` 当默认。尤其用户已明确约定：`锁定10%利润` 按“减仓当前仓位 10%”处理,不能因为没有给 base quantity 而跳过。只有文本明确写“锁定利润到 X% / 止损锁 X%收益 / 保本+X%”这类不是仓位比例的表达时,才不要减仓,改为移动止损或转人工复核。
 7. **美股/股票标的映射规则**:如果信号标的是美股股票代码或疑似股票代号(如 MU、MSTR、TSLA、NVDA 等),不要直接判定“非加密标的不可交易”。必须先检索/查询是否存在对应的 Binance 合约 USDT 标的(通常为 `<TICKER>USDT`,例如 `MU` -> `MUUSDT`)；存在则按该 USDT 合约处理,不存在才跳过并说明未找到可交易合约。
 9. **模糊点位量化与 0.1% 成交让利（用户固定约定，2026-08-03 修订）**：信号写“略破 / 小幅突破 / 稍微超过”但未给精确数值时，不再转 PENDING，统一按基准位向突破方向外扩 **0.3%** 得出精确价。**入场让利判据看措辞不看数字形态**：入场点位/区间带“附近、左右、大约、约”等模糊字眼时，入场价原值传入并加 `--entry-offset`（CLI 自动 0.1% 让利：多单上移、空单下移，Decimal 精确计算，禁止 Hermes 自己手工平移入场价以免叠加）；信号给出精确入场点位时**必须原值执行、不加旗标、不做任何让利**。止盈/止损的 0.1% 精确化仍由 Hermes 计算：空单止盈在目标位上方 0.1%，多单止盈在目标位下方 0.1%；空单止损在算出的突破价上方再放宽 0.1%，多单止损在算出的跌破价下方再放宽 0.1%。计算后仍须服从交易所 tick size，最终价格向有利于成交/避免过早触发的方向取到合法精度。审计理由中注明所用规则（如“按用户约定：略破0.3%”，入场让利由 CLI 自动注明）。
@@ -36,15 +36,15 @@ description: 通过 trader-v3 控制面下单、管理合约仓位、查询交�
 
 ## 查询系统(v3_query.py — 回答任何"现在什么情况"之前先查它)
 
-只读查询 CLI:`/srv/hermes/profiles/trader/skills/trading/v3-trader/scripts/v3_query.py`(python3,无依赖,输出 JSON)。
+只读查询 CLI:`${HERMES_HOME}/skills/trading/v3-trader/scripts/v3_query.py`(python3,无依赖,输出 JSON)。
 **凡是用户问消息/信号/持仓/挂单/止损/成交/盈亏/节点状态,或你自己决策前需要事实,一律先跑对应子命令,禁止凭记忆或上轮上下文回答。**
 
 ```bash
-Q=/srv/hermes/profiles/trader/skills/trading/v3-trader/scripts/v3_query.py
+Q=${HERMES_HOME}/skills/trading/v3-trader/scripts/v3_query.py
 
 python3 $Q channels                    # 信号频道列表(消息数/最近时间)
 python3 $Q messages 舒琴 --limit 5     # 某频道最近N条消息;支持 舒琴/titan/gauls/coinalert/operator 或频道id
-                                       # 返回的 media.path 是本机图片路径,直接查看图片即可解读图
+                                       # media.object_key 是存储标识，不是沙盒本机路径；图片使用已有媒体API获取
 python3 $Q positions                   # 持仓+每个仓位的止损/止盈保护单(币安真相,45s镜像)
 python3 $Q orders                      # 在场挂单(含挂龄小时数、是否系统单)+条件单
 python3 $Q intents --limit 10          # 最近交易意向(含风控理由);可加 --status rejected --symbol ETHUSDT
@@ -54,19 +54,20 @@ python3 $Q outcomes --days 7           # 已平仓结果(盈亏/R倍数/持仓�
 python3 $Q nodes                       # 节点健康:心跳/交易状态/HALT原因/最近RESUME命令
 python3 $Q reconcile                   # 系统账本 vs 币安真相对账(幽灵单/漏记)
 python3 $Q report --hours 24           # 一页系统摘要(写日报/周报先跑这个)
+python3 $Q signals --days 2            # 逐条处理结果及原因，含未处理和未知证据
 ```
 
 要点:
-- **真相层级:positions/orders(exchange_state_mirror,直连币安)> 任何投影/快照**。两边打架以 mirror 为准。
+- 控制面返回来源、生成时间和 stale。镜像是某次交易所查询的结果，不是实时成交回执；空的 open-orders 列表不能单独证明订单已撤或已成交。冲突时先核对原始执行事件，未知必须保留未知。
 - 输出里带 `warning`/`warnings` 字段时,把它如实转告用户。
-- 查不到某频道时先跑 `channels` 看清单;镜像超过5分钟没刷新会有 warning,此时先报数据可能过期。
+- 查不到某频道时先跑 `channels` 看清单；`stale=true` 要说明数据过期，`truncated=true` 要说明清单不完整。source_ts 与 receive_ts 缺失时不得用入库时间伪装。
 
 ## 命令
 
-脚本路径:`/srv/hermes/profiles/trader/skills/trading/v3-trader/scripts/v3_trade.py`(python3,无依赖)
+脚本路径:`${HERMES_HOME}/skills/trading/v3-trader/scripts/v3_trade.py`(python3,无依赖)
 
 ```bash
-V3=/srv/hermes/profiles/trader/skills/trading/v3-trader/scripts/v3_trade.py
+V3=${HERMES_HOME}/skills/trading/v3-trader/scripts/v3_trade.py
 
 # 开仓(市价做空,自动定量:带 --sl 即可,不传 --notional)
 python3 $V3 open BTCUSDT short --sl 63000 --tp 60000,58500 \
@@ -86,7 +87,7 @@ python3 $V3 open ICPUSDT long --entry-type market --second-price 2.662 --sl 2.58
   --source-message-id tg-sig-c1002198013097-m4486 \
   --ref tg-sig-c1002198013097-m4486
 
-# 同向加仓：审批前 CLI 按新鲜 mirror 选 add。被拒同源 open 要显式 --replay-of。
+# 同向加仓：显式选择 add，服务端核对仓位；被拒同源 open 要显式 --replay-of。
 python3 $V3 add BTCUSDT short --entry-type limit --price 78800 --sl 80000 \
   --reason "频道信号: 同向加仓空" --account account-c \
   --channel -1002189417451 --authorized-by-type channel \
@@ -218,15 +219,17 @@ python3 $V3 positions
 > 🔕 XX频道这条是行情分析,无入场参数,不操作。
 
 示例(失败):
-> ⚠️ SOL 开多没成:超单笔上限 150U,已按 150U 重试成交 / 或说明卡在哪。
+> ⚠️ SOL 开多被拒：超过单笔上限。未改数量重试。
+
+HTTP 成功和 approved/accepted 只可报告“已受理，等待执行”。只有真实成交记录才报告成交。超时保留原 ref，先查原操作；不得换 ref、改动作或改数量绕过失败。
 
 ## 日报/周报发布
 
-脚本路径:`/srv/hermes/profiles/trader/skills/trading/v3-trader/scripts/v3_report.py`(python3,无第三方依赖)
+脚本路径:`${HERMES_HOME}/skills/trading/v3-trader/scripts/v3_report.py`(python3,无第三方依赖)
 
 流程:
 
-1. 先跑 `/srv/hermes/profiles/trader/scripts/report_data.py` 拿数字摘要。该脚本是预跑摘要口径；发布前仍须用 `v3_query.py positions/orders/nodes/reconcile` 复核实时真相，若两者冲突，以 exchange_state_mirror 与 nodes 实时查询为准，并把口径冲突写入 `risk_md`。
+1. 先跑 `v3_query.py report --hours 24` 获取控制面摘要，再用 `positions/orders/nodes/reconcile` 核对。来源或时点不一致时记录冲突，缺失数据不得补成零。
 2. 用 `v3_query.py messages <频道> --limit <N>` 回看各频道当期消息,总结每个活跃频道交易员的行情观点。频道只有 lifecycle/hermes-agent 系统消息而没有当期交易员原文时，不得编造新观点；可明确写“本期无交易员新增观点”，并区分历史计划与系统执行状态。
 3. 组装报告 JSON。`channel_views` 必填,每个活跃频道都要有 `{channel,trader,stance,summary,symbols}`；其中 `stance` 只能使用 `bearish`、`bullish`、`mixed`、`neutral` 四个英文枚举值之一。`sections.overview_md` 也必填(本期概览,3-6行);有拒单/裸仓/系统异常时 `sections.risk_md` 必填;周报建议再写 `market_md`(大盘走势与关键位)和 `actions_md`(下周计划)。
 4. 有值得展示的盘面图,先 `python3 v3_report.py upload <图片路径>` 上传,再把返回的 asset URL 写进 `images[].url`。
@@ -240,7 +243,7 @@ python3 $V3 positions
 - 禁止跳过频道观点总结;`channel_views` 是用户明确要求的报告核心。
 - 脚本失败时只转述可读原因,不要把堆栈或原始 JSON 发给用户。
 - 发给用户的报告链接必须是 publish 脚本打印的那一行，禁止按记忆或示例域名改写。
-- `trade_outcomes` watermark 必须覆盖报告窗口尾。hourly timer 是主路径；若 publish 返回 503 且原因含 `window tail not materialized`，先 `systemctl start trader-v3-trade-outcomes.service`（幂等 upsert），再重试发布。该 unit 是 oneshot，成功执行后通常仍显示 `inactive/dead`；不要用 `systemctl is-active` 判断成败，应执行 `systemctl show trader-v3-trade-outcomes.service -p Result -p ExecMainStatus -p ActiveState -p SubState`，确认 `Result=success` 且 `ExecMainStatus=0` 后重试。禁止在物化滞后时把 KPI 全 0 的报告发出去。
+- `trade_outcomes` watermark 必须覆盖报告窗口尾。若发布返回 `window tail not materialized`，报告尚未准备好，停止发布并报告物化滞后；交互技能不执行宿主 systemctl，不把缺失数据写成全零。
 - publish 成功后必须用 `web_extract`（或等价HTTP读取）验证返回的完整URL可访问且报告正文中的标题、日期和核心指标正确，再把该URL原样作为收盘消息最后一行。报告页的 HTML `<title>` 可能固定显示 `Hermes Report`，不得仅凭该通用标题误判验证失败，应检查正文一级标题与指标。
 - 日报成交统计需区分“原始成交回报行数”和“唯一成交订单数”：`v3_query.py fills` 可能因事件镜像保留同一 `client_order_id`、同一时间/数量/价格的重复回报。不得把重复回报误报成多笔独立成交；报告中可同时注明原始回报数与去重后的唯一订单数。
 - 预跑摘要中的“账户收盘/持仓”若与发布前 `positions` 实时镜像差异明显，最终报告和收盘短消息一律采用实时镜像，并在 `risk_md` 或概览中明确说明口径冲突；不得混用两套仓位拼接结果。

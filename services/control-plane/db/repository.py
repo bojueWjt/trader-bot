@@ -166,26 +166,3 @@ class ProjectionWriter:
                 """,
                 (account_id, projector, event_id, ts_event),
             )
-
-    def upsert_order_projection(self, payload: dict) -> None:
-        with self.conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO orders_projection
-                    (order_projection_id, account_id, instrument_id, intent_id, client_order_id,
-                     venue_order_id, status, side, order_type, quantity, filled_quantity,
-                     updated_from_event_id, ts_event, updated_at, payload)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,COALESCE(%s,0),%s,%s, now(), %s)
-                ON CONFLICT (account_id, client_order_id) DO UPDATE SET
-                    instrument_id=EXCLUDED.instrument_id, intent_id=EXCLUDED.intent_id,
-                    venue_order_id=EXCLUDED.venue_order_id, status=EXCLUDED.status, side=EXCLUDED.side,
-                    order_type=EXCLUDED.order_type, quantity=EXCLUDED.quantity,
-                    filled_quantity=EXCLUDED.filled_quantity, updated_from_event_id=EXCLUDED.updated_from_event_id,
-                    ts_event=EXCLUDED.ts_event, updated_at=now(), payload=EXCLUDED.payload
-                """,
-                (str(uuid4()), payload["account_id"], payload["instrument_id"], payload.get("intent_id"),
-                 payload.get("client_order_id"), payload.get("venue_order_id"), payload.get("status", "submitted"),
-                 payload.get("side"), payload.get("order_type"), payload.get("quantity"),
-                 payload.get("filled_quantity"), payload.get("event_id"), payload.get("ts_event"),
-                 Json(payload.get("payload") or {})),
-            )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import pytest
 
 import order_management.order_reducer as order_reducer
 from order_management.order_reducer import OrderProjectionReducer
@@ -65,6 +66,84 @@ def test_order_reducer_duplicate_and_out_of_order_events_converge(db_conn) -> No
     assert event_id == "evt-accept"
     assert event_count == 2
     assert finding_count == 0
+
+
+def test_native_fill_deltas_rebuild_total_once_across_out_of_order_and_duplicate_trades(db_conn) -> None:
+    reducer = OrderProjectionReducer()
+    accepted = _order_event("native-accept", "OrderAccepted", 0, payload={"quantity": "1.936"})
+    reducer.apply_event(db_conn, accepted)
+    fills = []
+    for index, quantity in enumerate(("0.5", "0.5", "0.936"), 1):
+        event = _order_event(f"native-fill-{index}", "OrderFilled", index)
+        event["trade_id"] = f"venue-trade-{index}"
+        event["payload"] = {"instrument_id": "BTCUSDT-PERP.BINANCE", "last_qty": quantity, "last_px": "2452.19"}
+        fills.append(event)
+    duplicate_trade = {**fills[0], "event_id": "native-fill-1-recovery", "ts_event": BASE_TS + timedelta(seconds=5)}
+    for event in (fills[2], fills[0], fills[0], fills[1], duplicate_trade):
+        reducer.apply_event(db_conn, event)
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT status, quantity, filled_quantity, average_fill_price FROM orders_projection WHERE client_order_id='coid-1'")
+        assert cur.fetchone() == ("filled", Decimal("1.936"), Decimal("1.936"), Decimal("2452.19"))
+        cur.execute("SELECT count(*) FROM order_events")
+        assert cur.fetchone()[0] == 5
+
+
+def test_cumulative_fill_anchor_and_later_native_delta_share_one_total(db_conn) -> None:
+    reducer = OrderProjectionReducer()
+    reducer.apply_event(db_conn, _order_event("anchor", "OrderFilled", 1, payload={"filled_qty": "0.4"}))
+    delta = _order_event("delta", "OrderFilled", 2)
+    delta["payload"] = {"instrument_id": "BTCUSDT-PERP.BINANCE", "last_qty": "0.6", "last_px": "100"}
+    reducer.apply_event(db_conn, delta)
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT status, filled_quantity FROM orders_projection WHERE client_order_id='coid-1'")
+        assert cur.fetchone() == ("filled", Decimal("1"))
+
+
+@pytest.mark.parametrize("anchor_id,delta_id", [("a-anchor", "z-delta"), ("z-anchor", "a-delta")])
+def test_same_timestamp_anchor_and_delta_do_not_depend_on_uuid_order(db_conn, anchor_id, delta_id) -> None:
+    reducer = OrderProjectionReducer()
+    reducer.apply_event(db_conn, _order_event("initial", "OrderFilled", 1, payload={"filled_qty": "0.4", "quantity": "1.5"}))
+    anchor = _order_event(anchor_id, "OrderFilled", 2, payload={"filled_qty": "1", "quantity": "1.5"})
+    delta = _order_event(delta_id, "OrderFilled", 2)
+    delta["trade_id"] = "second-trade"
+    delta["payload"] = {"instrument_id": "BTCUSDT-PERP.BINANCE", "last_qty": "0.6"}
+    reducer.apply_event(db_conn, anchor)
+    reducer.apply_event(db_conn, delta)
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT status, filled_quantity FROM orders_projection WHERE client_order_id='coid-1'")
+        assert cur.fetchone() == ("partially_filled", Decimal("1"))
+
+
+def test_cancel_terminal_status_still_absorbs_late_venue_fill(db_conn) -> None:
+    reducer = OrderProjectionReducer()
+    reducer.apply_event(db_conn, _order_event("first", "OrderFilled", 1, payload={"filled_qty": "0.4"}))
+    reducer.apply_event(db_conn, _order_event("cancel", "OrderCanceled", 3))
+    late = _order_event("late", "OrderFilled", 2)
+    late["payload"] = {"instrument_id": "BTCUSDT-PERP.BINANCE", "last_qty": "0.2"}
+    reducer.apply_event(db_conn, late)
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT status,filled_quantity,ts_event FROM orders_projection WHERE client_order_id='coid-1'")
+        assert cur.fetchone() == ("cancelled", Decimal("0.6"), BASE_TS + timedelta(seconds=3))
+
+
+def test_fill_before_order_shape_converges_when_accepted_arrives(db_conn) -> None:
+    reducer = OrderProjectionReducer()
+    fill = _order_event("first-fill", "OrderFilled", 2)
+    fill["payload"] = {"instrument_id": "BTCUSDT-PERP.BINANCE", "last_qty": "1", "last_px": "100"}
+    reducer.apply_event(db_conn, fill)
+    reducer.apply_event(db_conn, _order_event("late-accept", "OrderAccepted", 1))
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT status,quantity,filled_quantity FROM orders_projection WHERE client_order_id='coid-1'")
+        assert cur.fetchone() == ("filled", Decimal("1"), Decimal("1"))
+
+
+def test_late_cumulative_average_cannot_replace_newer_fill_average(db_conn) -> None:
+    reducer = OrderProjectionReducer()
+    reducer.apply_event(db_conn, _order_event("new", "OrderFilled", 2, payload={"quantity": "2", "filled_qty": "1", "avg_px": "200"}))
+    reducer.apply_event(db_conn, _order_event("old", "OrderFilled", 1, payload={"quantity": "2", "filled_qty": "0.5", "avg_px": "100"}))
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT filled_quantity,average_fill_price FROM orders_projection WHERE client_order_id='coid-1'")
+        assert cur.fetchone() == (Decimal("1"), Decimal("200"))
 
 
 def test_order_reducer_records_illegal_backward_transition_without_overwrite(db_conn) -> None:

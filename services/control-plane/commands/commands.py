@@ -39,10 +39,17 @@ def issue_command(
     target_nodes: list[str],
     scope: dict | None = None,
     ack_timeout_seconds: int = 30,
+    invalidate_accounts: list[str] | None = None,
 ) -> dict:
     scope = scope or {}
     with transaction(conn):
         with conn.cursor() as cur:
+            if command_type == "CLOSE_ALL" and invalidate_accounts:
+                for account_id in sorted(set(invalidate_accounts)):
+                    cur.execute(
+                        "SELECT pg_advisory_xact_lock(hashtext(%s), 0)",
+                        (account_id,),
+                    )
             cur.execute(
                 "SELECT command_id::text, status FROM operator_commands WHERE idempotency_key = %s",
                 (idempotency_key,),
@@ -68,6 +75,12 @@ def issue_command(
                     """,
                     (command_id, node, ack_timeout_seconds),
                 )
+
+            if command_type == "CLOSE_ALL" and invalidate_accounts:
+                from position_revision import invalidate_account
+
+                for account_id in sorted(set(invalidate_accounts)):
+                    invalidate_account(cur, account_id, command_id)
 
             mode = MODE_FOR_TYPE.get(command_type)
             if mode and scope.get("account_id"):

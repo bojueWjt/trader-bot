@@ -13,6 +13,9 @@ import hashlib
 import json
 import os
 import sys
+import urllib.error
+import urllib.request
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +29,7 @@ from psycopg2.extensions import TRANSACTION_STATUS_IDLE, connection as PsycopgCo
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 for _p in (
     str(_REPO_ROOT / "services" / "control-plane" / "db"),
+    str(_REPO_ROOT / "services" / "control-plane" / "api"),
     str(Path(__file__).resolve().parent / "queue"),
 ):
     if _p not in sys.path:
@@ -33,6 +37,9 @@ for _p in (
 
 import claims  # noqa: E402  (services/hermes-worker/queue/claims.py)
 import signal_queue  # noqa: E402
+from position_revision import capture_versions  # noqa: E402
+from signal_operator import build_operator_request  # noqa: E402
+from operator_diagnostics import safe_operator_detail as _safe_operator_detail  # noqa: E402
 from connection import transaction  # noqa: E402  (services/control-plane/db/connection.py)
 
 from hermes_client import (  # noqa: E402
@@ -42,7 +49,7 @@ from hermes_client import (  # noqa: E402
     HermesTimeoutError,
     HermesUnavailableError,
 )
-from prompt import MODEL_TEMPERATURE, PROMPT_VERSION  # noqa: E402
+from prompt import MODEL_TEMPERATURE, PROMPT_VERSION, SIGNAL_PROMPT_VERSION  # noqa: E402
 
 CONTEXT_VERSION = "ctx-v1"
 SCHEMA_PATH = _REPO_ROOT / "packages" / "contracts" / "v1" / "hermes_decision.v1.json"
@@ -50,6 +57,7 @@ DEFAULT_TIMEOUT = 30.0
 RECENT_CONTEXT_LIMIT = 5
 WORKER_MODE_LEGACY = "legacy"
 WORKER_MODE_SHADOW = "shadow"
+WORKER_MODE_SIGNAL = "signal"
 DEFAULT_WORKER_MODE = WORKER_MODE_LEGACY
 
 
@@ -63,6 +71,14 @@ class SnapshotProvider(Protocol):
     def current(self) -> dict[str, Any]:
         """Return a SystemSnapshotV1-shaped dict (must include data_source/stale/...)."""
         ...
+
+
+class OperatorResponseError(RuntimeError):
+    """Bounded, credential-free control-plane status and rejection detail."""
+
+    def __init__(self, status_code: int, detail: str):
+        super().__init__(detail)
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -87,10 +103,10 @@ def _load_schema_validator():
 def resolve_worker_mode(mode: str | None = None) -> str:
     raw = (mode or os.environ.get("HERMES_WORKER_MODE") or DEFAULT_WORKER_MODE)
     resolved = str(raw).strip().lower()
-    if resolved not in {WORKER_MODE_LEGACY, WORKER_MODE_SHADOW}:
+    if resolved not in {WORKER_MODE_LEGACY, WORKER_MODE_SHADOW, WORKER_MODE_SIGNAL}:
         raise ValueError(
             f"HERMES_WORKER_MODE must be {WORKER_MODE_LEGACY!r} or "
-            f"{WORKER_MODE_SHADOW!r}, got {raw!r}"
+            f"{WORKER_MODE_SHADOW!r} or {WORKER_MODE_SIGNAL!r}, got {raw!r}"
         )
     return resolved
 
@@ -107,6 +123,9 @@ def process_one(
     lease_seconds: int = 30,
     now_iso: str | None = None,
     mode: str | None = None,
+    operator_submit: Any = None,
+    account_id: str | None = None,
+    operator_timeout: float = 10.0,
 ) -> WorkerResult:
     """Default mode is legacy outbox claim (sole live writer until G3 cutover).
 
@@ -114,6 +133,14 @@ def process_one(
     never submits operator/exchange orders.
     """
     resolved_mode = resolve_worker_mode(mode)
+    if resolved_mode == WORKER_MODE_SIGNAL:
+        return process_signal_one(
+            conn, worker_id=worker_id, client=client, media_loader=media_loader,
+            snapshot_provider=snapshot_provider, model_version=model_version,
+            timeout=timeout, lease_seconds=lease_seconds, now_iso=now_iso,
+            operator_submit=operator_submit, account_id=account_id,
+            operator_timeout=operator_timeout,
+        )
     if resolved_mode == WORKER_MODE_SHADOW:
         return process_shadow_one(
             conn,
@@ -378,6 +405,7 @@ def _assemble_decision(
     context_snapshot_id: str,
     model_version: str,
     created_at: str,
+    prompt_version: str = PROMPT_VERSION,
 ) -> dict[str, Any]:
     """Keep the model's semantics; force authoritative identity + pinned model block.
 
@@ -396,7 +424,7 @@ def _assemble_decision(
     decision["model"] = {
         "provider": "hermes",
         "model_version": model_version,
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": prompt_version,
         "temperature": MODEL_TEMPERATURE,
     }
     decision["created_at"] = created_at
@@ -436,6 +464,273 @@ def process_shadow_one(
         timeout=timeout,
         now_iso=now_iso,
     )
+
+
+def _signal_token(account_id: str) -> str:
+    names = {f"account-{letter}": f"SIGNAL_TOKEN_ACCOUNT_{letter.upper()}" for letter in "abcd"}
+    name = names.get(account_id)
+    if name is None:
+        raise ValueError("signal operator account has no scoped token mapping")
+    token = os.environ.get(name, "").strip()
+    if not token:
+        raise ValueError(f"missing account-scoped signal credential {name}")
+    return token
+
+
+def _http_operator_submit(body: dict, *, account_id: str, token: str, timeout: float) -> dict:
+    """Explicit opt-in endpoint, using only this account's signal credential."""
+    endpoint = os.environ.get("SIGNAL_OPERATOR_URL", "").strip()
+    if not endpoint.startswith(("http://", "https://")) or not endpoint.endswith("/v1/operator/orders"):
+        raise ValueError("SIGNAL_OPERATOR_URL must explicitly name /v1/operator/orders")
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            result = json.loads(response.read(1_000_001))
+    except urllib.error.HTTPError as exc:
+        detail = "operator request rejected"
+        try:
+            payload = json.loads(exc.read(4096).decode("utf-8"))
+            if isinstance(payload, dict):
+                detail = payload.get("detail", detail)
+        except (UnicodeError, ValueError, OSError):
+            pass
+        raise OperatorResponseError(exc.code, _safe_operator_detail(detail, token)) from None
+    if not isinstance(result, dict):
+        raise ValueError("operator response must be an object")
+    return result
+
+
+def _signal_entry_ref(task: signal_queue.SignalTask, message: dict) -> str | None:
+    """Only a same-channel Telegram reply is evidence of an entry reference.
+
+    A previous edit or a model-generated parent is never an ownership reference.
+    The operator still resolves the reference and verifies channel ownership.
+    """
+    if task.source_platform != "telegram":
+        return None
+    payload = message.get("raw_payload")
+    if not isinstance(payload, dict):
+        return None
+    reply = payload.get("reply_to")
+    if not isinstance(reply, dict):
+        reply = payload.get("reply")
+    if not isinstance(reply, dict):
+        return None
+    reply_channel = reply.get("channel_id")
+    if reply_channel is not None and str(reply_channel) != task.channel_id:
+        raise ValueError("reply channel does not match signal channel")
+    reply_id = reply.get("source_message_id")
+    if reply_id is None:
+        reply_id = reply.get("message_id")
+    if reply_id is None:
+        reply_id = reply.get("msg_id")
+    channel = task.channel_id.lstrip("-")
+    if isinstance(reply_id, bool) or not str(reply_id).isdigit() or not channel.isdigit():
+        return None
+    return f"tg-sig-c{channel}-m{reply_id}"
+
+
+def _signal_result(task: signal_queue.SignalTask, status: str, *, detail: str | None = None,
+                   decision_id: str | None = None, operator_submitted: bool = False) -> WorkerResult:
+    return WorkerResult(
+        status=status, processing_run_id=task.processing_run_id, raw_message_id=task.raw_message_id,
+        decision_id=decision_id, detail=detail, task_id=task.task_id,
+        account_id=task.account_id, operator_submitted=operator_submitted,
+    )
+
+
+def _signal_snapshot(snapshot: dict[str, Any], task: signal_queue.SignalTask) -> dict[str, Any]:
+    """Show only proven account-owned rows; retain conservative quality metadata.
+
+    SystemSnapshotV1's balances are fleet aggregates and its audit/decision rows
+    can lack ownership. Omit these values rather than inventing an account view.
+    Same-channel source text remains context, never routing authority.
+    """
+    metadata = (
+        "schema_version", "data_source", "snapshot_id", "generated_at",
+        "last_execution_event_at", "projection_lag_ms", "stale", "missing_nodes",
+        "reconciliation_state",
+    )
+    scoped = {key: deepcopy(snapshot[key]) for key in metadata if key in snapshot}
+    original = snapshot.get("data")
+    original = original if isinstance(original, dict) else {}
+    data: dict[str, Any] = {"account": {}}
+    for field in (
+        "accounts", "orders", "positions", "market_prices", "exchange_state",
+        "hermes_decisions", "risk_decisions", "node_health", "audit_trail",
+    ):
+        rows = original.get(field)
+        if not isinstance(rows, list):
+            continue
+        data[field] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            owner = row.get("account_id")
+            if owner is None:
+                owner = row.get("target_account_id")
+            if owner == task.account_id:
+                data[field].append(deepcopy(row))
+    recent = original.get("recent_messages")
+    data["recent_messages"] = []
+    if isinstance(recent, list):
+        for row in recent:
+            if isinstance(row, dict) and row.get("channel_id") == task.channel_id:
+                data["recent_messages"].append({
+                    key: deepcopy(row[key]) for key in (
+                        "id", "channel_id", "message_text", "source_received_at"
+                    ) if key in row
+                })
+    scoped["data"] = data
+    return scoped
+
+
+def _submit_registered_signal(conn, task, *, operator_submit, operator_timeout: float) -> WorkerResult:
+    body = task.execution_request
+    if not isinstance(body, dict):
+        raise ValueError("signal reconciliation requires the persisted execution_request")
+    detail = "operator response awaits committed task state"
+    operator_detail = None
+    submitted = False
+    try:
+        token = _signal_token(task.account_id)
+        submit = operator_submit or _http_operator_submit
+        # Both attempts send exactly the durable body. A timeout never creates a
+        # new claim, decision, UUID, deadline or semantic action.
+        for attempt in range(2):
+            try:
+                _close_read_transaction(conn)
+                submitted = True
+                submit(deepcopy(body), account_id=task.account_id, token=token, timeout=operator_timeout)
+                break
+            except (TimeoutError, ConnectionError, urllib.error.URLError, OSError) as exc:
+                detail = f"operator result unknown: {type(exc).__name__}"
+                if attempt == 1:
+                    break
+    except OperatorResponseError as exc:
+        safe_detail = _safe_operator_detail(str(exc), token)
+        operator_detail = {"http_status": exc.status_code, "detail": safe_detail}
+        detail = f"operator HTTP {exc.status_code}: {safe_detail}"
+    except Exception as exc:
+        # Keep credentials and untrusted HTTP payloads out of visible errors.
+        detail = f"operator reconciliation required: {type(exc).__name__}"
+    current = signal_queue.record_operator_uncertainty(conn, task, detail, operator_detail=operator_detail)
+    status = current.status
+    if status not in {"dispatched", "expired", "failed"}:
+        status = "reconciling"
+    return _signal_result(current, status, detail=current.disposition_reason,
+                          decision_id=body.get("decision_id"), operator_submitted=submitted)
+
+
+def process_signal_one(
+    conn: PsycopgConnection,
+    *,
+    worker_id: str,
+    client: Any,
+    media_loader: MediaLoader,
+    snapshot_provider: SnapshotProvider,
+    model_version: str = "pinned",
+    timeout: float = DEFAULT_TIMEOUT,
+    lease_seconds: int = 30,
+    now_iso: str | None = None,
+    operator_submit: Any = None,
+    account_id: str | None = None,
+    operator_timeout: float = 10.0,
+) -> WorkerResult:
+    """Opt-in signal consumer; it never consumes or publishes legacy outbox."""
+    if operator_timeout <= 0:
+        raise ValueError("operator_timeout must be positive")
+    bounded_lease = max(int(lease_seconds), int(timeout + 2 * operator_timeout) + 15)
+    task = signal_queue.claim_signal_task(
+        conn, worker_id, lease_seconds=bounded_lease, account_id=account_id,
+        processing_purpose=claims.PROCESSING_PURPOSE_SIGNAL,
+    )
+    if task is None:
+        pending = signal_queue.next_reconciling_task(conn, account_id=account_id)
+        if pending is None:
+            return WorkerResult(status="skipped")
+        return _submit_registered_signal(conn, pending, operator_submit=operator_submit,
+                                         operator_timeout=operator_timeout)
+    if client is None:
+        return _fail_claimed_signal(conn, task, "signal_requires_model", "Hermes client is required")
+    dispatch_at = _utc_now_iso()
+    try:
+        _signal_token(task.account_id)
+        message = _load_raw_message(conn, task.raw_message_id)
+        images, media_problem = _load_images(conn, task.raw_message_id, media_loader)
+        if media_problem is not None:
+            return _fail_claimed_signal(conn, task, "media_failed", media_problem)
+        recent = _recent_context(conn, message, task.raw_message_id)
+        _close_read_transaction(conn)
+        with conn:
+            with conn.cursor() as cur:
+                signal_queue.lock_execution_claim(cur, task)
+                versions = capture_versions(cur, task.account_id)
+                signal_queue.store_execution_context(cur, task, versions)
+        # Capture the revision fence before fetching the model's projection: a
+        # close racing with snapshot I/O must invalidate this analysis, never be
+        # absorbed into a newer fence paired with an older model snapshot.
+        snapshot = deepcopy(snapshot_provider.current())
+        if _snapshot_problem(snapshot) is not None or snapshot.get("fixture_provenance"):
+            return _fail_claimed_signal(conn, task, "context_unavailable", "signal execution requires a fresh postgres projection")
+        snapshot = _signal_snapshot(snapshot, task)
+        snapshot["execution_account_id"] = task.account_id
+        snapshot["position_versions"] = versions
+        request = HermesRequest(
+            raw_message_id=task.raw_message_id, text=message["message_text"] or "", images=images,
+            referenced_messages=_referenced_messages(message), recent_context=recent,
+            system_snapshot=snapshot,
+        )
+        _close_read_transaction(conn)
+        started_at = _utc_now_iso()
+        candidate = client.analyze(request, timeout=timeout)
+        finished_at = _utc_now_iso()
+        if not isinstance(candidate, dict):
+            raise ValueError("non-object model response")
+        decision = _assemble_decision(
+            candidate, decision_id=str(uuid4()), raw_message_id=task.raw_message_id,
+            processing_run_id=task.processing_run_id, context_snapshot_id=str(uuid4()),
+            model_version=model_version, created_at=now_iso or _utc_now_iso(),
+            prompt_version=SIGNAL_PROMPT_VERSION,
+        )
+        errors = sorted(_load_schema_validator().iter_errors(decision), key=lambda error: list(error.path))
+        if errors:
+            return _fail_claimed_signal(conn, task, "invalid_decision_schema", errors[0].message)
+        _enforce_action_safety(decision)
+        semantic = _semantic_shadow_fields(task, decision, message)
+        signal_queue.record_signal_decision(
+            conn, task, semantic=semantic, snapshot=snapshot,
+            stages=_shadow_stage_timestamps(message, dispatch_at=dispatch_at,
+                                            model_started_at=started_at, model_finished_at=finished_at),
+        )
+        body = build_operator_request(task, decision, entry_ref=_signal_entry_ref(task, message))
+        if body is None:
+            finished = signal_queue.complete_signal_task(
+                conn, task.task_id, task.claim_token, status="skipped", disposition="skipped",
+                disposition_reason=f"non_trading_decision:{decision['classification']['action']}",
+            )
+            return _signal_result(finished, "skipped", decision_id=decision["decision_id"])
+        registered = signal_queue.register_execution_request(conn, task, body)
+    except signal_queue.StaleClaimError as exc:
+        conn.rollback()
+        return _signal_result(task, "stale_claim", detail=str(exc))
+    except HermesTimeoutError as exc:
+        conn.rollback()
+        return _fail_claimed_signal(conn, task, "hermes_timeout", str(exc))
+    except (HermesUnavailableError, HermesResponseError) as exc:
+        conn.rollback()
+        return _fail_claimed_signal(conn, task, "hermes_failed", str(exc))
+    except Exception as exc:
+        conn.rollback()
+        return _fail_claimed_signal(conn, task, "signal_request_failed", str(exc))
+    # Once registered, no failure path may turn this task into a new model run.
+    return _submit_registered_signal(conn, registered, operator_submit=operator_submit,
+                                     operator_timeout=operator_timeout)
 
 
 def _process_claimed_signal(
@@ -648,7 +943,7 @@ def _fail_claimed_signal(
             task.claim_token,
             disposition_reason=f"{code}: {detail}"[:500],
             shadow_result={
-                "mode": "shadow",
+                "mode": task.processing_purpose,
                 "operator_submitted": False,
                 "outbox_published": False,
                 "code": code,
@@ -963,8 +1258,8 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(
         description=(
-            "G2 shadow consumer. No live orders. Uses existing RealHermesClient. "
-            "Does not cut over execution (G3)."
+            "Hermes queue consumer using RealHermesClient. Defaults to shadow. "
+            "Explicit signal mode submits through the operator API."
         )
     )
     run_mode = parser.add_mutually_exclusive_group(required=True)
@@ -976,7 +1271,7 @@ def main(argv: list[str] | None = None) -> int:
     run_mode.add_argument(
         "--loop",
         action="store_true",
-        help="keep claiming until the queue is idle, then exit",
+        help="drain the queue, then exit on idle or unresolved signal reconciliation",
     )
     adapters = parser.add_mutually_exclusive_group(required=True)
     adapters.add_argument(
@@ -984,7 +1279,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=(
             "use existing smoke_replay Postgres snapshot + filesystem media "
-            "adapters; does not enable live orders or deployment"
+            "adapters; required for signal mode"
         ),
     )
     adapters.add_argument(
@@ -996,8 +1291,27 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="required with --fixture-snapshot-json; root for media object_key paths",
     )
-    parser.add_argument("--worker-id", default="shadow-worker")
+    parser.add_argument("--worker-id", default=None, help="worker identity prefix; signal mode appends its account")
+    parser.add_argument("--mode", choices=(WORKER_MODE_SHADOW, WORKER_MODE_SIGNAL), default=WORKER_MODE_SHADOW)
+    parser.add_argument("--account-id", choices=tuple(f"account-{letter}" for letter in "abcd"))
+    parser.add_argument("--media-root", help="filesystem root for projection media object keys")
     args = parser.parse_args(argv)
+    if args.mode == WORKER_MODE_SIGNAL:
+        if args.account_id is None or not args.projection_adapters:
+            parser.error("--mode signal requires --account-id and --projection-adapters")
+        _signal_token(args.account_id)
+        own_token = f"SIGNAL_TOKEN_{args.account_id.upper().replace('-', '_')}"
+        for name in os.environ:
+            foreign_signal = name.startswith("SIGNAL_TOKEN_ACCOUNT_") and name != own_token
+            telegram_token = name.startswith(("TELEGRAM_", "TG_")) and "TOKEN" in name
+            if (foreign_signal or telegram_token) and os.environ.get(name):
+                parser.error(f"signal worker environment must not contain {name}")
+        endpoint = os.environ.get("SIGNAL_OPERATOR_URL", "").strip()
+        if not endpoint.startswith(("http://", "https://")) or not endpoint.endswith("/v1/operator/orders"):
+            parser.error("SIGNAL_OPERATOR_URL must explicitly name /v1/operator/orders")
+        worker_id = f"{args.worker_id or 'signal-worker'}:{args.account_id}"
+    else:
+        worker_id = args.worker_id or "shadow-worker"
     database_url = os.environ.get("DATABASE_URL", "").strip()
     if not database_url:
         raise SystemExit("DATABASE_URL is required")
@@ -1022,20 +1336,33 @@ def main(argv: list[str] | None = None) -> int:
     else:
         conn = psycopg2.connect(database_url)
         snapshot_provider = PostgresSnapshotProvider(conn)
-        media_loader = FilesystemMediaLoader()
+        media_loader = FilesystemMediaLoader(root=args.media_root)
     try:
-        result = run_shadow_consumer(
-            conn,
-            worker_id=args.worker_id,
-            client=client,
-            snapshot_provider=snapshot_provider,
-            media_loader=media_loader,
-            once=bool(args.once),
-        )
+        if args.mode == WORKER_MODE_SIGNAL:
+            while True:
+                result = process_signal_one(
+                    conn, worker_id=worker_id, account_id=args.account_id, client=client,
+                    snapshot_provider=snapshot_provider, media_loader=media_loader,
+                    model_version=os.environ.get("HERMES_MODEL", "pinned"),
+                )
+                # A service manager can poll with RestartSec. Do not hammer an
+                # unknown result or rerun its model in an in-process busy loop.
+                idle = result.status == "skipped" and result.task_id is None
+                if args.once or idle or result.status == "reconciling":
+                    break
+        else:
+            result = run_shadow_consumer(
+                conn,
+                worker_id=worker_id,
+                client=client,
+                snapshot_provider=snapshot_provider,
+                media_loader=media_loader,
+                once=bool(args.once),
+            )
     finally:
         conn.close()
     print(result.status)
-    return 0 if result.status in {"shadow_dispatched", "skipped", "expired"} else 1
+    return 0 if result.status in {"shadow_dispatched", "dispatched", "reconciling", "skipped", "expired"} else 1
 
 
 if __name__ == "__main__":

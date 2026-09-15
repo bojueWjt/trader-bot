@@ -130,6 +130,29 @@ def test_order_accepted_event_projects_into_orders_projection(
     assert quantity == Decimal("5")
 
 
+def test_three_native_close_fills_project_actual_cumulative_quantity(
+    client: TestClient, migrated_db: str,
+) -> None:
+    intent_id = _seed_approved_intent(migrated_db)
+    client_order_id = f"B{intent_id.replace('-', '')}01"
+    accepted = _order_accepted_event(client_order_id, ts_event=T1, intent_id=intent_id)
+    accepted["payload"].update(quantity="1.936", side="SELL", order_type="MARKET", reduce_only=True)
+    assert _post_events(client, [accepted]).status_code == 200
+    fills = []
+    for index, quantity in enumerate(("0.5", "0.5", "0.936"), 1):
+        event = _order_filled_event(client_order_id, ts_event=T1 + timedelta(seconds=index), intent_id=intent_id)
+        event["trade_id"] = f"venue-close-fill-{index}"
+        event["payload"] = {"instrument_id": INSTRUMENT_ID, "last_qty": quantity, "last_px": "2452.19"}
+        fills.append(event)
+    for events in ([fills[2]], [fills[0], fills[1]], fills):
+        assert _post_events(client, events).status_code == 200
+    with psycopg2.connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute("SELECT status,quantity,filled_quantity,average_fill_price,order_type FROM orders_projection WHERE client_order_id=%s", (client_order_id,))
+        assert cur.fetchone() == ("filled", Decimal("1.936"), Decimal("1.936"), Decimal("2452.19"), "MARKET")
+        cur.execute("SELECT count(*) FROM execution_events WHERE intent_id=%s AND event_type='OrderFilled'", (intent_id,))
+        assert cur.fetchone()[0] == 3
+
+
 def test_order_denied_event_is_durable_and_queryable(
     client: TestClient,
     migrated_db: str,

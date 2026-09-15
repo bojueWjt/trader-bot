@@ -31,10 +31,11 @@ from strategy.intent_execution_strategy import (  # noqa: E402
     _intent_execution_identity,
     _intent_execution_payload,
 )
-from runtime.exchange_cancel_adapter import CancelStateError, OrderAlreadyFilledError
+from runtime.exchange_cancel_adapter import CancelStateError, OrderAlreadyFilledError, TerminalExchangeWorker
 from runtime.intent_execution_inbox import (  # noqa: E402
     IntentExecutionIdentity,
     IntentExecutionState,
+    JsonIntentExecutionInbox,
 )
 
 
@@ -47,6 +48,130 @@ ROBOT_OLD_TP_ID = "Bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb02"
 
 
 class StrategyManageShellTest(unittest.TestCase):
+    def test_close_waits_for_real_worker_cancel_and_replans_after_racing_fill(self) -> None:
+        self._exercise_close_entry_barrier("confirmed")
+
+    def test_close_cancel_unknown_or_stale_evidence_remains_pending(self) -> None:
+        for outcome in ("unknown", "stale", "cache_lag", "missing_evidence"):
+            with self.subTest(outcome=outcome):
+                self._exercise_close_entry_barrier(outcome)
+
+    def _exercise_close_entry_barrier(self, outcome: str) -> None:
+        from threading import Event
+        entry_id = "Bcccccccccccccccccccccccccccccccc01"
+        entry = SimpleNamespace(
+            account_id=ACCOUNT_ID, symbol="BTCUSDT", position_side="LONG",
+            order_kind="regular", venue_order_id="entry-1", client_order_id=entry_id,
+            instrument_id=INSTRUMENT_ID, side="BUY", order_type="LIMIT",
+            quantity="0.2", price="26000", reduce_only=False, status="ACCEPTED",
+        )
+        manual = SimpleNamespace(**{**vars(entry), "client_order_id": "aos_manual"})
+        strategy = _HarnessStrategy(orders=[entry, manual])
+        started, release = Event(), Event()
+        cancelled = []
+        results = []
+
+        def cancel(_action, request, **_kwargs):
+            cancelled.append(request.client_order_id)
+            started.set()
+            self.assertTrue(release.wait(2))
+            if outcome == "unknown":
+                raise TimeoutError("cancel outcome unknown")
+            entry.status = "CANCELED"
+            strategy._exchange_state_mirror._orders = (manual,)
+            if outcome != "cache_lag":
+                strategy._positions[0].quantity = "0.6"
+            return SimpleNamespace(terminal_status="CANCELED", outcome="canceled")
+
+        def snapshot(**kwargs):
+            self.assertTrue(kwargs["force_refresh"])
+            fetched = datetime.now(timezone.utc)
+            if outcome == "stale":
+                fetched -= timedelta(seconds=30)
+            return {"positions_fetched_at": fetched, "positions": [
+                {"symbol": "BTCUSDT", "position_side": "LONG", "quantity": "0.6"},
+            ]}
+
+        if outcome != "missing_evidence":
+            strategy._exchange_evidence_provider = SimpleNamespace(snapshot=snapshot)
+        worker = TerminalExchangeWorker(
+            account_id=ACCOUNT_ID, mirror=strategy._exchange_state_mirror,
+            adapter=SimpleNamespace(cancel=cancel), result_publisher=results.append,
+            total_deadline_seconds=2,
+        )
+        worker.start()
+        strategy.set_terminal_exchange_worker(worker)
+        intent = _intent(action="close_position", order_plan={"type": "market", "position_side": "LONG"})
+        identity = _intent_execution_identity(intent)
+        try:
+            self.assertTrue(strategy._queue_intent_receive(intent))
+            _pump_durable(strategy)
+            self.assertTrue(worker.wait_empty(timeout_seconds=1))
+            strategy._on_terminal_exchange_result(results.pop(0))
+            self.assertTrue(started.wait(1))
+            self.assertEqual(strategy.submitted_plans, [])
+            self.assertEqual(strategy._intent_execution_inbox.get(identity).state, IntentExecutionState.RECEIVED)
+            release.set()
+            self.assertTrue(worker.wait_empty(timeout_seconds=1))
+            strategy._on_terminal_exchange_result(results.pop(0))
+            _pump_durable(strategy)
+            self.assertEqual(cancelled, [entry_id])
+            if outcome == "confirmed":
+                self.assertEqual(len(strategy.submitted_plans), 1)
+                self.assertEqual(strategy.submitted_plans[0].quantity, "0.600")
+                self.assertTrue(strategy.submitted_plans[0].reduce_only)
+                restarted = _HarnessStrategy()
+                restarted._intent_execution_inbox = JsonIntentExecutionInbox(
+                    strategy._state_dir / "intent-execution-inbox.json",
+                )
+                try:
+                    fresh = _intent(action="add_position", order_plan={
+                        "type": "limit", "side": "buy", "quantity": "0.1", "price": "26000",
+                    })
+                    fresh_identity = _intent_execution_identity(fresh)
+                    restarted._intent_execution_inbox.register_received(fresh_identity, _intent_execution_payload(fresh))
+                    from strategy.intent_execution_planner import OrderPlan
+                    new_plan = OrderPlan(
+                        intent_id=fresh.intent_id, client_order_id=encode_client_order_id(fresh.intent_id),
+                        tags=("action=add_position",), instrument_id=INSTRUMENT_ID,
+                        side="BUY", order_type="LIMIT", quantity="0.1", price="26000", time_in_force="GTC",
+                    )
+                    self.assertFalse(restarted._submit_order_plan(new_plan, intent_execution=fresh_identity))
+                    self.assertEqual(restarted.denials[-1].reason, "position_close_reconciling")
+                    close_order_id = strategy.submitted_plans[0].client_order_id
+                    strategy._orders.append(SimpleNamespace(
+                        client_order_id=close_order_id, instrument_id=INSTRUMENT_ID, status="FILLED",
+                    ))
+                    strategy._positions[0].quantity = "0"
+                    strategy.on_order_filled(SimpleNamespace(
+                        client_order_id=close_order_id, instrument_id=INSTRUMENT_ID,
+                    ))
+                    _pump_durable(strategy)
+                    restarted._intent_execution_inbox = JsonIntentExecutionInbox(
+                        strategy._state_dir / "intent-execution-inbox.json",
+                    )
+                    persisted = restarted._intent_execution_inbox.get(identity)
+                    self.assertEqual(persisted.terminal_client_order_ids, (close_order_id,))
+                    fresh_open = _intent(action="open_position", order_plan={
+                        "type": "limit", "side": "buy", "quantity": "0.1", "price": "26000",
+                    })
+                    open_identity = _intent_execution_identity(fresh_open)
+                    restarted._intent_execution_inbox.register_received(open_identity, _intent_execution_payload(fresh_open))
+                    from dataclasses import replace
+                    open_plan = replace(new_plan, intent_id=fresh_open.intent_id,
+                                        client_order_id=encode_client_order_id(fresh_open.intent_id), tags=("action=open_position",))
+                    self.assertTrue(restarted._submit_order_plan(open_plan, intent_execution=open_identity))
+                finally:
+                    restarted.on_stop()
+            else:
+                self.assertEqual(strategy.submitted_plans, [])
+                self.assertEqual(strategy._intent_execution_inbox.get(identity).state, IntentExecutionState.RECEIVED)
+                self.assertEqual(strategy.denials[-1].reason, "close_entries_reconciling")
+        finally:
+            release.set()
+            worker.stop()
+            strategy.on_stop()
+
     def test_post_dispatch_missing_cancel_target_is_rejected(self) -> None:
         for action in ("cancel_order", "move_stop_loss", "replace_take_profits"):
             with self.subTest(action=action):
@@ -78,8 +203,11 @@ class StrategyManageShellTest(unittest.TestCase):
             ("EXPIRED", "", "order_already_terminal"),
             ("REJECTED", "", "order_already_terminal"),
             ("", "CancelStateError('terminal status EXPIRED: account=a')", "order_already_terminal"),
-            ("", "CancelStateError('order disappeared from open endpoint with terminal status NEW: account=a')", "order_already_terminal"),
-            ("NEW", "", "order_already_terminal"),
+            ("", "CancelStateError('order disappeared from open endpoint with terminal status NEW: account=a')", "order_cancel_failed"),
+            ("NEW", "", "order_cancel_failed"),
+            ("UNKNOWN", "", "order_cancel_failed"),
+            ("TRIGGERED", "", "order_cancel_failed"),
+            ("EXECUTED", "", "order_cancel_failed"),
             ("", "CancelStateError('unknown state')", "order_cancel_failed"),
             ("", "TimeoutError('timeout')", "order_cancel_failed"),
         )
@@ -120,7 +248,6 @@ class StrategyManageShellTest(unittest.TestCase):
             (CancelStateError("terminal status EXPIRED: account=a"), "order_already_terminal"),
             (SimpleNamespace(terminal_status="FILLED"), "order_already_filled"),
             (SimpleNamespace(terminal_status="EXPIRED"), "order_already_terminal"),
-            (SimpleNamespace(terminal_status="CANCELED", outcome="already_canceled"), "order_already_terminal"),
         )
         for result, reason in cases:
             with self.subTest(result=result):
@@ -153,7 +280,7 @@ class StrategyManageShellTest(unittest.TestCase):
 
     def test_cancel_batch_distinguishes_already_canceled_from_success(self) -> None:
         for outcome_name, expected_state in (
-            ("already_canceled", IntentExecutionState.REJECTED),
+            ("already_canceled", IntentExecutionState.EXCHANGE_CONFIRMED),
             ("canceled", IntentExecutionState.EXCHANGE_CONFIRMED),
         ):
             with self.subTest(outcome=outcome_name):
@@ -175,10 +302,21 @@ class StrategyManageShellTest(unittest.TestCase):
                     _pump_durable(strategy)
                     record = strategy._intent_execution_inbox.get(identity)
                     self.assertEqual(record.state, expected_state)
-                    if outcome_name == "already_canceled":
-                        self.assertEqual(record.rejection_reason, "order_already_terminal")
+                    self.assertEqual(record.rejection_reason, "")
                 finally:
                     strategy.on_stop()
+
+    def test_sync_already_canceled_is_idempotent_success(self) -> None:
+        strategy = _HarnessStrategy()
+        order = SimpleNamespace(account_id=ACCOUNT_ID, symbol="BTCUSDT", position_side="LONG",
+                                order_kind="regular", venue_order_id="existing")
+        adapter = Mock(cancel=Mock(return_value=SimpleNamespace(terminal_status="CANCELED", outcome="already_canceled")))
+        strategy.set_exchange_cancel_adapter(adapter, Mock(find_order=Mock(return_value=order)))
+        try:
+            self.assertTrue(strategy._cancel_via_exchange_adapter(INSTRUMENT_ID, ROBOT_OLD_STOP_ID))
+            self.assertEqual(strategy.denials, [])
+        finally:
+            strategy.on_stop()
 
     def test_management_rejection_persistence_failure_halts_durable_lane(self) -> None:
         strategy = _HarnessStrategy()
@@ -240,7 +378,7 @@ class StrategyManageShellTest(unittest.TestCase):
             cancel_outcomes = tuple(
                 SimpleNamespace(
                     request=request,
-                    status="confirmed",
+                    status="confirmed", terminal_status="CANCELED",
                     error="",
                 )
                 for request in cancel.cancel_requests

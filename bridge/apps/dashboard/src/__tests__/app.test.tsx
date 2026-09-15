@@ -315,6 +315,68 @@ describe("control-plane dashboard contracts", () => {
     expect(within(detail).getByText("Protection protected")).toBeInTheDocument();
   });
 
+  it.each(["/dashboard", "/orders"])("submits scoped position actions and displays queried execution denial on %s", async (page) => {
+    const positionId = "BTCUSDT-PERP.BINANCE-SHORT";
+    const operationId = "11111111-1111-4111-8111-111111111111";
+    const fetchMock = stubControlPlane(vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/v1/operator/orders" && init?.method === "POST") {
+        return jsonResponse({ intent_id: operationId, status: "accepted" });
+      }
+      if (path === `/v1/operator/orders/${operationId}`) {
+        return jsonResponse({ status: "rejected", denial_reason: "position_generation_stale" });
+      }
+      if (path.startsWith("/v1/positions")) {
+        return jsonResponse(envelope({ positions: [{
+          account_id: "account-d", position_id: positionId, instrument_symbol: "BTC/USDT",
+          position_side: "SHORT", quantity: 0.5, entry_price: 60000, mark_price: 59000,
+          stop_loss: 61000
+        }] }));
+      }
+      return jsonResponse(envelope({ accounts: [], orders: [], nodes: [], trades: [], messages: [] }));
+    }), false);
+    render(<App initialPath={page} />);
+    if (page === "/dashboard") {
+      fireEvent.click(await screen.findByRole("button", { name: "Open BTC/USDT detail" }));
+      fireEvent.click(screen.getByRole("button", { name: /^Close position$/ }));
+    } else {
+      fireEvent.click(await screen.findByRole("button", { name: `Close position ${positionId}` }));
+    }
+    const dialog = screen.getByRole("dialog", { name: "Close position" });
+    fireEvent.change(within(dialog).getByLabelText("Action reason"), { target: { value: "close this short position" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Confirm close position" }));
+    expect(await screen.findByText("Request accepted — awaiting execution")).toBeInTheDocument();
+    const postCall = fetchMock.mock.calls.find(([path, request]) => path === "/v1/operator/orders" && request?.method === "POST");
+    expect(postCall).toBeDefined();
+    expect(JSON.parse(String(postCall?.[1]?.body))).toMatchObject({
+      action: "close_position", account_id: "account-d", symbol: "BTCUSDT",
+      position_side: "short", target_position_id: positionId, authorized_by_type: "user"
+    });
+    expect(fetchMock.mock.calls.some(([path]) => path === "/v1/commands")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Check execution status" }));
+    expect(await screen.findByText("Request rejected: position_generation_stale")).toBeInTheDocument();
+    expect(screen.queryByText("Command completed")).not.toBeInTheDocument();
+  });
+
+  it("shows missing account scope instead of submitting an unscoped position action", async () => {
+    const fetchMock = stubControlPlane(vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/v1/positions")) {
+        return jsonResponse(envelope({ positions: [{
+          position_id: "pos-missing-account", instrument_symbol: "BTC/USDT", side: "long", quantity: 1
+        }] }));
+      }
+      return jsonResponse(envelope({ accounts: [], orders: [], nodes: [], trades: [], messages: [] }));
+    }), false);
+    render(<App initialPath="/orders" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Close position pos-missing-account" }));
+    const dialog = screen.getByRole("dialog", { name: "Close position" });
+    fireEvent.change(within(dialog).getByLabelText("Action reason"), { target: { value: "close one position" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Confirm close position" }));
+    expect(await screen.findByText("Cannot submit: missing account ID.")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([path]) => path === "/v1/operator/orders" || path === "/v1/commands")).toBe(false);
+  });
+
   it("requires confirmation before submitting a manual cancel order action", async () => {
     const fetchMock = stubControlPlane(vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);

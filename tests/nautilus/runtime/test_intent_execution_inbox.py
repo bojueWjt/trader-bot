@@ -316,7 +316,7 @@ def test_repair_cli_dry_run_backup_and_non_entry_guard(tmp_path: Path) -> None:
     backups = list(tmp_path.glob("intent_execution_inbox.json.bak-*"))
     assert len(backups) == 1
     assert backups[0].read_bytes() == before
-    assert json.loads(path.read_bytes())["version"] == 1
+    assert json.loads(path.read_bytes())["version"] == 2
     for identity in eligible:
         record = inbox.get(identity)
         assert record.state is IntentExecutionState.REJECTED
@@ -346,6 +346,75 @@ def test_repair_io_failure_preserves_original(tmp_path: Path, failure_point: str
         backups = list(tmp_path.glob("*.bak-*"))
         assert len(backups) == 1
         assert backups[0].read_bytes() == before
+
+
+def test_add_generation_survives_close_reopen_and_invalidation_replay(tmp_path: Path) -> None:
+    path = tmp_path / "inbox.json"
+    inbox = JsonIntentExecutionInbox(path)
+    identity = replace(_identity(), action="add_position")
+    payload = {**_payload(identity), "order_plan": {"side": "buy"}}
+    inbox.register_received(identity, payload)
+    book = (identity.account_id, identity.instrument_id, "LONG")
+    assert inbox.get(identity).local_position_generation == 0
+    assert inbox.invalidate_position(*book, operation_id="close-1") == 1
+    restarted = JsonIntentExecutionInbox(path)
+    assert restarted.register_received(identity, payload) is IntentRegisterResult.REPLAY
+    assert restarted.get(identity).local_position_generation == 0
+    assert restarted.add_position_denial(
+        identity.account_id, identity.intent_id, identity.instrument_id, "LONG",
+    ) == "position_generation_stale"
+    assert restarted.invalidate_position(*book, operation_id="close-1") == 1
+    assert restarted.invalidate_position(*book, operation_id="close-2") == 2
+    assert restarted.invalidate_position(*book, operation_id="close-1") == 1
+    assert restarted.position_generation(*book) == 2
+    assert restarted.position_generation(identity.account_id, identity.instrument_id, "SHORT") == 0
+    new_identity = replace(_identity(), action="add_position")
+    restarted.register_received(new_identity, {**_payload(new_identity), "order_plan": {"side": "buy"}})
+    assert restarted.get(new_identity).local_position_generation == 2
+    assert restarted.add_position_denial(
+        new_identity.account_id, new_identity.intent_id, new_identity.instrument_id, "LONG",
+    ) is None
+
+
+def test_close_all_scope_is_atomic_and_does_not_invalidate_other_accounts(tmp_path: Path) -> None:
+    path = tmp_path / "inbox.json"
+    inbox = JsonIntentExecutionInbox(path)
+    identities = (
+        replace(_identity(), action="add_position"),
+        replace(_identity(), action="add_position"),
+        replace(_identity(), action="add_position", account_id="account-c"),
+        replace(_identity(), action="add_position", instrument_id="BTCUSDT-PERP.BINANCE"),
+    )
+    for index, identity in enumerate(identities):
+        side = "sell" if index == 1 else "buy"
+        inbox.register_received(identity, {**_payload(identity), "order_plan": {"side": side}})
+    inbox.invalidate_position_scope("account-b", operation_id="close-all", instrument_ids=("SOLUSDT",))
+    restarted = JsonIntentExecutionInbox(path)
+    restarted.invalidate_position_scope("account-b", operation_id="close-all", instrument_ids=("SOLUSDT",))
+    for index, identity in enumerate(identities):
+        side = "SHORT" if index == 1 else "LONG"
+        expected = "position_generation_stale" if index < 2 else None
+        assert restarted.add_position_denial(identity.account_id, identity.intent_id, identity.instrument_id, side) == expected
+        assert restarted.position_generation(identity.account_id, identity.instrument_id, side) == (1 if index < 2 else 0)
+
+
+def test_legacy_add_is_not_rebound_on_first_replay(tmp_path: Path) -> None:
+    path = tmp_path / "inbox.json"
+    identity = replace(_identity(), action="add_position")
+    payload = {**_payload(identity), "order_plan": {"side": "buy"}}
+    inbox = JsonIntentExecutionInbox(path)
+    inbox.register_received(identity, payload)
+    raw = json.loads(path.read_text())
+    raw["version"] = 1
+    raw.pop("position_generations")
+    for record in raw["records"].values():
+        record.pop("local_position_generation")
+        record.pop("local_position_side")
+    path.write_text(json.dumps(raw))
+    restarted = JsonIntentExecutionInbox(path)
+    assert restarted.register_received(identity, payload) is IntentRegisterResult.REPLAY
+    assert restarted.add_position_denial(identity.account_id, identity.intent_id, identity.instrument_id, "LONG") == "position_generation_missing"
+    assert restarted.get(identity).local_position_generation is None
 
 
 def _identity() -> IntentExecutionIdentity:

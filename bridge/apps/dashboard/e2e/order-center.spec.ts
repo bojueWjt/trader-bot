@@ -216,6 +216,18 @@ async function routeOrderCenterApi(page: Page, audit: CommandAudit): Promise<voi
       });
       return;
     }
+    if (url.pathname === "/v1/operator/orders" && request.method() === "POST") {
+      audit.commands.push(request.postDataJSON() as Record<string, unknown>);
+      await fulfillJson(route, {
+        intent_id: `00000000-0000-4000-8000-${String(audit.commands.length).padStart(12, "0")}`,
+        status: "accepted"
+      });
+      return;
+    }
+    if (url.pathname.startsWith("/v1/operator/orders/") && request.method() === "GET") {
+      await fulfillJson(route, { status: "accepted" });
+      return;
+    }
 
     await route.abort();
   });
@@ -243,7 +255,8 @@ async function submitManualAction(
   }
   await expect(confirmButton).toBeEnabled();
   await confirmButton.click();
-  await expect(page.getByText("Command completed")).toBeVisible();
+  const expectedStatus = confirmName === "Confirm cancel order" ? "Command completed" : "Request accepted — awaiting execution";
+  await expect(page.getByText(expectedStatus)).toBeVisible();
 }
 
 test.beforeEach(async ({ page }) => {
@@ -331,38 +344,31 @@ test("manual cancel, move-stop, partial-close, and close actions are confirmatio
 
   await drawer.getByRole("button", { name: "Move stop pos-alpha" }).click();
   await submitManualAction(page, "Confirm move stop", "raise stop after first target", { stopPrice: "64123" });
-  expect(audit.commands.at(-1)).toEqual({
-    args: {
-      position_id: "pos-alpha",
-      reason: "raise stop after first target",
-      signal_id: "intent-alpha",
-      stop_loss_price: 64123
-    },
-    type: "move_stop_loss"
+  expect(audit.commands.at(-1)).toMatchObject({
+    action: "move_stop_loss", account_id: "acc-main", symbol: "BTCUSDT",
+    position_side: "long", target_position_id: "pos-alpha", authorized_by_type: "user",
+    reason: "raise stop after first target", stop_loss: 64123
   });
 
   await drawer.getByRole("button", { name: "Partial close pos-alpha" }).click();
   await submitManualAction(page, "Confirm partial close", "take partial profit into resistance", { fraction: "0.25" });
-  expect(audit.commands.at(-1)).toEqual({
-    args: {
-      amount: 0.3,
-      position_id: "pos-alpha",
-      reason: "take partial profit into resistance",
-      scope: "position_partial",
-      signal_id: "intent-alpha"
-    },
-    type: "close_all"
+  expect(audit.commands.at(-1)).toMatchObject({
+    action: "partial_close", account_id: "acc-main", symbol: "BTCUSDT",
+    position_side: "long", target_position_id: "pos-alpha", authorized_by_type: "user",
+    quantity: 0.3, reason: "take partial profit into resistance"
   });
 
   await drawer.getByRole("button", { name: "Close position pos-alpha" }).click();
   await submitManualAction(page, "Confirm close position", "exit remaining exposure before maintenance");
-  expect(audit.commands.at(-1)).toEqual({
-    args: {
-      position_id: "pos-alpha",
-      reason: "exit remaining exposure before maintenance",
-      scope: "position",
-      signal_id: "intent-alpha"
-    },
-    type: "close_all"
+  expect(audit.commands.at(-1)).toMatchObject({
+    action: "close_position", account_id: "acc-main", symbol: "BTCUSDT",
+    position_side: "long", target_position_id: "pos-alpha", authorized_by_type: "user",
+    reason: "exit remaining exposure before maintenance"
   });
+  await page.getByRole("button", { name: "Check execution status" }).click();
+  await expect(page.getByText("Request accepted — awaiting execution")).toBeVisible();
+  await drawer.getByRole("button", { name: "Close position pos-alpha" }).click();
+  await submitManualAction(page, "Confirm close position", "retry same pending close");
+  expect(audit.commands).toHaveLength(4);
+  expect(audit.commands.some((body) => body.type === "close_all")).toBe(false);
 });

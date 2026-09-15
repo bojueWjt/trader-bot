@@ -94,6 +94,10 @@ class IntentExecutionRecord:
     exchange_confirmed_client_order_ids: tuple[str, ...]
     updated_at: str
     rejection_reason: str = ""
+    # Node-local receipt generation, not a control-plane/LLM precondition.
+    local_position_generation: int | None = None
+    local_position_side: str = ""
+    terminal_client_order_ids: tuple[str, ...] = ()
 
     def identity(self) -> IntentExecutionIdentity:
         return IntentExecutionIdentity(
@@ -132,7 +136,7 @@ def expired_dispatched_management(
 class JsonIntentExecutionInbox:
     """Durable intent receipt and exchange-confirmation barrier."""
 
-    _VERSION = 1
+    _VERSION = 2
 
     def __init__(
         self,
@@ -190,12 +194,117 @@ class JsonIntentExecutionInbox:
                 exchange_confirmed_client_order_ids=(),
                 updated_at=_utc_now(),
             )
+            if normalized.action in {"open_position", "add_position"}:
+                order_plan = payload_copy.get("order_plan")
+                if isinstance(order_plan, dict):
+                    side = {"buy": "LONG", "sell": "SHORT"}.get(
+                        str(order_plan.get("side", "")).lower(), "",
+                    )
+                    if side:
+                        book = _position_book_key(
+                            normalized.account_id, normalized.instrument_id, side,
+                        )
+                        generations = payload.setdefault("position_generations", {})
+                        state = generations.setdefault(
+                            book, {"generation": 0, "invalidations": {}},
+                        )
+                        record = replace(
+                            record,
+                            local_position_generation=state["generation"],
+                            local_position_side=side,
+                        )
             payload["records"][_record_key(normalized)] = (
                 _serialize_record(record)
             )
             return IntentRegisterResult.REGISTERED, True
 
         return self._mutate(mutate)
+
+    def position_generation(
+        self, account_id: str, instrument_id: str, position_side: str,
+    ) -> int:
+        book = _position_book_key(account_id, instrument_id, position_side)
+        return self._read_locked(
+            lambda payload: payload.get("position_generations", {}).get(
+                book, {"generation": 0},
+            )["generation"]
+        )
+
+    def invalidate_position(
+        self, account_id: str, instrument_id: str, position_side: str,
+        *, operation_id: str,
+    ) -> int:
+        """Persist a close barrier once per operation, even after restart."""
+        book = _position_book_key(account_id, instrument_id, position_side)
+        operation = _position_operation_id(operation_id)
+
+        def mutate(payload: dict[str, Any]) -> tuple[int, bool]:
+            state = payload.setdefault("position_generations", {}).setdefault(
+                book, {"generation": 0, "invalidations": {}},
+            )
+            if operation in state["invalidations"]:
+                return state["invalidations"][operation], False
+            state["generation"] += 1
+            state["invalidations"][operation] = state["generation"]
+            return state["generation"], True
+
+        return self._mutate(mutate)
+
+    def invalidate_position_scope(
+        self, account_id: str, *, operation_id: str,
+        instrument_ids: tuple[str, ...] = (),
+    ) -> None:
+        """CLOSE_ALL invalidates all already-bound books in its scope atomically."""
+        operation = _position_operation_id(operation_id)
+        symbols = {_position_symbol(value) for value in instrument_ids}
+
+        def mutate(payload: dict[str, Any]) -> tuple[None, bool]:
+            changed = False
+            for key, state in payload.get("position_generations", {}).items():
+                account, symbol, _side = json.loads(key)
+                if account != account_id or (symbols and symbol not in symbols):
+                    continue
+                if operation in state["invalidations"]:
+                    continue
+                state["generation"] += 1
+                state["invalidations"][operation] = state["generation"]
+                changed = True
+            return None, changed
+
+        self._mutate(mutate)
+
+    def add_position_denial(
+        self, account_id: str, intent_id: str, instrument_id: str,
+        position_side: str, *, require_binding: bool = False,
+    ) -> str | None:
+        """Check the immutable receipt binding; never bind during final submit."""
+        book = _position_book_key(account_id, instrument_id, position_side)
+        key = f"{account_id}:{UUID(str(intent_id))}"
+
+        def read(payload: dict[str, Any]) -> str | None:
+            raw = payload["records"].get(key)
+            if raw is None:
+                return "position_generation_missing" if require_binding else None
+            record = self._record_from_raw(raw)
+            if record.action not in {"open_position", "add_position"}:
+                return "position_generation_missing" if require_binding else None
+            if record.local_position_generation is None:
+                if record.action == "open_position" and not require_binding:
+                    return None
+                return "position_generation_missing"
+            record_book = _position_book_key(
+                record.account_id, record.instrument_id, record.local_position_side,
+            )
+            if record_book != book:
+                return "position_generation_book_mismatch"
+            state = payload.get("position_generations", {}).get(book)
+            if state is None:
+                return "position_generation_missing"
+            if record.local_position_generation != state["generation"]:
+                return "position_generation_stale"
+            return None
+
+        return self._read_locked(read)
 
     def begin_dispatch(
         self,
@@ -317,6 +426,25 @@ class JsonIntentExecutionInbox:
             payload["records"][key] = _serialize_record(updated)
             return True, True
 
+        return self._mutate(mutate)
+
+    def mark_close_order_terminal(self, client_order_id: str) -> bool:
+        """Persist actual close-order terminal evidence, separate from acceptance."""
+        def mutate(payload: dict[str, Any]) -> tuple[bool, bool]:
+            match = self._record_entry_for_client_order_id(payload, str(client_order_id))
+            if match is False:
+                return False, False
+            key, record = match
+            if record.action != "close_position":
+                return False, False
+            terminal = set(record.terminal_client_order_ids)
+            if client_order_id in terminal:
+                return True, False
+            terminal.add(client_order_id)
+            payload["records"][key] = _serialize_record(replace(
+                record, terminal_client_order_ids=tuple(sorted(terminal)), updated_at=_utc_now(),
+            ))
+            return True, True
         return self._mutate(mutate)
 
     def mark_rejected(
@@ -594,6 +722,11 @@ class JsonIntentExecutionInbox:
                 rejection_reason=str(
                     raw.get("rejection_reason", "")
                 ),
+                local_position_generation=_optional_position_generation(
+                    raw.get("local_position_generation"),
+                ),
+                local_position_side=str(raw.get("local_position_side", "")),
+                terminal_client_order_ids=tuple(str(value) for value in raw.get("terminal_client_order_ids", ())),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise IntentExecutionInboxError(
@@ -653,7 +786,7 @@ class JsonIntentExecutionInbox:
             raise IntentExecutionInboxError(
                 "intent execution inbox root must be an object"
             )
-        if payload.get("version") != self._VERSION:
+        if payload.get("version") not in {1, self._VERSION}:
             raise IntentExecutionInboxError(
                 "unsupported intent execution inbox version"
             )
@@ -662,6 +795,27 @@ class JsonIntentExecutionInbox:
             raise IntentExecutionInboxError(
                 "intent execution records must be an object"
             )
+        generations = payload.get("position_generations", {})
+        if not isinstance(generations, dict):
+            raise IntentExecutionInboxError("position generations must be an object")
+        for key, state in generations.items():
+            try:
+                account, symbol, side = json.loads(key)
+                if _position_book_key(account, symbol, side) != key:
+                    raise ValueError("noncanonical position book")
+                if not isinstance(state, dict):
+                    raise ValueError("position generation must be an object")
+                generation = _optional_position_generation(state.get("generation"))
+                if generation is None or not isinstance(state.get("invalidations"), dict):
+                    raise ValueError("position generation is incomplete")
+                for operation, value in state["invalidations"].items():
+                    _position_operation_id(operation)
+                    invalidated = _optional_position_generation(value)
+                    if invalidated is None or not 0 < invalidated <= generation:
+                        raise ValueError("invalid position invalidation")
+            except (TypeError, ValueError) as exc:
+                raise IntentExecutionInboxError("position generation is invalid") from exc
+        payload["version"] = self._VERSION
         return payload
 
     def _save_payload(self, payload: dict[str, Any]) -> None:
@@ -761,6 +915,34 @@ def _json_object(value: Mapping[str, Any]) -> dict[str, Any]:
 
 def _record_key(identity: IntentExecutionIdentity) -> str:
     return f"{identity.account_id}:{identity.intent_id}"
+
+
+def _position_symbol(instrument_id: str) -> str:
+    return str(instrument_id).strip().upper().split("-", 1)[0].split(".", 1)[0]
+
+
+def _position_book_key(account_id: str, instrument_id: str, side: str) -> str:
+    account = str(account_id).strip()
+    symbol = _position_symbol(instrument_id)
+    position_side = str(side).strip().upper()
+    if not account or not symbol or position_side not in {"LONG", "SHORT"}:
+        raise IntentExecutionInboxError("position book is invalid")
+    return json.dumps([account, symbol, position_side], separators=(",", ":"))
+
+
+def _position_operation_id(value: str) -> str:
+    operation = str(value).strip()
+    if not operation:
+        raise IntentExecutionInboxError("position invalidation operation_id is required")
+    return operation
+
+
+def _optional_position_generation(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise IntentExecutionInboxError("position generation must be a nonnegative integer")
+    return value
 
 
 def _serialize_record(

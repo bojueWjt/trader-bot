@@ -4671,3 +4671,61 @@ def test_node_command_ack_preserves_progress_states_and_rejects_unknown(
             (failed_command_id,),
         )
         assert cur.fetchone()[0] == "failed"
+
+
+@pytest.mark.parametrize(
+    'case,expected_status',
+    [
+        ('fresh', 200), ('absent', 409), ('different_symbol', 409),
+        ('stale_regular', 409), ('stale_algo', 409), ('stale_positions', 409),
+        ('stale_reconciliation', 409), ('degraded', 409), ('incomplete', 409),
+        ('duplicate_cid', 409), ('risk_increasing_venue_order', 409), ('naive_proof_time', 409),
+    ],
+)
+def test_resume_projection_shell_uses_only_same_fresh_venue_protection(
+    client, migrated_db, case, expected_status,
+):
+    cid = 'B' + 'f' * 32 + '02'
+    order = {
+        'symbol': SYMBOL, 'clientOrderId': cid, 'type': 'STOP_MARKET',
+        'order_kind': 'algo', 'reduceOnly': True,
+    }
+    if case == 'different_symbol':
+        order['symbol'] = 'ETHUSDT'
+    if case == 'risk_increasing_venue_order':
+        order['reduceOnly'] = False
+    orders = [] if case == 'absent' else [order]
+    if case == 'duplicate_cid':
+        orders.append(dict(order))
+    _seed_heartbeat(migrated_db, algo_orders=orders,
+                    reconciliation_state='degraded' if case == 'degraded' else 'healthy')
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO orders_projection
+               (order_projection_id,account_id,instrument_id,client_order_id,status,side,payload,updated_at)
+               VALUES (%s,%s,%s,%s,'accepted','short',%s,clock_timestamp())""",
+            (str(uuid4()), ACCOUNT_A, 'BTCUSDT-PERP.BINANCE', cid,
+             Json({'instrument_id': 'BTCUSDT-PERP.BINANCE'})),
+        )
+        timestamp_fields = {
+            'stale_regular': 'regular_orders_snapshot_at',
+            'stale_algo': 'algo_orders_snapshot_at',
+            'stale_positions': 'positions_snapshot_at',
+            'stale_reconciliation': 'reconciliation_completed_at',
+        }
+        if case in timestamp_fields:
+            cur.execute(f"UPDATE node_heartbeats SET {timestamp_fields[case]}=clock_timestamp()-interval '5 minutes' WHERE node_id=%s", (NODE_A,))
+        if case == 'incomplete':
+            cur.execute('UPDATE node_heartbeats SET regular_orders_snapshot_at=NULL WHERE node_id=%s', (NODE_A,))
+        if case == 'naive_proof_time':
+            cur.execute("UPDATE node_heartbeats SET payload=jsonb_set(payload,'{ts}',%s) WHERE node_id=%s",
+                        (Json(datetime.now().isoformat()), NODE_A))
+    permit_id = _seed_reviewed_release_and_permit(migrated_db)
+    response = client.post('/v1/commands', headers=_risk_headers(str(uuid4())), json=_resume_body(permit_id))
+    assert response.status_code == expected_status, response.text
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute('SELECT status,order_type,reduce_only,payload FROM orders_projection WHERE account_id=%s AND client_order_id=%s', (ACCOUNT_A,cid))
+        assert cur.fetchone() == ('accepted', None, None, {'instrument_id':'BTCUSDT-PERP.BINANCE'})
+        if expected_status == 200:
+            cur.execute("SELECT status FROM node_heartbeats WHERE node_id=%s", (NODE_A,))
+            assert cur.fetchone() == ('HALTED',)

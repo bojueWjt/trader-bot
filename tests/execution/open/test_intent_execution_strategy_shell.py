@@ -23,6 +23,7 @@ sys.path.insert(0, str(EXECUTION_DOMAIN_ROOT))
 
 from strategy.intent_execution_planner import (  # noqa: E402
     InstrumentSpec,
+    ManagementPlan,
     OrderPlan,
     encode_client_order_id,
 )
@@ -60,6 +61,281 @@ from risk.config import (  # noqa: E402
 
 
 class StrategyShellTest(unittest.TestCase):
+    def test_async_add_prepare_cannot_cross_close_reopen_with_same_position(self) -> None:
+        for close_kind in ("close_position", "close_all"):
+            with self.subTest(close_kind=close_kind), tempfile.TemporaryDirectory() as directory:
+                strategy = _LiveEntrySubmitStrategy(
+                    inventory=(), state_dir=Path(directory), environment="testnet",
+                )
+                intent = _live_entry_intent()
+                intent.action = "add_position"
+                position = SimpleNamespace(
+                    instrument_id=intent.instrument_id, side="LONG", quantity="1",
+                    position_id=f"{intent.instrument_id}-LONG", entry_price="100",
+                )
+                positions = [position]
+                identity = _durable_identity(intent)
+                # Isolate receipt-generation ABA here; the management worker
+                # suite separately exercises already-dispatched entry barriers.
+                with patch.object(strategy, "_cache_positions", side_effect=lambda _instrument: tuple(positions)), patch.object(
+                    strategy, "_close_entry_ids", return_value=set(),
+                ):
+                    try:
+                        # Real receipt worker and prepare worker run, but the
+                        # actor deliberately has not handled the prepare result.
+                        self.assertTrue(strategy._queue_intent_receive(intent))
+                        self.assertTrue(strategy._durable_io_worker.wait_empty(timeout_seconds=2))
+                        strategy.drain_durable_io_mailbox(max_results=1)
+                        self.assertTrue(strategy._durable_io_worker.wait_empty(timeout_seconds=2))
+                        self.assertEqual(strategy._intent_execution_inbox.get(identity).state, IntentExecutionState.DISPATCHED)
+                        self.assertEqual(strategy.submitted_orders, [])
+                        close_id = uuid4()
+                        authorization = {
+                            "authorized_by_type": "user", "authorized_by_id": "test-operator",
+                            "source_message_id": str(close_id), "parent_intent_id": str(close_id),
+                        }
+                        if close_kind == "close_position":
+                            close_order = OrderPlan(
+                                intent_id=close_id, client_order_id=encode_client_order_id(close_id),
+                                tags=(), instrument_id=intent.instrument_id, side="SELL",
+                                order_type="MARKET", quantity="1", price=None,
+                                time_in_force="IOC", reduce_only=True,
+                            )
+                            close_plan = ManagementPlan(
+                                intent_id=close_id, action="close_position",
+                                instrument_id=intent.instrument_id, target_position_id=position.position_id,
+                                target_position_side="LONG", cancel_order_ids=(), orders=(close_order,),
+                                authorization=authorization,
+                            )
+                            with patch.object(strategy, "_absorb_management_plan", return_value=True), patch.object(
+                                strategy, "_management_cancel_order_ids", return_value=(),
+                            ):
+                                self.assertTrue(strategy._submit_management_plan(close_plan))
+                                # Retry is the same close barrier, not a new generation.
+                                self.assertTrue(strategy._invalidate_close_plan(close_plan))
+                        else:
+                            worker = SimpleNamespace(new_deadline=lambda: 10, submit=lambda _request: True)
+                            strategy._terminal_exchange_worker = worker
+                            strategy._on_node_command(SimpleNamespace(
+                                command_id=str(close_id), type="close_all",
+                                args={"account_id": intent.account_id, "instrument_ids": ["BTCUSDT"], "authorization": authorization},
+                            ))
+                            self.assertIn(str(close_id), strategy._terminal_command_request_ids)
+                            operations, errors = [], []
+                            with patch.object(strategy, "_terminal_positions_for_close", return_value=(position,)):
+                                strategy._close_terminal_positions(
+                                    (intent.instrument_id,), operations, errors,
+                                    command_id=str(close_id), authorization=authorization,
+                                )
+                            self.assertEqual(errors, [])
+                            self.assertEqual(operations[0]["status"], "submitted")
+                            strategy._terminal_exchange_worker = False
+                        # Simulate venue closing and reopening the same quantity
+                        # and hedge position ID before delivering the old callback.
+                        positions.clear()
+                        positions.append(SimpleNamespace(**vars(position)))
+                        self.assertEqual(vars(positions[0]), vars(position))
+                        strategy._intent_execution_inbox = JsonIntentExecutionInbox(
+                            Path(directory) / "intent-execution-inbox.json",
+                        )
+                        self.assertEqual(strategy._intent_execution_inbox.position_generation(
+                            intent.account_id, intent.instrument_id, "LONG",
+                        ), 1)
+                        submitted_close_ids = list(strategy.submitted_orders)
+                        self.assertEqual(len(submitted_close_ids), 1)
+                        self.assertTrue(_pump_durable_until(
+                            strategy,
+                            lambda: strategy._intent_execution_inbox.get(identity).state is IntentExecutionState.REJECTED,
+                            timeout=2,
+                        ))
+                        self.assertEqual(strategy.submitted_orders, submitted_close_ids)
+                        record = strategy._intent_execution_inbox.get(identity)
+                        self.assertEqual(record.rejection_reason, "position_generation_stale")
+                        strategy._handle_intent(intent)
+                        self.assertEqual(strategy.submitted_orders, submitted_close_ids)
+                        # A genuinely new local add receipt binds the new generation.
+                        for closed_id in submitted_close_ids:
+                            strategy._intent_execution_inbox.mark_close_order_terminal(closed_id)
+                        fresh = _live_entry_intent()
+                        fresh.action = "add_position"
+                        self.assertTrue(strategy._queue_intent_receive(fresh))
+                        self.assertTrue(_pump_durable_until(
+                            strategy, lambda: len(strategy.submitted_orders) == 2, timeout=2,
+                        ))
+                        self.assertEqual(strategy._intent_execution_inbox.get(_durable_identity(fresh)).local_position_generation, 1)
+                    finally:
+                        strategy.on_stop()
+
+    def test_async_open_prepare_reloaded_after_close_all_cannot_submit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            strategy = _LiveEntrySubmitStrategy(inventory=(), state_dir=Path(directory), environment="testnet")
+            intent = _live_entry_intent()
+            intent.action = "open_position"
+            identity = _durable_identity(intent)
+            try:
+                self.assertTrue(strategy._queue_intent_receive(intent))
+                self.assertTrue(strategy._durable_io_worker.wait_empty(timeout_seconds=2))
+                strategy.drain_durable_io_mailbox(max_results=1)
+                self.assertTrue(strategy._durable_io_worker.wait_empty(timeout_seconds=2))
+                self.assertEqual(strategy._intent_execution_inbox.get(identity).state, IntentExecutionState.DISPATCHED)
+                strategy._terminal_exchange_worker = SimpleNamespace(new_deadline=lambda: 10, submit=lambda _request: True)
+                strategy._on_node_command(SimpleNamespace(
+                    command_id=str(uuid4()), type="close_all", args={
+                        "account_id": intent.account_id, "instrument_ids": [intent.instrument_id],
+                        "authorization": {"authorized_by_type": "user", "authorized_by_id": "test", "source_message_id": "close"},
+                    },
+                ))
+                strategy._terminal_exchange_worker = False
+                strategy._intent_execution_inbox = JsonIntentExecutionInbox(Path(directory) / "intent-execution-inbox.json")
+                self.assertTrue(_pump_durable_until(strategy, lambda: strategy._intent_execution_inbox.get(identity).state is IntentExecutionState.REJECTED, timeout=2))
+                self.assertEqual(strategy.submitted_orders, [])
+                self.assertEqual(strategy._intent_execution_inbox.get(identity).rejection_reason, "position_generation_stale")
+            finally:
+                strategy.on_stop()
+
+    def test_sync_add_final_gate_checks_binding_after_order_construction(self) -> None:
+        self._exercise_sync_entry_close_gate("add_position")
+
+    def test_sync_open_final_gate_checks_binding_after_order_construction(self) -> None:
+        self._exercise_sync_entry_close_gate("open_position")
+
+    def _exercise_sync_entry_close_gate(self, action: str) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            strategy = _LiveEntrySubmitStrategy(inventory=(), state_dir=Path(directory), environment="testnet")
+            intent = _live_entry_intent()
+            intent.action = action
+            identity = _durable_identity(intent)
+            strategy._intent_execution_inbox.register_received(identity, _durable_payload(intent))
+            plan = OrderPlan(
+                intent_id=intent.intent_id, client_order_id=encode_client_order_id(intent.intent_id),
+                tags=(f"action={action}",), instrument_id=intent.instrument_id, side="BUY",
+                order_type="LIMIT", quantity="1", price="100", time_in_force="IOC",
+            )
+            original = strategy._submission_order
+
+            def close_before_submit(candidate, *, prepared_order=False):
+                order = original(candidate, prepared_order=prepared_order)
+                self.assertTrue(strategy._invalidate_position_generation(
+                    intent.instrument_id, "LONG", operation_id="close-before-sync-submit",
+                ))
+                return order
+
+            try:
+                with patch.object(strategy, "_submission_order", side_effect=close_before_submit):
+                    self.assertFalse(strategy._submit_order_plan(plan, intent_execution=identity))
+                self.assertEqual(strategy.submitted_orders, [])
+                self.assertTrue(_pump_durable_until(
+                    strategy, lambda: strategy._intent_execution_inbox.get(identity).state is IntentExecutionState.REJECTED,
+                    timeout=2,
+                ))
+                self.assertEqual(strategy._intent_execution_inbox.get(identity).rejection_reason, "position_generation_stale")
+            finally:
+                strategy.on_stop()
+
+    def test_carried_remote_revision_is_checked_by_both_actual_submit_paths(self) -> None:
+        expected = {
+            "account_id": "account-b", "instrument_id": "BTCUSDT", "position_side": "LONG",
+            "account_revision": 2, "book_revision": 3,
+        }
+        cases = (
+            ("matching", dict(expected), None),
+            ("book_changed", {**expected, "book_revision": 4}, "position_revision_stale"),
+            ("account_changed", {**expected, "account_revision": 3}, "position_revision_stale"),
+            ("regressed", {**expected, "book_revision": 2}, "execution_revision_regressed"),
+            ("missing", None, "execution_revision_invalid"),
+            ("boolean_counter", {**expected, "book_revision": True}, "execution_revision_invalid"),
+            ("string_counter", {**expected, "book_revision": "3"}, "execution_revision_invalid"),
+            ("negative_counter", {**expected, "book_revision": -1}, "execution_revision_invalid"),
+            ("wrong_account", {**expected, "account_id": "account-c"}, "position_revision_scope_mismatch"),
+            ("wrong_book", {**expected, "position_side": "SHORT"}, "position_revision_scope_mismatch"),
+            ("wrong_instrument", {**expected, "instrument_id": "SOLUSDT"}, "position_revision_scope_mismatch"),
+            ("invalid_precondition", dict(expected), "execution_precondition_invalid"),
+            ("boolean_precondition", dict(expected), "execution_precondition_invalid"),
+            ("wrong_precondition_account", dict(expected), "position_revision_scope_mismatch"),
+        )
+        for mode in ("async", "sync"):
+            for action, (label, current, expected_denial) in (
+                (action, case) for action in ("open_position", "add_position") for case in cases
+            ):
+                with self.subTest(mode=mode, action=action, case=label), tempfile.TemporaryDirectory() as directory:
+                    strategy = _LiveEntrySubmitStrategy(inventory=(), state_dir=Path(directory), environment="testnet")
+                    intent = _live_entry_intent()
+                    intent.action = action
+                    bound_precondition = dict(expected)
+                    if label == "invalid_precondition":
+                        bound_precondition = None
+                    elif label == "boolean_precondition":
+                        bound_precondition["account_revision"] = True
+                    elif label == "wrong_precondition_account":
+                        bound_precondition["account_id"] = "account-c"
+                    intent.order_plan["execution_precondition"] = bound_precondition
+                    if current is not None:
+                        intent.order_plan["execution_revision"] = current
+                    identity = _durable_identity(intent)
+                    position = SimpleNamespace(
+                        instrument_id=intent.instrument_id, side="LONG", quantity="1",
+                        position_id=f"{intent.instrument_id}-LONG", entry_price="100",
+                    )
+                    try:
+                        with patch.object(strategy, "_cache_positions", return_value=(position,) if action == "add_position" else ()):
+                            if mode == "async":
+                                self.assertTrue(strategy._queue_intent_receive(intent))
+                            else:
+                                strategy._handle_intent(intent)
+                            target = IntentExecutionState.DISPATCHED
+                            if expected_denial:
+                                target = IntentExecutionState.REJECTED
+
+                            def finished():
+                                record = strategy._intent_execution_inbox.get(identity)
+                                if not record or record.state is not target:
+                                    return False
+                                return bool(strategy.submitted_orders) if expected_denial is None else True
+
+                            self.assertTrue(_pump_durable_until(strategy, finished, timeout=2))
+                        record = strategy._intent_execution_inbox.get(identity)
+                        if expected_denial is None:
+                            self.assertEqual(len(strategy.submitted_orders), 1)
+                        else:
+                            self.assertEqual(strategy.submitted_orders, [])
+                            self.assertEqual(record.rejection_reason, expected_denial)
+                        # The accepted precondition is retained exactly, not
+                        # overwritten with current poll evidence or local counters.
+                        self.assertEqual(record.intent_payload["order_plan"]["execution_precondition"], bound_precondition)
+                    finally:
+                        strategy.on_stop()
+
+    def test_failed_close_generation_persist_blocks_both_add_submit_paths(self) -> None:
+        for mode in ("async", "sync"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                strategy = _LiveEntrySubmitStrategy(inventory=(), state_dir=Path(directory), environment="testnet")
+                intent = _live_entry_intent()
+                intent.action = "add_position"
+                identity = _durable_identity(intent)
+                strategy._intent_execution_inbox.register_received(identity, _durable_payload(intent))
+                plan = OrderPlan(
+                    intent_id=intent.intent_id, client_order_id=encode_client_order_id(intent.intent_id),
+                    tags=("action=add_position",), instrument_id=intent.instrument_id, side="BUY",
+                    order_type="LIMIT", quantity="1", price="100", time_in_force="IOC",
+                )
+                try:
+                    with patch.object(strategy._intent_execution_inbox, "invalidate_position", side_effect=OSError("fsync failed")):
+                        self.assertFalse(strategy._invalidate_position_generation(
+                            intent.instrument_id, "LONG", operation_id="failed-close",
+                        ))
+                    self.assertIn("fsync failed", strategy.durable_io_halted_reason)
+                    if mode == "sync":
+                        submitted = strategy._submit_order_plan(plan, intent_execution=identity)
+                    else:
+                        strategy._intent_execution_inbox.begin_dispatch(identity, (plan.client_order_id,))
+                        submitted = strategy._submit_order_plan_after_durable_prepare(
+                            plan, intent_execution=identity, live_canary_execution=False,
+                        )
+                    self.assertFalse(submitted)
+                    self.assertEqual(strategy.submitted_orders, [])
+                finally:
+                    strategy.on_stop()
+
     def test_live_entry_inventory_subscribes_mark_prices(self) -> None:
         strategy = _LiveEntryMarkSubscriptionStrategy(
             environment="live",
@@ -502,7 +778,12 @@ class StrategyShellTest(unittest.TestCase):
                 self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
                 following = _durable_entry_intent()
                 strategy._handle_intent(following)
-                self.assertIn(encode_client_order_id(following.intent_id), strategy.submitted_orders)
+                strategy.on_stop()
+                if action == "close_position":
+                    self.assertNotIn(encode_client_order_id(following.intent_id), strategy.submitted_orders)
+                    self.assertIn("position_close_reconciling", [denial.reason for denial in strategy.denials])
+                else:
+                    self.assertIn(encode_client_order_id(following.intent_id), strategy.submitted_orders)
                 self.assertNotIn("symbol_new_open_frozen", [denial.reason for denial in strategy.denials])
                 self.assertTrue(strategy.wait_for_durable_io(timeout_seconds=1.0))
                 strategy.on_stop()

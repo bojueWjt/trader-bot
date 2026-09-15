@@ -138,28 +138,21 @@ def _load_module(name: str, path: Path):
     return module
 
 
-def test_v3_trade_trading_db_path_resolver_accepts_canonical_and_legacy_aliases() -> None:
-    trade = _load_module("test_v3_trade_db_path", TRADE_PATH)
-
-    assert trade.resolve_trading_db_path({}) == trade.DEFAULT_TRADING_DB_PATH
-    assert trade.resolve_trading_db_path(
-        {"WATCHER_TRADING_DB": "/data/watcher-trading.db"}
-    ) == "/data/watcher-trading.db"
-    assert trade.resolve_trading_db_path(
-        {
-            "TRADER_TRADING_DB_PATH": "/data/watcher-trading.db",
-            "WATCHER_TRADING_DB": "/data/watcher-trading.db",
-            "TRADING_DB_PATH": "/data/watcher-trading.db",
-        }
-    ) == "/data/watcher-trading.db"
-
-
-def test_v3_trade_trading_db_path_conflict_fails_closed(monkeypatch) -> None:
-    monkeypatch.setenv("TRADER_TRADING_DB_PATH", "/data/a.db")
-    monkeypatch.setenv("WATCHER_TRADING_DB", "/data/b.db")
-
-    with pytest.raises(RuntimeError, match="conflicting trading DB path"):
-        _load_module("test_v3_trade_db_path_conflict", TRADE_PATH)
+def test_v3_trade_does_not_read_host_database_or_env_files(monkeypatch) -> None:
+    monkeypatch.setenv("TRADER_TRADING_DB_PATH", "/unavailable/a.db")
+    monkeypatch.setenv("WATCHER_TRADING_DB", "/unavailable/b.db")
+    monkeypatch.setenv("RISK_ADMIN_TOKEN", "injected-token")
+    trade = _load_module("portable_trade", TRADE_PATH)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("portable CLI tried to open a host file")
+    monkeypatch.setattr("builtins.open", forbidden)
+    monkeypatch.setattr(sqlite3, "connect", forbidden)
+    assert trade._token() == "injected-token"
+    calls = []
+    monkeypatch.setattr(trade, "_call", _successful_call(calls))
+    assert trade._channel_execution_account("-1002189417451") == "account-c"
+    assert len(calls) == 1
+    assert calls[0][1].startswith("/v1/query/channel-route?")
 
 
 def _create_routing_db(path: Path) -> None:
@@ -223,31 +216,12 @@ def _create_routing_db(path: Path) -> None:
         conn.close()
 
 
-def test_v3_trade_rejects_orphan_subaccount_route(
-    monkeypatch,
-    tmp_path: Path,
-    capsys,
-) -> None:
-    routing_db = tmp_path / "orphan-subaccount.db"
-    _create_routing_db(routing_db)
-    conn = sqlite3.connect(routing_db)
-    try:
-        conn.execute(
-            "UPDATE account_configs "
-            "SET parent_account_id='missing-main' "
-            "WHERE execution_account_id='account-c'"
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    monkeypatch.setenv("TRADER_TRADING_DB_PATH", str(routing_db))
-    trade = _load_module("test_v3_trade_orphan_subaccount", TRADE_PATH)
-
-    with pytest.raises(SystemExit) as exc:
+def test_v3_trade_rejects_unregistered_control_plane_route(monkeypatch, capsys) -> None:
+    trade = _load_module("portable_trade_invalid_route", TRADE_PATH)
+    monkeypatch.setattr(trade, "_call", lambda *args: {"execution_account_id": "credential-email"})
+    with pytest.raises(SystemExit):
         trade._channel_execution_account("-1002189417451")
-
-    assert exc.value.code == 1
-    assert "parent must resolve to one main account" in capsys.readouterr().out
+    assert "no registered execution account" in capsys.readouterr().out
 
 
 def _signal(channel_id: str, message_id: int) -> dict[str, str]:
@@ -298,6 +272,11 @@ def _snapshot_response(
 def _successful_call(calls, *, positions_by_account=None, snapshot_stale=False):
     def fake_call(method, path, payload=None):
         calls.append((method, path, payload))
+        if method == "GET" and path.startswith("/v1/query/channel-route?"):
+            from urllib.parse import parse_qs, urlsplit
+            channel = parse_qs(urlsplit(path).query)["channel"][0]
+            route = next(row for row in FOUR_CHANNEL_ROUTES if row[0] == channel)
+            return {"execution_account_id": route[2], "risk_capital_addon": route[5]}
         if method == "GET" and path == "/api/system/snapshot":
             return _snapshot_response(
                 positions_by_account=positions_by_account,
@@ -888,7 +867,7 @@ def test_cli_add_posts_add_position_before_approval(monkeypatch, tmp_path: Path)
     assert payload["client_ref"] == "tg-sig-c1002189417451-m6901"
 
 
-def test_cli_open_with_same_side_mirror_posts_add_not_open(
+def test_cli_open_preserves_explicit_open_even_with_same_side_position(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -918,7 +897,7 @@ def test_cli_open_with_same_side_mirror_posts_add_not_open(
         for method, path, payload in calls
         if method == "POST" and path == "/v1/operator/orders"
     )
-    assert payload["action"] == "add_position"
+    assert payload["action"] == "open_position"
     assert payload["intended_action"] == "open_position"
 
 
@@ -951,7 +930,7 @@ def test_cli_open_without_same_side_posts_open_position(
     assert payload["intended_action"] == "open_position"
 
 
-def test_cli_stale_mirror_refuses_risk_increase(monkeypatch, tmp_path: Path) -> None:
+def test_cli_submits_explicit_action_without_separate_snapshot_read(monkeypatch, tmp_path: Path) -> None:
     routing_db = tmp_path / "watcher-trading.db"
     _create_routing_db(routing_db)
     monkeypatch.setenv("WATCHER_TRADING_DB", str(routing_db))
@@ -967,10 +946,7 @@ def test_cli_stale_mirror_refuses_risk_increase(monkeypatch, tmp_path: Path) -> 
         "argv",
         ["v3_trade.py", "open", "BTCUSDT", "short", "--notional", "300", *_ENTRY_AUTH],
     )
-    with pytest.raises(SystemExit) as exited:
-        trade.main()
-    assert exited.value.code == 1
-    assert not any(
-        method == "POST" and path == "/v1/operator/orders"
-        for method, path, _payload in calls
-    )
+    trade.main()
+    assert not any(method == "GET" and path == "/api/system/snapshot" for method, path, _ in calls)
+    payload = next(payload for method, path, payload in calls if method == "POST")
+    assert payload["action"] == "open_position"

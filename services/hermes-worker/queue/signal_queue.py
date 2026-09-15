@@ -26,6 +26,7 @@ from psycopg2.extensions import connection as PsycopgConnection
 
 from claims import (
     PROCESSING_PURPOSE_SHADOW,
+    PROCESSING_PURPOSE_SIGNAL,
     QueueSchemaError,
     QueueStateError,
 )
@@ -94,6 +95,10 @@ REQUIRED_COLUMNS = {
     "expires_at",
     "created_at",
     "updated_at",
+    "processing_purpose",
+    "execution_context",
+    "execution_request",
+    "operator_intent_id",
 }
 
 _TASK_RETURNING = """
@@ -114,7 +119,11 @@ _TASK_RETURNING = """
     lease_expires_at,
     worker_id,
     disposition,
-    disposition_reason
+    disposition_reason,
+    processing_purpose,
+    execution_context,
+    execution_request,
+    operator_intent_id::text
 """
 
 
@@ -142,6 +151,10 @@ class SignalTask:
     worker_id: str | None
     disposition: str | None
     disposition_reason: str | None
+    processing_purpose: str = PROCESSING_PURPOSE_SHADOW
+    execution_context: dict[str, Any] | None = None
+    execution_request: dict[str, Any] | None = None
+    operator_intent_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -204,10 +217,14 @@ def enqueue_signal_task(
     action: str | None = None,
     expires_at: Any = None,
     skipped_reason: str | None = None,
+    processing_purpose: str = PROCESSING_PURPOSE_SHADOW,
 ) -> EnqueueResult:
     """Insert-or-ignore one source identity. Caller owns the transaction."""
 
+    _validate_purpose(processing_purpose)
     resolved_account = (account_id or DEFAULT_ACCOUNT_ID).strip() or DEFAULT_ACCOUNT_ID
+    if processing_purpose == PROCESSING_PURPOSE_SIGNAL and resolved_account == DEFAULT_ACCOUNT_ID:
+        raise ValueError("signal processing requires an explicit account_id")
     resolved_action = (action or DEFAULT_ACTION).strip() or DEFAULT_ACTION
     key = identity_key(
         source_platform,
@@ -228,7 +245,10 @@ def enqueue_signal_task(
         )
         status = "skipped" if skipped_reason else "pending"
         disposition = "skipped" if skipped_reason else "pending"
-        disposition_reason = skipped_reason or "shadow_queued_legacy_still_live"
+        queued_reason = "shadow_queued_legacy_still_live"
+        if processing_purpose == PROCESSING_PURPOSE_SIGNAL:
+            queued_reason = "signal_queued"
+        disposition_reason = skipped_reason or queued_reason
         task_id = str(uuid4())
         cur.execute(
             """
@@ -247,10 +267,11 @@ def enqueue_signal_task(
                 attempt,
                 disposition,
                 disposition_reason,
-                expires_at
+                expires_at,
+                processing_purpose
             )
             VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s
             )
             ON CONFLICT (source_platform, channel_id, source_message_id,
                          edit_version, account_id)
@@ -272,13 +293,14 @@ def enqueue_signal_task(
                 disposition,
                 disposition_reason,
                 expires_at,
+                processing_purpose,
             ),
         )
         inserted = cur.fetchone()
         if inserted is None:
             cur.execute(
                 """
-                SELECT task_id::text, related_task_id::text, status
+                SELECT task_id::text, related_task_id::text, status, processing_purpose
                 FROM signal_dispatch_tasks
                 WHERE source_platform = %s
                   AND channel_id = %s
@@ -297,6 +319,8 @@ def enqueue_signal_task(
             existing = cur.fetchone()
             if existing is None:
                 raise QueueStateError("signal identity conflict without existing task")
+            if existing[3] != processing_purpose:
+                raise QueueStateError("existing source identity has a different processing_purpose; automatic promotion is forbidden")
             return EnqueueResult(
                 task_id=existing[0],
                 inserted=False,
@@ -317,6 +341,7 @@ def enqueue_signal_task(
                 "edit_version": edit_version,
                 "related_task_id": inserted[1],
                 "status": inserted[2],
+                "processing_purpose": processing_purpose,
             },
         )
         return EnqueueResult(
@@ -335,6 +360,7 @@ def claim_signal_task(
     lease_seconds: int = 30,
     account_id: str | None = None,
     open_ttl_seconds: int | None = None,
+    processing_purpose: str = PROCESSING_PURPOSE_SHADOW,
 ) -> SignalTask | None:
     """Claim one task from a free account.
 
@@ -343,6 +369,7 @@ def claim_signal_task(
     node writer fence.
     """
 
+    _validate_purpose(processing_purpose)
     if not worker_id:
         raise ValueError("worker_id is required")
     if lease_seconds <= 0:
@@ -357,6 +384,7 @@ def claim_signal_task(
                     cur,
                     account_id=account_id,
                     skip_accounts=skipped_accounts,
+                    processing_purpose=processing_purpose,
                 )
                 if candidate is None:
                     return None
@@ -379,7 +407,7 @@ def claim_signal_task(
                     skipped_accounts.add(task.account_id)
                     continue
                 fresh = _task_from_row(locked)
-                if not _row_is_claimable(fresh):
+                if fresh.processing_purpose != processing_purpose or not _row_is_claimable(fresh):
                     skipped_accounts.add(task.account_id)
                     continue
                 if _task_ttl_expired(fresh, open_ttl_seconds=open_ttl_seconds):
@@ -424,12 +452,12 @@ def complete_signal_task(
                 SET status = %s,
                     disposition = %s,
                     disposition_reason = %s,
-                    shadow_result = %s,
+                    shadow_result = COALESCE(shadow_result, '{{}}'::jsonb) || %s,
                     updated_at = now()
                 WHERE task_id = %s
                   AND claim_token = %s
                   AND status = 'leased'
-                  AND lease_expires_at > now()
+                  AND lease_expires_at > clock_timestamp()
                 RETURNING {_TASK_RETURNING}
                 """,
                 (
@@ -456,7 +484,7 @@ def complete_signal_task(
                     WHERE processing_run_id = %s
                       AND claim_token = %s
                       AND status IN ('started', 'processing')
-                      AND lease_expires_at > now()
+                      AND lease_expires_at > clock_timestamp()
                     """,
                     (run_status, task.processing_run_id, str(claim_token)),
                 )
@@ -652,8 +680,9 @@ def _account_has_live_lease(cur, account_id: str) -> bool:
         SELECT 1
         FROM signal_dispatch_tasks
         WHERE account_id = %s
-          AND status = 'leased'
-          AND lease_expires_at > now()
+          AND (status = 'reconciling'
+               OR (status = 'leased' AND
+                   (lease_expires_at > clock_timestamp() OR execution_request IS NOT NULL)))
         LIMIT 1
         """,
         (account_id,),
@@ -662,6 +691,8 @@ def _account_has_live_lease(cur, account_id: str) -> bool:
 
 
 def _row_is_claimable(task: SignalTask) -> bool:
+    if task.execution_request is not None:
+        return False
     if task.status == "pending":
         return True
     if task.status != "leased":
@@ -671,9 +702,11 @@ def _row_is_claimable(task: SignalTask) -> bool:
     return _as_utc(task.lease_expires_at) <= datetime.now(timezone.utc)
 
 
-def _peek_claim_candidate(cur, *, account_id: str | None, skip_accounts: set[str]):
+def _peek_claim_candidate(cur, *, account_id: str | None, skip_accounts: set[str], processing_purpose: str):
     clauses = [
         "t.status IN ('pending', 'leased')",
+        "t.processing_purpose = %s",
+        "t.execution_request IS NULL",
         """(
             t.status = 'pending'
             OR t.lease_expires_at IS NULL
@@ -683,11 +716,12 @@ def _peek_claim_candidate(cur, *, account_id: str | None, skip_accounts: set[str
             SELECT 1
             FROM signal_dispatch_tasks busy
             WHERE busy.account_id = t.account_id
-              AND busy.status = 'leased'
-              AND busy.lease_expires_at > now()
+              AND (busy.status = 'reconciling'
+                   OR (busy.status = 'leased' AND
+                       (busy.lease_expires_at > clock_timestamp() OR busy.execution_request IS NOT NULL)))
         )""",
     ]
-    params: list[Any] = []
+    params: list[Any] = [processing_purpose]
     if account_id:
         clauses.append("t.account_id = %s")
         params.append(account_id)
@@ -729,8 +763,9 @@ def _lease_task(
         FROM message_processing_runs
         WHERE raw_message_id = %s
           AND COALESCE(processing_purpose, 'legacy') = %s
+          AND account_id IS NOT DISTINCT FROM %s
         """,
-        (task.raw_message_id, PROCESSING_PURPOSE_SHADOW),
+        (task.raw_message_id, task.processing_purpose, task.account_id),
     )
     next_attempt = int(cur.fetchone()[0]) + 1
     claim_token = str(uuid4())
@@ -762,7 +797,7 @@ def _lease_task(
             next_attempt,
             claim_token,
             task.account_id,
-            PROCESSING_PURPOSE_SHADOW,
+            task.processing_purpose,
         ),
     )
     cur.execute(
@@ -774,9 +809,12 @@ def _lease_task(
             attempt = %s,
             current_processing_run_id = %s,
             lease_expires_at = now() + (%s * interval '1 second'),
+            execution_context = NULL,
+            execution_request = NULL,
             updated_at = now()
         WHERE task_id = %s
           AND status IN ('pending', 'leased')
+          AND execution_request IS NULL
           AND (
                 status = 'pending'
                 OR lease_expires_at IS NULL
@@ -913,7 +951,249 @@ def _task_from_row(row) -> SignalTask:
         worker_id=row[15],
         disposition=row[16],
         disposition_reason=row[17],
+        processing_purpose=row[18],
+        execution_context=row[19],
+        execution_request=row[20],
+        operator_intent_id=row[21],
     )
+
+
+def _validate_purpose(purpose: str) -> None:
+    if purpose not in {PROCESSING_PURPOSE_SHADOW, PROCESSING_PURPOSE_SIGNAL}:
+        raise ValueError("processing_purpose must be shadow or signal")
+
+
+def lock_execution_claim(cur, task: SignalTask) -> SignalTask:
+    """Account risk lock first, then the exact task/run with a database-clock fence.
+
+    Caller owns this short transaction and must finish it before model/network I/O.
+    The account lock namespace matches operator ingress and CLOSE_ALL exactly.
+    """
+    if task.processing_purpose != PROCESSING_PURPOSE_SIGNAL:
+        raise StaleClaimError("execution requires a signal-purpose task")
+    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s), 0)", (task.account_id,))
+    cur.execute(
+        """
+        SELECT t.task_id
+        FROM signal_dispatch_tasks t
+        JOIN message_processing_runs r ON r.processing_run_id = t.current_processing_run_id
+        WHERE t.task_id = %s AND t.account_id = %s
+          AND t.current_processing_run_id = %s AND t.claim_token = %s
+          AND t.attempt = %s AND t.processing_purpose = 'signal'
+          AND t.status = 'leased' AND t.execution_request IS NULL
+          AND t.lease_expires_at > clock_timestamp()
+          AND r.claim_token = t.claim_token AND r.attempt = t.attempt
+          AND r.account_id = t.account_id AND r.raw_message_id = t.raw_message_id
+          AND r.processing_purpose = 'signal' AND r.status IN ('started', 'processing')
+          AND r.lease_expires_at > clock_timestamp()
+        FOR UPDATE OF t, r
+        """,
+        (task.task_id, task.account_id, task.processing_run_id, task.claim_token, task.attempt),
+    )
+    if cur.fetchone() is None:
+        raise StaleClaimError("execution rejected stale, expired or mismatched signal claim")
+    return task
+
+
+def store_execution_context(cur, task: SignalTask, versions: dict[str, Any]) -> None:
+    """Persist the server's pre-model versions, while lock_execution_claim is held."""
+    if versions.get("account_id") != task.account_id:
+        raise ValueError("execution context account does not match task")
+    cur.execute(
+        """
+        UPDATE signal_dispatch_tasks SET execution_context = %s, updated_at = clock_timestamp()
+        WHERE task_id = %s AND current_processing_run_id = %s
+          AND claim_token = %s AND attempt = %s AND status = 'leased'
+          AND execution_context IS NULL AND execution_request IS NULL
+          AND lease_expires_at > clock_timestamp()
+          AND EXISTS (SELECT 1 FROM message_processing_runs r
+                      WHERE r.processing_run_id = current_processing_run_id
+                        AND r.lease_expires_at > clock_timestamp())
+        """,
+        (Json(versions), task.task_id, task.processing_run_id, task.claim_token, task.attempt),
+    )
+    if cur.rowcount != 1:
+        raise StaleClaimError("execution context already captured or claim expired")
+
+
+def record_signal_decision(conn, task: SignalTask, *, semantic: dict, stages: dict, snapshot: dict) -> None:
+    """Persist original model output without feeding the legacy Decision Gateway."""
+    with conn:
+        with conn.cursor() as cur:
+            lock_execution_claim(cur, task)
+            cur.execute(
+                """
+                UPDATE signal_dispatch_tasks
+                SET shadow_result = %s, updated_at = clock_timestamp()
+                WHERE task_id = %s AND lease_expires_at > clock_timestamp()
+                  AND EXISTS (SELECT 1 FROM message_processing_runs r
+                              WHERE r.processing_run_id = current_processing_run_id
+                                AND r.lease_expires_at > clock_timestamp())
+                """,
+                (Json({"mode": "signal", "semantic": semantic, "stages": stages,
+                       "snapshot": snapshot, "operator_submitted": False,
+                       "outbox_published": False}), task.task_id),
+            )
+            if cur.rowcount != 1:
+                raise StaleClaimError("claim expired before decision persistence")
+
+
+def register_execution_request(conn, task: SignalTask, body: dict[str, Any]) -> SignalTask:
+    """Durably freeze one request before HTTP; never lease this task for a new LLM call.
+
+    reconciling means the downstream result may be unknown, including a process
+    crash between registration and submission. Only operator ingress can accept.
+    """
+    expected_claim = {
+        "task_id": task.task_id, "processing_run_id": task.processing_run_id,
+        "claim_token": task.claim_token, "attempt": task.attempt,
+    }
+    actual_claim = body.get("signal_claim")
+    if not isinstance(actual_claim, dict) or any(actual_claim.get(key) != value for key, value in expected_claim.items()):
+        raise StaleClaimError("registered request does not match task claim")
+    if body.get("account_id") != task.account_id:
+        raise ValueError("registered request account does not match task")
+    with conn:
+        with conn.cursor() as cur:
+            lock_execution_claim(cur, task)
+            cur.execute(
+                f"""
+                UPDATE signal_dispatch_tasks
+                SET execution_request = %s, status = 'reconciling',
+                    disposition = 'pending', disposition_reason = 'operator_result_pending',
+                    updated_at = clock_timestamp()
+                WHERE task_id = %s AND execution_context IS NOT NULL
+                  AND shadow_result #>> '{{semantic,decision,decision_id}}' = %s
+                  AND lease_expires_at > clock_timestamp()
+                  AND EXISTS (SELECT 1 FROM message_processing_runs r
+                              WHERE r.processing_run_id = current_processing_run_id
+                                AND r.lease_expires_at > clock_timestamp())
+                RETURNING {_TASK_RETURNING}
+                """,
+                (Json(body), task.task_id, body.get("decision_id")),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise StaleClaimError("request registration requires current context and persisted decision")
+            _insert_audit(cur, event_type="signal.execution_registered", raw_message_id=task.raw_message_id,
+                          actor=task.worker_id or "signal-worker", payload={
+                              "task_id": task.task_id, "processing_run_id": task.processing_run_id,
+                              "account_id": task.account_id, "attempt": task.attempt,
+                              "decision_id": body.get("decision_id"), "outbox_written": False,
+                          })
+            return _task_from_row(row)
+
+
+def next_reconciling_task(conn, *, account_id: str | None = None) -> SignalTask | None:
+    """Read an existing immutable request; never mint a claim or rerun a model."""
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {_TASK_RETURNING} FROM signal_dispatch_tasks
+                WHERE processing_purpose = 'signal'
+                  AND status IN ('leased', 'reconciling') AND execution_request IS NOT NULL
+                  AND (%s IS NULL OR account_id = %s)
+                ORDER BY updated_at, task_id LIMIT 1
+                """,
+                (account_id, account_id),
+            )
+            row = cur.fetchone()
+            return _task_from_row(row) if row is not None else None
+
+
+def record_operator_uncertainty(conn, task: SignalTask, detail: str, *, operator_detail: dict | None = None) -> SignalTask:
+    """Do not turn an HTTP timeout into a claim failure or 'no order' assertion."""
+    with conn:
+        with conn.cursor() as cur:
+            # Match operator ingress's lock order: account, task, current run.
+            # Once both leases expired under these locks, an absent binding is
+            # proof that no operation was accepted and a late ingress cannot win.
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s), 0)", (task.account_id,))
+            cur.execute(f"SELECT {_TASK_RETURNING} FROM signal_dispatch_tasks WHERE task_id = %s FOR UPDATE", (task.task_id,))
+            locked_row = cur.fetchone()
+            if locked_row is None:
+                raise StaleClaimError("registered signal task disappeared")
+            current = _task_from_row(locked_row)
+            if current.operator_intent_id is not None or current.status in TERMINAL_STATUSES:
+                return current
+            if (current.claim_token != task.claim_token or current.attempt != task.attempt
+                    or current.processing_run_id != task.processing_run_id
+                    or current.execution_request != task.execution_request):
+                raise StaleClaimError("signal reconciliation claim changed")
+            cur.execute("SELECT processing_run_id FROM message_processing_runs WHERE processing_run_id = %s FOR UPDATE", (task.processing_run_id,))
+            if cur.fetchone() is None:
+                raise StaleClaimError("signal reconciliation run disappeared")
+            if operator_detail is not None:
+                cur.execute(
+                    """UPDATE signal_dispatch_tasks
+                       SET shadow_result = COALESCE(shadow_result, '{}'::jsonb) || %s
+                       WHERE task_id = %s""",
+                    (Json({"operator_detail": operator_detail}), task.task_id),
+                )
+            cur.execute(
+                f"""
+                WITH expired AS MATERIALIZED (
+                    SELECT t.task_id, r.processing_run_id
+                    FROM signal_dispatch_tasks t
+                    JOIN message_processing_runs r ON r.processing_run_id = t.current_processing_run_id
+                    WHERE t.task_id = %s AND t.processing_purpose = 'signal'
+                      AND t.operator_intent_id IS NULL AND t.status IN ('leased', 'reconciling')
+                      AND r.processing_purpose = 'signal' AND r.account_id = t.account_id
+                      AND r.raw_message_id = t.raw_message_id AND r.claim_token = t.claim_token
+                      AND r.attempt = t.attempt AND r.status IN ('started', 'processing')
+                      AND t.lease_expires_at <= clock_timestamp()
+                      AND r.lease_expires_at <= clock_timestamp()
+                ), finished AS (
+                    UPDATE message_processing_runs r
+                    SET status = 'hermes_timeout', finished_at = clock_timestamp(),
+                        error = 'claim_expired_without_operation'
+                    FROM expired e WHERE r.processing_run_id = e.processing_run_id
+                    RETURNING r.processing_run_id
+                )
+                UPDATE signal_dispatch_tasks t
+                SET status = 'expired', disposition = 'rejected',
+                    disposition_reason = 'claim_expired_without_operation', updated_at = clock_timestamp(),
+                    shadow_result = COALESCE(t.shadow_result, '{{}}'::jsonb)
+                        || '{{"operator_submitted": false, "operator_result": "expired_without_operation"}}'::jsonb
+                WHERE t.task_id IN (SELECT e.task_id FROM expired e JOIN finished f USING (processing_run_id))
+                RETURNING {_TASK_RETURNING}
+                """,
+                (task.task_id,),
+            )
+            expired = cur.fetchone()
+            if expired is not None:
+                _insert_audit(cur, event_type="signal.expired_without_operation", raw_message_id=task.raw_message_id,
+                              actor=task.worker_id or "signal-worker", payload={
+                                  "task_id": task.task_id, "processing_run_id": task.processing_run_id,
+                                  "account_id": task.account_id, "reason": "claim_expired_without_operation",
+                              })
+                return _task_from_row(expired)
+            cur.execute(
+                f"""
+                UPDATE signal_dispatch_tasks
+                SET status = 'reconciling', disposition = 'pending',
+                    disposition_reason = %s, updated_at = clock_timestamp(),
+                    shadow_result = COALESCE(shadow_result, '{{}}'::jsonb)
+                        || '{{"operator_submitted": null, "operator_result": "unknown"}}'::jsonb
+                WHERE task_id = %s AND claim_token = %s AND current_processing_run_id = %s
+                  AND attempt = %s AND execution_request = %s
+                  AND status IN ('leased', 'reconciling')
+                RETURNING {_TASK_RETURNING}
+                """,
+                (str(detail)[:500], task.task_id, task.claim_token, task.processing_run_id,
+                 task.attempt, Json(task.execution_request)),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                return _task_from_row(row)
+            # An accepted transaction may have won while its HTTP response was
+            # lost. Report its authoritative status instead of overwriting it.
+            cur.execute(f"SELECT {_TASK_RETURNING} FROM signal_dispatch_tasks WHERE task_id = %s", (task.task_id,))
+            row = cur.fetchone()
+            if row is None:
+                raise StaleClaimError("registered signal task disappeared")
+            return _task_from_row(row)
 
 
 def _insert_audit(

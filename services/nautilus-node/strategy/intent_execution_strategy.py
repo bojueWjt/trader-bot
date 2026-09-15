@@ -72,6 +72,7 @@ _TERMINAL_EXCHANGE_PENDING = object()
 
 class _DurableIoTaskKind(str, Enum):
     INTENT_EXCHANGE_CONFIRMED = "intent_exchange_confirmed"
+    CLOSE_ORDER_TERMINAL = "close_order_terminal"
     INTENT_RECEIVE = "intent_receive"
     PREPARE_SUBMIT = "prepare_submit"
     PREPARE_ROLLBACK = "prepare_rollback"
@@ -231,6 +232,7 @@ class IntentExecutionStrategy(Strategy):
             dict[str, Any],
         ] = {}
         self._pending_order_confirmations: dict[str, str] = {}
+        self._close_entry_proofs: dict[str, dict[str, Any]] = {}
         self._user_directed_robot_fill_remaining: dict[
             str,
             Decimal,
@@ -1552,6 +1554,20 @@ class IntentExecutionStrategy(Strategy):
                 return
             if command_id in self._terminal_command_request_ids:
                 return
+        if ctype == "close_all":
+            if not command_id:
+                self._record_denial(OrderDenied("terminal_command_id_required", ctype))
+                return
+            try:
+                with self._durable_io_halt_lock:
+                    self._intent_execution_inbox.invalidate_position_scope(
+                        str(self.config.account_id),
+                        operation_id=f"close-command:{command_id}",
+                        instrument_ids=instrument_ids,
+                    )
+            except (OSError, RuntimeError) as exc:
+                self._halt_durable_io(f"position generation persist failed: {exc!r}")
+                return
         if self._terminal_exchange_worker:
             self._queue_terminal_command(
                 command_id=command_id,
@@ -1765,6 +1781,9 @@ class IntentExecutionStrategy(Strategy):
             return
         if kind == "intent_refresh":
             self._complete_intent_refresh(result, pending)
+            return
+        if kind == "close_entry_cancel":
+            self._complete_close_entry_cancels(result, pending)
             return
         if kind == "management_cancel":
             self._complete_management_cancels(result, pending)
@@ -2219,7 +2238,15 @@ class IntentExecutionStrategy(Strategy):
         command_id: str,
         authorization: Mapping[str, Any],
     ) -> None:
-        positions = self._terminal_positions_for_close(errors)
+        if errors:
+            return
+        cancels = [item for item in operations if item.get("kind") == "cancel_order"]
+        if any(item.get("status") != "confirmed" for item in cancels):
+            errors.append("close_entries_reconciling: cancellation not confirmed")
+            return
+        not_before = datetime.now(timezone.utc) if cancels else None
+        positions = self._terminal_positions_for_close(errors, not_before=not_before)
+        resolved = {str(item.get("client_order_id") or "") for item in cancels}
         for position in positions:
             instrument_id = _position_instrument_id(position)
             if not _terminal_instrument_matches(
@@ -2228,6 +2255,14 @@ class IntentExecutionStrategy(Strategy):
             ):
                 continue
             position_side = _position_side(position)
+            try:
+                unresolved = self._close_entry_ids(instrument_id, position_side, resolved)
+            except Exception as exc:
+                errors.append(f"close_entries_reconciling: {exc!r}")
+                continue
+            if unresolved:
+                errors.append("close_entries_reconciling: " + ",".join(sorted(unresolved)))
+                continue
             quantity = _position_quantity(position)
             robot_owned_quantity = self._robot_owned_position_quantity(
                 instrument_id,
@@ -2260,6 +2295,21 @@ class IntentExecutionStrategy(Strategy):
                 robot_owned_quantity=robot_owned_quantity,
                 user_directed_quantity=user_directed_quantity,
             )
+            if not self._invalidate_position_generation(
+                instrument_id, position_side,
+                operation_id=f"close-command:{command_id}",
+            ):
+                operation["status"] = "failed"
+                operation["error"] = "position_generation_persist_failed"
+                errors.append(operation["error"])
+                operations.append(operation)
+                continue
+            if not self._persist_terminal_close_dispatch(plan, command_id, position_side):
+                operation["status"] = "failed"
+                operation["error"] = "close_entries_reconciling: durable close dispatch unresolved"
+                errors.append(operation["error"])
+                operations.append(operation)
+                continue
             if not self._submit_order_plan(plan):
                 operation["status"] = "failed"
                 detail = (
@@ -2274,11 +2324,37 @@ class IntentExecutionStrategy(Strategy):
                 operation["client_order_id"] = plan.client_order_id
             operations.append(operation)
 
+    def _persist_terminal_close_dispatch(self, plan: OrderPlan, command_id: str, side: str) -> bool:
+        """Reuse the inbox so restart cannot forget a submitted CLOSE_ALL exit."""
+        identity = IntentExecutionIdentity(
+            account_id=str(self.config.account_id), intent_id=str(plan.intent_id),
+            idempotency_key=sha256(f"terminal-close:{command_id}:{plan.client_order_id}".encode()).hexdigest(),
+            instrument_id=plan.instrument_id, action="close_position",
+        )
+        try:
+            with self._durable_io_halt_lock:
+                if self._intent_execution_inbox.get(identity) is not False:
+                    return False
+                self._intent_execution_inbox.register_received(identity, {
+                    "action": "close_position", "command_id": command_id,
+                    "order_plan": {"position_side": side, "quantity": plan.quantity, "type": "market"},
+                })
+                self._intent_execution_inbox.begin_dispatch(identity, (plan.client_order_id,))
+        except (OSError, RuntimeError) as exc:
+            self._halt_durable_io(f"terminal close persistence failed: {exc!r}")
+            return False
+        return True
+
     def _terminal_positions_for_close(
         self,
         errors: list[str],
+        *,
+        not_before: datetime | None = None,
     ) -> tuple[Any, ...]:
         provider = self._exchange_evidence_provider
+        if not_before is not None and not provider:
+            errors.append("close_entries_reconciling: post-cancel position evidence unavailable")
+            return ()
         if provider:
             snapshot_method = getattr(provider, "snapshot", None)
             if not callable(snapshot_method):
@@ -2296,6 +2372,11 @@ class IntentExecutionStrategy(Strategy):
             if not isinstance(snapshot, Mapping):
                 errors.append("exchange position snapshot is invalid")
                 return ()
+            if not_before is not None:
+                fetched_at = snapshot.get("positions_fetched_at", snapshot.get("fetched_at"))
+                if not isinstance(fetched_at, datetime) or fetched_at.tzinfo is None or fetched_at < not_before:
+                    errors.append("close_entries_reconciling: position evidence predates cancellation")
+                    return ()
             rows = snapshot.get("positions")
             if not isinstance(rows, list):
                 errors.append("exchange position snapshot is invalid")
@@ -2331,7 +2412,7 @@ class IntentExecutionStrategy(Strategy):
         account_quantity: str,
     ) -> str:
         owned_quantities: list[Decimal] = []
-        for stash in self._entry_protection_stash.values():
+        for stash_key, stash in self._entry_protection_stash.items():
             if not isinstance(stash, Mapping):
                 continue
             if str(stash.get("instrument_id") or "") != instrument_id:
@@ -2340,9 +2421,28 @@ class IntentExecutionStrategy(Strategy):
             owned_side = "LONG" if entry_side == "BUY" else "SHORT"
             if owned_side != position_side:
                 continue
+            raw_owned = stash.get("protected_quantity")
+            fills = stash.get("batch_fills")
+            if isinstance(fills, dict) and fills:
+                raw_owned = owned_quantity(fills)
+            elif raw_owned is None:
+                # Before the first protection is placed, use robot fill evidence
+                # rather than treating missing protected_quantity as a flat book.
+                filled_owned = Decimal("0")
+                for order in self._cache_orders_all(instrument_id):
+                    client_id = object_client_order_id(order)
+                    if not is_robot_client_order_id(client_id):
+                        continue
+                    trace = decode_client_order_id(client_id)
+                    if str(trace.intent_id) != str(stash.get("entry_intent_id") or stash_key):
+                        continue
+                    filled = _positive_canary_decimal(getattr(order, "filled_qty", None))
+                    if filled is not None:
+                        filled_owned += filled if trace.sequence <= 9 else -filled
+                raw_owned = max(filled_owned, Decimal("0"))
             try:
                 protected_quantity = Decimal(
-                    str(stash.get("protected_quantity") or "0")
+                    str(raw_owned or "0")
                 )
             except (InvalidOperation, TypeError, ValueError):
                 continue
@@ -2351,13 +2451,13 @@ class IntentExecutionStrategy(Strategy):
                 and protected_quantity > 0
             ):
                 owned_quantities.append(protected_quantity)
-        owned_quantity = sum(owned_quantities, Decimal("0"))
+        total_owned = sum(owned_quantities, Decimal("0"))
         try:
             account = Decimal(str(account_quantity))
         except (InvalidOperation, TypeError, ValueError):
             account = Decimal("0")
-        owned_quantity = min(max(owned_quantity, Decimal("0")), account)
-        return format(owned_quantity, "f")
+        total_owned = min(max(total_owned, Decimal("0")), account)
+        return format(total_owned, "f")
 
     def _user_directed_close_plan(
         self,
@@ -2634,6 +2734,7 @@ class IntentExecutionStrategy(Strategy):
             and not raw_order_plan.get("take_profits")
         )
         needs_exchange_state = action in {
+            "close_position",
             "cancel",
             "cancel_order",
             "move_stop_loss",
@@ -2805,6 +2906,10 @@ class IntentExecutionStrategy(Strategy):
             return
 
         if isinstance(result, ManagementPlan):
+            if result.action == "close_position" and self._begin_close_entry_barrier(
+                result, intent, context, durable_async=durable_async,
+            ):
+                return
             if durable_async:
                 self._queue_management_plan_after_persist(
                     result,
@@ -4183,6 +4288,17 @@ class IntentExecutionStrategy(Strategy):
             return
         if not is_robot_client_order_id(client_order_id):
             return
+        terminal_event = _event_type_name(event) in {"OrderCanceled", "OrderCancelled", "OrderExpired", "OrderRejected", "OrderDenied"}
+        instrument_id = str(_event_instrument_id(event) or "")
+        fully_filled = bool(instrument_id) and any(
+            object_client_order_id(order) == client_order_id and self._order_status_name(order) == "FILLED"
+            for order in self._cache_orders_all(instrument_id)
+        )
+        if terminal_event or fully_filled:
+            if not self._submit_durable_io_task(_DurableIoTask(
+                kind=_DurableIoTaskKind.CLOSE_ORDER_TERMINAL, client_order_id=client_order_id,
+            )):
+                self._halt_durable_io("close terminal evidence queue rejected")
         for key, stash in tuple(self._entry_protection_stash.items()):
             if client_order_id not in stash.get('batch_entry_ids', ()):
                 continue
@@ -4261,6 +4377,9 @@ class IntentExecutionStrategy(Strategy):
         self,
         task: _DurableIoTask,
     ) -> None:
+        if task.kind is _DurableIoTaskKind.CLOSE_ORDER_TERMINAL:
+            self._intent_execution_inbox.mark_close_order_terminal(task.client_order_id)
+            return
         if task.kind is _DurableIoTaskKind.INTENT_EXCHANGE_CONFIRMED:
             self._intent_execution_inbox.mark_exchange_confirmed_by_client_order_id(
                 task.client_order_id
@@ -4811,6 +4930,7 @@ class IntentExecutionStrategy(Strategy):
                     prepared_order = prepared_orders[index]
                 if not self._submit_order_plan_after_durable_prepare(
                     plan,
+                    intent_execution=intent_execution,
                     live_canary_execution=(
                         task.live_canary_execution
                     ),
@@ -7632,11 +7752,149 @@ class IntentExecutionStrategy(Strategy):
         except Exception:
             return str(instrument_id)
 
+    def _invalidate_position_generation(
+        self, instrument_id: str, position_side: str, *, operation_id: str,
+    ) -> bool:
+        try:
+            # The same lock surrounds final submit. A close barrier must win
+            # before waiting on any management/venue continuation.
+            with self._durable_io_halt_lock:
+                self._intent_execution_inbox.invalidate_position(
+                    str(self.config.account_id), instrument_id, position_side,
+                    operation_id=operation_id,
+                )
+        except (OSError, RuntimeError) as exc:
+            self._record_denial(OrderDenied("position_generation_persist_failed", repr(exc)))
+            self._halt_durable_io(f"position generation persist failed: {exc!r}")
+            return False
+        return True
+
+    def _invalidate_close_plan(self, plan: ManagementPlan) -> bool:
+        if plan.action != "close_position":
+            return True
+        side = str(plan.target_position_side or "").upper()
+        return self._invalidate_position_generation(
+            plan.instrument_id, side,
+            operation_id=f"close-intent:{plan.intent_id}",
+        )
+
+    def _validate_local_add_generation(
+        self, plan: OrderPlan,
+        intent_execution: IntentExecutionIdentity | bool = False,
+    ) -> bool:
+        if plan.reduce_only:
+            return True
+        book = (plan.instrument_id, "LONG" if plan.side == "BUY" else "SHORT")
+        action = _tag_value(plan.tags, "action")
+        if isinstance(intent_execution, IntentExecutionIdentity):
+            action = intent_execution.action
+        if action not in {"open_position", "add_position"}:
+            return True
+        try:
+            record = self._intent_execution_inbox.get_by_client_order_id(plan.client_order_id)
+            raw_plan = record.intent_payload.get("order_plan", {}) if record is not False else {}
+            if not isinstance(raw_plan, Mapping):
+                raw_plan = {}
+            require_binding = action == "add_position" or "execution_precondition" in raw_plan
+            denial_reason = self._intent_execution_inbox.add_position_denial(
+                str(self.config.account_id), str(plan.intent_id),
+                plan.instrument_id, "LONG" if plan.side == "BUY" else "SHORT",
+                require_binding=require_binding,
+            )
+            if denial_reason is None and (record is not False or action == "add_position"):
+                denial_reason = self._carried_position_revision_denial(plan)
+            if denial_reason is None and self._unsettled_close_book(*book):
+                denial_reason = "position_close_reconciling"
+        except (OSError, RuntimeError, ValueError) as exc:
+            self._record_denial(OrderDenied("position_generation_unavailable", repr(exc)))
+            self._halt_durable_io(f"position generation read failed: {exc!r}")
+            return False
+        if denial_reason is None:
+            return True
+        denial = OrderDenied(denial_reason, str(plan.intent_id))
+        self._record_denial(denial)
+        # Both submission paths have already persisted DISPATCHED. This is a
+        # known pre-submit denial, not a claim that an earlier dispatch failed.
+        self._queue_order_event_rejection(
+            SimpleNamespace(
+                client_order_id=plan.client_order_id,
+                instrument_id=plan.instrument_id,
+                reason=denial_reason,
+            ),
+            default_reason=denial_reason,
+        )
+        return False
+
+    def _unsettled_close_book(self, instrument_id: str, side: str) -> bool:
+        terminal = {
+            object_client_order_id(order) for order in self._cache_orders_all(instrument_id)
+            if self._order_status_name(order) in self._PROTECTION_TERMINAL_STATUSES
+        }
+        for record in self._intent_execution_inbox.records():
+            if record.instrument_id != instrument_id or record.action != "close_position":
+                continue
+            if record.state is IntentExecutionState.REJECTED:
+                continue
+            raw = record.intent_payload.get("order_plan", {})
+            if not isinstance(raw, Mapping):
+                raw = {}
+            target_side = str(raw.get("position_side") or "").upper()
+            if target_side in {"LONG", "SHORT"} and target_side != side:
+                continue
+            # EXCHANGE_CONFIRMED management means dispatched, not necessarily
+            # filled. On restart, missing cache terminal evidence stays unknown.
+            resolved = terminal | set(record.terminal_client_order_ids)
+            if not record.client_order_ids or not set(record.client_order_ids).issubset(resolved):
+                return True
+        return False
+
+    def _carried_position_revision_denial(self, plan: OrderPlan) -> str | None:
+        """Compare the CP snapshot carried at poll time; this does not refresh it.
+
+        Missing preconditions on transitional intents provide only the separate
+        local receipt-generation guarantee. An explicit precondition never
+        falls back to that legacy path when its current evidence is missing.
+        """
+        record = self._intent_execution_inbox.get_by_client_order_id(plan.client_order_id)
+        if record is False:
+            return "position_generation_missing"
+        order_plan = record.intent_payload.get("order_plan")
+        if not isinstance(order_plan, Mapping):
+            return "execution_precondition_invalid"
+        if "execution_precondition" not in order_plan:
+            return None
+        expected = order_plan["execution_precondition"]
+        current = order_plan.get("execution_revision")
+        for label, revision in (("execution_precondition", expected), ("execution_revision", current)):
+            if not isinstance(revision, Mapping):
+                return f"{label}_invalid"
+            for field in ("account_revision", "book_revision"):
+                counter = revision.get(field)
+                if isinstance(counter, bool) or not isinstance(counter, int) or counter < 0:
+                    return f"{label}_invalid"
+            scope = (
+                revision.get("account_id"), revision.get("instrument_id"),
+                revision.get("position_side"),
+            )
+            required_scope = (
+                str(self.config.account_id), _canonical_symbol(plan.instrument_id),
+                "LONG" if plan.side == "BUY" else "SHORT",
+            )
+            if scope != required_scope or record.account_id != required_scope[0]:
+                return "position_revision_scope_mismatch"
+        for field in ("account_revision", "book_revision"):
+            if current[field] < expected[field]:
+                return "execution_revision_regressed"
+        if any(current[field] != expected[field] for field in ("account_revision", "book_revision")):
+            return "position_revision_stale"
+        return None
+
     def _submit_order_plan_after_durable_prepare(
         self,
         plan: OrderPlan,
         *,
         live_canary_execution: LiveCanaryExecutionIdentity | bool,
+        intent_execution: IntentExecutionIdentity | bool = False,
         prepared_order: Any | bool = False,
     ) -> bool:
         requires_live_canary = (
@@ -7719,6 +7977,8 @@ class IntentExecutionStrategy(Strategy):
                             self._trading_state(),
                         )
                     )
+                    return False
+                if not self._validate_local_add_generation(plan, intent_execution):
                     return False
                 self._durable_entry_submit_started = True
                 self._register_pending_order_confirmation(plan)
@@ -7902,11 +8162,20 @@ class IntentExecutionStrategy(Strategy):
 
         try:
             position_id = self._hedge_position_id(order, plan)
-            self._register_pending_order_confirmation(plan)
-            if position_id is not None:
-                self.submit_order(order, position_id=position_id)  # type: ignore[attr-defined]
-            else:
-                self.submit_order(order)  # type: ignore[attr-defined]
+            with self._durable_io_halt_lock:
+                if not plan.reduce_only and (self._strategy_stopping or self._durable_io_halted_reason):
+                    self._record_denial(OrderDenied(
+                        "strategy_durable_io_halted",
+                        self._durable_io_halted_reason or "strategy_stopping",
+                    ))
+                    return False
+                if not self._validate_local_add_generation(plan, intent_execution):
+                    return False
+                self._register_pending_order_confirmation(plan)
+                if position_id is not None:
+                    self.submit_order(order, position_id=position_id)  # type: ignore[attr-defined]
+                else:
+                    self.submit_order(order)  # type: ignore[attr-defined]
         except Exception as exc:  # Fail closed: no silent drops on adapter/API mismatch.
             self._record_denial(OrderDenied("order_submit_failed", repr(exc)))
             return False
@@ -7926,8 +8195,14 @@ class IntentExecutionStrategy(Strategy):
         *,
         prepared_order: Any | bool = False,
     ) -> Any | OrderDenied:
+        try:
+            submission_plan = self._plan_for_submission(plan)
+        except (RuntimeError, ValueError, TypeError, AttributeError) as exc:
+            return OrderDenied("reduction_evidence_unavailable", repr(exc))
+        if isinstance(submission_plan, OrderDenied):
+            return submission_plan
         order = prepared_order
-        if prepared_order is False:
+        if prepared_order is False or submission_plan != plan:
             instrument = self._cache_instrument(plan.instrument_id)
             if instrument is None:
                 return OrderDenied(
@@ -7938,7 +8213,7 @@ class IntentExecutionStrategy(Strategy):
                 # Submission kwargs may drop the internal reduce_only flag for
                 # external positions. The live-entry gate uses the original plan.
                 order = self._build_nautilus_order(
-                    self._plan_for_submission(plan),
+                    submission_plan,
                     instrument,
                 )
             except Exception as exc:
@@ -8660,16 +8935,12 @@ class IntentExecutionStrategy(Strategy):
     ) -> None:
         self._live_canary_execution_store.mark_dispatched(identity)
 
-    def _plan_for_submission(self, plan: OrderPlan) -> OrderPlan:
-        """Hedge-mode reconciliation quirk (live incident 2026-07-07, ALGO
-        2026-09-15): a node restart rebuilds in-flight fills into positions
-        named ...-EXTERNAL, or leaves the constructed ...-LONG/SHORT book empty
-        / undersized versus venue. RiskEngine then blocks reduce-only orders
-        attached to the book id ("would increase position"), while the Binance
-        adapter refuses non-LONG/SHORT position-id suffixes. Binance ignores
-        reduceOnly in hedge mode anyway (the adapter suppresses the param), so
-        dropping the INTERNAL flag is venue-identical: SELL+LONG / BUY+SHORT
-        still reduce that book, and a missing book is rejected by the venue."""
+    def _plan_for_submission(self, plan: OrderPlan) -> OrderPlan | OrderDenied:
+        """Validate one authorized venue reduction before adapting the cache flag.
+
+        The original plan still supplies Binance's LONG/SHORT position ID. This
+        changes only Nautilus's internal cache check, never fabricates a position.
+        """
         if not plan.reduce_only:
             return plan
         try:
@@ -8678,6 +8949,75 @@ class IntentExecutionStrategy(Strategy):
             return plan
         if getattr(self.config, "oms_type", None) != OmsType.HEDGING:
             return plan
+        from execution_domain.account_execution_ledger import BookKey
+        if plan.side not in {"BUY", "SELL"}:
+            return OrderDenied("reduction_scope_mismatch", plan.side)
+        book = "SHORT" if plan.side == "BUY" else "LONG"
+        state = self._build_reconciled_state(plan.instrument_id)
+        if state is None:
+            return OrderDenied("reduction_evidence_unavailable", plan.instrument_id)
+        assessment = state.assess(BookKey(str(self.config.account_id), plan.instrument_id, book))
+        if assessment.state != "known_open" or not assessment.venue_fresh:
+            return OrderDenied("reduction_evidence_unavailable", assessment.detail)
+        quantity = _positive_canary_decimal(plan.quantity)
+        if quantity is None or quantity > assessment.quantity:
+            return OrderDenied("reduction_quantity_exceeds_venue", plan.quantity)
+        authorization = _authorization_from_tags(plan.tags)
+        if not authorization:
+            return OrderDenied("reduction_authorization_missing", str(plan.intent_id))
+        account = _tag_value(plan.tags, "account_id")
+        if account and account != str(self.config.account_id):
+            return OrderDenied("reduction_scope_mismatch", account)
+        target = _tag_value(plan.tags, "position_id")
+        target_book = _position_book_from_id(target)
+        if target_book and target != f"{plan.instrument_id}-{book}":
+            return OrderDenied("reduction_scope_mismatch", str(target))
+        record = self._intent_execution_inbox.get_by_client_order_id(plan.client_order_id)
+        owned_limit = Decimal(self._robot_owned_position_quantity(plan.instrument_id, book, str(assessment.quantity)))
+        limit = owned_limit
+        if record is not False:
+            if record.state is IntentExecutionState.REJECTED:
+                return OrderDenied("reduction_authorization_missing", "intent rejected")
+            raw = record.intent_payload.get("order_plan", {})
+            if not isinstance(raw, Mapping):
+                return OrderDenied("reduction_authorization_missing", str(plan.intent_id))
+            expected_side = str(raw.get("position_side") or "").upper()
+            if (record.account_id != str(self.config.account_id) or record.instrument_id != plan.instrument_id
+                    or expected_side and expected_side != book):
+                return OrderDenied("reduction_scope_mismatch", str(plan.intent_id))
+            expected_auth = raw.get("authorization")
+            command_close = bool(record.intent_payload.get("command_id")) and record.action == "close_position"
+            if not command_close:
+                if not isinstance(expected_auth, Mapping) or any(
+                    str(expected_auth.get(key) or "") != authorization[key]
+                    for key in ("authorized_by_type", "authorized_by_id", "source_message_id")
+                ):
+                    return OrderDenied("reduction_authorization_missing", str(plan.intent_id))
+            if record.action not in {"close_position", "partial_close", "move_stop_loss", "move_stop_to_entry", "replace_take_profits"}:
+                return OrderDenied("reduction_authorization_missing", record.action)
+            if authorization["authorized_by_type"] == "user":
+                limit = assessment.quantity
+            if raw.get("quantity") is not None:
+                approved = _positive_canary_decimal(raw["quantity"])
+                if approved is None:
+                    return OrderDenied("reduction_authorization_missing", "invalid approved quantity")
+                limit = min(limit, approved)
+            elif raw.get("fraction") is not None:
+                fraction = _positive_canary_decimal(raw["fraction"])
+                if fraction is None or fraction > 1:
+                    return OrderDenied("reduction_authorization_missing", "invalid approved fraction")
+                limit = min(limit, assessment.quantity * fraction)
+        else:
+            matching = any(
+                str(stash.get("instrument_id") or "") == plan.instrument_id
+                and _stash_protection_authorization(stash) == authorization
+                for stash in self._entry_protection_stash.values()
+                if isinstance(stash, dict)
+            )
+            if not matching:
+                return OrderDenied("reduction_authorization_missing", str(plan.intent_id))
+        if quantity > limit:
+            return OrderDenied("reduction_quantity_exceeds_authority", plan.quantity)
         cache_positions = _nonzero_positions(
             self._cache_positions(plan.instrument_id),
         )
@@ -8687,8 +9027,7 @@ class IntentExecutionStrategy(Strategy):
             plan.quantity,
             cache_positions,
         ):
-            import dataclasses
-            return dataclasses.replace(plan, reduce_only=False)
+            return replace(plan, reduce_only=False)
         return plan
 
     def _hedge_position_id(self, order: Any, plan: OrderPlan) -> Any:
@@ -8716,6 +9055,160 @@ class IntentExecutionStrategy(Strategy):
             book = "LONG" if is_buy else "SHORT"
         return PositionId(f"{order.instrument_id}-{book}")
 
+    def _close_entry_ids(self, instrument_id: str, side: str, resolved: set[str]) -> set[str]:
+        """Absence from openOrders is not proof that a dispatched entry is terminal."""
+        entry_side = "BUY" if side.upper() == "LONG" else "SELL"
+        cache = tuple(self._cache_orders_all(instrument_id))
+        terminal = {
+            object_client_order_id(order) for order in cache
+            if self._order_status_name(order) in self._PROTECTION_TERMINAL_STATUSES
+        }
+        mirror = self._exchange_state_mirror
+        orders = list(cache)
+        if mirror:
+            orders.extend(mirror.orders_for_instrument(instrument_id))
+        unresolved: set[str] = set()
+        for order in orders:
+            client_id = object_client_order_id(order)
+            if not is_robot_client_order_id(client_id) or client_id in resolved:
+                continue
+            if self._order_status_name(order) in self._PROTECTION_TERMINAL_STATUSES:
+                continue
+            if getattr(order, "reduce_only", False) is True or getattr(order, "is_reduce_only", False) is True:
+                continue
+            book = str(getattr(order, "position_side", "") or "").upper()
+            order_side = _enum_name(getattr(order, "side", getattr(order, "order_side", "")))
+            if book in {"LONG", "SHORT"} and book != side.upper():
+                continue
+            if order_side in {"BUY", "SELL"} and order_side != entry_side:
+                continue
+            unresolved.add(client_id)
+        for record in self._intent_execution_inbox.records():
+            if record.instrument_id != instrument_id or record.action not in {"open_position", "add_position"}:
+                continue
+            if record.state not in {IntentExecutionState.DISPATCHED, IntentExecutionState.EXCHANGE_CONFIRMED}:
+                continue
+            raw = record.intent_payload.get("order_plan", {})
+            order_side = _entry_order_side_name(raw.get("side"))
+            if order_side and order_side != entry_side:
+                continue
+            for client_id in record.client_order_ids:
+                if client_id not in resolved and client_id not in terminal:
+                    unresolved.add(client_id)
+        return unresolved
+
+    def _close_entry_submit_allowed(self, plan: ManagementPlan) -> bool:
+        if plan.action != "close_position":
+            return True
+        proof = self._close_entry_proofs.get(str(plan.intent_id), {})
+        if proof:
+            positions = [row for row in self._position_snapshots(plan.instrument_id)
+                         if row.position_id == plan.target_position_id]
+            age = (datetime.now(timezone.utc) - proof["observed_at"]).total_seconds()
+            if age > 5 or len(positions) != 1 or Decimal(positions[0].quantity) != proof["quantity"]:
+                self._record_denial(OrderDenied("close_entries_reconciling", "post-cancel position evidence changed or expired"))
+                return False
+        try:
+            unresolved = self._close_entry_ids(
+                plan.instrument_id, plan.target_position_side, set(proof.get("resolved_ids", ())),
+            )
+        except Exception as exc:
+            self._record_denial(OrderDenied("close_entries_reconciling", repr(exc)))
+            return False
+        if unresolved:
+            self._record_denial(OrderDenied("close_entries_reconciling", ",".join(sorted(unresolved))))
+            return False
+        return True
+
+    def _begin_close_entry_barrier(self, plan, intent, context, *, durable_async: bool) -> bool:
+        if not self._invalidate_close_plan(plan):
+            return True
+        try:
+            ids = self._close_entry_ids(plan.instrument_id, plan.target_position_side, set())
+        except Exception as exc:
+            self._record_denial(OrderDenied("close_entries_reconciling", repr(exc)))
+            return True
+        if not ids:
+            if str(plan.intent_id) in self._close_entry_proofs:
+                self._complete_close_entry_cancels(
+                    SimpleNamespace(error="", cancel_outcomes=()),
+                    {"plan": plan, "intent": intent, "context": context,
+                     "durable_async": durable_async, "expected_ids": set()},
+                )
+                return True
+            return False
+        if not self._terminal_exchange_worker:
+            self._record_denial(OrderDenied("close_entries_reconciling", "terminal worker required"))
+            return True
+        if any(item.get("kind") == "close_entry_cancel" and str(item["plan"].intent_id) == str(plan.intent_id)
+               for item in self._pending_terminal_exchange.values()):
+            return True
+        request_id = f"close-entry-cancel:{plan.intent_id}:{uuid4().hex}"
+        requests = self._management_cancel_requests(plan.instrument_id, tuple(sorted(ids)))
+        if requests is False:
+            self._record_denial(OrderDenied("close_entries_reconciling", "entry terminal evidence unavailable"))
+            return True
+        from runtime.exchange_cancel_adapter import TerminalExchangeRequest
+        request = TerminalExchangeRequest(
+            request_id=request_id, account_id=str(self.config.account_id),
+            operation="cancel_batch", purpose="close_entry_barrier",
+            deadline_monotonic=self._terminal_exchange_worker.new_deadline(), cancel_requests=requests,
+        )
+        self._pending_terminal_exchange[request_id] = {
+            "kind": "close_entry_cancel", "intent": intent, "plan": plan,
+            "context": context, "durable_async": durable_async, "expected_ids": ids,
+        }
+        if not self._terminal_exchange_worker.submit(request):
+            self._pending_terminal_exchange.pop(request_id, None)
+            self._record_denial(OrderDenied("close_entries_reconciling", "cancel queue rejected"))
+        return True
+
+    def _complete_close_entry_cancels(self, result, pending) -> None:
+        plan, intent = pending["plan"], pending["intent"]
+        outcomes = tuple(getattr(result, "cancel_outcomes", ()) or ())
+        resolved = {
+            str(outcome.request.client_order_id) for outcome in outcomes
+            if str(getattr(outcome, "status", "")) == "confirmed"
+            and str(getattr(outcome, "terminal_status", "")).upper() in {"CANCELED", "CANCELLED"}
+            and not getattr(outcome, "error", "")
+        }
+        if getattr(result, "error", "") or resolved != pending["expected_ids"]:
+            self._record_denial(OrderDenied("close_entries_reconciling", "entry cancellation not fully confirmed"))
+            return
+        errors: list[str] = []
+        positions = self._terminal_positions_for_close(errors, not_before=datetime.now(timezone.utc))
+        if errors:
+            self._record_denial(OrderDenied("close_entries_reconciling", "; ".join(errors)))
+            return
+        matching = [row for row in positions if _position_instrument_id(row) == plan.instrument_id
+                    and _position_side(row).upper() == plan.target_position_side.upper()]
+        if len(matching) != 1:
+            self._record_denial(OrderDenied("close_entries_reconciling", "fresh position is not unique"))
+            return
+        fresh_quantity = Decimal(_position_quantity(matching[0]))
+        cache_positions = self._position_snapshots(plan.instrument_id)
+        selected = [row for row in cache_positions if row.position_id == plan.target_position_id]
+        # A fill racing cancellation must reach the ownership/cache ledger before
+        # planning. Never replace owned quantity with the account's gross exposure.
+        if len(selected) != 1 or Decimal(selected[0].quantity) != fresh_quantity:
+            self._record_denial(OrderDenied("close_entries_reconciling", "post-cancel position/cache mismatch"))
+            return
+        context = replace(pending["context"], positions=cache_positions,
+                          position=selected[0], reconciled_state=self._build_reconciled_state(plan.instrument_id))
+        context = self._batch_management_context(intent, context)
+        rebuilt = plan_intent_execution(intent, context)
+        if isinstance(rebuilt, OrderDenied) or not isinstance(rebuilt, ManagementPlan):
+            self._record_denial(OrderDenied("close_entries_reconciling", "post-cancel replanning failed"))
+            return
+        self._close_entry_proofs[str(plan.intent_id)] = {
+            "resolved_ids": resolved, "quantity": fresh_quantity,
+            "observed_at": datetime.now(timezone.utc),
+        }
+        if pending["durable_async"]:
+            self._queue_management_plan_after_persist(rebuilt, source_intent=intent)
+        else:
+            self._submit_management_plan(rebuilt, source_intent=intent)
+
     def _queue_management_plan_after_persist(
         self,
         plan: ManagementPlan,
@@ -8733,6 +9226,10 @@ class IntentExecutionStrategy(Strategy):
             )
             self._record_denial(denial)
             self._report_denial(source_intent, denial)
+            return False
+        if not self._invalidate_close_plan(plan):
+            return False
+        if not self._close_entry_submit_allowed(plan):
             return False
         if not self._terminal_exchange_worker:
             environment = str(
@@ -8896,6 +9393,8 @@ class IntentExecutionStrategy(Strategy):
         disabling_take_profits = bool(
             continuation.get("disabling_take_profits", False)
         )
+        if not self._close_entry_submit_allowed(plan):
+            return
         if not disabling_take_profits:
             for order_plan in plan.orders:
                 if self._submit_order_plan(order_plan):
@@ -9046,6 +9545,10 @@ class IntentExecutionStrategy(Strategy):
                     str(plan.intent_id),
                 )
             )
+            return False
+        if not self._invalidate_close_plan(plan):
+            return False
+        if not self._close_entry_submit_allowed(plan):
             return False
         stash = self._entry_protection_stash.get(parent_intent_id)
         if stash and stash.get('batch_entry_ids'):
@@ -9313,13 +9816,9 @@ class IntentExecutionStrategy(Strategy):
                 outcome_error = str(
                     getattr(outcome, "error", "") or ""
                 )
-                if str(getattr(outcome, "outcome", "")) == "already_canceled":
-                    failure = "order was already canceled"
-                    failure_reason = "order_already_terminal"
-                    break
                 if (
                     str(getattr(outcome, "status", "")) == "confirmed"
-                    and terminal_status in {"", "CANCELED", "CANCELLED"}
+                    and terminal_status in {"CANCELED", "CANCELLED"}
                     and not outcome_error
                 ):
                     continue
@@ -9489,11 +9988,6 @@ class IntentExecutionStrategy(Strategy):
             terminal_status = str(
                 getattr(result, "terminal_status", "")
             ).upper()
-            if str(getattr(result, "outcome", "")) == "already_canceled":
-                self._record_denial(
-                    OrderDenied("order_already_terminal", client_order_id)
-                )
-                return False
             if terminal_status not in {"CANCELED", "CANCELLED"}:
                 reason = _management_cancel_failure_reason(
                     terminal_status, "",
@@ -10899,7 +11393,7 @@ def _management_cancel_failure_reason(
     error: str,
 ) -> str:
     if (
-        terminal_status in {"FILLED", "EXECUTED", "TRIGGERED"}
+        terminal_status == "FILLED"
         or "OrderAlreadyFilledError" in error
     ):
         return "order_already_filled"
@@ -10907,9 +11401,8 @@ def _management_cancel_failure_reason(
         "EXPIRED",
         "EXPIRED_IN_MATCH",
         "REJECTED",
-        "NEW",
     } or re.search(
-        r"terminal status (?:EXPIRED_IN_MATCH|EXPIRED|REJECTED|NEW)\b",
+        r"terminal status (?:EXPIRED_IN_MATCH|EXPIRED|REJECTED)\b",
         error,
     ):
         return "order_already_terminal"
@@ -11160,6 +11653,8 @@ def _management_parent_intent_id(plan: ManagementPlan) -> str:
 def _management_operation_ids(
     plan: ManagementPlan,
 ) -> tuple[str, ...]:
+    if plan.action == "close_position" and plan.orders:
+        return tuple(order.client_order_id for order in plan.orders)
     return (
         encode_client_order_id(
             UUID(str(plan.intent_id)),

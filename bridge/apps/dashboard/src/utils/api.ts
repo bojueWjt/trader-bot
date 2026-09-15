@@ -68,9 +68,10 @@ export type EventLog = {
 };
 
 export type Position = {
+  accountId: string;
   id: string;
   pair: string;
-  side: "long" | "short";
+  side: "long" | "short" | "";
   leverage: number;
   entry: number;
   mark: number;
@@ -312,6 +313,8 @@ export type CommandResult = {
   acknowledgedNodes: string[];
   failedNodes: string[];
   statusText: string;
+  operationId?: string;
+  operationStatus?: string;
 };
 
 type JsonResult = {
@@ -1050,14 +1053,24 @@ function eventRows(
   }));
 }
 
-function positionFromApi(value: Record<string, unknown>, index: number): Position {
-  const side = firstString([value.side, value.position_side], "long").toLowerCase();
-  const normalizedSide = side === "short" || side === "sell" ? "short" : "long";
+function positionSideFromApi(value: Record<string, unknown>): "long" | "short" | "" {
+  const side = firstString([value.position_side, value.side]).toLowerCase();
+  if (side === "short" || side === "sell") {
+    return "short";
+  }
+  if (side === "long" || side === "buy") {
+    return "long";
+  }
+  return "";
+}
+
+function positionFromApi(value: Record<string, unknown>, _index: number): Position {
   const stopLoss = firstNumber([value.stop_loss, value.stop_loss_price], Number.NaN);
   const takeProfit = firstNumber([value.take_profit, value.next_take_profit_price], Number.NaN);
-  const positionId = firstString([value.position_id, value.trade_id, value.id], `position-${index}`);
+  const positionId = firstString([value.position_id, value.id]);
 
   return {
+    accountId: firstString([value.account_id, value.account, value.exchange_account_id]),
     anomaly: Number.isFinite(stopLoss) && stopLoss > 0 ? false : "Missing SL",
     auditTimeline: asRecordArray(value.audit_timeline),
     entry: firstNumber([value.entry_price, value.entry_rate, value.open_rate]),
@@ -1067,12 +1080,12 @@ function positionFromApi(value: Record<string, unknown>, index: number): Positio
     leverage: firstNumber([value.leverage], 1),
     mark: firstNumber([value.mark_price, value.current_rate, value.current_price]),
     orders: asRecordArray(value.orders),
-    pair: firstString([value.instrument_symbol, value.pair, value.symbol], "UNAVAILABLE"),
+    pair: firstString([value.instrument_symbol, value.pair, value.symbol, value.instrument_id]),
     pnl: firstNumber([value.unrealized_pnl, value.pnl]),
     pnlPercent: firstNumber([value.pnl_pct, value.profit_pct]),
     rMultiple: firstNumber([value.r_multiple]),
     rawSignal: firstString([value.raw_signal, value.raw_text]),
-    side: normalizedSide,
+    side: positionSideFromApi(value),
     signalId: firstString([value.signal_id, value.intent_id]),
     size: firstNumber([value.size, value.amount, value.quantity]),
     stopLoss: Number.isFinite(stopLoss) && stopLoss > 0 ? stopLoss : false,
@@ -1081,12 +1094,12 @@ function positionFromApi(value: Record<string, unknown>, index: number): Positio
   };
 }
 
-function orderPositionFromApi(value: Record<string, unknown>, index: number): OrderCenterPosition {
-  const side = firstString([value.side, value.position_side], "long").toLowerCase();
+function orderPositionFromApi(value: Record<string, unknown>, _index: number): OrderCenterPosition {
   const entry = firstNumber([value.entry_price, value.entry_rate, value.open_rate]);
   const stopLoss = firstNumber([value.stop_loss, value.stop_loss_price], Number.NaN);
   const takeProfit = firstNumber([value.take_profit, value.take_profit_price, value.next_take_profit_price], Number.NaN);
-  const positionId = firstString([value.position_id, value.trade_id, value.id], `position-${index}`);
+  const positionId = firstString([value.position_id, value.id]);
+  const instrument = firstString([value.instrument_id, value.instrument_symbol, value.pair, value.symbol]);
   return {
     accountId: firstString([value.account_id, value.account, value.exchange_account_id]),
     amount: firstNumber([value.amount, value.size, value.quantity]),
@@ -1094,10 +1107,10 @@ function orderPositionFromApi(value: Record<string, unknown>, index: number): Or
     entry,
     executionJobId: firstString([value.execution_job_id, value.job_id]),
     id: positionId,
-    instrument: firstString([value.instrument_symbol, value.pair, value.symbol], "UNAVAILABLE"),
+    instrument,
     leverage: firstNumber([value.leverage], 1),
     openDate: firstString([value.opened_at, value.created_at, value.open_date], "--"),
-    pair: firstString([value.instrument_symbol, value.pair, value.symbol], "UNAVAILABLE"),
+    pair: firstString([value.instrument_symbol, value.pair, value.symbol], instrument),
     pnl: firstNumber([value.unrealized_pnl, value.pnl]),
     pnlPct: firstNumber([value.pnl_pct, value.profit_pct]),
     protectionStatus: firstString(
@@ -1105,7 +1118,7 @@ function orderPositionFromApi(value: Record<string, unknown>, index: number): Or
       Number.isFinite(stopLoss) && stopLoss > 0 ? "protected" : "missing"
     ),
     signalId: firstString([value.signal_id, value.intent_id]),
-    side: side === "short" || side === "sell" ? "short" : "long",
+    side: positionSideFromApi(value),
     stakeAmount: firstNumber([value.notional, value.stake_amount]),
     status: firstString([value.status], "open"),
     stopLoss: Number.isFinite(stopLoss) && stopLoss > 0 ? stopLoss : false,
@@ -1980,13 +1993,234 @@ export async function activateKillSwitch(reason: string, closeAll: boolean, conf
   });
 }
 
-export async function closePosition(tradeId: string, reason: string, signalId: string): Promise<CommandResult> {
-  return issueCommand("close_all", {
-    position_id: tradeId,
-    reason,
-    scope: "position",
-    signal_id: signalId
+export type PositionActionTarget = Pick<Position, "accountId" | "id" | "pair"> & {
+  side: string;
+  instrument?: string;
+};
+
+export const POSITION_OPERATION_STORAGE_PREFIX = "hermes.position-operation.v1:";
+type PositionOperation = {
+  requestId: string;
+  body: Record<string, unknown>;
+  operationId: string;
+};
+const pendingPositionRequests = new Map<string, Promise<CommandResult>>();
+const terminalPositionStatuses = new Set(["filled", "rejected", "expired", "cancelled", "canceled"]);
+
+async function positionOperationJson(path: string, init: RequestInit): Promise<{
+  response: Response; payload: Record<string, unknown>;
+}> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error("Request timed out after 15 seconds"));
+      controller.abort();
+    }, 15_000);
   });
+  try {
+    // Keep the deadline through body reading. Aborting a POST does not establish
+    // whether the server accepted it; the caller retains its saved identity.
+    return await Promise.race([
+      (async () => {
+        const response = await fetch(apiUrl(path), { ...init, signal: controller.signal });
+        const payload = asRecord(await response.json().catch(() => ({})));
+        return { response, payload };
+      })(),
+      timeout
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function positionOperationResult(statusText: string, operationId = "", operationStatus = "unknown"): CommandResult {
+  return {
+    commandId: "", operationId, operationStatus,
+    complete: operationStatus === "filled",
+    pendingNodes: [], acknowledgedNodes: [], failedNodes: [], statusText
+  };
+}
+
+function positionOperationFromPayload(payload: Record<string, unknown>, operationId: string): CommandResult {
+  const intent = asRecord(payload.intent);
+  const rawStatus = firstString([payload.status, intent.status], "accepted").toLowerCase();
+  const status = rawStatus === "approved" ? "accepted" : rawStatus;
+  const reason = firstString([payload.denial_reason, intent.denial_reason]);
+  const messages: Record<string, string> = {
+    accepted: "Request accepted — awaiting execution",
+    queued: "Request queued — awaiting execution",
+    submitted: "Order submitted — awaiting exchange result",
+    partial: "Partially filled — execution in progress",
+    filled: "Execution filled",
+    rejected: "Request rejected",
+    expired: "Request expired",
+    cancelled: "Request cancelled",
+    canceled: "Request cancelled",
+    reconciling: "Execution is being reconciled"
+  };
+  let text = messages[status] || `Execution status: ${status}`;
+  if (reason) {
+    text = `${text}: ${reason}`;
+  }
+  return positionOperationResult(text, operationId, status);
+}
+
+function responseErrorDetail(payload: Record<string, unknown>, fallback: string): string {
+  const detail = payload.detail;
+  if (typeof detail === "string" && detail) {
+    return detail;
+  }
+  if (Array.isArray(detail)) {
+    return detail.map((item) => {
+      const error = asRecord(item);
+      return firstString([error.msg], JSON.stringify(item));
+    }).join("; ");
+  }
+  if (detail && typeof detail === "object") {
+    return JSON.stringify(detail);
+  }
+  return firstString([payload.denial_reason, payload.message], fallback);
+}
+
+function clearTerminalPositionOperation(operationId: string, status: string): void {
+  if (!terminalPositionStatuses.has(status)) {
+    return;
+  }
+  for (let index = sessionStorage.length - 1; index >= 0; index -= 1) {
+    const key = sessionStorage.key(index);
+    if (!key || !key.startsWith(POSITION_OPERATION_STORAGE_PREFIX)) {
+      continue;
+    }
+    const stored = sessionStorage.getItem(key);
+    if (stored && asRecord(JSON.parse(stored)).operationId === operationId) {
+      sessionStorage.removeItem(key);
+    }
+  }
+}
+
+export async function queryPositionOperation(operationId: string): Promise<CommandResult> {
+  try {
+    const { response, payload } = await positionOperationJson(`/v1/operator/orders/${encodeURIComponent(operationId)}`, {
+      headers: requestHeaders({ Accept: "application/json" })
+    });
+    if (!response.ok) {
+      return positionOperationResult(`Status unavailable (HTTP ${response.status}): ${responseErrorDetail(payload, "Retry status lookup")}`, operationId);
+    }
+    const intent = asRecord(payload.intent);
+    if (!firstString([payload.status, intent.status])) {
+      return positionOperationResult("Status unavailable: response has no execution status. Retry status lookup.", operationId);
+    }
+    const result = positionOperationFromPayload(payload, operationId);
+    clearTerminalPositionOperation(operationId, result.operationStatus || "unknown");
+    return result;
+  } catch (error) {
+    return positionOperationResult(`Status unavailable: ${error instanceof Error ? error.message : "network error"}. Retry status lookup.`, operationId);
+  }
+}
+
+async function sendPositionOperation(key: string, body: Record<string, unknown>): Promise<CommandResult> {
+  let operation: PositionOperation;
+  try {
+    const saved = sessionStorage.getItem(key);
+    if (saved) {
+      const record = asRecord(JSON.parse(saved));
+      const savedBody = asRecord(record.body);
+      if (typeof record.requestId !== "string" || !record.requestId || typeof savedBody.client_ref !== "string") {
+        return positionOperationResult("Saved request is invalid; submission blocked to avoid duplicating an unknown operation.");
+      }
+      operation = { requestId: record.requestId, body: savedBody, operationId: asString(record.operationId) };
+    } else {
+      const requestId = crypto.randomUUID();
+      operation = { requestId, body: { ...body, client_ref: `dashboard-position-${requestId}` }, operationId: "" };
+      // Persist before the first POST; a timeout or reload must reuse its identity.
+      sessionStorage.setItem(key, JSON.stringify(operation));
+    }
+  } catch (error) {
+    return positionOperationResult(`Cannot save a stable request; submission blocked: ${error instanceof Error ? error.message : "session storage unavailable"}`);
+  }
+  if (operation.operationId) {
+    return queryPositionOperation(operation.operationId);
+  }
+  try {
+    const { response, payload } = await positionOperationJson("/v1/operator/orders", {
+      method: "POST", body: JSON.stringify(operation.body),
+      headers: requestHeaders({
+        Accept: "application/json", "Content-Type": "application/json", "X-Request-Id": operation.requestId
+      })
+    });
+    if (!response.ok) {
+      const outcome = response.status >= 500 ? "Request outcome unknown" : "Request rejected";
+      return positionOperationResult(`${outcome} (HTTP ${response.status}): ${responseErrorDetail(payload, "No acceptance confirmed; retry uses the same request")}`);
+    }
+    const intent = asRecord(payload.intent);
+    const operationId = firstString([payload.intent_id, intent.intent_id]);
+    if (!operationId) {
+      return positionOperationResult("Request outcome unknown: response has no operation ID. Retry uses the same request.");
+    }
+    operation.operationId = operationId;
+    sessionStorage.setItem(key, JSON.stringify(operation));
+    const result = positionOperationFromPayload(payload, operationId);
+    clearTerminalPositionOperation(operationId, result.operationStatus || "unknown");
+    return result;
+  } catch (error) {
+    return positionOperationResult(`Request outcome unknown: ${error instanceof Error ? error.message : "network error"}. Retry checks or reuses the same request.`, operation.operationId);
+  }
+}
+
+function submitPositionOperation(
+  action: "close_position" | "partial_close" | "move_stop_loss",
+  position: PositionActionTarget, reason: string, parameters: Record<string, number> = {}
+): Promise<CommandResult> {
+  const accountId = asString(position.accountId).trim();
+  const positionId = asString(position.id).trim();
+  const side = asString(position.side).toLowerCase();
+  const instrument = position.instrument || position.pair;
+  const symbol = asString(instrument).trim().toUpperCase().replace(/-PERP\.BINANCE$/, "").replace(/:USDT$/, "").replace("/", "");
+  const missing: string[] = [];
+  if (!accountId) {
+    missing.push("account ID");
+  }
+  if (!positionId) {
+    missing.push("position ID");
+  }
+  if (side !== "long" && side !== "short") {
+    missing.push("position side (long/short)");
+  }
+  if (!/^[A-Z0-9_]+USDT$/.test(symbol)) {
+    missing.push("valid USDT symbol");
+  }
+  if (!reason.trim()) {
+    missing.push("reason");
+  }
+  if (missing.length > 0) {
+    return Promise.resolve(positionOperationResult(`Cannot submit: missing ${missing.join(", ")}.`));
+  }
+  for (const [field, value] of Object.entries(parameters)) {
+    if (!Number.isFinite(value) || value <= 0) {
+      return Promise.resolve(positionOperationResult(`Cannot submit: ${field} must be a positive number.`));
+    }
+  }
+  const effect = { action, account_id: accountId, symbol, side, position_side: side, target_position_id: positionId, ...parameters };
+  // Reason is audit text, not a new economic operation. Repeated clicks with a
+  // revised reason retain the first body and identity until terminal evidence.
+  const key = `${POSITION_OPERATION_STORAGE_PREFIX}${JSON.stringify(effect)}`;
+  const pending = pendingPositionRequests.get(key);
+  if (pending) {
+    return pending;
+  }
+  const request = sendPositionOperation(key, { ...effect, reason: reason.trim(), authorized_by_type: "user" });
+  pendingPositionRequests.set(key, request);
+  void request.finally(() => {
+    pendingPositionRequests.delete(key);
+  });
+  return request;
+}
+
+export async function closePosition(position: PositionActionTarget, reason: string): Promise<CommandResult> {
+  return submitPositionOperation("close_position", position, reason);
 }
 
 export async function cancelOrder(orderId: string, reason: string): Promise<CommandResult> {
@@ -1997,32 +2231,19 @@ export async function cancelOrder(orderId: string, reason: string): Promise<Comm
 }
 
 export async function partialClosePosition(
-  tradeId: string,
+  position: PositionActionTarget,
   amount: number,
-  reason: string,
-  signalId: string
+  reason: string
 ): Promise<CommandResult> {
-  return issueCommand("close_all", {
-    amount,
-    position_id: tradeId,
-    reason,
-    scope: "position_partial",
-    signal_id: signalId
-  });
+  return submitPositionOperation("partial_close", position, reason, { quantity: amount });
 }
 
 export async function moveStopLoss(
-  tradeId: string,
+  position: PositionActionTarget,
   stopLossPrice: number,
-  reason: string,
-  signalId: string
+  reason: string
 ): Promise<CommandResult> {
-  return issueCommand("move_stop_loss", {
-    position_id: tradeId,
-    reason,
-    signal_id: signalId,
-    stop_loss_price: stopLossPrice
-  });
+  return submitPositionOperation("move_stop_loss", position, reason, { stop_loss: stopLossPrice });
 }
 
 export async function pauseBot(reason: string): Promise<CommandResult> {

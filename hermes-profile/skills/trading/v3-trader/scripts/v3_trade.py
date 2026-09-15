@@ -10,41 +10,13 @@ import argparse
 import json
 import os
 import re
-import sqlite3
 import sys
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 
 BASE = os.environ.get("V3_CONTROL_PLANE_URL", "http://127.0.0.1:8080")
-ENV_FILE = os.environ.get("V3_ENV_FILE", "/srv/trader-v3/.env.v3")
-DEFAULT_TRADING_DB_PATH = "/var/lib/docker/volumes/trader_signal-data/_data/watcher-trading.db"
-CANONICAL_TRADING_DB_ENV = "TRADER_TRADING_DB_PATH"
-LEGACY_TRADING_DB_ENVS = ("WATCHER_TRADING_DB", "TRADING_DB_PATH")
-TRADING_DB_ENV_NAMES = (CANONICAL_TRADING_DB_ENV, *LEGACY_TRADING_DB_ENVS)
-
-
-def resolve_trading_db_path(env: dict[str, str] | None = None) -> str:
-    if env is None:
-        env = os.environ
-    configured: list[tuple[str, str]] = []
-    for name in TRADING_DB_ENV_NAMES:
-        value = str(env.get(name) or "").strip()
-        if value:
-            configured.append((name, value))
-    if not configured:
-        return DEFAULT_TRADING_DB_PATH
-    canonical_name, canonical_value = configured[0]
-    for name, value in configured[1:]:
-        if value != canonical_value:
-            raise RuntimeError(
-                "conflicting trading DB path environment: "
-                f"{canonical_name}={canonical_value} {name}={value}"
-            )
-    return canonical_value
-
-
-WATCHER_TRADING_DB = resolve_trading_db_path()
 _DEFAULT_OPERATOR_ACCOUNTS = (
     "account-a",
     "account-b",
@@ -110,155 +82,21 @@ def _channel_route_error(message: str) -> None:
     sys.exit(1)
 
 
-def _table_columns(
-    conn: sqlite3.Connection,
-    table_name: str,
-) -> set[str]:
-    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-    return {str(row["name"]) for row in rows}
-
-
-def _route_account_is_enabled(
-    row: sqlite3.Row,
-    account_columns: set[str],
-) -> bool:
-    for field_name in ("is_enabled", "enabled"):
-        if field_name not in account_columns:
-            continue
-        value = str(row[field_name] or "").strip().lower()
-        if value not in _ENABLED_ACCOUNT_STATUSES:
-            return False
-    if "status" not in account_columns:
-        return True
-    status = str(row["status"] or "").strip().lower()
-    if not status:
-        return True
-    return status in _ENABLED_ACCOUNT_STATUSES
-
-
 def _channel_execution_account(channel_id: str) -> str:
-    normalized_channel = str(channel_id or "").strip()
-    if _CHANNEL_ID_RE.fullmatch(normalized_channel) is None:
-        _channel_route_error("channel route requires a numeric Telegram channel id")
-
-    try:
-        conn = sqlite3.connect(
-            f"file:{WATCHER_TRADING_DB}?mode=ro",
-            uri=True,
-        )
-        conn.row_factory = sqlite3.Row
-        try:
-            account_columns = _table_columns(conn, "account_configs")
-            route_columns = _table_columns(conn, "channel_routing")
-            required_account_columns = {
-                "account_id",
-                "account_type",
-                "parent_account_id",
-                "execution_account_id",
-            }
-            if not required_account_columns <= account_columns:
-                _channel_route_error(
-                    "account routing schema requires account identity, "
-                    "hierarchy, and execution identity"
-                )
-            if not {"channel_id", "target_account_id"} <= route_columns:
-                _channel_route_error(
-                    "channel routing schema requires channel_id and "
-                    "target_account_id"
-                )
-
-            fields = [
-                "route.target_account_id AS target_account_id",
-                "account.account_id AS account_id",
-                "account.execution_account_id AS execution_account_id",
-                "(SELECT COUNT(*) FROM account_configs AS candidate "
-                "WHERE candidate.execution_account_id = "
-                "account.execution_account_id) AS execution_account_count",
-                "account.account_type AS account_type",
-                "account.parent_account_id AS parent_account_id",
-                "(SELECT COUNT(*) FROM account_configs AS parent "
-                "WHERE parent.account_id = account.parent_account_id "
-                "AND lower(trim(parent.account_type)) = 'main') "
-                "AS parent_main_account_count",
-            ]
-            for field_name in ("is_enabled", "enabled", "status"):
-                if field_name in account_columns:
-                    fields.append(f"account.{field_name} AS {field_name}")
-            rows = conn.execute(
-                "SELECT "
-                + ", ".join(fields)
-                + " FROM channel_routing AS route "
-                + "LEFT JOIN account_configs AS account "
-                + "ON account.account_id = route.target_account_id "
-                + "WHERE route.channel_id = ?",
-                (normalized_channel,),
-            ).fetchall()
-        finally:
-            conn.close()
-    except (OSError, sqlite3.Error) as exc:
-        _channel_route_error(f"channel routing lookup failed: {exc}")
-
-    if len(rows) != 1:
-        _channel_route_error(
-            f"channel {normalized_channel} must resolve to exactly one account"
-        )
-    row = rows[0]
-    target_account = str(row["target_account_id"] or "").strip()
-    credential_account = str(row["account_id"] or "").strip()
-    execution_account = str(row["execution_account_id"] or "").strip()
-    if not credential_account or credential_account != target_account:
-        _channel_route_error("channel route target credential account is invalid")
-    if _ACCOUNT_ID_RE.fullmatch(execution_account) is None:
-        _channel_route_error("channel route execution account is invalid")
-    try:
-        execution_account_count = int(row["execution_account_count"])
-    except (TypeError, ValueError):
-        _channel_route_error("channel route execution account identity is invalid")
-    if execution_account_count != 1:
-        _channel_route_error("channel route execution account must be unique")
-    account_type = str(row["account_type"] or "").strip().lower()
-    parent_account = str(row["parent_account_id"] or "").strip()
-    if account_type == "main":
-        if parent_account:
-            _channel_route_error(
-                "channel route main account must not have a parent"
-            )
-    elif account_type == "subaccount":
-        try:
-            parent_main_account_count = int(row["parent_main_account_count"])
-        except (TypeError, ValueError):
-            _channel_route_error(
-                "channel route subaccount parent identity is invalid"
-            )
-        if not parent_account or parent_main_account_count != 1:
-            _channel_route_error(
-                "channel route subaccount parent must resolve to one main account"
-            )
-    else:
-        _channel_route_error("channel route account type is invalid")
-    if execution_account not in _configured_operator_accounts():
-        _channel_route_error(
-            f"channel route execution account {execution_account} is not registered"
-        )
-    if not _route_account_is_enabled(row, account_columns):
-        _channel_route_error("channel route target credential account is disabled")
-    return execution_account
+    query = urllib.parse.urlencode({"channel": channel_id})
+    route = _call("GET", "/v1/query/channel-route?" + query)
+    account_id = route.get("execution_account_id")
+    if not isinstance(account_id, str) or account_id not in _configured_operator_accounts():
+        _channel_route_error("control-plane channel route has no registered execution account")
+    return account_id
 
 
 def _token() -> str:
-    tok = os.environ.get("RISK_ADMIN_TOKEN", "").strip()
-    if tok:
-        return tok
-    try:
-        with open(ENV_FILE, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if line.startswith("RISK_ADMIN_TOKEN="):
-                    return line.split("=", 1)[1].strip().strip('"').strip("'")
-    except OSError:
-        pass
-    print(json.dumps({"error": "RISK_ADMIN_TOKEN unavailable (check /srv/trader-v3/.env.v3)"}))
-    sys.exit(2)
+    token = os.environ.get("RISK_ADMIN_TOKEN", "").strip()
+    if not token:
+        print(json.dumps({"error": "RISK_ADMIN_TOKEN unavailable; inject the credential through the process environment"}))
+        raise SystemExit(2)
+    return token
 
 
 def _call(method: str, path: str, payload: dict | None = None) -> dict:
@@ -504,104 +342,13 @@ def _apply_entry_offset(entry: dict, side: str) -> str:
     return f"；按用户约定：入场模糊点位让利0.1%（原值 {', '.join(raw_parts)}）"
 
 
-def _mirror_book_for_account(account_id: str) -> tuple[str, list]:
-    snap = _call("GET", "/api/system/snapshot")
-    if snap.get("stale") is True:
-        return "stale", []
-    data = snap.get("data") or {}
-    rows = data.get("exchange_state") or []
-    row = next(
-        (
-            item
-            for item in rows
-            if str(item.get("account_id") or "") == account_id
-        ),
-        None,
-    )
-    if row is None:
-        return "unknown", []
-    if row.get("stale") is True:
-        return "stale", []
-    payload = row.get("payload") or {}
-    positions = payload.get("positions")
-    if not isinstance(positions, list):
-        return "conflict", []
-    return "known", positions
-
-
-def _same_side_position_open(positions: list, symbol: str, side: str) -> bool:
-    want_symbol = str(symbol or "").upper().split("-")[0].split(".")[0]
-    want_side = str(side or "").strip().lower()
-    for item in positions:
-        if not isinstance(item, dict):
-            continue
-        item_symbol = str(
-            item.get("symbol") or item.get("instrument_id") or ""
-        ).upper().split("-")[0].split(".")[0]
-        if item_symbol != want_symbol:
-            continue
-        item_side = str(
-            item.get("position_side") or item.get("side") or ""
-        ).strip().lower()
-        if item_side in ("buy", "long"):
-            item_side = "long"
-        elif item_side in ("sell", "short"):
-            item_side = "short"
-        raw_qty = item.get("position_amt")
-        if raw_qty is None:
-            raw_qty = item.get("quantity")
-        try:
-            quantity = abs(float(raw_qty or 0))
-        except (TypeError, ValueError):
-            return True
-        if quantity == 0:
-            continue
-        if item_side == want_side:
-            return True
-    return False
-
-
-def resolve_entry_action(
-    *,
-    intended_action: str,
-    symbol: str,
-    account_id: str,
-    side: str,
-    canary: bool,
-    second_price,
-) -> str:
-    """Choose open vs add from a fresh mirror before approval."""
-    if canary:
-        if intended_action == "add_position":
-            print(json.dumps({
-                "error": "canary_open_position_only",
-                "detail": "live canary cannot submit add_position",
-            }, ensure_ascii=False))
-            sys.exit(1)
-        return "open_position"
-    state, positions = _mirror_book_for_account(account_id)
-    if state in ("stale", "unknown", "conflict"):
-        print(json.dumps({
-            "error": "venue_position_state",
-            "detail": (
-                f"refusing risk-increasing {intended_action}: "
-                f"mirror state is {state}"
-            ),
-            "state": state,
-        }, ensure_ascii=False))
-        sys.exit(1)
-    actual = (
-        "add_position"
-        if _same_side_position_open(positions, symbol, side)
-        else "open_position"
-    )
-    if second_price is not None and actual != "open_position":
-        print(json.dumps({
-            "error": "second_price requires market/limit open_position",
-            "detail": "same-side position is open; Titan second_price cannot add",
-        }, ensure_ascii=False))
-        sys.exit(1)
-    return actual
+def resolve_entry_action(*, intended_action: str, canary: bool, second_price) -> str:
+    """Preserve explicit intent; the control plane validates current positions."""
+    if canary and intended_action != "open_position":
+        raise SystemExit("canary_open_position_only")
+    if second_price is not None and intended_action != "open_position":
+        raise SystemExit("second_price requires market/limit open_position")
+    return intended_action
 
 
 def _cmd_entry(args, intended_action: str) -> None:
@@ -626,9 +373,6 @@ def _cmd_entry(args, intended_action: str) -> None:
         reason = reason + _apply_entry_offset(entry, args.side)
     actual_action = resolve_entry_action(
         intended_action=intended_action,
-        symbol=str(args.symbol).upper(),
-        account_id=args.account,
-        side=args.side,
         canary=getattr(args, "canary_permit_id", None) is not None,
         second_price=second_price,
     )

@@ -43,6 +43,7 @@ CancelConfirmationTimeoutError = (
     EXCHANGE_CANCEL_ADAPTER.CancelConfirmationTimeoutError
 )
 CancelStateError = EXCHANGE_CANCEL_ADAPTER.CancelStateError
+CancelConfirmationUnknownError = EXCHANGE_CANCEL_ADAPTER.CancelConfirmationUnknownError
 CancelIntentRequiredError = EXCHANGE_CANCEL_ADAPTER.CancelIntentRequiredError
 CancelOrderRequest = EXCHANGE_CANCEL_ADAPTER.CancelOrderRequest
 ControlPlaneExchangeStateMirror = (
@@ -169,10 +170,53 @@ class ExchangeCancelAdapterTest(unittest.TestCase):
         )
         adapter = _adapter(transport)
 
-        with self.assertRaisesRegex(CancelStateError, "terminal status UNKNOWN"):
+        with self.assertRaisesRegex(CancelConfirmationUnknownError, "observed status UNKNOWN"):
             adapter.cancel(
                 "cancel_order",
                 _request(order_kind="regular", venue_order_id="42"),
+            )
+
+    def test_algo_disappearance_is_not_terminal_or_filled_evidence(self) -> None:
+        for status in ("NEW", "TRIGGERED", "EXECUTED", "FINISHED", "UNKNOWN"):
+            with self.subTest(status=status):
+                terminal = {"algoId": 9001, "algoStatus": status}
+                if status == "UNKNOWN":
+                    terminal = BinanceApiError(-2013, "Order does not exist")
+                transport = _ScriptedTransport({
+                    ("DELETE", "/fapi/v1/algoOrder"): [{"code": 200}],
+                    ("GET", "/fapi/v1/openAlgoOrders"): [{"orders": []}],
+                    ("GET", "/fapi/v1/algoOrder"): [terminal],
+                })
+                with self.assertRaises(CancelConfirmationUnknownError) as raised:
+                    _adapter(transport).cancel(
+                        "cancel_order", _request(order_kind="algo", venue_order_id="9001"),
+                    )
+                self.assertEqual(raised.exception.observed_status, status)
+                self.assertNotIsInstance(raised.exception, CancelStateError)
+                self.assertEqual([call[:2] for call in transport.calls], [
+                    ("DELETE", "/fapi/v1/algoOrder"),
+                    ("GET", "/fapi/v1/openAlgoOrders"),
+                    ("GET", "/fapi/v1/algoOrder"),
+                ])
+
+    def test_regular_new_after_disappearance_remains_unknown(self) -> None:
+        transport = _ScriptedTransport({
+            ("DELETE", "/fapi/v1/order"): [{"status": "NEW"}],
+            ("GET", "/fapi/v1/openOrders"): [[]],
+            ("GET", "/fapi/v1/order"): [{"orderId": 42, "status": "NEW"}],
+        })
+        with self.assertRaisesRegex(CancelConfirmationUnknownError, "observed status NEW"):
+            _adapter(transport).cancel("cancel_order", _request())
+
+    def test_algo_query_filled_is_distinct_from_cancel_and_trigger(self) -> None:
+        transport = _ScriptedTransport({
+            ("DELETE", "/fapi/v1/algoOrder"): [BinanceApiError(-2011, "Unknown order")],
+            ("GET", "/fapi/v1/openAlgoOrders"): [{"orders": []}],
+            ("GET", "/fapi/v1/algoOrder"): [{"algoId": 9001, "algoStatus": "FILLED"}],
+        })
+        with self.assertRaisesRegex(OrderAlreadyFilledError, "FILLED"):
+            _adapter(transport).cancel(
+                "cancel_order", _request(order_kind="algo", venue_order_id="9001"),
             )
 
     def test_wrong_account_is_rejected_before_exchange_request(self) -> None:
@@ -218,6 +262,25 @@ class ExchangeCancelAdapterTest(unittest.TestCase):
 
 
 class TerminalExchangeWorkerTest(unittest.TestCase):
+    def test_unknown_cancel_uses_existing_reconciling_outcome(self) -> None:
+        transport = _ScriptedTransport({
+            ("DELETE", "/fapi/v1/algoOrder"): [{"code": 200}],
+            ("GET", "/fapi/v1/openAlgoOrders"): [{"orders": []}],
+            ("GET", "/fapi/v1/algoOrder"): [{"algoStatus": "NEW"}],
+        })
+        worker = TerminalExchangeWorker(
+            account_id=ACCOUNT_ID, mirror=_CountingMirror(), adapter=_adapter(transport),
+            result_publisher=lambda _result: None,
+        )
+        request = _request(order_kind="algo", venue_order_id="9001")
+        outcomes = worker._cancel_batch((request,), worker.new_deadline())
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0].status, "reconciling")
+        self.assertEqual(outcomes[0].terminal_status, "")
+        self.assertEqual(outcomes[0].outcome, "")
+        self.assertIn("CancelConfirmationUnknownError", outcomes[0].error)
+        self.assertIn("observed status NEW", outcomes[0].error)
+
     def test_duplicate_id_reuses_immutable_result_without_reexecution(
         self,
     ) -> None:

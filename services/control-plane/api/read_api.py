@@ -81,6 +81,18 @@ from snapshot import (  # noqa: E402
     validate_snapshot,
 )
 from position_protection import protection_status  # noqa: E402
+from security.permissions import AuthRequired, PermissionDenied  # noqa: E402
+from security.principal import (  # noqa: E402
+    PrincipalKind,
+    TokenCatalogError,
+    assert_account_authorized,
+    can_write_operator_orders,
+    resolve_principal,
+)
+from intent_trace import load_intent_trace, list_open_incidents  # noqa: E402
+import position_revision  # noqa: E402
+import signal_handoff  # noqa: E402
+from signal_status import load_signal_rows, signal_disposition  # noqa: E402
 
 READER_TOKEN_ENV = {
     "SYSTEM_OBSERVER_TOKEN": "system_observer",
@@ -315,17 +327,45 @@ def _reader_tokens() -> dict[str, str]:
     return tokens
 
 
+def _authenticated_principal(authorization: str | None):
+    try:
+        return resolve_principal(authorization)
+    except TokenCatalogError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except AuthRequired as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except PermissionDenied as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
 def require_reader(authorization: str | None) -> str:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="bearer token required")
-    tokens = _reader_tokens()
-    if not tokens:
-        # fail closed: no reader credentials configured
-        raise HTTPException(status_code=503, detail="reader auth not configured")
-    role = tokens.get(authorization[len("Bearer "):].strip())
-    if not role:
-        raise HTTPException(status_code=403, detail="forbidden")
-    return role
+    principal = _authenticated_principal(authorization)
+    if principal.kind is PrincipalKind.SIGNAL:
+        raise HTTPException(status_code=403, detail="account-scoped reader required")
+    return principal.role
+
+
+def _require_operator_principal(
+    authorization: str | None, account_id: str = "", *, allow_signal: bool = False,
+):
+    principal = _authenticated_principal(authorization)
+    try:
+        if principal.kind is PrincipalKind.SIGNAL:
+            assert_account_authorized(principal, account_id)
+            if allow_signal:
+                return principal
+        if not can_write_operator_orders(principal):
+            raise PermissionDenied("risk_admin required")
+    except PermissionDenied as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return principal
+
+
+def _signal_execution_context(cur, account_id, body, *, lock=False):
+    try:
+        return signal_handoff.load_request(cur, account_id, body, lock=lock)
+    except signal_handoff.SignalHandoffError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.code) from exc
 
 
 @app.get("/api/system/snapshot")
@@ -536,6 +576,9 @@ _EXECUTION_ORDER_PLAN_METADATA = (
     "canary_permit",
     "disable_take_profits",
     "equity",
+    "execution_precondition",
+    "execution_revision",
+    "signal_execution",
     "live_open_gate",
     "protection_policy",
     "request_semantics",
@@ -900,6 +943,15 @@ def node_intents(
                 params + [limit],
             )
             rows = cur.fetchall()
+            for row in rows:
+                plan = row[7]
+                if row[6] not in {"open_position", "add_position"} or not isinstance(plan, dict):
+                    continue
+                precondition = plan.get("execution_precondition")
+                if isinstance(precondition, dict):
+                    plan["execution_revision"] = position_revision.read_current(
+                        cur, account_id, row[5], precondition["position_side"],
+                    )
     finally:
         conn.close()
     items = []
@@ -936,9 +988,7 @@ def issue_operator_command(
     """Operator audited command (HALT/REDUCE/RESUME/CANCEL_ALL/CLOSE_ALL/REFRESH_EVIDENCE).
     risk_admin only; requires request_id + reason + confirm=true; writes a durable
     audit_events row; issue_command sets risk_state for state commands."""
-    role = require_reader(authorization)
-    if role != "risk_admin":
-        raise HTTPException(status_code=403, detail="risk_admin required")
+    _require_operator_principal(authorization)
     command_type = (body.get("type") or body.get("command_type") or "").upper()
     if command_type not in (
         "HALT",
@@ -1012,6 +1062,9 @@ def issue_operator_command(
             conn, command_type=command_type, requested_by="risk_admin", reason=reason,
             idempotency_key=idempotency_key,
             target_nodes=target_nodes, scope=scope,
+            invalidate_accounts=(
+                [account_id] if account_id else list(_operator_accounts())
+            ) if command_type == "CLOSE_ALL" else None,
         )
         record_audit_event(
             conn, event_type="operator_command", aggregate_type="operator_command",
@@ -1861,6 +1914,8 @@ def _timestamp_is_fresh_with_max_age(
 ) -> bool:
     if not isinstance(value, datetime) or not isinstance(now, datetime):
         return False
+    if value.tzinfo is None or now.tzinfo is None:
+        return False
     age_seconds = (now - value).total_seconds()
     return -1.0 <= age_seconds <= max_age_seconds
 
@@ -1902,6 +1957,8 @@ def _validate_owned_orders_terminal(
     account_id: str,
 ) -> list[dict]:
     durable_entry_order_exemptions: dict[str, dict] = {}
+    venue_protection_orders: dict[str, dict] = {}
+    fresh_venue_evidence = _resume_venue_order_evidence_is_fresh(heartbeat)
     for field_name in ("regular_orders", "algo_orders"):
         snapshot = heartbeat.get(field_name)
         if not isinstance(snapshot, list):
@@ -1918,6 +1975,8 @@ def _validate_owned_orders_terminal(
             if not row_is_robot_order(item):
                 continue
             if _robot_order_is_resume_exempt(item):
+                if fresh_venue_evidence:
+                    venue_protection_orders[client_order_id_from_row(item)] = item
                 continue
             durable_entry_exemption = (
                 _durable_entry_order_resume_exemption(
@@ -1947,7 +2006,8 @@ def _validate_owned_orders_terminal(
                status,
                order_type,
                reduce_only,
-               payload
+               payload,
+               instrument_id
         FROM orders_projection
         WHERE account_id=%s
           AND client_order_id ~ '^B[0-9a-f]{32}[0-9]{2}$'
@@ -1961,6 +2021,7 @@ def _validate_owned_orders_terminal(
         order_type,
         reduce_only,
         raw_payload,
+        instrument_id,
     ) in cur.fetchall():
         if str(status or "").strip().lower() in _TERMINAL_ORDER_STATES:
             continue
@@ -1973,6 +2034,14 @@ def _validate_owned_orders_terminal(
             projection_order["reduce_only"] = reduce_only
         if _robot_order_is_resume_exempt(projection_order):
             continue
+        venue_order = venue_protection_orders.get(client_order_id)
+        if (
+            venue_order is not None
+            and _snapshot_item_symbol(venue_order) == _canonical_symbol(instrument_id)
+        ):
+            # Same live protection, richer venue shape. This is an exemption,
+            # never a terminal inference or a mutation of the lagging projection.
+            continue
         if client_order_id in durable_entry_order_exemptions:
             continue
         raise HTTPException(
@@ -1980,6 +2049,44 @@ def _validate_owned_orders_terminal(
             detail="robot-owned orders are not terminal",
         )
     return list(durable_entry_order_exemptions.values())
+
+
+def _resume_venue_order_evidence_is_fresh(heartbeat: dict) -> bool:
+    """Permit a projection-shell override only with complete current evidence.
+
+    Runtime binds its reconciliation proof to account, release and generation;
+    the surrounding RESUME gate validates that heartbeat writer identity.
+    Mere absence from an open-order endpoint is never a terminal proof.
+    """
+    now = heartbeat.get("database_now")
+    payload = heartbeat.get("payload")
+    if not isinstance(payload, dict) or payload.get("readiness") is not True:
+        return False
+    if (
+        payload.get("health_degraded_reasons")
+        or not _reconciliation_health_is_fresh(payload, now)
+    ):
+        return False
+    for name in (
+        "last_seen_at", "reconciliation_completed_at", "positions_snapshot_at",
+        "regular_orders_snapshot_at", "algo_orders_snapshot_at",
+    ):
+        if not _timestamp_is_fresh(heartbeat.get(name), now):
+            return False
+    seen_order_ids: set[str] = set()
+    for name in ("positions", "regular_orders", "algo_orders"):
+        snapshot = heartbeat.get(name)
+        if not isinstance(snapshot, list):
+            return False
+        for item in snapshot:
+            if not isinstance(item, dict) or not _snapshot_item_symbol(item):
+                return False
+            if name != "positions" and row_is_robot_order(item):
+                client_order_id = client_order_id_from_row(item)
+                if client_order_id in seen_order_ids:
+                    return False
+                seen_order_ids.add(client_order_id)
+    return True
 
 
 def _durable_entry_order_resume_exemption(
@@ -2704,24 +2811,6 @@ def _normalize_position_hint(hint: dict, event_type: str | None = None) -> dict 
     return out
 
 
-def _normalize_order_hint(hint: dict) -> dict | None:
-    out = dict(hint or {})
-    if not out.get("client_order_id"):
-        return None
-    side = _order_side(out.get("side") or out.get("order_side"))
-    if side is not None:
-        out["side"] = side
-    if out.get("order_type") is not None:
-        out["order_type"] = str(out.get("order_type"))
-    for src, dst in (("price", "price"), ("trigger_price", "trigger_price"),
-                     ("quantity", "quantity"), ("filled_quantity", "filled_quantity")):
-        if src in out:
-            out[dst] = _num(out.get(src))
-    if "reduce_only" in out:
-        out["reduce_only"] = _bool(out.get("reduce_only"))
-    return out
-
-
 def _position_projection_from_event(ev: dict) -> dict | None:
     et = str(ev.get("event_type") or "")
     p = ev.get("payload") or {}
@@ -2745,34 +2834,6 @@ def _position_projection_from_event(ev: dict) -> dict | None:
         "payload": p,
     }
     return _normalize_position_hint(hint, et)
-
-
-def _order_projection_from_event(ev: dict) -> dict | None:
-    et = str(ev.get("event_type") or "")
-    p = ev.get("payload") or {}
-    acct = ev.get("account_id")
-    cid = ev.get("client_order_id") or p.get("client_order_id")
-    if not acct or not et.startswith("Order") or not cid:
-        return None
-    fill_qty = _num(p.get("last_qty")) or _num(p.get("filled_qty"))
-    hint = {
-        "account_id": acct,
-        "instrument_id": p.get("instrument_id"),
-        "client_order_id": cid,
-        "venue_order_id": ev.get("venue_order_id") or p.get("venue_order_id"),
-        "status": (et[5:].lower() or "submitted"),
-        "side": p.get("side") or p.get("order_side"),
-        "order_type": p.get("order_type"),
-        "quantity": _num(p.get("quantity")) or fill_qty,
-        "filled_quantity": fill_qty,
-        "price": p.get("price"),
-        "trigger_price": p.get("trigger_price"),
-        "reduce_only": p.get("reduce_only"),
-        "event_id": ev.get("event_id"),
-        "ts_event": ev.get("ts_event"),
-        "payload": p,
-    }
-    return _normalize_order_hint(hint)
 
 
 _projection_log = logging.getLogger("control_plane.projection")
@@ -5238,12 +5299,14 @@ def _intent_operation_status(
     has_entry_deny = False
     saw_entry = False
     all_entry_complete = True
+    entry_statuses = []
     for order in orders or ():
         row = dict(order)
         if _is_protection_order_row(row):
             continue
         saw_entry = True
         status = str(row.get("status") or "").strip()
+        entry_statuses.append(status)
         try:
             filled_qty = float(row.get("filled_quantity") or 0)
         except (TypeError, ValueError):
@@ -5262,7 +5325,18 @@ def _intent_operation_status(
         return "filled"
     if has_entry_deny or denial_reason:
         return "rejected"
-    return intent_status
+    if entry_statuses and all(status == "expired" for status in entry_statuses):
+        return "expired"
+    if entry_statuses and all(status in {"canceled", "cancelled", "expired"} for status in entry_statuses):
+        return "cancelled"
+    if entry_statuses:
+        return "submitted"
+    if intent_status == "filled":
+        return "reconciling"
+    return {
+        "approved": "accepted", "pending": "queued", "dispatched": "submitted",
+        "partially_filled": "partial", "denied": "rejected", "canceled": "cancelled",
+    }.get(intent_status, intent_status)
 
 
 def _read_conn() -> "psycopg2.extensions.connection":
@@ -5343,6 +5417,72 @@ def _valid_uuid(value: str) -> str | None:
         return str(UUID(str(value)))
     except (ValueError, TypeError, AttributeError):
         return None
+
+
+@app.get("/v1/signals")
+def signal_statuses(
+    days: int = 2, limit: int = 500,
+    authorization: str | None = Header(default=None),
+):
+    from datetime import timedelta
+
+    require_reader(authorization)
+    now = datetime.now(timezone.utc)
+    days = max(1, min(days, 30))
+    limit = max(1, min(limit, 2000))
+    conn = _read_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            rows = load_signal_rows(cur, since=now - timedelta(days=days), limit=limit)
+            envelope = _envelope(cur)
+        items = []
+        for row in rows[:limit]:
+            disposition, reason = signal_disposition(row, operation_status=_intent_operation_status)
+            row.pop("orders", None)
+            row["disposition"] = disposition
+            row["reason"] = reason
+            row["source_ts_unknown"] = row["source_ts"] is None
+            row["receive_ts_unknown"] = row["receive_ts"] is None
+            row["age_since_persist_seconds"] = max(0, (now - row["ingested_at"]).total_seconds())
+            items.append(row)
+        return jsonable_encoder({**envelope, "signals": items, "truncated": len(rows) > limit})
+    finally:
+        conn.close()
+
+
+@app.get("/v1/intents/{intent_id}/trace")
+def intent_trace(intent_id: str, authorization: str | None = Header(default=None)):
+    require_reader(authorization)
+    intent_id = _valid_uuid(intent_id)
+    if intent_id is None:
+        raise HTTPException(status_code=400, detail="invalid intent_id")
+    conn = _read_conn()
+    try:
+        data = load_intent_trace(conn, intent_id)
+        if data is None:
+            raise HTTPException(status_code=404, detail="intent not found")
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            envelope = _envelope(cur)
+        return {**envelope, "data": data}
+    finally:
+        conn.close()
+
+
+@app.get("/v1/incidents")
+def list_incidents(
+    status: str = "open", authorization: str | None = Header(default=None),
+):
+    require_reader(authorization)
+    if status != "open":
+        raise HTTPException(status_code=400, detail="status must be open")
+    conn = _read_conn()
+    try:
+        data = list_open_incidents(conn)
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            envelope = _envelope(cur)
+        return {**envelope, "data": data}
+    finally:
+        conn.close()
 
 
 @app.get("/v1/accounts")
@@ -6033,10 +6173,10 @@ def _watcher_account_is_enabled(row, account_columns: set[str]) -> bool:
     return not status or status in {"1", "active", "enabled", "true"}
 
 
-def _channel_risk_capital_addon(
+def _load_channel_risk_route(
     channel_id: str,
-    account_id: str,
-) -> float:
+    account_id: str | None = None,
+) -> dict:
     import sqlite3
 
     normalized_channel_id = str(channel_id or "").strip()
@@ -6138,7 +6278,7 @@ def _channel_risk_capital_addon(
             status_code=503,
             detail="watcher channel route target account is invalid",
         )
-    if execution_account_id != account_id:
+    if account_id is not None and execution_account_id != account_id:
         raise HTTPException(
             status_code=409,
             detail="watcher channel route conflicts with requested account_id",
@@ -6201,7 +6341,11 @@ def _channel_risk_capital_addon(
             status_code=503,
             detail="watcher channel risk capital addon is invalid",
         )
-    return addon
+    return {"execution_account_id": execution_account_id, "risk_capital_addon": addon}
+
+
+def _channel_risk_capital_addon(channel_id: str, account_id: str) -> float:
+    return _load_channel_risk_route(channel_id, account_id)["risk_capital_addon"]
 
 
 def _account_risk_capital_addon(account_id: str) -> float:
@@ -8828,9 +8972,46 @@ def operator_order(
     from datetime import timedelta
     from psycopg2.extras import Json
 
-    role = require_reader(authorization)
-    if role != "risk_admin":
-        raise HTTPException(status_code=403, detail="risk_admin required")
+    principal = _require_operator_principal(
+        authorization, str(body.get("account_id") or "").strip(),
+        allow_signal=True,
+    )
+    role = principal.actor_id
+    signal_context = None
+    if principal.kind is PrincipalKind.SIGNAL:
+        source_identity = body.get("source_identity")
+        if (
+            not isinstance(source_identity, dict)
+            or body.get("authorized_by_type") != "channel"
+            or body.get("authorized_by_id") != source_identity.get("channel_id")
+            or body.get("source_channel") != source_identity.get("channel_id")
+            or not isinstance(body.get("signal_claim"), dict)
+            or body.get("dry_run") is True
+            or body.get("replay_of")
+        ):
+            raise HTTPException(status_code=403, detail="signal_claim_channel_authority_required")
+        signal_conn = _read_conn()
+        try:
+            with signal_conn.cursor() as signal_cur:
+                signal_context = _signal_execution_context(
+                    signal_cur, principal.account_id, body,
+                )
+                if signal_context["existing_operation"]:
+                    signal_cur.execute(
+                        "SELECT intent_id::text, status::text, valid_until, order_plan, risk_budget "
+                        "FROM trade_intents WHERE intent_id=%s AND account_id=%s",
+                        (signal_context["operator_intent_id"], principal.account_id),
+                    )
+                    previous = signal_cur.fetchone()
+                    if previous is None:
+                        raise HTTPException(status_code=409, detail="signal_operation_missing")
+                    return {
+                        "intent_id": previous[0], "status": previous[1], "replay": True,
+                        "valid_until": previous[2].isoformat() if previous[2] else None,
+                        "order_plan": previous[3], "risk_budget": previous[4],
+                    }
+        finally:
+            signal_conn.close()
 
     action = str(body.get("action") or "").strip()
     if action not in _OPERATOR_ACTIONS:
@@ -8988,7 +9169,7 @@ def operator_order(
             authorization=authorization_evidence,
             action=action,
         )
-        if replay_of is None:
+        if replay_of is None and signal_context is None:
             replay = _operator_open_replay(
                 database_url,
                 account_id=account_id,
@@ -9530,6 +9711,12 @@ def operator_order(
             "effective_equity": equity_evidence["effective_equity"],
         }
     order_plan["authorization"] = authorization_evidence
+    order_plan["principal"] = {
+        "kind": principal.kind.value,
+        "actor_id": principal.actor_id,
+        "scope": principal.scope,
+        "account_id": principal.account_id,
+    }
     if attribution:
         order_plan["attribution"] = attribution
     request_semantics = False
@@ -9606,13 +9793,29 @@ def operator_order(
             f"{position_side or ''}|{client_ref}".encode()
         ).hexdigest()
     message_type = "new_signal" if action == "open_position" else "position_update"
+    if signal_context is not None:
+        idem = signal_context["idempotency_key"]
     valid_until = now + timedelta(seconds=valid_seconds)
+    if signal_context is not None and signal_context["source_deadline"] is not None:
+        valid_until = min(valid_until, signal_context["source_deadline"])
+    if body.get("valid_until") is not None:
+        try:
+            deadline = datetime.fromisoformat(str(body["valid_until"]).replace("Z", "+00:00"))
+            if deadline.tzinfo is None:
+                raise ValueError("deadline requires timezone")
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="valid_until must be an absolute timestamp") from exc
+        if deadline <= now:
+            raise HTTPException(status_code=409, detail="signal_expired")
+        valid_until = min(valid_until, deadline)
 
     conn = _database_connection(database_url)
     try:
         with conn.cursor() as cur:
-            if action in _OPERATOR_ENTRY_ACTIONS:
+            if action in _OPERATOR_ENTRY_ACTIONS or action == "close_position" or signal_context is not None:
                 _account_risk_increase_lock(cur, account_id)
+            if signal_context is not None:
+                signal_context = _signal_execution_context(cur, account_id, body, lock=True)
             cur.execute(
                 "SELECT pg_advisory_xact_lock("
                 "hashtextextended(%s, 0))",
@@ -9653,7 +9856,7 @@ def operator_order(
                             status_code=409,
                             detail="idempotency key request payload mismatch",
                         )
-                if action in _OPERATOR_ENTRY_ACTIONS:
+                if action in _OPERATOR_ENTRY_ACTIONS and signal_context is None:
                     live_source = _source_identity_live_replay(
                         cur,
                         account_id=account_id,
@@ -9858,6 +10061,30 @@ def operator_order(
                             "allow_duplicate=true to silence this warning"
                         )
                         break
+            if action in {"open_position", "add_position"}:
+                expected_versions = signal_context["expected_versions"] if signal_context is not None else None
+                try:
+                    order_plan["execution_precondition"] = position_revision.bind_precondition(
+                        cur, account_id, symbol, side, expected_versions,
+                    )
+                except position_revision.StalePositionRevision as exc:
+                    raise HTTPException(status_code=409, detail="stale_position_revision") from exc
+            elif action == "close_position":
+                if position_side is None:
+                    # Legacy global operators may resolve the sole position
+                    # by its server reference. Do not invent a LONG book.
+                    position_revision.invalidate_account(cur, account_id, intent_id)
+                else:
+                    position_revision.invalidate_book(
+                        cur, account_id, symbol, position_side, intent_id,
+                    )
+            if signal_context is not None:
+                order_plan["signal_execution"] = {
+                    key: signal_context[key] for key in (
+                        "task_id", "raw_message_id", "processing_run_id", "attempt",
+                        "source_identity", "stable_action_or_leg_id", "request_hash",
+                    )
+                }
             raw_source_message_id = client_ref
             if replay_of:
                 raw_source_message_id = f"{client_ref}|replay|{replay_of}"
@@ -9956,7 +10183,7 @@ def operator_order(
                 (
                     str(uuid4()),
                     intent_id,
-                    authorization_evidence["authorized_by_id"],
+                    principal.actor_id,
                     raw_id,
                     dec_id,
                     risk_id,
@@ -9964,6 +10191,7 @@ def operator_order(
                     Json(
                         {
                             "authorization": authorization_evidence,
+                            "principal": order_plan["principal"],
                             "action": action,
                             "intended_action": intended_action,
                             "signal_intent": signal_intent,
@@ -10008,12 +10236,19 @@ def operator_order(
                      "authorization": authorization_evidence,
                  })),
             )
+            if signal_context is not None:
+                try:
+                    signal_handoff.accept_operation(cur, signal_context, intent_id)
+                except signal_handoff.SignalHandoffError as exc:
+                    raise HTTPException(status_code=exc.status_code, detail=exc.code) from exc
         conn.commit()
     finally:
         conn.close()
 
     response = {
         "intent_id": intent_id,
+        "operation_id": intent_id,
+        "operation_status": "accepted",
         "status": "approved",
         "replay": False,
         "account_id": account_id,
@@ -10077,7 +10312,7 @@ def _operator_denial_reason(*, intent: dict, events, conn) -> str:
 def operator_order_status(intent_id: str, authorization: str | None = Header(default=None)):
     """Execution status of an operator-placed intent: intent row + order projections
     (fills) + the current position on that instrument, so Hermes can report back."""
-    require_reader(authorization)
+    principal = _authenticated_principal(authorization)
     try:
         UUID(intent_id)
     except ValueError:
@@ -10097,6 +10332,8 @@ def operator_order_status(intent_id: str, authorization: str | None = Header(def
             intent = cur.fetchone()
             if intent is None:
                 raise HTTPException(status_code=404, detail="intent not found")
+            if principal.kind is PrincipalKind.SIGNAL and intent["account_id"] != principal.account_id:
+                raise HTTPException(status_code=403, detail="signal cannot read other accounts")
             cur.execute(
                 "SELECT client_order_id, status::text, filled_quantity, average_fill_price, "
                 "updated_at, lifecycle_role, payload, order_type "
@@ -10133,6 +10370,7 @@ def operator_order_status(intent_id: str, authorization: str | None = Header(def
         return jsonable_encoder(
             {
                 "intent": intent_out,
+                "operation_id": intent_id,
                 "status": operation_status,
                 "denial_reason": denial_reason,
                 "orders": order_rows,
@@ -10179,8 +10417,10 @@ def role_database_health():
 
 
 from v1_mirror import router as v1_mirror_router  # noqa: E402
+from operator_queries import router as operator_queries_router  # noqa: E402
 
-app.include_router(v1_mirror_router)
+app.router.routes.extend(v1_mirror_router.routes)
+app.router.routes.extend(operator_queries_router.routes)
 
 _install_retryable_db_error_handler(app)
 all_role_app = app

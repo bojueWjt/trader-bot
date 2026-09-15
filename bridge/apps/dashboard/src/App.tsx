@@ -51,6 +51,7 @@ import {
   lockPair,
   moveStopLoss,
   partialClosePosition,
+  queryPositionOperation,
   pauseBot,
   rejectReviewProposal,
   rejectReviewSignal,
@@ -835,6 +836,8 @@ function PositionDrawer({ actionsDisabled, position, onClose }: PositionDrawerPr
   const [confirmAction, setConfirmAction] = useState<PositionAction>(false);
   const [reason, setReason] = useState("");
   const [status, setStatus] = useState("");
+  const [operationId, setOperationId] = useState("");
+  const [statusLoading, setStatusLoading] = useState(false);
   const [stopLossInput, setStopLossInput] = useState(() => {
     if (position.stopLoss) {
       return String(position.stopLoss);
@@ -846,6 +849,7 @@ function PositionDrawer({ actionsDisabled, position, onClose }: PositionDrawerPr
   useEffect(() => {
     setConfirmAction(false);
     setReason("");
+    setOperationId("");
 
     if (position.stopLoss) {
       setStopLossInput(String(position.stopLoss));
@@ -868,11 +872,12 @@ function PositionDrawer({ actionsDisabled, position, onClose }: PositionDrawerPr
     }
 
     setCloseSubmitting(true);
-    setStatus("Closing position");
+    setStatus("Submitting close request");
     setConfirmAction(false);
-    const result = await closePosition(position.id, actionReason, position.signalId);
+    const result = await closePosition(position, actionReason);
     setCloseSubmitting(false);
     setStatus(result.statusText);
+    setOperationId(result.operationId || "");
   }
 
   async function submitMoveStopLoss(actionReason: string): Promise<void> {
@@ -887,11 +892,12 @@ function PositionDrawer({ actionsDisabled, position, onClose }: PositionDrawerPr
     }
 
     setMoveSubmitting(true);
-    setStatus("Moving SL");
+    setStatus("Submitting stop-loss request");
     setConfirmAction(false);
-    const result = await moveStopLoss(position.id, stopLossPrice, actionReason, position.signalId);
+    const result = await moveStopLoss(position, stopLossPrice, actionReason);
     setMoveSubmitting(false);
     setStatus(result.statusText);
+    setOperationId(result.operationId || "");
   }
 
   async function submitPartialClose(actionReason: string): Promise<void> {
@@ -908,9 +914,10 @@ function PositionDrawer({ actionsDisabled, position, onClose }: PositionDrawerPr
     setPartialSubmitting(true);
     setStatus("Partial close pending");
     setConfirmAction(false);
-    const result = await partialClosePosition(position.id, partialAmount, actionReason, position.signalId);
+    const result = await partialClosePosition(position, partialAmount, actionReason);
     setPartialSubmitting(false);
     setStatus(result.statusText);
+    setOperationId(result.operationId || "");
   }
 
   async function submitPairLock(actionReason: string): Promise<void> {
@@ -1080,7 +1087,22 @@ function PositionDrawer({ actionsDisabled, position, onClose }: PositionDrawerPr
             Lock pair
           </button>
           {actionsDisabled && <p className="drawer-status">Live readonly blocks manual position actions.</p>}
-          {status && <p className="drawer-status">{status}</p>}
+          {status && <p className="drawer-status" role="status">{status}</p>}
+          {operationId && (
+            <button
+              className="secondary-button"
+              disabled={statusLoading}
+              onClick={async () => {
+                setStatusLoading(true);
+                const result = await queryPositionOperation(operationId);
+                setStatus(result.statusText);
+                setStatusLoading(false);
+              }}
+              type="button"
+            >
+              Check execution status
+            </button>
+          )}
         </section>
         {confirmAction && (
           <PositionActionConfirm

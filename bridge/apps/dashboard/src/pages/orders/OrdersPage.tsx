@@ -18,7 +18,8 @@ import {
   fetchOrderCenter,
   getEmptyOrderCenter,
   moveStopLoss,
-  partialClosePosition
+  partialClosePosition,
+  queryPositionOperation
 } from "../../utils/api";
 import type {
   AuthRole,
@@ -77,11 +78,33 @@ export function OrdersPage({ refreshKey, role, onRefresh }: OrdersPageProps): Re
   const [detail, setDetail] = useState<DetailSelection>(false);
   const [manualAction, setManualAction] = useState<ManualAction>(false);
   const [actionStatus, setActionStatus] = useState("");
+  const [operationId, setOperationId] = useState("");
+  const [statusLoading, setStatusLoading] = useState(false);
   const readonly = role === "viewer";
   const sourceBadgeClass = getSourceBadgeClass(data.dataSource, loading);
   const sourceBadgeLabel = getSourceBadgeLabel(data.dataSource, loading);
   const filterOptions = useMemo(() => buildFilterOptions(data), [data]);
   const filtered = useMemo(() => filterOrderCenter(data, filters), [data, filters]);
+  const actionFeedback = (
+    <>
+      {actionStatus && <p className="drawer-status" role="status">{actionStatus}</p>}
+      {operationId && (
+        <button
+          className="secondary-button"
+          disabled={statusLoading}
+          onClick={async () => {
+            setStatusLoading(true);
+            const result = await queryPositionOperation(operationId);
+            setActionStatus(result.statusText);
+            setStatusLoading(false);
+          }}
+          type="button"
+        >
+          Check execution status
+        </button>
+      )}
+    </>
+  );
 
   return (
     <section className="page-grid" data-testid="orders-page">
@@ -150,7 +173,7 @@ export function OrdersPage({ refreshKey, role, onRefresh }: OrdersPageProps): Re
         </section>
       )}
 
-      {actionStatus && <p className="drawer-status" role="status">{actionStatus}</p>}
+      {!detail && actionFeedback}
 
       <Panel title="Positions" icon={<Activity size={17} />}>
         <OrderPositionsTable
@@ -208,6 +231,7 @@ export function OrdersPage({ refreshKey, role, onRefresh }: OrdersPageProps): Re
 
       {detail && (
         <OrderDetailDrawer
+          actionFeedback={actionFeedback}
           data={data}
           detail={detail}
           readonly={readonly}
@@ -229,6 +253,7 @@ export function OrdersPage({ refreshKey, role, onRefresh }: OrdersPageProps): Re
             setActionStatus(`${actionVerb(request.action)} pending`);
             const result = await submitManualAction(request.action, request.reason, request.stopPrice, request.partialFraction);
             setActionStatus(commandStatus(result));
+            setOperationId(result.operationId || "");
           }}
         />
       )}
@@ -590,12 +615,14 @@ function OrderHistoryTable({
 }
 
 function OrderDetailDrawer({
+  actionFeedback,
   data,
   detail,
   readonly,
   onAction,
   onClose
 }: {
+  actionFeedback: ReactNode;
   data: OrderCenterData;
   detail: Exclude<DetailSelection, false>;
   readonly: boolean;
@@ -624,6 +651,8 @@ function OrderDetailDrawer({
             <X size={16} />
           </button>
         </header>
+
+        {actionFeedback}
 
         <dl className="detail-grid">
           <div>
@@ -842,15 +871,15 @@ async function submitManualAction(
   }
 
   if (action.kind === "move-stop") {
-    return moveStopLoss(action.position.id, stopPrice, reason, action.position.signalId);
+    return moveStopLoss(action.position, stopPrice, reason);
   }
 
   if (action.kind === "partial-close") {
     const amount = Number((action.position.amount * partialFraction).toFixed(8));
-    return partialClosePosition(action.position.id, amount, reason, action.position.signalId);
+    return partialClosePosition(action.position, amount, reason);
   }
 
-  return closePosition(action.position.id, reason, action.position.signalId);
+  return closePosition(action.position, reason);
 }
 
 function TimelineNode({ label, status }: { label: string; status: string }): ReactElement {

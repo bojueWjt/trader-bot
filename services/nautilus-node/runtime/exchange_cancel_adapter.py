@@ -37,7 +37,8 @@ REGULAR_ORDER = "regular"
 ALGO_ORDER = "algo"
 _CANCEL_ACTIONS = frozenset({"cancel", "cancel_order"})
 _CANCELED_STATUSES = frozenset({"CANCELED", "CANCELLED"})
-_FILLED_STATUSES = frozenset({"FILLED", "EXECUTED", "TRIGGERED"})
+_FILLED_STATUSES = frozenset({"FILLED"})
+_OTHER_TERMINAL_STATUSES = frozenset({"EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"})
 _ABSENT_ORDER_CODES = frozenset({-2011, -2013})
 DEFAULT_RECV_WINDOW_MS = 30_000
 MAX_RECV_WINDOW_MS = 60_000
@@ -84,6 +85,18 @@ class CancelConfirmationTimeoutError(ExchangeCancelError):
 
 class CancelStateError(ExchangeCancelError):
     pass
+
+
+class CancelConfirmationUnknownError(ExchangeCancelError):
+    """The cancellation lacks venue terminal evidence and needs reconciliation."""
+
+    def __init__(self, observed_status: str, request: CancelOrderRequest) -> None:
+        self.observed_status = observed_status
+        super().__init__(
+            f"cancel outcome unconfirmed; observed status {observed_status}: "
+            f"account={request.account_id} symbol={request.symbol} "
+            f"position_side={request.position_side} kind={request.order_kind}"
+        )
 
 
 class OrderAlreadyFilledError(CancelStateError):
@@ -677,6 +690,15 @@ class TerminalExchangeWorker:
                 result = self._cancel(request, deadline_monotonic)
             except TerminalExchangeDeadlineError:
                 raise
+            except CancelConfirmationUnknownError as exc:
+                outcomes.append(
+                    TerminalExchangeCancelOutcome(
+                        request=request,
+                        status="reconciling",
+                        error=repr(exc),
+                    )
+                )
+                continue
             except Exception as exc:
                 outcomes.append(
                     TerminalExchangeCancelOutcome(
@@ -882,11 +904,16 @@ class BinanceExchangeCancelAdapter:
                 outcome=outcome,
                 terminal_status=status,
             )
-        raise CancelStateError(
-            f"order disappeared from open endpoint with terminal status {status}: "
-            f"account={request.account_id} symbol={request.symbol} "
-            f"position_side={request.position_side}"
-        )
+        if status in _OTHER_TERMINAL_STATUSES:
+            raise CancelStateError(
+                f"order has non-cancel terminal status {status}: "
+                f"account={request.account_id} symbol={request.symbol} "
+                f"position_side={request.position_side}"
+            )
+        # Absence from an open-order listing is not cancellation evidence.
+        # In particular, an algo trigger can create a live child order: neither
+        # TRIGGERED nor FINISHED/EXECUTED proves that the child filled or canceled.
+        raise CancelConfirmationUnknownError(status, request)
 
     def _wait_until_absent(
         self,
