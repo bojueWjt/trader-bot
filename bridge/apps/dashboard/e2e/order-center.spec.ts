@@ -216,7 +216,8 @@ async function routeOrderCenterApi(page: Page, audit: CommandAudit): Promise<voi
       });
       return;
     }
-    if (url.pathname === "/v1/operator/orders" && request.method() === "POST") {
+    if (url.pathname === "/m/v1/operator/orders" && request.method() === "POST") {
+      expect(request.headers().authorization).toBe("Bearer om8-e2e-token");
       audit.commands.push(request.postDataJSON() as Record<string, unknown>);
       await fulfillJson(route, {
         intent_id: `00000000-0000-4000-8000-${String(audit.commands.length).padStart(12, "0")}`,
@@ -224,7 +225,8 @@ async function routeOrderCenterApi(page: Page, audit: CommandAudit): Promise<voi
       });
       return;
     }
-    if (url.pathname.startsWith("/v1/operator/orders/") && request.method() === "GET") {
+    if (url.pathname.startsWith("/m/v1/operator/orders/") && request.method() === "GET") {
+      expect(request.headers().authorization).toBe("Bearer om8-e2e-token");
       await fulfillJson(route, { status: "accepted" });
       return;
     }

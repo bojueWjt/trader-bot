@@ -9717,6 +9717,8 @@ def operator_order(
         "scope": principal.scope,
         "account_id": principal.account_id,
     }
+    if principal.session_subject is not None:
+        order_plan["principal"]["session_subject"] = principal.session_subject
     if attribution:
         order_plan["attribution"] = attribution
     request_semantics = False

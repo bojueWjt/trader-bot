@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,12 +74,61 @@ MIGRATION_FILES = (
     "db/migrations/0017_operator_query_projection_reads.down.sql",
     "db/migrations/0018_projection_reliability.up.sql",
     "db/migrations/0018_projection_reliability.down.sql",
+    "db/migrations/0019_signal_dispatch_queue_g2.up.sql",
+    "db/migrations/0019_signal_dispatch_queue_g2.down.sql",
+    "db/migrations/0020_signal_execution_g3.up.sql",
+    "db/migrations/0020_signal_execution_g3.down.sql",
+    "db/migrations/0021_position_revision_g3.up.sql",
+    "db/migrations/0021_position_revision_g3.down.sql",
 )
 SYSTEMD_RESOURCE_FILES = (
     "infra/systemd/account-stall-account-node.conf",
     "infra/systemd/account-stall-control-plane-reader.conf",
     "infra/systemd/account-stall-control-plane-writer.conf",
     "infra/systemd/account-stall-redis.conf",
+)
+SIGNAL_RUNTIME_RELEASE_FILES = (
+    ('services/control-plane/api/intent_trace.py', 'host/intent_trace.py'),
+    ('services/control-plane/api/operator_queries.py', 'host/operator_queries.py'),
+    ('services/control-plane/api/position_protection.py', 'host/position_protection.py'),
+    ('services/control-plane/api/position_revision.py', 'host/position_revision.py'),
+    ('services/control-plane/api/signal_handoff.py', 'host/signal_handoff.py'),
+    ('services/control-plane/api/signal_status.py', 'host/signal_status.py'),
+    ('services/control-plane/api/v1_mirror.py', 'host/v1_mirror.py'),
+    ('services/control-plane/security/__init__.py', 'host/security/__init__.py'),
+    ('services/control-plane/security/audit.py', 'host/security/audit.py'),
+    ('services/control-plane/security/dangerous_ops.py', 'host/security/dangerous_ops.py'),
+    ('services/control-plane/security/permissions.py', 'host/security/permissions.py'),
+    ('services/control-plane/security/principal.py', 'host/security/principal.py'),
+    ('services/control-plane/security/session_auth.py', 'host/security/session_auth.py'),
+    ('services/control-plane/db/__init__.py', 'host/db/__init__.py'),
+    ('services/control-plane/db/connection.py', 'host/db/connection.py'),
+    ('services/control-plane/db/enums.py', 'host/db/enums.py'),
+    ('services/control-plane/order_management/state_descriptor.py', 'host/order_management/state_descriptor.py'),
+    ('services/control-plane/order_management/execution_jobs.py', 'host/order_management/execution_jobs.py'),
+    ('services/control-plane/commands/commands.py', 'host/commands/commands.py'),
+    ('services/control-plane/risk_state/risk_state.py', 'host/risk_state/risk_state.py'),
+    ('services/control-plane/risk/governor.py', 'host/risk/governor.py'),
+    ('services/control-plane/risk/policy.py', 'host/risk/policy.py'),
+    ('services/hermes-worker/worker.py', 'host/hermes-worker/worker.py'),
+    ('services/hermes-worker/hermes_client.py', 'host/hermes-worker/hermes_client.py'),
+    ('services/hermes-worker/prompt.py', 'host/hermes-worker/prompt.py'),
+    ('services/hermes-worker/operator_diagnostics.py', 'host/hermes-worker/operator_diagnostics.py'),
+    ('services/hermes-worker/signal_operator.py', 'host/hermes-worker/signal_operator.py'),
+    ('services/hermes-worker/queue/__init__.py', 'host/hermes-worker/queue/__init__.py'),
+    ('services/hermes-worker/queue/claims.py', 'host/hermes-worker/queue/claims.py'),
+    ('services/hermes-worker/queue/signal_queue.py', 'host/hermes-worker/queue/signal_queue.py'),
+    ('services/ingress/ingress/__init__.py', 'host/ingress/__init__.py'),
+    ('services/ingress/ingress/http.py', 'host/ingress/http.py'),
+    ('services/ingress/ingress/service.py', 'host/ingress/service.py'),
+    ('scripts/order_lifecycle_monitor.py', 'host/order_lifecycle_monitor.py'),
+    ('hermes-profile/skills/trading/v3-trader/scripts/v3_query.py', 'host/v3_query.py'),
+    ('packages/execution-domain/execution_domain/http_client.py', 'host/execution_domain/http_client.py'),
+    ('packages/contracts/v1/hermes_decision.v1.json', 'packages/contracts/v1/hermes_decision.v1.json'),
+    ('packages/contracts/v1/order_state.v1.json', 'packages/contracts/v1/order_state.v1.json'),
+    ('packages/contracts/v1/order_management_settings.v1.json', 'packages/contracts/v1/order_management_settings.v1.json'),
+    ('infra/systemd/trader-v3-signal-worker@.service', 'infra/systemd/trader-v3-signal-worker@.service'),
+    ('infra/systemd/trader-v3-hermes-feeder-signal-cutover.conf', 'infra/systemd/trader-v3-hermes-feeder-signal-cutover.conf'),
 )
 RELEASE_FILES = (
     ("scripts/hk-deploy-20260803.sh", "hk-deploy-20260803.sh"),
@@ -330,7 +382,7 @@ RELEASE_FILES = (
         "services/control-plane/db/migrate.py",
         "services/control-plane/db/migrate.py",
     ),
-) + tuple(
+) + SIGNAL_RUNTIME_RELEASE_FILES + tuple(
     (source_path, release_path)
     for source_path, release_path, _target_path in WATCHER_RELEASE_FILES
 ) + tuple(
@@ -353,7 +405,7 @@ REQUIRED_HERMES_RELEASE_PATHS = {
 }
 HERMES_FEEDER_SOURCE_PATH = "scripts/hermes_signal_feeder.py"
 HERMES_FEEDER_REQUIRED_SHA256 = (
-    "d50a97463adc8808863c5ddff9b6acd9a48aa6b703664b80119253309a7e4d4d"
+    "1c8518eba5332fadc64276d4c475c1e0c6c0e9974ec785c7b7a2067f5e5ef8a2"
 )
 REQUIRED_CONTROL_PLANE_HOST_RELEASE_PATHS = {
     "host/read_api.py",
@@ -399,6 +451,12 @@ FORBIDDEN_RELEASE_CONTENT_RE = re.compile(
 )
 SOURCE_MANIFEST_NAME = "release-source-manifest.json"
 MIGRATION_MANIFEST_NAME = "migration-manifest.json"
+DASHBOARD_MANIFEST_NAME = "dashboard-manifest.json"
+DASHBOARD_SOURCE = "bridge/apps/dashboard"
+DASHBOARD_BUILD_INPUTS = (
+    DASHBOARD_SOURCE,
+    "tests/nautilus/_fixtures/contracts-v1/data_quality_envelope_v1.schema.json",
+)
 SYSTEMD_RESOURCE_CONTRACT_NAME = "systemd-resource-contract.json"
 MIGRATION_MANIFEST_SCHEMA_VERSION = "trader-v3-migration-manifest/v1"
 SYSTEMD_RESOURCE_CONTRACT_SCHEMA_VERSION = (
@@ -465,6 +523,12 @@ MIGRATION_PROJECTION_RELIABILITY_UP = (
 MIGRATION_PROJECTION_RELIABILITY_DOWN = (
     "db/migrations/0018_projection_reliability.down.sql"
 )
+MIGRATION_SIGNAL_DISPATCH_QUEUE_UP = "db/migrations/0019_signal_dispatch_queue_g2.up.sql"
+MIGRATION_SIGNAL_DISPATCH_QUEUE_DOWN = "db/migrations/0019_signal_dispatch_queue_g2.down.sql"
+MIGRATION_SIGNAL_EXECUTION_UP = "db/migrations/0020_signal_execution_g3.up.sql"
+MIGRATION_SIGNAL_EXECUTION_DOWN = "db/migrations/0020_signal_execution_g3.down.sql"
+MIGRATION_POSITION_REVISION_UP = "db/migrations/0021_position_revision_g3.up.sql"
+MIGRATION_POSITION_REVISION_DOWN = "db/migrations/0021_position_revision_g3.down.sql"
 MIGRATION_PREREQUISITES = (
     "db/migrations/0005_order_management.up.sql",
 )
@@ -535,6 +599,15 @@ MIGRATION_STEPS = (
         "down": MIGRATION_PROJECTION_RELIABILITY_DOWN,
         "prerequisites": [MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP],
     },
+    {"version": "0019", "name": "signal_dispatch_queue_g2",
+     "up": MIGRATION_SIGNAL_DISPATCH_QUEUE_UP, "down": MIGRATION_SIGNAL_DISPATCH_QUEUE_DOWN,
+     "prerequisites": [MIGRATION_PROJECTION_RELIABILITY_UP]},
+    {"version": "0020", "name": "signal_execution_g3",
+     "up": MIGRATION_SIGNAL_EXECUTION_UP, "down": MIGRATION_SIGNAL_EXECUTION_DOWN,
+     "prerequisites": [MIGRATION_SIGNAL_DISPATCH_QUEUE_UP]},
+    {"version": "0021", "name": "position_revision_g3",
+     "up": MIGRATION_POSITION_REVISION_UP, "down": MIGRATION_POSITION_REVISION_DOWN,
+     "prerequisites": [MIGRATION_SIGNAL_EXECUTION_UP]},
 )
 MIGRATION_PYTHON_DEPENDENCIES = ("psycopg2",)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -625,6 +698,9 @@ def _validate_release_contract() -> None:
         destination_relative
         for _source_relative, destination_relative in RELEASE_FILES
     }
+    missing_runtime = set(SIGNAL_RUNTIME_RELEASE_FILES) - set(RELEASE_FILES)
+    if missing_runtime:
+        raise ReleaseBundleError(f"release lacks signal runtime dependencies: {sorted(missing_runtime)}")
     missing = REQUIRED_REDIS_RELEASE_PATHS - release_paths
     if missing:
         raise ReleaseBundleError(
@@ -856,6 +932,7 @@ def _write_source_manifest(
     migration_manifest_path: Path,
     systemd_resource_contract_path: Path,
     watcher_runtime_manifest_path: Path,
+    dashboard_manifest_path: Path,
 ) -> Path:
     bundle_manifest_path = output_dir / "bundle-manifest.json"
     manifest = {
@@ -897,6 +974,10 @@ def _write_source_manifest(
                 watcher_runtime_manifest_path
             ),
         },
+        "dashboard": {
+            "manifest": DASHBOARD_MANIFEST_NAME,
+            "manifest_sha256": _sha256(dashboard_manifest_path),
+        },
         "files": release_files,
     }
     path = output_dir / SOURCE_MANIFEST_NAME
@@ -904,6 +985,83 @@ def _write_source_manifest(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    return path
+
+
+def _build_dashboard(repo_root: Path, output_dir: Path, source_commit: str) -> Path:
+    """Build only committed frontend sources and bind derived bytes to this release."""
+    versions = {}
+    for tool in ("node", "npm"):
+        binary = shutil.which(tool)
+        if binary is None:
+            raise ReleaseBundleError(f"dashboard build requires {tool} on PATH")
+        result = subprocess.run([binary, "--version"], capture_output=True, text=True, check=True)
+        versions[tool] = result.stdout.strip()
+    node_version = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", versions["node"])
+    if node_version is None or tuple(map(int, node_version.groups())) < (22, 12, 0):
+        raise ReleaseBundleError("dashboard build requires Node >=22.12.0")
+    archive = subprocess.run(
+        ["git", "archive", "--format=tar", source_commit, *DASHBOARD_BUILD_INPUTS],
+        cwd=repo_root, capture_output=True, check=True,
+    ).stdout
+    source_tree = resolve_git_tree(repo_root, source_commit)
+    with tempfile.TemporaryDirectory(prefix="dashboard-build-", dir=output_dir.parent) as temporary:
+        work = Path(temporary)
+        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+            for member in tar.getmembers():
+                relative = Path(member.name)
+                if relative.is_absolute() or ".." in relative.parts:
+                    raise ReleaseBundleError("dashboard Git archive contains an unsafe path")
+                if member.isdir():
+                    continue
+                if not member.isfile():
+                    raise ReleaseBundleError("dashboard Git sources must be regular files")
+                if relative.is_relative_to(DASHBOARD_SOURCE):
+                    source_relative = relative.relative_to(DASHBOARD_SOURCE)
+                    if any(part in {"dist", "node_modules"} or part.startswith(".env") for part in source_relative.parts):
+                        continue
+                elif relative.as_posix() not in DASHBOARD_BUILD_INPUTS:
+                    raise ReleaseBundleError("dashboard archive contains an undeclared build input")
+                target = work / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(tar.extractfile(member).read())
+        app = work / DASHBOARD_SOURCE
+        lock = app / "package-lock.json"
+        if not lock.is_file():
+            raise ReleaseBundleError("dashboard requires a committed npm lockfile")
+        lock_sha256 = _sha256(lock)
+        env = {key: value for key, value in os.environ.items() if not key.startswith("VITE_")}
+        env.update(VITE_API_BASE_URL="", VITE_API_BASE="", VITE_BASE_PATH="/", VITE_AUTH_DISABLED="false")
+        for command in (["npm", "ci", "--no-audit", "--no-fund"], ["npm", "run", "build"]):
+            result = subprocess.run(command, cwd=app, env=env, capture_output=True, text=True, timeout=600)
+            if result.returncode:
+                raise ReleaseBundleError("dashboard build failed: " + (result.stderr or result.stdout)[-2000:])
+        if _sha256(lock) != lock_sha256:
+            raise ReleaseBundleError("dashboard build modified the committed lockfile")
+        dist = app / "dist"
+        if not (dist / "index.html").is_file():
+            raise ReleaseBundleError("dashboard build did not produce dist/index.html")
+        files = {}
+        for source in sorted(dist.rglob("*")):
+            if source.is_symlink():
+                raise ReleaseBundleError("dashboard build output must not contain symlinks")
+            if not source.is_file():
+                continue
+            relative = "dashboard/dist/" + source.relative_to(dist).as_posix()
+            target = output_dir / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes())
+            files[relative] = _sha256(target)
+    manifest = {
+        "schema_version": "trader-v3-dashboard/v1", "source_commit": source_commit,
+        "source_tree": source_tree, "source_subdir": DASHBOARD_SOURCE,
+        "build_inputs": list(DASHBOARD_BUILD_INPUTS),
+        "package_lock_sha256": lock_sha256, "tool_versions": versions,
+        "api_base": "", "base_path": "/", "auth_disabled": False,
+        "operator_path": "/m/v1/operator/orders", "files": files,
+    }
+    path = output_dir / DASHBOARD_MANIFEST_NAME
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
 
 
@@ -1226,6 +1384,7 @@ def build_release(
         systemd_resource_contract_path = (
             _write_systemd_resource_contract(staging_dir)
         )
+        dashboard_manifest_path = _build_dashboard(repo_root, staging_dir, source_commit)
         _write_source_manifest(
             staging_dir,
             source_ref=source_ref,
@@ -1241,6 +1400,7 @@ def build_release(
             watcher_runtime_manifest_path=(
                 watcher_runtime_manifest_path
             ),
+            dashboard_manifest_path=dashboard_manifest_path,
         )
         checksum_path = _write_checksums(staging_dir)
 

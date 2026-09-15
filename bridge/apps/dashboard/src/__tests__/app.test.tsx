@@ -320,10 +320,10 @@ describe("control-plane dashboard contracts", () => {
     const operationId = "11111111-1111-4111-8111-111111111111";
     const fetchMock = stubControlPlane(vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
-      if (path === "/v1/operator/orders" && init?.method === "POST") {
+      if (path === "/m/v1/operator/orders" && init?.method === "POST") {
         return jsonResponse({ intent_id: operationId, status: "accepted" });
       }
-      if (path === `/v1/operator/orders/${operationId}`) {
+      if (path === `/m/v1/operator/orders/${operationId}`) {
         return jsonResponse({ status: "rejected", denial_reason: "position_generation_stale" });
       }
       if (path.startsWith("/v1/positions")) {
@@ -346,7 +346,7 @@ describe("control-plane dashboard contracts", () => {
     fireEvent.change(within(dialog).getByLabelText("Action reason"), { target: { value: "close this short position" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Confirm close position" }));
     expect(await screen.findByText("Request accepted — awaiting execution")).toBeInTheDocument();
-    const postCall = fetchMock.mock.calls.find(([path, request]) => path === "/v1/operator/orders" && request?.method === "POST");
+    const postCall = fetchMock.mock.calls.find(([path, request]) => path === "/m/v1/operator/orders" && request?.method === "POST");
     expect(postCall).toBeDefined();
     expect(JSON.parse(String(postCall?.[1]?.body))).toMatchObject({
       action: "close_position", account_id: "account-d", symbol: "BTCUSDT",
@@ -374,7 +374,7 @@ describe("control-plane dashboard contracts", () => {
     fireEvent.change(within(dialog).getByLabelText("Action reason"), { target: { value: "close one position" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Confirm close position" }));
     expect(await screen.findByText("Cannot submit: missing account ID.")).toBeInTheDocument();
-    expect(fetchMock.mock.calls.some(([path]) => path === "/v1/operator/orders" || path === "/v1/commands")).toBe(false);
+    expect(fetchMock.mock.calls.some(([path]) => path === "/m/v1/operator/orders" || path === "/v1/commands")).toBe(false);
   });
 
   it("requires confirmation before submitting a manual cancel order action", async () => {

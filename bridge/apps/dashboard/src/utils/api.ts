@@ -2103,7 +2103,7 @@ function clearTerminalPositionOperation(operationId: string, status: string): vo
 
 export async function queryPositionOperation(operationId: string): Promise<CommandResult> {
   try {
-    const { response, payload } = await positionOperationJson(`/v1/operator/orders/${encodeURIComponent(operationId)}`, {
+    const { response, payload } = await positionOperationJson(`/m/v1/operator/orders/${encodeURIComponent(operationId)}`, {
       headers: requestHeaders({ Accept: "application/json" })
     });
     if (!response.ok) {
@@ -2145,7 +2145,7 @@ async function sendPositionOperation(key: string, body: Record<string, unknown>)
     return queryPositionOperation(operation.operationId);
   }
   try {
-    const { response, payload } = await positionOperationJson("/v1/operator/orders", {
+    const { response, payload } = await positionOperationJson("/m/v1/operator/orders", {
       method: "POST", body: JSON.stringify(operation.body),
       headers: requestHeaders({
         Accept: "application/json", "Content-Type": "application/json", "X-Request-Id": operation.requestId

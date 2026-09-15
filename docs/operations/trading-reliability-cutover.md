@@ -4,6 +4,10 @@
 
 ## 启动边界
 
+网页交易操作继续使用既有登录服务签发的 HS256 JWT，通过现有 `/m/v1/operator/orders` 路由进入同一控制面；该路由保留凭证。线上 `/v1/*` 代理会替换为只读 observer 凭证，不能用于网页写操作。控制面只信任验签后的角色与用户，静态 signal token 仍绑定账户，二者不互换。发布脚本从现有 `trader-api-1` 读取签名密钥，仅为 operator-query 准备专用 `dashboard-jwt.env`；已配置不同密钥时拒绝部署，不静默换钥匙。
+
+交互 Hermes 的全局操作凭证通过专用 `hermes-cli.env` 注入，来源为 operator-query 已配置的管理员凭证；不加载整份控制面环境。以上文件权限为 `0600`，先校验再备份、安装并重启对应服务。部署后还需核对实际进程和网页 `/m/v1` 的登录查询；不得用真实交易 POST 充当只读探针。
+
 保留一个 Telegram watcher/ingress。四个 signal worker 不接 Telegram 更新、不持有 Telegram token；交互式全局 operator 保持独立，保留其人工授权入口。每个实例只有自己的账户 signal token，不读取全局 `RISK_ADMIN_TOKEN`。
 
 | 实例 `%i` | profile / HERMES_HOME | 操作凭证变量 |
@@ -71,7 +75,7 @@ guard 文件持久化后，重启会沿用原高水位；相同账户不得修�
 
 ## 单账户切换检查
 
-1. 在旧进程仍运行时完成迁移、代码与依赖门禁、专属凭证、真实媒体读取、模型/API 连通性和路由能力核验。确认 0020/0021 已生效，控制面新代码已重启生效。准备 profile 文件不等于 worker 已上线。
+1. 在旧进程仍运行时完成迁移、代码与依赖门禁、专属凭证、真实媒体读取、模型/API 连通性和路由能力核验。确认 0019→0020→0021 及其前序依赖已生效，控制面新代码已重启生效。准备 profile 文件不等于 worker 已上线。
 2. 冻结目标账户的**旧领取/旧触发入口**，保留原始 Telegram 持久化；记录切换时间与 source message/edit 边界。不要关闭唯一 ingress，也不要误停其他账户。先确认新版 ingress 的独立 `/telegram/raw/signal` 路由已生效，再启用 feeder 配置；普通 ingestion 默认仍入 shadow，signal feeder 必须走新路径，不能靠启动 worker 替代路由接线。
 3. 查当前任务、run、已接受 intent、节点心跳和交易所真实机器人订单；不能只看其他会话的“已完成”。旧模型 in-flight 未结束前，不让同账户另一路抢写。`reconciling` 表示结果未知，先核对已绑定 intent 与真实订单，不得重跑 LLM 生成新请求。
 4. 单账户设置上述 opt-in 与明确 receive cutoff，核对落盘 guard 的账户、UTC 时间和首次 watcher 高水位，再启用对应 worker 实例。只将双边界后的**未来消息**路由为 signal purpose。既有 shadow purpose 不可提升；不得扫描历史 raw/outbox 再造 signal 任务，不得删除 guard 或身份去重后补跑。

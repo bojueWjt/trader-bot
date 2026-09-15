@@ -35,7 +35,7 @@ WATCHER_BUILDER_RELEASE_PATH = "build_immutable_watcher_image.py"
 HERMES_FEEDER_SOURCE_PATH = "scripts/hermes_signal_feeder.py"
 HERMES_FEEDER_RELEASE_PATH = "host/hermes_signal_feeder.py"
 HERMES_FEEDER_REQUIRED_SHA256 = (
-    "d50a97463adc8808863c5ddff9b6acd9a48aa6b703664b80119253309a7e4d4d"
+    "1c8518eba5332fadc64276d4c475c1e0c6c0e9974ec785c7b7a2067f5e5ef8a2"
 )
 V3_TRADE_SOURCE_PATH = (
     "hermes-profile/skills/trading/v3-trader/scripts/v3_trade.py"
@@ -145,6 +145,47 @@ REQUIRED_HOST_PATHS = {
     "host/pools.py",
 }
 EXPECTED_RELEASE_FILE_MAP = {
+    'services/control-plane/api/intent_trace.py': 'host/intent_trace.py',
+    'services/control-plane/api/operator_queries.py': 'host/operator_queries.py',
+    'services/control-plane/api/position_protection.py': 'host/position_protection.py',
+    'services/control-plane/api/position_revision.py': 'host/position_revision.py',
+    'services/control-plane/api/signal_handoff.py': 'host/signal_handoff.py',
+    'services/control-plane/api/signal_status.py': 'host/signal_status.py',
+    'services/control-plane/api/v1_mirror.py': 'host/v1_mirror.py',
+    'services/control-plane/security/__init__.py': 'host/security/__init__.py',
+    'services/control-plane/security/audit.py': 'host/security/audit.py',
+    'services/control-plane/security/dangerous_ops.py': 'host/security/dangerous_ops.py',
+    'services/control-plane/security/permissions.py': 'host/security/permissions.py',
+    'services/control-plane/security/principal.py': 'host/security/principal.py',
+    'services/control-plane/security/session_auth.py': 'host/security/session_auth.py',
+    'services/control-plane/db/__init__.py': 'host/db/__init__.py',
+    'services/control-plane/db/connection.py': 'host/db/connection.py',
+    'services/control-plane/db/enums.py': 'host/db/enums.py',
+    'services/control-plane/order_management/state_descriptor.py': 'host/order_management/state_descriptor.py',
+    'services/control-plane/order_management/execution_jobs.py': 'host/order_management/execution_jobs.py',
+    'services/control-plane/commands/commands.py': 'host/commands/commands.py',
+    'services/control-plane/risk_state/risk_state.py': 'host/risk_state/risk_state.py',
+    'services/control-plane/risk/governor.py': 'host/risk/governor.py',
+    'services/control-plane/risk/policy.py': 'host/risk/policy.py',
+    'services/hermes-worker/worker.py': 'host/hermes-worker/worker.py',
+    'services/hermes-worker/hermes_client.py': 'host/hermes-worker/hermes_client.py',
+    'services/hermes-worker/prompt.py': 'host/hermes-worker/prompt.py',
+    'services/hermes-worker/operator_diagnostics.py': 'host/hermes-worker/operator_diagnostics.py',
+    'services/hermes-worker/signal_operator.py': 'host/hermes-worker/signal_operator.py',
+    'services/hermes-worker/queue/__init__.py': 'host/hermes-worker/queue/__init__.py',
+    'services/hermes-worker/queue/claims.py': 'host/hermes-worker/queue/claims.py',
+    'services/hermes-worker/queue/signal_queue.py': 'host/hermes-worker/queue/signal_queue.py',
+    'services/ingress/ingress/__init__.py': 'host/ingress/__init__.py',
+    'services/ingress/ingress/http.py': 'host/ingress/http.py',
+    'services/ingress/ingress/service.py': 'host/ingress/service.py',
+    'scripts/order_lifecycle_monitor.py': 'host/order_lifecycle_monitor.py',
+    'hermes-profile/skills/trading/v3-trader/scripts/v3_query.py': 'host/v3_query.py',
+    'packages/execution-domain/execution_domain/http_client.py': 'host/execution_domain/http_client.py',
+    'packages/contracts/v1/hermes_decision.v1.json': 'packages/contracts/v1/hermes_decision.v1.json',
+    'packages/contracts/v1/order_state.v1.json': 'packages/contracts/v1/order_state.v1.json',
+    'packages/contracts/v1/order_management_settings.v1.json': 'packages/contracts/v1/order_management_settings.v1.json',
+    'infra/systemd/trader-v3-signal-worker@.service': 'infra/systemd/trader-v3-signal-worker@.service',
+    'infra/systemd/trader-v3-hermes-feeder-signal-cutover.conf': 'infra/systemd/trader-v3-hermes-feeder-signal-cutover.conf',
     "packages/execution-domain/execution_domain/entry_batch.py": "host/execution_domain/entry_batch.py",
     "packages/execution-domain/execution_domain/account_execution_ledger.py": "host/execution_domain/account_execution_ledger.py",
     "scripts/rebuild_orders_projection.py": "scripts/rebuild_orders_projection.py",
@@ -375,6 +416,26 @@ def _seed_repo(root: Path) -> None:
             ADAPTER_SOURCE_PATH,
         }:
             path.chmod(0o755)
+    dashboard = root / release.DASHBOARD_SOURCE
+    dashboard.mkdir(parents=True, exist_ok=True)
+    (dashboard / "package.json").write_text(json.dumps({
+        "name": "dashboard-release-fixture", "version": "1.0.0", "private": True,
+        "scripts": {"build": "node build.js"},
+    }))
+    (dashboard / "package-lock.json").write_text(json.dumps({
+        "name": "dashboard-release-fixture", "version": "1.0.0", "lockfileVersion": 3,
+        "packages": {"": {"name": "dashboard-release-fixture", "version": "1.0.0"}},
+    }))
+    (dashboard / "build.js").write_text(
+        "const fs = require('fs'); fs.mkdirSync('dist', {recursive:true}); "
+        "fs.writeFileSync('dist/index.html', fs.readFileSync('source.html')); "
+        "if(process.env.VITE_API_BASE_URL !== '' || process.env.VITE_API_BASE !== '' "
+        "|| process.env.VITE_BASE_PATH !== '/' || process.env.VITE_AUTH_DISABLED !== 'false') process.exit(3);\n"
+    )
+    (dashboard / "source.html").write_text('<html>committed dashboard</html>')
+    build_fixture = root / release.DASHBOARD_BUILD_INPUTS[1]
+    build_fixture.parent.mkdir(parents=True, exist_ok=True)
+    build_fixture.write_bytes((REPO_ROOT / release.DASHBOARD_BUILD_INPUTS[1]).read_bytes())
     subprocess.run(["git", "add", "."], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "fixture"], cwd=root, check=True)
 
@@ -391,15 +452,15 @@ def _commit_path(root: Path, path: Path, message: str) -> None:
 def test_release_builder_includes_operator_query_reads_migration() -> None:
     assert (
         release.SCHEMA_EPOCHS["db"]
-        == "0018_projection_reliability"
+        == "0021_position_revision_g3"
     )
-    assert release.MIGRATION_FILES[-6:-2] == (
+    assert release.MIGRATION_FILES[30:34] == (
         release.MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP,
         release.MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_DOWN,
         release.MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP,
         release.MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN,
     )
-    assert release.MIGRATION_STEPS[-2] == {
+    assert release.MIGRATION_STEPS[7] == {
         "version": "0017",
         "name": "operator_query_projection_reads",
         "up": release.MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP,
@@ -491,7 +552,7 @@ def test_release_builder_writes_complete_checksummed_payload(
         "python_dependencies": ["psycopg2"],
         "migration_files": list(release.MIGRATION_FILES),
         "steps": [dict(item) for item in release.MIGRATION_STEPS],
-        "db_schema_epoch": "0018_projection_reliability",
+        "db_schema_epoch": "0021_position_revision_g3",
         "manifest": release.MIGRATION_MANIFEST_NAME,
         "manifest_sha256": hashlib.sha256(
             (output / release.MIGRATION_MANIFEST_NAME).read_bytes()
@@ -576,7 +637,7 @@ def test_release_builder_writes_complete_checksummed_payload(
     )
     assert (
         migration_manifest["schema_epoch"]
-        == "0018_projection_reliability"
+        == "0021_position_revision_g3"
     )
     assert {
         item["path"]
@@ -655,6 +716,8 @@ def test_release_builder_writes_complete_checksummed_payload(
         release.MIGRATION_MANIFEST_NAME,
         release.SYSTEMD_RESOURCE_CONTRACT_NAME,
         release.WATCHER_RUNTIME_MANIFEST_NAME,
+        release.DASHBOARD_MANIFEST_NAME,
+        "dashboard/dist/index.html",
         "SHA256SUMS",
         *(item[0] for item in container_bundle.BUNDLE_FILES),
         *expected_release_files.values(),
@@ -1167,3 +1230,109 @@ def test_release_rejects_payload_tampering_and_does_not_publish(
         release.build_release(repo, output)
 
     assert not output.exists()
+
+
+def test_signal_runtime_and_migrations_cannot_be_omitted(monkeypatch):
+    assert release.SCHEMA_EPOCHS['db'] == '0021_position_revision_g3'
+    assert [step['version'] for step in release.MIGRATION_STEPS[-3:]] == ['0019', '0020', '0021']
+    previous = release.MIGRATION_PROJECTION_RELIABILITY_UP
+    for step in release.MIGRATION_STEPS[-3:]:
+        assert step['prerequisites'] == [previous]
+        assert step['up'] in release.MIGRATION_FILES and step['down'] in release.MIGRATION_FILES
+        previous = step['up']
+    monkeypatch.setattr(release, 'RELEASE_FILES', tuple(
+        pair for pair in release.RELEASE_FILES if pair[0] != 'services/control-plane/security/session_auth.py'
+    ))
+    with pytest.raises(release.ReleaseBundleError, match='signal runtime dependencies'):
+        release._validate_release_contract()
+
+
+def test_packaged_runtime_imports_without_checkout_dependencies(tmp_path):
+    """Reconstruct installed source layout from packaged files, not the checkout."""
+    root = tmp_path / 'isolated-runtime'
+    for source, destination in release.RELEASE_FILES:
+        if destination.startswith('host/') or source.startswith('packages/contracts/'):
+            target = root / source
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((REPO_ROOT / source).read_bytes())
+    code = '''
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path[:0] = [str(root / path) for path in (
+    'services/control-plane/api', 'services/control-plane',
+    'services/control-plane/db', 'services/control-plane/commands',
+    'services/control-plane/decision_gateway', 'services/hermes-worker',
+    'services/ingress', 'packages/execution-domain',
+)]
+import read_api, worker, ingress.http, commands, gateway, security.session_auth
+from order_management.order_reducer import OrderProjectionReducer
+from order_management.state_descriptor import load_state_descriptor
+from settings.schema import load_descriptor
+worker._load_schema_validator()
+__import__('snapshot')._snapshot_validator()
+load_state_descriptor()
+load_descriptor()
+assert callable(ingress.http.ingest_signal_telegram_update)
+assert all(str(root) in module.__file__ for module in (read_api, worker, ingress.http, commands, gateway, security.session_auth))
+'''
+    result = subprocess.run([sys.executable, '-I', '-c', code, str(root)], cwd=tmp_path,
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_release_builder_and_verifier_share_migration_contract():
+    assert release.SCHEMA_EPOCHS == release_manifest_contract.SCHEMA_EPOCHS
+    assert release.MIGRATION_FILES == release_manifest_contract.CANONICAL_MIGRATION_PATHS
+    assert release.MIGRATION_STEPS == release_manifest_contract.CANONICAL_MIGRATION_STEPS
+
+
+def test_dashboard_build_uses_pinned_git_sources_and_explicit_production_config(tmp_path, monkeypatch):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    _seed_repo(repo)
+    commit = release.resolve_git_commit(repo, 'HEAD')
+    app = repo / release.DASHBOARD_SOURCE
+    (app / 'source.html').write_text('dirty working tree must not ship')
+    (app / 'dist').mkdir()
+    (app / 'dist/index.html').write_text('dirty dist must not ship')
+    (app / '.env.production').write_text('VITE_AUTH_DISABLED=true\nVITE_API_BASE_URL=https://wrong.invalid\n')
+    monkeypatch.setenv('VITE_API_BASE_URL', 'https://wrong.invalid')
+    monkeypatch.setenv('VITE_AUTH_DISABLED', 'true')
+    output = tmp_path / 'payload'
+    output.mkdir()
+    path = release._build_dashboard(repo, output, commit)
+    document = release_manifest_contract.validate_dashboard_manifest(
+        path, payload_root=output, source_commit=commit, source_tree=release.resolve_git_tree(repo, commit),
+    )
+    assert (output / 'dashboard/dist/index.html').read_text() == '<html>committed dashboard</html>'
+    assert document['auth_disabled'] is False and document['api_base'] == '' and document['base_path'] == '/'
+    assert document['operator_path'] == '/m/v1/operator/orders'
+    assert document['source_commit'] == commit
+    assert document['package_lock_sha256'] == hashlib.sha256((app / 'package-lock.json').read_bytes()).hexdigest()
+    for mutation in ('wrong_commit', 'auth_disabled', 'wrong_operator_path', 'extra_asset', 'symlink_asset', 'changed_asset'):
+        bad = json.loads(path.read_text())
+        if mutation == 'wrong_commit':
+            bad['source_commit'] = '0' * 40
+        if mutation == 'auth_disabled':
+            bad['auth_disabled'] = True
+        if mutation == 'wrong_operator_path':
+            bad['operator_path'] = '/v1/operator/orders'
+        if mutation == 'extra_asset':
+            (output / 'dashboard/dist/unlisted.js').write_text('unexpected')
+        if mutation == 'symlink_asset':
+            original = output / 'original.html'
+            (output / 'dashboard/dist/index.html').rename(original)
+            (output / 'dashboard/dist/index.html').symlink_to(original)
+        if mutation == 'changed_asset':
+            (output / 'dashboard/dist/index.html').write_text('tampered')
+        path.write_text(json.dumps(bad))
+        with pytest.raises(release_manifest_contract.ReleaseManifestError):
+            release_manifest_contract.validate_dashboard_manifest(
+                path, payload_root=output, source_commit=commit, source_tree=release.resolve_git_tree(repo, commit),
+            )
+        path.write_text(json.dumps(document))
+        (output / 'dashboard/dist/unlisted.js').unlink(missing_ok=True)
+        if mutation == 'symlink_asset':
+            (output / 'dashboard/dist/index.html').unlink()
+            original.rename(output / 'dashboard/dist/index.html')

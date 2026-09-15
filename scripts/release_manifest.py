@@ -38,7 +38,7 @@ NODE_CONFIG_SCHEMA_VERSIONS = {
 }
 SCHEMA_EPOCHS = {
     "app": "account-stall-hardening-runtime/v1",
-    "db": "0018_projection_reliability",
+    "db": "0021_position_revision_g3",
     "redis": "fenced-generation-namespace/v2",
 }
 DEFAULT_CONTAINERS = (
@@ -113,6 +113,7 @@ MIGRATION_MANIFEST_SCHEMA_VERSION = "trader-v3-migration-manifest/v1"
 MIGRATION_MANIFEST_NAME = "migration-manifest.json"
 WATCHER_RUNTIME_MANIFEST_NAME = "watcher-runtime-manifest.json"
 RELEASE_SOURCE_MANIFEST_NAME = "release-source-manifest.json"
+DASHBOARD_MANIFEST_NAME = "dashboard-manifest.json"
 SYSTEMD_RESOURCE_CONTRACT_NAME = "systemd-resource-contract.json"
 SHA256SUMS_NAME = "SHA256SUMS"
 RELEASE_DEPENDENCY_LOCK_NAME = "uv.node.lock"
@@ -195,6 +196,12 @@ MIGRATION_PROJECTION_RELIABILITY_UP_PATH = (
 MIGRATION_PROJECTION_RELIABILITY_DOWN_PATH = (
     "db/migrations/0018_projection_reliability.down.sql"
 )
+MIGRATION_SIGNAL_DISPATCH_QUEUE_UP_PATH = "db/migrations/0019_signal_dispatch_queue_g2.up.sql"
+MIGRATION_SIGNAL_DISPATCH_QUEUE_DOWN_PATH = "db/migrations/0019_signal_dispatch_queue_g2.down.sql"
+MIGRATION_SIGNAL_EXECUTION_UP_PATH = "db/migrations/0020_signal_execution_g3.up.sql"
+MIGRATION_SIGNAL_EXECUTION_DOWN_PATH = "db/migrations/0020_signal_execution_g3.down.sql"
+MIGRATION_POSITION_REVISION_UP_PATH = "db/migrations/0021_position_revision_g3.up.sql"
+MIGRATION_POSITION_REVISION_DOWN_PATH = "db/migrations/0021_position_revision_g3.down.sql"
 MIGRATION_PREREQUISITE_PATHS = (
     "db/migrations/0005_order_management.up.sql",
 )
@@ -235,6 +242,12 @@ CANONICAL_MIGRATION_PATHS = (
     MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN_PATH,
     MIGRATION_PROJECTION_RELIABILITY_UP_PATH,
     MIGRATION_PROJECTION_RELIABILITY_DOWN_PATH,
+    MIGRATION_SIGNAL_DISPATCH_QUEUE_UP_PATH,
+    MIGRATION_SIGNAL_DISPATCH_QUEUE_DOWN_PATH,
+    MIGRATION_SIGNAL_EXECUTION_UP_PATH,
+    MIGRATION_SIGNAL_EXECUTION_DOWN_PATH,
+    MIGRATION_POSITION_REVISION_UP_PATH,
+    MIGRATION_POSITION_REVISION_DOWN_PATH,
 )
 CANONICAL_MIGRATION_STEPS = (
     {
@@ -305,6 +318,15 @@ CANONICAL_MIGRATION_STEPS = (
             MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP_PATH
         ],
     },
+    {"version": "0019", "name": "signal_dispatch_queue_g2",
+     "up": MIGRATION_SIGNAL_DISPATCH_QUEUE_UP_PATH, "down": MIGRATION_SIGNAL_DISPATCH_QUEUE_DOWN_PATH,
+     "prerequisites": [MIGRATION_PROJECTION_RELIABILITY_UP_PATH]},
+    {"version": "0020", "name": "signal_execution_g3",
+     "up": MIGRATION_SIGNAL_EXECUTION_UP_PATH, "down": MIGRATION_SIGNAL_EXECUTION_DOWN_PATH,
+     "prerequisites": [MIGRATION_SIGNAL_DISPATCH_QUEUE_UP_PATH]},
+    {"version": "0021", "name": "position_revision_g3",
+     "up": MIGRATION_POSITION_REVISION_UP_PATH, "down": MIGRATION_POSITION_REVISION_DOWN_PATH,
+     "prerequisites": [MIGRATION_SIGNAL_EXECUTION_UP_PATH]},
 )
 STRICT_V3_REQUIRED_FIELDS = {
     "build_attestation_sha256",
@@ -2157,6 +2179,59 @@ def _verify_payload_hashes(
             )
 
 
+def validate_dashboard_manifest(
+    path: Path, *, payload_root: Path, source_commit: str, source_tree: str,
+) -> dict[str, Any]:
+    if path.is_symlink():
+        raise ReleaseManifestError("dashboard manifest must not be a symlink")
+    document = _load_json(path)
+    if (
+        document.get("schema_version") != "trader-v3-dashboard/v1"
+        or document.get("source_commit") != source_commit
+        or document.get("source_tree") != source_tree
+        or document.get("source_subdir") != "bridge/apps/dashboard"
+        or document.get("build_inputs") != [
+            "bridge/apps/dashboard",
+            "tests/nautilus/_fixtures/contracts-v1/data_quality_envelope_v1.schema.json",
+        ]
+        or document.get("api_base") != ""
+        or document.get("base_path") != "/"
+        or document.get("auth_disabled") is not False
+        or document.get("operator_path") != "/m/v1/operator/orders"
+    ):
+        raise ReleaseManifestError("dashboard build provenance or routing mismatch")
+    _require_sha256(str(document.get("package_lock_sha256") or ""), "dashboard npm lock SHA256")
+    versions = document.get("tool_versions")
+    if not isinstance(versions, dict):
+        raise ReleaseManifestError("dashboard tool versions are missing")
+    node = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", str(versions.get("node") or ""))
+    if node is None or tuple(map(int, node.groups())) < (22, 12, 0) or not versions.get("npm"):
+        raise ReleaseManifestError("dashboard requires Node >=22.12.0 and npm provenance")
+    files = document.get("files")
+    if not isinstance(files, dict) or "dashboard/dist/index.html" not in files:
+        raise ReleaseManifestError("dashboard manifest requires dist/index.html")
+    entries = []
+    for relative, digest in files.items():
+        relative = _validated_payload_relative_path(relative, label="dashboard asset")
+        if not relative.startswith("dashboard/dist/"):
+            raise ReleaseManifestError("dashboard asset escapes dist")
+        entries.append({"path": relative, "sha256": _require_sha256(digest, "dashboard asset SHA256")})
+    dashboard_root = payload_root / "dashboard"
+    dist = dashboard_root / "dist"
+    assets = list(dist.rglob("*"))
+    if dashboard_root.is_symlink() or dist.is_symlink() or any(item.is_symlink() for item in assets):
+        raise ReleaseManifestError("dashboard assets must not contain symlinks")
+    actual = {
+        item.relative_to(payload_root).as_posix()
+        for item in assets
+        if item.is_file()
+    }
+    if actual != set(files):
+        raise ReleaseManifestError("dashboard asset exact-set mismatch")
+    _verify_payload_hashes(payload_root, entries)
+    return document
+
+
 def validate_release_source_manifest(
     path: Path,
     *,
@@ -2302,7 +2377,17 @@ def validate_release_source_manifest(
         str(watcher_runtime.get("manifest_sha256") or ""),
         "release source watcher runtime manifest sha256",
     )
+    dashboard = document.get("dashboard")
+    if not isinstance(dashboard, dict) or dashboard.get("manifest") != DASHBOARD_MANIFEST_NAME:
+        raise ReleaseManifestError("release source dashboard manifest is required")
+    dashboard_sha256 = _require_sha256(str(dashboard.get("manifest_sha256") or ""), "dashboard manifest SHA256")
     root = payload_root.resolve()
+    dashboard_path = root / DASHBOARD_MANIFEST_NAME
+    if dashboard_path.is_symlink() or not dashboard_path.is_file() or sha256_file(dashboard_path) != dashboard_sha256:
+        raise ReleaseManifestError("release source dashboard manifest hash mismatch")
+    dashboard_build = validate_dashboard_manifest(
+        dashboard_path, payload_root=root, source_commit=source_commit, source_tree=source_tree,
+    )
     bundle_path = root / "bundle-manifest.json"
     if not bundle_path.is_file() or sha256_file(bundle_path) != bundle_sha256:
         raise ReleaseManifestError(
@@ -2342,6 +2427,8 @@ def validate_release_source_manifest(
         "watcher_runtime_manifest_sha256": (
             watcher_runtime_manifest_sha256
         ),
+        "dashboard_manifest_sha256": dashboard_sha256,
+        "dashboard_files": dashboard_build["files"],
         "files": sorted(
             release_files,
             key=lambda item: item["release_path"],
@@ -3074,7 +3161,9 @@ def _expected_release_payload(
         WATCHER_RUNTIME_MANIFEST_NAME: source_manifest[
             "watcher_runtime_manifest_sha256"
         ],
+        DASHBOARD_MANIFEST_NAME: source_manifest["dashboard_manifest_sha256"],
     }
+    expected.update(source_manifest["dashboard_files"])
     for item in bundle_files:
         relative = item["bundle_path"]
         digest = item["sha256"]

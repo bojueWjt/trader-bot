@@ -14,6 +14,7 @@ from enum import Enum
 from typing import Any
 
 from security.permissions import AuthRequired, PermissionDenied, TOKEN_ENV_VARS
+from security.session_auth import SessionTokenError, verify_session_token
 
 UNASSIGNED_ACCOUNT_ID = "unassigned"
 
@@ -49,6 +50,7 @@ class Principal:
     role: str
     scope: str
     account_id: str | None
+    session_subject: str | None = None
 
 
 def signal_account_tokens(env: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -102,7 +104,7 @@ def resolve_principal(
     reader_tokens: Mapping[str, str] | None = None,
     body: Mapping[str, Any] | None = None,
 ) -> Principal:
-    """Derive Principal from Bearer + server token tables. Body is ignored."""
+    """Derive Principal from server credentials or a verified login. Ignore body."""
     del body
     source = os.environ if env is None else env
     assert_token_catalog_unique(source)
@@ -114,9 +116,6 @@ def resolve_principal(
 
     readers = dict(reader_tokens) if reader_tokens is not None else _reader_token_map(source)
     signals = signal_account_tokens(source)
-    if not readers and not signals:
-        raise TokenCatalogError("reader auth not configured")
-
     role = readers.get(presented)
     if role is not None:
         return _principal_for_reader_role(role)
@@ -130,6 +129,22 @@ def resolve_principal(
             scope="account",
             account_id=account_id,
         )
+    if presented.count(".") == 2:
+        try:
+            session = verify_session_token(presented, source.get("AUTH_SECRET_KEY"))
+        except SessionTokenError as exc:
+            raise AuthRequired(str(exc)) from exc
+        role = session["role"]
+        return Principal(
+            kind=PrincipalKind.OPERATOR if role == "risk_admin" else PrincipalKind.READER,
+            actor_id=f"user:{session['sub']}",
+            role=role,
+            scope="global",
+            account_id=None,
+            session_subject=session["sub"],
+        )
+    if not readers and not signals:
+        raise TokenCatalogError("reader auth not configured")
     raise PermissionDenied("forbidden")
 
 

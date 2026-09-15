@@ -13,6 +13,7 @@ function response(payload: unknown, status = 200): Response {
 
 afterEach(() => {
   sessionStorage.clear();
+  localStorage.clear();
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -72,7 +73,7 @@ describe("manual position operator API", () => {
     expect(vi.getTimerCount()).toBe(0);
 
     expect((await closePosition(position, "retry")).operationStatus).toBe("queued");
-    expect(fetchMock.mock.calls[2][0]).toBe(`/v1/operator/orders/${operationId}`);
+    expect(fetchMock.mock.calls[2][0]).toBe(`/m/v1/operator/orders/${operationId}`);
     expect(fetchMock.mock.calls[2][1].method).toBeUndefined();
     expect(fetchMock.mock.calls.filter(([, init]) => init.method === "POST")).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(0);
@@ -80,6 +81,7 @@ describe("manual position operator API", () => {
   });
 
   it("sends real account, symbol, side and target with correct action fields", async () => {
+    localStorage.setItem("hermes.auth.token", "existing-login-session");
     const fetchMock = vi.fn(async () => response({ intent_id: operationId, status: "accepted" }));
     vi.stubGlobal("fetch", fetchMock);
     for (const [submit, expected] of [
@@ -90,8 +92,9 @@ describe("manual position operator API", () => {
       const result = await submit();
       const [url, request] = fetchMock.mock.calls.at(-1) as unknown as [string, RequestInit];
       const body = JSON.parse(String(request.body));
-      expect(url).toBe("/v1/operator/orders");
+      expect(url).toBe("/m/v1/operator/orders");
       expect(request.method).toBe("POST");
+      expect(new Headers(request.headers).get("Authorization")).toBe("Bearer existing-login-session");
       expect(body).toMatchObject({ ...expected, account_id: "account-c", symbol: "BTCUSDT", side: "short", position_side: "short", target_position_id: position.id, authorized_by_type: "user" });
       expect(body).not.toHaveProperty("actor");
       expect(body).not.toHaveProperty("authorized_by_id");
@@ -118,7 +121,7 @@ describe("manual position operator API", () => {
     await reloaded.closePosition(position, "retry with revised reason");
     expect(fetchMock.mock.calls[1][1].body).toBe(firstBody);
     const repeated = await reloaded.closePosition(position, "another click after acceptance");
-    expect(fetchMock.mock.calls[2][0]).toBe(`/v1/operator/orders/${operationId}`);
+    expect(fetchMock.mock.calls[2][0]).toBe(`/m/v1/operator/orders/${operationId}`);
     expect(fetchMock.mock.calls[2][1].method).toBeUndefined();
     expect(repeated.statusText).toContain("awaiting execution");
     expect(sessionStorage.length).toBe(1);
@@ -177,7 +180,7 @@ describe("manual position operator API", () => {
       expect(target.side).toBe("");
       expect((await closePosition(target, "close")).statusText).toContain("position ID");
     }
-    expect(fetchMock.mock.calls.every(([url]) => url !== "/v1/operator/orders")).toBe(true);
+    expect(fetchMock.mock.calls.every(([url]) => url !== "/m/v1/operator/orders")).toBe(true);
   });
 
   it("shows HTTP rejection details and preserves the request for uncertain or failed retries", async () => {
