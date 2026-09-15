@@ -265,7 +265,7 @@ REQUIRED_RUNTIME_BUNDLE_TARGETS = {
 BUNDLE_SCHEMA_VERSION = "trader-v3-container-bundle/v2"
 SCHEMA_EPOCHS = {
     "app": "account-stall-hardening-runtime/v1",
-    "db": "0021_position_revision_g3",
+    "db": "0022_position_revision_g3",
     "redis": "fenced-generation-namespace/v2",
 }
 MANIFEST_NAME = "bundle-manifest.json"

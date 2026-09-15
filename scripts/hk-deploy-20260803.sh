@@ -74,12 +74,14 @@ MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP="$STAGING/db/migrations/0017_operat
 MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN="$STAGING/db/migrations/0017_operator_query_projection_reads.down.sql"
 MIGRATION_PROJECTION_RELIABILITY_UP="$STAGING/db/migrations/0018_projection_reliability.up.sql"
 MIGRATION_PROJECTION_RELIABILITY_DOWN="$STAGING/db/migrations/0018_projection_reliability.down.sql"
-MIGRATION_SIGNAL_DISPATCH_QUEUE_UP="$STAGING/db/migrations/0019_signal_dispatch_queue_g2.up.sql"
-MIGRATION_SIGNAL_DISPATCH_QUEUE_DOWN="$STAGING/db/migrations/0019_signal_dispatch_queue_g2.down.sql"
-MIGRATION_SIGNAL_EXECUTION_UP="$STAGING/db/migrations/0020_signal_execution_g3.up.sql"
-MIGRATION_SIGNAL_EXECUTION_DOWN="$STAGING/db/migrations/0020_signal_execution_g3.down.sql"
-MIGRATION_POSITION_REVISION_UP="$STAGING/db/migrations/0021_position_revision_g3.up.sql"
-MIGRATION_POSITION_REVISION_DOWN="$STAGING/db/migrations/0021_position_revision_g3.down.sql"
+MIGRATION_ACCOUNT_EQUITY_SAMPLES_UP="$STAGING/db/migrations/0019_account_equity_samples.up.sql"
+MIGRATION_ACCOUNT_EQUITY_SAMPLES_DOWN="$STAGING/db/migrations/0019_account_equity_samples.down.sql"
+MIGRATION_SIGNAL_DISPATCH_QUEUE_UP="$STAGING/db/migrations/0020_signal_dispatch_queue_g2.up.sql"
+MIGRATION_SIGNAL_DISPATCH_QUEUE_DOWN="$STAGING/db/migrations/0020_signal_dispatch_queue_g2.down.sql"
+MIGRATION_SIGNAL_EXECUTION_UP="$STAGING/db/migrations/0021_signal_execution_g3.up.sql"
+MIGRATION_SIGNAL_EXECUTION_DOWN="$STAGING/db/migrations/0021_signal_execution_g3.down.sql"
+MIGRATION_POSITION_REVISION_UP="$STAGING/db/migrations/0022_position_revision_g3.up.sql"
+MIGRATION_POSITION_REVISION_DOWN="$STAGING/db/migrations/0022_position_revision_g3.down.sql"
 JP24_REDIS_DEAD_INSTANCE_JANITOR="$STAGING/jp24_redis_dead_instance_janitor.py"
 CONTROL_PLANE_ISOLATION_SCRIPT="$STAGING/hk-control-plane-isolation.sh"
 CONTROL_PLANE_ISOLATION_MODE="${CONTROL_PLANE_ISOLATION_MODE:-require}"
@@ -5052,7 +5054,7 @@ try:
     UUID(redis_fencing_epoch)
 except ValueError as exc:
     raise SystemExit("post-migration Redis fencing epoch is invalid") from exc
-if database_schema_epoch != "0021_position_revision_g3":
+if database_schema_epoch != "0022_position_revision_g3":
     raise SystemExit("post-migration database schema epoch is invalid")
 if redis_schema_epoch != "fenced-generation-namespace/v2":
     raise SystemExit("post-migration Redis schema epoch is invalid")
@@ -5240,7 +5242,7 @@ with psycopg2.connect(database_url) as conn, conn.cursor() as cur:
         FROM schema_migrations
         WHERE version = ANY(%s)
         """,
-        (["0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021"],),
+        (["0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022"],),
     )
     applied_migrations = dict(cur.fetchall())
 if len(rows) != 1:
@@ -5257,9 +5259,10 @@ if applied_migrations != {
     "0016": "control_plane_lock_privileges",
     "0017": "operator_query_projection_reads",
     "0018": "projection_reliability",
-    "0019": "signal_dispatch_queue_g2",
-    "0020": "signal_execution_g3",
-    "0021": "position_revision_g3",
+    "0019": "account_equity_samples",
+    "0020": "signal_dispatch_queue_g2",
+    "0021": "signal_execution_g3",
+    "0022": "position_revision_g3",
 }:
     raise SystemExit(
         "post-migration recovery lacks required migrations"
@@ -7134,12 +7137,14 @@ require_staging_artifact \
   || die "0018 up migration missing"
 [ -f "$MIGRATION_PROJECTION_RELIABILITY_DOWN" ] \
   || die "0018 down migration missing"
-[ -f "$MIGRATION_SIGNAL_DISPATCH_QUEUE_UP" ] || die "0019 up migration missing"
-[ -f "$MIGRATION_SIGNAL_DISPATCH_QUEUE_DOWN" ] || die "0019 down migration missing"
-[ -f "$MIGRATION_SIGNAL_EXECUTION_UP" ] || die "0020 up migration missing"
-[ -f "$MIGRATION_SIGNAL_EXECUTION_DOWN" ] || die "0020 down migration missing"
-[ -f "$MIGRATION_POSITION_REVISION_UP" ] || die "0021 up migration missing"
-[ -f "$MIGRATION_POSITION_REVISION_DOWN" ] || die "0021 down migration missing"
+[ -f "$MIGRATION_ACCOUNT_EQUITY_SAMPLES_UP" ] || die "0019 up migration missing"
+[ -f "$MIGRATION_ACCOUNT_EQUITY_SAMPLES_DOWN" ] || die "0019 down migration missing"
+[ -f "$MIGRATION_SIGNAL_DISPATCH_QUEUE_UP" ] || die "0020 up migration missing"
+[ -f "$MIGRATION_SIGNAL_DISPATCH_QUEUE_DOWN" ] || die "0020 down migration missing"
+[ -f "$MIGRATION_SIGNAL_EXECUTION_UP" ] || die "0021 up migration missing"
+[ -f "$MIGRATION_SIGNAL_EXECUTION_DOWN" ] || die "0021 down migration missing"
+[ -f "$MIGRATION_POSITION_REVISION_UP" ] || die "0022 up migration missing"
+[ -f "$MIGRATION_POSITION_REVISION_DOWN" ] || die "0022 down migration missing"
 case "$DELIVERY_MODE" in
   immutable_image|transition_bind_mount) ;;
   *) die "invalid DELIVERY_MODE: $DELIVERY_MODE" ;;
@@ -7251,12 +7256,14 @@ for required in \
   db/migrations/0017_operator_query_projection_reads.down.sql \
   db/migrations/0018_projection_reliability.up.sql \
   db/migrations/0018_projection_reliability.down.sql \
-  db/migrations/0019_signal_dispatch_queue_g2.up.sql \
-  db/migrations/0019_signal_dispatch_queue_g2.down.sql \
-  db/migrations/0020_signal_execution_g3.up.sql \
-  db/migrations/0020_signal_execution_g3.down.sql \
-  db/migrations/0021_position_revision_g3.up.sql \
-  db/migrations/0021_position_revision_g3.down.sql \
+  db/migrations/0019_account_equity_samples.up.sql \
+  db/migrations/0019_account_equity_samples.down.sql \
+  db/migrations/0020_signal_dispatch_queue_g2.up.sql \
+  db/migrations/0020_signal_dispatch_queue_g2.down.sql \
+  db/migrations/0021_signal_execution_g3.up.sql \
+  db/migrations/0021_signal_execution_g3.down.sql \
+  db/migrations/0022_position_revision_g3.up.sql \
+  db/migrations/0022_position_revision_g3.down.sql \
   "$(basename "$DEPENDENCY_LOCK")"; do
   require_checksum_artifact "$required"
 done
@@ -7449,18 +7456,22 @@ expected_steps = [
             ),
         ],
     },
-    {"version": "0019", "name": "signal_dispatch_queue_g2",
-     "up": "db/migrations/0019_signal_dispatch_queue_g2.up.sql",
-     "down": "db/migrations/0019_signal_dispatch_queue_g2.down.sql",
+    {"version": "0019", "name": "account_equity_samples",
+     "up": "db/migrations/0019_account_equity_samples.up.sql",
+     "down": "db/migrations/0019_account_equity_samples.down.sql",
      "prerequisites": ["db/migrations/0018_projection_reliability.up.sql"]},
-    {"version": "0020", "name": "signal_execution_g3",
-     "up": "db/migrations/0020_signal_execution_g3.up.sql",
-     "down": "db/migrations/0020_signal_execution_g3.down.sql",
-     "prerequisites": ["db/migrations/0019_signal_dispatch_queue_g2.up.sql"]},
-    {"version": "0021", "name": "position_revision_g3",
-     "up": "db/migrations/0021_position_revision_g3.up.sql",
-     "down": "db/migrations/0021_position_revision_g3.down.sql",
-     "prerequisites": ["db/migrations/0020_signal_execution_g3.up.sql"]},
+    {"version": "0020", "name": "signal_dispatch_queue_g2",
+     "up": "db/migrations/0020_signal_dispatch_queue_g2.up.sql",
+     "down": "db/migrations/0020_signal_dispatch_queue_g2.down.sql",
+     "prerequisites": ["db/migrations/0019_account_equity_samples.up.sql"]},
+    {"version": "0021", "name": "signal_execution_g3",
+     "up": "db/migrations/0021_signal_execution_g3.up.sql",
+     "down": "db/migrations/0021_signal_execution_g3.down.sql",
+     "prerequisites": ["db/migrations/0020_signal_dispatch_queue_g2.up.sql"]},
+    {"version": "0022", "name": "position_revision_g3",
+     "up": "db/migrations/0022_position_revision_g3.up.sql",
+     "down": "db/migrations/0022_position_revision_g3.down.sql",
+     "prerequisites": ["db/migrations/0021_signal_execution_g3.up.sql"]},
 ]
 if migration.get("steps") != expected_steps:
     raise SystemExit("release migration metadata mismatch: steps")
@@ -7483,12 +7494,14 @@ required_migration_files = {
     "db/migrations/0017_operator_query_projection_reads.down.sql",
     "db/migrations/0018_projection_reliability.up.sql",
     "db/migrations/0018_projection_reliability.down.sql",
-    "db/migrations/0019_signal_dispatch_queue_g2.up.sql",
-    "db/migrations/0019_signal_dispatch_queue_g2.down.sql",
-    "db/migrations/0020_signal_execution_g3.up.sql",
-    "db/migrations/0020_signal_execution_g3.down.sql",
-    "db/migrations/0021_position_revision_g3.up.sql",
-    "db/migrations/0021_position_revision_g3.down.sql",
+    "db/migrations/0019_account_equity_samples.up.sql",
+    "db/migrations/0019_account_equity_samples.down.sql",
+    "db/migrations/0020_signal_dispatch_queue_g2.up.sql",
+    "db/migrations/0020_signal_dispatch_queue_g2.down.sql",
+    "db/migrations/0021_signal_execution_g3.up.sql",
+    "db/migrations/0021_signal_execution_g3.down.sql",
+    "db/migrations/0022_position_revision_g3.up.sql",
+    "db/migrations/0022_position_revision_g3.down.sql",
 }
 migration_files = migration.get("migration_files")
 if not isinstance(migration_files, list):
@@ -7498,10 +7511,102 @@ if not required_migration_files.issubset(set(migration_files)):
 print(epochs["app"], epochs["db"], epochs["redis"])
 PY
 )
-[ "$DATABASE_SCHEMA_EPOCH" = "0021_position_revision_g3" ] \
-  || die "reviewed database schema epoch must be 0021_position_revision_g3"
+[ "$DATABASE_SCHEMA_EPOCH" = "0022_position_revision_g3" ] \
+  || die "reviewed database schema epoch must be 0022_position_revision_g3"
 [ "$REDIS_SCHEMA_EPOCH" = "fenced-generation-namespace/v2" ] \
   || die "reviewed Redis schema epoch mismatch"
+
+"$T/.venv-cp/bin/python" - \
+  "$T/.env.v3" \
+  "$MIGRATION_EVIDENCE_INDEXES_UP" \
+  "$MIGRATION_UP" \
+  "$MIGRATION_MAINTENANCE_FENCE_UP" \
+  "$MIGRATION_FOUR_ACCOUNT_ROLLOUT_UP" \
+  "$MIGRATION_CANCEL_ORDER_CONTRACT_UP" \
+  "$MIGRATION_REFRESH_EVIDENCE_COMMAND_UP" \
+  "$MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP" \
+  "$MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP" \
+  "$MIGRATION_PROJECTION_RELIABILITY_UP" \
+  "$MIGRATION_ACCOUNT_EQUITY_SAMPLES_UP" \
+  "$MIGRATION_SIGNAL_DISPATCH_QUEUE_UP" \
+  "$MIGRATION_SIGNAL_EXECUTION_UP" \
+  "$MIGRATION_POSITION_REVISION_UP" <<'PY' || die "live schema migration identity mismatch"
+from __future__ import annotations
+
+import hashlib
+import sys
+from pathlib import Path
+
+import psycopg2
+
+
+def read_environment(path: Path) -> dict[str, str]:
+    values = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip()
+        if (
+            len(value) >= 2
+            and value[0] == value[-1]
+            and value[0] in {"'", '"'}
+        ):
+            value = value[1:-1]
+        values[key.strip()] = value
+    return values
+
+
+env = read_environment(Path(sys.argv[1]))
+database_url = env.get("DATABASE_URL", "")
+if not database_url:
+    raise SystemExit("DATABASE_URL is required for live schema identity")
+specs = (
+    ("0010", "evidence_and_poll_indexes", Path(sys.argv[2])),
+    ("0011", "live_safety", Path(sys.argv[3])),
+    ("0012", "control_plane_maintenance_fence", Path(sys.argv[4])),
+    ("0013", "four_account_rollout", Path(sys.argv[5])),
+    ("0014", "cancel_order_contract", Path(sys.argv[6])),
+    ("0015", "refresh_evidence_command", Path(sys.argv[7])),
+    ("0016", "control_plane_lock_privileges", Path(sys.argv[8])),
+    ("0017", "operator_query_projection_reads", Path(sys.argv[9])),
+    ("0018", "projection_reliability", Path(sys.argv[10])),
+    ("0019", "account_equity_samples", Path(sys.argv[11])),
+    ("0020", "signal_dispatch_queue_g2", Path(sys.argv[12])),
+    ("0021", "signal_execution_g3", Path(sys.argv[13])),
+    ("0022", "position_revision_g3", Path(sys.argv[14])),
+)
+expected = {}
+for version, name, path in specs:
+    sql = path.read_text(encoding="utf-8")
+    if not sql.strip():
+        raise SystemExit(f"{version} migration is empty")
+    expected[version] = (name, hashlib.sha256(sql.encode("utf-8")).hexdigest())
+with psycopg2.connect(database_url) as conn, conn.cursor() as cur:
+    cur.execute(
+        """
+        SELECT version, name, up_sha256
+        FROM schema_migrations
+        WHERE version = ANY(%s)
+        """,
+        (list(expected),),
+    )
+    applied = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
+for version, (name, digest) in expected.items():
+    if version not in applied:
+        continue
+    applied_name, applied_digest = applied[version]
+    if applied_name != name:
+        raise SystemExit(
+            f"schema_migrations {version} name or SQL hash mismatch"
+        )
+    if applied_digest and applied_digest != digest:
+        raise SystemExit(
+            f"schema_migrations {version} name or SQL hash mismatch"
+        )
+print("live schema identity OK")
+PY
 
 RELEASE_RESOURCE_LIMITS="$(
 python3 - \
@@ -8498,8 +8603,20 @@ LEGACY_REDIS_CONTAINER="$(
   python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["legacy_container"])' \
     "$REDIS_CAPACITY_EVIDENCE"
 )"
-docker inspect "$LEGACY_REDIS_CONTAINER" >/dev/null \
-  || die "legacy Redis container from capacity evidence is missing"
+if ! docker inspect "$LEGACY_REDIS_CONTAINER" >/dev/null 2>&1; then
+  # Same-epoch application maintenance does not switch Redis. A pruned legacy
+  # container may be replaced as rollback evidence by its exact retained RDB
+  # and image, after the original cold/capacity and live identity gates above.
+  require_checksum_artifact "verify_retired_redis_artifacts.py"
+  RETIRED_REDIS_RECEIPT="$STAGING/retired-redis-artifacts-$STAMP.json"
+  [ ! -e "$RETIRED_REDIS_RECEIPT" ] && [ ! -L "$RETIRED_REDIS_RECEIPT" ] \
+    || die "retired Redis verification receipt already exists"
+  python3 "$STAGING/verify_retired_redis_artifacts.py" \
+    "$REDIS_COLD_BACKUP_MANIFEST" "$REDIS_CAPACITY_EVIDENCE" \
+    "$DEPLOY_GATE_MODE" > "$RETIRED_REDIS_RECEIPT" \
+    || die "legacy Redis container is missing and retained artifacts failed verification"
+  echo "== missing legacy Redis container: exact retained rollback artifacts verified"
+else
 [ "$(docker inspect --format '{{.State.Running}}' "$LEGACY_REDIS_CONTAINER")" = "false" ] \
   || die "legacy Redis container must remain stopped"
 LEGACY_REDIS_INSPECT="$(docker inspect "$LEGACY_REDIS_CONTAINER")"
@@ -8537,6 +8654,7 @@ source = Path(str(mount.get("Source") or "")).resolve()
 if source != Path(str(backup.get("source_data_root") or "")).resolve():
     raise SystemExit("legacy Redis volume differs from cold backup evidence")
 PY
+fi
 
 # host-side target
 SIGNAL_RUNTIME_FILE_MAP=(
@@ -8720,6 +8838,7 @@ apply_and_verify_database_migration() {
     "$MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP" \
     "$MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP" \
     "$MIGRATION_PROJECTION_RELIABILITY_UP" \
+    "$MIGRATION_ACCOUNT_EQUITY_SAMPLES_UP" \
     "$MIGRATION_SIGNAL_DISPATCH_QUEUE_UP" \
     "$MIGRATION_SIGNAL_EXECUTION_UP" \
     "$MIGRATION_POSITION_REVISION_UP" \
@@ -8773,18 +8892,19 @@ refresh_evidence_command_path = Path(sys.argv[8])
 control_plane_lock_privileges_path = Path(sys.argv[9])
 operator_query_projection_reads_path = Path(sys.argv[10])
 projection_reliability_path = Path(sys.argv[11])
-signal_dispatch_queue_g2_path = Path(sys.argv[12])
-signal_execution_g3_path = Path(sys.argv[13])
-position_revision_g3_path = Path(sys.argv[14])
-expected_epoch = sys.argv[15]
-migration_commit_marker = Path(sys.argv[16])
-maintenance_fence_id_raw = sys.argv[17]
-maintenance_owner_token = sys.argv[18]
-maintenance_actor = sys.argv[19]
-maintenance_fence_state = Path(sys.argv[20])
-maintenance_lease_seconds = int(sys.argv[21])
-heartbeat_max_age_seconds = int(sys.argv[22])
-deploy_gate_mode = sys.argv[23]
+account_equity_samples_path = Path(sys.argv[12])
+signal_dispatch_queue_g2_path = Path(sys.argv[13])
+signal_execution_g3_path = Path(sys.argv[14])
+position_revision_g3_path = Path(sys.argv[15])
+expected_epoch = sys.argv[16]
+migration_commit_marker = Path(sys.argv[17])
+maintenance_fence_id_raw = sys.argv[18]
+maintenance_owner_token = sys.argv[19]
+maintenance_actor = sys.argv[20]
+maintenance_fence_state = Path(sys.argv[21])
+maintenance_lease_seconds = int(sys.argv[22])
+heartbeat_max_age_seconds = int(sys.argv[23])
+deploy_gate_mode = sys.argv[24]
 if deploy_gate_mode not in {
     "bootstrap_stopped",
     "bootstrap_resume_stopped",
@@ -8800,7 +8920,7 @@ elif maintenance_fence_id_raw:
 database_url = env.get("DATABASE_URL", "")
 if not database_url:
     raise SystemExit("DATABASE_URL is required for migration")
-if expected_epoch != "0021_position_revision_g3":
+if expected_epoch != "0022_position_revision_g3":
     raise SystemExit("unexpected database schema epoch")
 migration_specs = (
     ("0005", "order_management", order_management_path),
@@ -8845,9 +8965,10 @@ migration_specs = (
         "projection_reliability",
         projection_reliability_path,
     ),
-    ("0019", "signal_dispatch_queue_g2", signal_dispatch_queue_g2_path),
-    ("0020", "signal_execution_g3", signal_execution_g3_path),
-    ("0021", "position_revision_g3", position_revision_g3_path),
+    ("0019", "account_equity_samples", account_equity_samples_path),
+    ("0020", "signal_dispatch_queue_g2", signal_dispatch_queue_g2_path),
+    ("0021", "signal_execution_g3", signal_execution_g3_path),
+    ("0022", "position_revision_g3", position_revision_g3_path),
 )
 migrations = []
 for version, name, path in migration_specs:
@@ -9016,7 +9137,23 @@ try:
                         (version, name, digest),
                     )
                     continue
-                if row != (name, digest):
+                registered_name, registered_digest = row
+                if registered_name != name:
+                    raise SystemExit(
+                        "schema_migrations "
+                        f"{version} name or SQL hash mismatch"
+                    )
+                if not registered_digest:
+                    cur.execute(
+                        """
+                        UPDATE schema_migrations
+                        SET up_sha256=%s
+                        WHERE version=%s
+                        """,
+                        (digest, version),
+                    )
+                    continue
+                if registered_digest != digest:
                     raise SystemExit(
                         "schema_migrations "
                         f"{version} name or SQL hash mismatch"
@@ -9386,7 +9523,7 @@ try:
                 )
 finally:
     conn.close()
-print("database_schema_epoch=0021_position_revision_g3")
+print("database_schema_epoch=0022_position_revision_g3")
 PY
   if [ "$DEPLOY_GATE_MODE" = "maintenance_fence" ]; then
     load_maintenance_fence_state
@@ -9679,7 +9816,7 @@ try:
         FROM schema_migrations
         WHERE version = ANY(%s)
         """,
-        (["0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021"],),
+        (["0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022"],),
     )
             applied_migrations = dict(cur.fetchall())
 finally:
@@ -9726,9 +9863,10 @@ if applied_migrations != {
     "0016": "control_plane_lock_privileges",
     "0017": "operator_query_projection_reads",
     "0018": "projection_reliability",
-    "0019": "signal_dispatch_queue_g2",
-    "0020": "signal_execution_g3",
-    "0021": "position_revision_g3",
+    "0019": "account_equity_samples",
+    "0020": "signal_dispatch_queue_g2",
+    "0021": "signal_execution_g3",
+    "0022": "position_revision_g3",
 }:
     raise SystemExit("account-a database schema epoch mismatch")
 if not isinstance(positions, list):

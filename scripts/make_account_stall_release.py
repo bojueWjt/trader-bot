@@ -74,12 +74,14 @@ MIGRATION_FILES = (
     "db/migrations/0017_operator_query_projection_reads.down.sql",
     "db/migrations/0018_projection_reliability.up.sql",
     "db/migrations/0018_projection_reliability.down.sql",
-    "db/migrations/0019_signal_dispatch_queue_g2.up.sql",
-    "db/migrations/0019_signal_dispatch_queue_g2.down.sql",
-    "db/migrations/0020_signal_execution_g3.up.sql",
-    "db/migrations/0020_signal_execution_g3.down.sql",
-    "db/migrations/0021_position_revision_g3.up.sql",
-    "db/migrations/0021_position_revision_g3.down.sql",
+    "db/migrations/0019_account_equity_samples.up.sql",
+    "db/migrations/0019_account_equity_samples.down.sql",
+    "db/migrations/0020_signal_dispatch_queue_g2.up.sql",
+    "db/migrations/0020_signal_dispatch_queue_g2.down.sql",
+    "db/migrations/0021_signal_execution_g3.up.sql",
+    "db/migrations/0021_signal_execution_g3.down.sql",
+    "db/migrations/0022_position_revision_g3.up.sql",
+    "db/migrations/0022_position_revision_g3.down.sql",
 )
 SYSTEMD_RESOURCE_FILES = (
     "infra/systemd/account-stall-account-node.conf",
@@ -181,6 +183,10 @@ RELEASE_FILES = (
         "account_a_live_trade_http_adapter.py",
     ),
     ("scripts/redis_capacity_config.py", "redis_capacity_config.py"),
+    (
+        "scripts/verify_retired_redis_artifacts.py",
+        "verify_retired_redis_artifacts.py",
+    ),
     (
         "scripts/refresh_redis_capacity_evidence.py",
         "refresh_redis_capacity_evidence.py",
@@ -523,12 +529,18 @@ MIGRATION_PROJECTION_RELIABILITY_UP = (
 MIGRATION_PROJECTION_RELIABILITY_DOWN = (
     "db/migrations/0018_projection_reliability.down.sql"
 )
-MIGRATION_SIGNAL_DISPATCH_QUEUE_UP = "db/migrations/0019_signal_dispatch_queue_g2.up.sql"
-MIGRATION_SIGNAL_DISPATCH_QUEUE_DOWN = "db/migrations/0019_signal_dispatch_queue_g2.down.sql"
-MIGRATION_SIGNAL_EXECUTION_UP = "db/migrations/0020_signal_execution_g3.up.sql"
-MIGRATION_SIGNAL_EXECUTION_DOWN = "db/migrations/0020_signal_execution_g3.down.sql"
-MIGRATION_POSITION_REVISION_UP = "db/migrations/0021_position_revision_g3.up.sql"
-MIGRATION_POSITION_REVISION_DOWN = "db/migrations/0021_position_revision_g3.down.sql"
+MIGRATION_ACCOUNT_EQUITY_SAMPLES_UP = (
+    "db/migrations/0019_account_equity_samples.up.sql"
+)
+MIGRATION_ACCOUNT_EQUITY_SAMPLES_DOWN = (
+    "db/migrations/0019_account_equity_samples.down.sql"
+)
+MIGRATION_SIGNAL_DISPATCH_QUEUE_UP = "db/migrations/0020_signal_dispatch_queue_g2.up.sql"
+MIGRATION_SIGNAL_DISPATCH_QUEUE_DOWN = "db/migrations/0020_signal_dispatch_queue_g2.down.sql"
+MIGRATION_SIGNAL_EXECUTION_UP = "db/migrations/0021_signal_execution_g3.up.sql"
+MIGRATION_SIGNAL_EXECUTION_DOWN = "db/migrations/0021_signal_execution_g3.down.sql"
+MIGRATION_POSITION_REVISION_UP = "db/migrations/0022_position_revision_g3.up.sql"
+MIGRATION_POSITION_REVISION_DOWN = "db/migrations/0022_position_revision_g3.down.sql"
 MIGRATION_PREREQUISITES = (
     "db/migrations/0005_order_management.up.sql",
 )
@@ -599,13 +611,20 @@ MIGRATION_STEPS = (
         "down": MIGRATION_PROJECTION_RELIABILITY_DOWN,
         "prerequisites": [MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP],
     },
-    {"version": "0019", "name": "signal_dispatch_queue_g2",
+    {
+        "version": "0019",
+        "name": "account_equity_samples",
+        "up": MIGRATION_ACCOUNT_EQUITY_SAMPLES_UP,
+        "down": MIGRATION_ACCOUNT_EQUITY_SAMPLES_DOWN,
+        "prerequisites": [MIGRATION_PROJECTION_RELIABILITY_UP],
+    },
+    {"version": "0020", "name": "signal_dispatch_queue_g2",
      "up": MIGRATION_SIGNAL_DISPATCH_QUEUE_UP, "down": MIGRATION_SIGNAL_DISPATCH_QUEUE_DOWN,
-     "prerequisites": [MIGRATION_PROJECTION_RELIABILITY_UP]},
-    {"version": "0020", "name": "signal_execution_g3",
+     "prerequisites": [MIGRATION_ACCOUNT_EQUITY_SAMPLES_UP]},
+    {"version": "0021", "name": "signal_execution_g3",
      "up": MIGRATION_SIGNAL_EXECUTION_UP, "down": MIGRATION_SIGNAL_EXECUTION_DOWN,
      "prerequisites": [MIGRATION_SIGNAL_DISPATCH_QUEUE_UP]},
-    {"version": "0021", "name": "position_revision_g3",
+    {"version": "0022", "name": "position_revision_g3",
      "up": MIGRATION_POSITION_REVISION_UP, "down": MIGRATION_POSITION_REVISION_DOWN,
      "prerequisites": [MIGRATION_SIGNAL_EXECUTION_UP]},
 )

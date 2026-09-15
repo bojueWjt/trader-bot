@@ -217,6 +217,9 @@ EXPECTED_RELEASE_FILE_MAP = {
     ADAPTER_SOURCE_PATH: ADAPTER_RELEASE_PATH,
     "scripts/redis_capacity_config.py": "redis_capacity_config.py",
     (
+        "scripts/verify_retired_redis_artifacts.py"
+    ): "verify_retired_redis_artifacts.py",
+    (
         "scripts/refresh_redis_capacity_evidence.py"
     ): "refresh_redis_capacity_evidence.py",
     "scripts/redis_namespace_janitor.py": "redis_namespace_janitor.py",
@@ -452,7 +455,7 @@ def _commit_path(root: Path, path: Path, message: str) -> None:
 def test_release_builder_includes_operator_query_reads_migration() -> None:
     assert (
         release.SCHEMA_EPOCHS["db"]
-        == "0021_position_revision_g3"
+        == "0022_position_revision_g3"
     )
     assert release.MIGRATION_FILES[30:34] == (
         release.MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP,
@@ -552,7 +555,7 @@ def test_release_builder_writes_complete_checksummed_payload(
         "python_dependencies": ["psycopg2"],
         "migration_files": list(release.MIGRATION_FILES),
         "steps": [dict(item) for item in release.MIGRATION_STEPS],
-        "db_schema_epoch": "0021_position_revision_g3",
+        "db_schema_epoch": "0022_position_revision_g3",
         "manifest": release.MIGRATION_MANIFEST_NAME,
         "manifest_sha256": hashlib.sha256(
             (output / release.MIGRATION_MANIFEST_NAME).read_bytes()
@@ -637,7 +640,7 @@ def test_release_builder_writes_complete_checksummed_payload(
     )
     assert (
         migration_manifest["schema_epoch"]
-        == "0021_position_revision_g3"
+        == "0022_position_revision_g3"
     )
     assert {
         item["path"]
@@ -1233,10 +1236,12 @@ def test_release_rejects_payload_tampering_and_does_not_publish(
 
 
 def test_signal_runtime_and_migrations_cannot_be_omitted(monkeypatch):
-    assert release.SCHEMA_EPOCHS['db'] == '0021_position_revision_g3'
-    assert [step['version'] for step in release.MIGRATION_STEPS[-3:]] == ['0019', '0020', '0021']
+    assert release.SCHEMA_EPOCHS['db'] == '0022_position_revision_g3'
+    assert [step['version'] for step in release.MIGRATION_STEPS[-4:]] == [
+        '0019', '0020', '0021', '0022'
+    ]
     previous = release.MIGRATION_PROJECTION_RELIABILITY_UP
-    for step in release.MIGRATION_STEPS[-3:]:
+    for step in release.MIGRATION_STEPS[-4:]:
         assert step['prerequisites'] == [previous]
         assert step['up'] in release.MIGRATION_FILES and step['down'] in release.MIGRATION_FILES
         previous = step['up']

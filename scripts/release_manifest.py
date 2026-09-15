@@ -38,7 +38,7 @@ NODE_CONFIG_SCHEMA_VERSIONS = {
 }
 SCHEMA_EPOCHS = {
     "app": "account-stall-hardening-runtime/v1",
-    "db": "0021_position_revision_g3",
+    "db": "0022_position_revision_g3",
     "redis": "fenced-generation-namespace/v2",
 }
 DEFAULT_CONTAINERS = (
@@ -196,12 +196,18 @@ MIGRATION_PROJECTION_RELIABILITY_UP_PATH = (
 MIGRATION_PROJECTION_RELIABILITY_DOWN_PATH = (
     "db/migrations/0018_projection_reliability.down.sql"
 )
-MIGRATION_SIGNAL_DISPATCH_QUEUE_UP_PATH = "db/migrations/0019_signal_dispatch_queue_g2.up.sql"
-MIGRATION_SIGNAL_DISPATCH_QUEUE_DOWN_PATH = "db/migrations/0019_signal_dispatch_queue_g2.down.sql"
-MIGRATION_SIGNAL_EXECUTION_UP_PATH = "db/migrations/0020_signal_execution_g3.up.sql"
-MIGRATION_SIGNAL_EXECUTION_DOWN_PATH = "db/migrations/0020_signal_execution_g3.down.sql"
-MIGRATION_POSITION_REVISION_UP_PATH = "db/migrations/0021_position_revision_g3.up.sql"
-MIGRATION_POSITION_REVISION_DOWN_PATH = "db/migrations/0021_position_revision_g3.down.sql"
+MIGRATION_ACCOUNT_EQUITY_SAMPLES_UP_PATH = (
+    "db/migrations/0019_account_equity_samples.up.sql"
+)
+MIGRATION_ACCOUNT_EQUITY_SAMPLES_DOWN_PATH = (
+    "db/migrations/0019_account_equity_samples.down.sql"
+)
+MIGRATION_SIGNAL_DISPATCH_QUEUE_UP_PATH = "db/migrations/0020_signal_dispatch_queue_g2.up.sql"
+MIGRATION_SIGNAL_DISPATCH_QUEUE_DOWN_PATH = "db/migrations/0020_signal_dispatch_queue_g2.down.sql"
+MIGRATION_SIGNAL_EXECUTION_UP_PATH = "db/migrations/0021_signal_execution_g3.up.sql"
+MIGRATION_SIGNAL_EXECUTION_DOWN_PATH = "db/migrations/0021_signal_execution_g3.down.sql"
+MIGRATION_POSITION_REVISION_UP_PATH = "db/migrations/0022_position_revision_g3.up.sql"
+MIGRATION_POSITION_REVISION_DOWN_PATH = "db/migrations/0022_position_revision_g3.down.sql"
 MIGRATION_PREREQUISITE_PATHS = (
     "db/migrations/0005_order_management.up.sql",
 )
@@ -242,6 +248,8 @@ CANONICAL_MIGRATION_PATHS = (
     MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN_PATH,
     MIGRATION_PROJECTION_RELIABILITY_UP_PATH,
     MIGRATION_PROJECTION_RELIABILITY_DOWN_PATH,
+    MIGRATION_ACCOUNT_EQUITY_SAMPLES_UP_PATH,
+    MIGRATION_ACCOUNT_EQUITY_SAMPLES_DOWN_PATH,
     MIGRATION_SIGNAL_DISPATCH_QUEUE_UP_PATH,
     MIGRATION_SIGNAL_DISPATCH_QUEUE_DOWN_PATH,
     MIGRATION_SIGNAL_EXECUTION_UP_PATH,
@@ -318,13 +326,20 @@ CANONICAL_MIGRATION_STEPS = (
             MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP_PATH
         ],
     },
-    {"version": "0019", "name": "signal_dispatch_queue_g2",
+    {
+        "version": "0019",
+        "name": "account_equity_samples",
+        "up": MIGRATION_ACCOUNT_EQUITY_SAMPLES_UP_PATH,
+        "down": MIGRATION_ACCOUNT_EQUITY_SAMPLES_DOWN_PATH,
+        "prerequisites": [MIGRATION_PROJECTION_RELIABILITY_UP_PATH],
+    },
+    {"version": "0020", "name": "signal_dispatch_queue_g2",
      "up": MIGRATION_SIGNAL_DISPATCH_QUEUE_UP_PATH, "down": MIGRATION_SIGNAL_DISPATCH_QUEUE_DOWN_PATH,
-     "prerequisites": [MIGRATION_PROJECTION_RELIABILITY_UP_PATH]},
-    {"version": "0020", "name": "signal_execution_g3",
+     "prerequisites": [MIGRATION_ACCOUNT_EQUITY_SAMPLES_UP_PATH]},
+    {"version": "0021", "name": "signal_execution_g3",
      "up": MIGRATION_SIGNAL_EXECUTION_UP_PATH, "down": MIGRATION_SIGNAL_EXECUTION_DOWN_PATH,
      "prerequisites": [MIGRATION_SIGNAL_DISPATCH_QUEUE_UP_PATH]},
-    {"version": "0021", "name": "position_revision_g3",
+    {"version": "0022", "name": "position_revision_g3",
      "up": MIGRATION_POSITION_REVISION_UP_PATH, "down": MIGRATION_POSITION_REVISION_DOWN_PATH,
      "prerequisites": [MIGRATION_SIGNAL_EXECUTION_UP_PATH]},
 )

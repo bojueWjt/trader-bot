@@ -14,7 +14,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = REPO_ROOT / "scripts" / "hk-deploy-20260803.sh"
 APP_SCHEMA_EPOCH = "account-stall-hardening-runtime/v1"
-DATABASE_SCHEMA_EPOCH = "0021_position_revision_g3"
+DATABASE_SCHEMA_EPOCH = "0022_position_revision_g3"
 REDIS_SCHEMA_EPOCH = "fenced-generation-namespace/v2"
 REVIEWER_KEY_SHA256 = (
     "2b149fe2d7357dfea74441a1f6d6f1dd"
@@ -492,6 +492,15 @@ def connect(_url):
         projection_reads_spec = migration_function.index(
             '"0017",\n        "operator_query_projection_reads",',
         )
+        self.assertIn(
+            '("0019", "account_equity_samples", account_equity_samples_path)',
+            migration_function,
+        )
+        self.assertIn(
+            '("0022", "position_revision_g3", position_revision_g3_path)',
+            migration_function,
+        )
+        self.assertIn("SET up_sha256=%s", migration_function)
         migration_sql = migration_function.index("cur.execute(sql)")
         migration_record = migration_function.index(
             "INSERT INTO schema_migrations",
@@ -922,7 +931,7 @@ all_execution_accounts_stopped
         source = _migration_validator_source()
 
         self.assertIn('"$DEPLOY_GATE_MODE"', invocation)
-        self.assertIn("deploy_gate_mode = sys.argv[23]", source)
+        self.assertIn("deploy_gate_mode = sys.argv[24]", source)
         self.assertIn('"bootstrap_stopped"', source)
         self.assertIn('"bootstrap_resume_stopped"', source)
         self.assertIn('"maintenance_fence"', source)
@@ -1054,7 +1063,7 @@ def connect(_url):
                 str(refresh_evidence_path),
                 str(lock_privileges_path),
                 str(projection_reads_path),
-                *[str(projection_reads_path)] * 4,
+                *[str(projection_reads_path)] * 5,
                 DATABASE_SCHEMA_EPOCH,
                 str(marker_path),
                 "58deee06-3a70-47d3-b056-92854fc6c322",
