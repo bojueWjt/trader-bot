@@ -265,9 +265,44 @@ def _signal(channel_id: str, message_id: int) -> dict[str, str]:
     }
 
 
-def _successful_call(calls):
+def _snapshot_response(
+    *,
+    positions_by_account: dict[str, list] | None = None,
+    stale: bool = False,
+) -> dict:
+    positions_by_account = positions_by_account or {}
+    return {
+        "stale": stale,
+        "data": {
+            "positions": [],
+            "exchange_state": [
+                {
+                    "account_id": account_id,
+                    "stale": stale,
+                    "updated_at": "2026-09-14T00:00:00+00:00",
+                    "payload": {
+                        "positions": list(positions_by_account.get(account_id) or []),
+                    },
+                }
+                for account_id in (
+                    "account-a",
+                    "account-b",
+                    "account-c",
+                    "account-d",
+                )
+            ],
+        },
+    }
+
+
+def _successful_call(calls, *, positions_by_account=None, snapshot_stale=False):
     def fake_call(method, path, payload=None):
         calls.append((method, path, payload))
+        if method == "GET" and path == "/api/system/snapshot":
+            return _snapshot_response(
+                positions_by_account=positions_by_account,
+                stale=snapshot_stale,
+            )
         if method == "POST":
             return {
                 "intent_id": "intent-1",
@@ -584,3 +619,358 @@ def test_normal_operator_open_keeps_explicit_notional_compatibility(
     assert payload["notional_usdt"] == 300.0
     assert "quantity" not in payload
     assert "canary_permit_id" not in payload
+
+
+_MANAGE_AUTH = [
+    "--account", "account-b",
+    "--side", "long",
+    "--reason", "titan lock 20 percent",
+    "--ref", "partial-jto-tg-sig-c1002198013097-m4502",
+    "--channel", "-1002198013097",
+    "--entry-ref", "tg-sig-c1002198013097-m4493-e1",
+    "--authorized-by-type", "channel",
+    "--authorized-by-id", "-1002198013097",
+    "--source-message-id", "tg-sig-c1002198013097-m4502",
+    "--no-wait",
+]
+
+
+def test_resolve_partial_close_quantity_20_percent_of_snapshot() -> None:
+    trade = _load_module("test_partial_qty_helper", TRADE_PATH)
+    assert trade.resolve_partial_close_quantity(
+        quantity=None, percent=20, position_quantity=1407,
+    ) == 281.4
+    assert trade.resolve_partial_close_quantity(
+        quantity=None, percent=20, position_quantity=11871.2,
+    ) == pytest.approx(2374.24)
+    assert trade.resolve_partial_close_quantity(
+        quantity=281.0, percent=None, position_quantity=1407,
+    ) == 281.0
+
+
+def test_resolve_partial_close_rejects_missing_and_illegal_ratios() -> None:
+    trade = _load_module("test_partial_qty_illegal", TRADE_PATH)
+    with pytest.raises(ValueError, match="exactly one"):
+        trade.resolve_partial_close_quantity(
+            quantity=None, percent=None, position_quantity=1407,
+        )
+    with pytest.raises(ValueError, match="exactly one"):
+        trade.resolve_partial_close_quantity(
+            quantity=281, percent=20, position_quantity=1407,
+        )
+    with pytest.raises(ValueError, match="percent"):
+        trade.resolve_partial_close_quantity(
+            quantity=None, percent=0, position_quantity=1407,
+        )
+    with pytest.raises(ValueError, match="percent"):
+        trade.resolve_partial_close_quantity(
+            quantity=None, percent=120, position_quantity=1407,
+        )
+    with pytest.raises(ValueError, match="no open position"):
+        trade.resolve_partial_close_quantity(
+            quantity=None, percent=20, position_quantity=None,
+        )
+
+
+def test_resolve_partial_close_rejects_non_finite_percent_quantity_and_position() -> None:
+    trade = _load_module("test_partial_qty_nonfinite", TRADE_PATH)
+    nan = float("nan")
+    inf = float("inf")
+    ninf = float("-inf")
+    with pytest.raises(ValueError, match="illegal percent"):
+        trade.resolve_partial_close_quantity(
+            quantity=None, percent=nan, position_quantity=1407,
+        )
+    with pytest.raises(ValueError, match="illegal percent"):
+        trade.resolve_partial_close_quantity(
+            quantity=None, percent=inf, position_quantity=1407,
+        )
+    with pytest.raises(ValueError, match="illegal percent"):
+        trade.resolve_partial_close_quantity(
+            quantity=None, percent=ninf, position_quantity=1407,
+        )
+    with pytest.raises(ValueError, match="illegal quantity"):
+        trade.resolve_partial_close_quantity(
+            quantity=nan, percent=None, position_quantity=1407,
+        )
+    with pytest.raises(ValueError, match="illegal quantity"):
+        trade.resolve_partial_close_quantity(
+            quantity=inf, percent=None, position_quantity=1407,
+        )
+    with pytest.raises(ValueError, match="illegal quantity"):
+        trade.resolve_partial_close_quantity(
+            quantity=ninf, percent=None, position_quantity=1407,
+        )
+    with pytest.raises(ValueError, match="illegal position_quantity"):
+        trade.resolve_partial_close_quantity(
+            quantity=None, percent=20, position_quantity=nan,
+        )
+    with pytest.raises(ValueError, match="illegal position_quantity"):
+        trade.resolve_partial_close_quantity(
+            quantity=None, percent=20, position_quantity=inf,
+        )
+
+
+def test_partial_percent_20_posts_partial_close_not_full(
+    monkeypatch,
+) -> None:
+    trade = _load_module("test_partial_percent_20", TRADE_PATH)
+    calls = []
+    monkeypatch.setattr(trade, "_call", _successful_call(calls))
+    monkeypatch.setattr(
+        trade,
+        "_position_for",
+        lambda symbol, account_id, side=None: {
+            "quantity": 1407,
+            "account_id": account_id,
+            "instrument_id": symbol,
+            "side": side,
+            "status": "open",
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["v3_trade.py", "partial", "JTOUSDT", "--percent", "20", *_MANAGE_AUTH],
+    )
+    trade.main()
+    payload = next(
+        payload
+        for method, path, payload in calls
+        if method == "POST" and path == "/v1/operator/orders"
+    )
+    assert payload["action"] == "partial_close"
+    assert payload["quantity"] == pytest.approx(281.4)
+    first = dict(payload)
+    calls.clear()
+    trade.main()
+    retry = next(
+        payload
+        for method, path, payload in calls
+        if method == "POST" and path == "/v1/operator/orders"
+    )
+    assert retry["quantity"] == first["quantity"]
+    assert retry["client_ref"] == first["client_ref"]
+
+
+def test_close_with_percent_is_rejected_not_silent_full_close(monkeypatch) -> None:
+    trade = _load_module("test_close_percent_rejected", TRADE_PATH)
+    calls = []
+    monkeypatch.setattr(trade, "_call", _successful_call(calls))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["v3_trade.py", "close", "JTOUSDT", "--percent", "20", *_MANAGE_AUTH],
+    )
+    with pytest.raises(SystemExit) as exited:
+        trade.main()
+    assert exited.value.code == 1
+    assert calls == []
+
+
+def test_partial_without_quantity_or_percent_is_rejected(monkeypatch) -> None:
+    trade = _load_module("test_partial_missing_ratio", TRADE_PATH)
+    calls = []
+    monkeypatch.setattr(trade, "_call", _successful_call(calls))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["v3_trade.py", "partial", "JTOUSDT", *_MANAGE_AUTH],
+    )
+    with pytest.raises(SystemExit) as exited:
+        trade.main()
+    assert exited.value.code == 1
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("extra_argv", "position_quantity"),
+    [
+        (["--percent", "nan"], 1407),
+        (["--percent", "inf"], 1407),
+        (["--percent=-inf"], 1407),
+        (["--quantity", "nan"], None),
+        (["--quantity", "inf"], None),
+        (["--quantity=-inf"], None),
+        (["--percent", "20"], float("nan")),
+        (["--percent", "20"], float("inf")),
+    ],
+)
+def test_partial_non_finite_cli_exits_without_post(
+    monkeypatch,
+    extra_argv: list[str],
+    position_quantity: float | None,
+) -> None:
+    label = "_".join(extra_argv).replace("-", "")
+    pos = "none" if position_quantity is None else str(position_quantity)
+    trade = _load_module(f"test_partial_nonfinite_{label}_{pos}", TRADE_PATH)
+    calls = []
+    monkeypatch.setattr(trade, "_call", _successful_call(calls))
+    if position_quantity is not None:
+        monkeypatch.setattr(
+            trade,
+            "_position_for",
+            lambda symbol, account_id, side=None, qty=position_quantity: {
+                "quantity": qty,
+                "account_id": account_id,
+                "instrument_id": symbol,
+                "side": side,
+                "status": "open",
+            },
+        )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["v3_trade.py", "partial", "JTOUSDT", *extra_argv, *_MANAGE_AUTH],
+    )
+    with pytest.raises(SystemExit) as exited:
+        trade.main()
+    assert exited.value.code == 1
+    assert calls == []
+
+
+_ENTRY_AUTH = [
+    "--reason", "same-side add routing",
+    "--account", "account-c",
+    "--authorized-by-type", "channel",
+    "--authorized-by-id", "-1002189417451",
+    "--source-message-id", "tg-sig-c1002189417451-m6901",
+    "--channel", "-1002189417451",
+    "--ref", "tg-sig-c1002189417451-m6901",
+    "--no-wait",
+]
+
+
+def _short_btc_mirror() -> dict[str, list]:
+    return {
+        "account-c": [
+            {
+                "symbol": "BTCUSDT",
+                "position_side": "SHORT",
+                "position_amt": "0.055",
+                "entry_price": "80593.6",
+                "mark_price": "77676",
+            }
+        ]
+    }
+
+
+def test_cli_add_posts_add_position_before_approval(monkeypatch, tmp_path: Path) -> None:
+    routing_db = tmp_path / "watcher-trading.db"
+    _create_routing_db(routing_db)
+    monkeypatch.setenv("WATCHER_TRADING_DB", str(routing_db))
+    trade = _load_module("test_cli_add_posts_add", TRADE_PATH)
+    calls = []
+    monkeypatch.setattr(
+        trade,
+        "_call",
+        _successful_call(calls, positions_by_account=_short_btc_mirror()),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "v3_trade.py", "add", "BTCUSDT", "short",
+            "--entry-type", "limit", "--price", "78800",
+            "--sl", "80000", "--notional", "700",
+            *_ENTRY_AUTH,
+        ],
+    )
+    trade.main()
+    payload = next(
+        payload
+        for method, path, payload in calls
+        if method == "POST" and path == "/v1/operator/orders"
+    )
+    assert payload["action"] == "add_position"
+    assert payload["intended_action"] == "add_position"
+    assert payload["signal_intent"] == "加仓"
+    assert payload["client_ref"] == "tg-sig-c1002189417451-m6901"
+
+
+def test_cli_open_with_same_side_mirror_posts_add_not_open(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    routing_db = tmp_path / "watcher-trading.db"
+    _create_routing_db(routing_db)
+    monkeypatch.setenv("WATCHER_TRADING_DB", str(routing_db))
+    trade = _load_module("test_cli_open_selects_add", TRADE_PATH)
+    calls = []
+    monkeypatch.setattr(
+        trade,
+        "_call",
+        _successful_call(calls, positions_by_account=_short_btc_mirror()),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "v3_trade.py", "open", "BTCUSDT", "short",
+            "--entry-type", "limit", "--price", "78800",
+            "--sl", "80000", "--notional", "700",
+            *_ENTRY_AUTH,
+        ],
+    )
+    trade.main()
+    payload = next(
+        payload
+        for method, path, payload in calls
+        if method == "POST" and path == "/v1/operator/orders"
+    )
+    assert payload["action"] == "add_position"
+    assert payload["intended_action"] == "open_position"
+
+
+def test_cli_open_without_same_side_posts_open_position(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    routing_db = tmp_path / "watcher-trading.db"
+    _create_routing_db(routing_db)
+    monkeypatch.setenv("WATCHER_TRADING_DB", str(routing_db))
+    trade = _load_module("test_cli_open_flat_stays_open", TRADE_PATH)
+    calls = []
+    monkeypatch.setattr(trade, "_call", _successful_call(calls))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "v3_trade.py", "open", "BTCUSDT", "short",
+            "--notional", "300",
+            *_ENTRY_AUTH,
+        ],
+    )
+    trade.main()
+    payload = next(
+        payload
+        for method, path, payload in calls
+        if method == "POST" and path == "/v1/operator/orders"
+    )
+    assert payload["action"] == "open_position"
+    assert payload["intended_action"] == "open_position"
+
+
+def test_cli_stale_mirror_refuses_risk_increase(monkeypatch, tmp_path: Path) -> None:
+    routing_db = tmp_path / "watcher-trading.db"
+    _create_routing_db(routing_db)
+    monkeypatch.setenv("WATCHER_TRADING_DB", str(routing_db))
+    trade = _load_module("test_cli_stale_mirror", TRADE_PATH)
+    calls = []
+    monkeypatch.setattr(
+        trade,
+        "_call",
+        _successful_call(calls, snapshot_stale=True),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["v3_trade.py", "open", "BTCUSDT", "short", "--notional", "300", *_ENTRY_AUTH],
+    )
+    with pytest.raises(SystemExit) as exited:
+        trade.main()
+    assert exited.value.code == 1
+    assert not any(
+        method == "POST" and path == "/v1/operator/orders"
+        for method, path, _payload in calls
+    )
