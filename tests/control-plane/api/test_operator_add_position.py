@@ -599,6 +599,23 @@ def test_working_gtc_is_not_double_counted_against_available(
     assert second.status_code == 200, second.text
 
 
+def test_historical_open_projection_does_not_block_fresh_flat_entry(client, migrated_db):
+    _seed_account(migrated_db, account_id=ACCOUNT_B, node_id=NODE_B, positions=[])
+    _seed_mirror(migrated_db, account_id=ACCOUNT_B, positions=[])
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO positions_projection
+                (account_id, position_id, instrument_id, side, quantity, avg_entry_price, status)
+            VALUES (%s, 'historical-long', 'ATOMUSDT-PERP.BINANCE', 'long', 100, 1.55, 'open')
+        """, (ACCOUNT_B,))
+    response = _post(client, _entry_body("open_position", "historical-flat"))
+    assert response.status_code == 200, response.text
+    # Admission does not fabricate PositionClosed events or rewrite accounting.
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute("SELECT status FROM positions_projection WHERE account_id=%s AND position_id='historical-long'", (ACCOUNT_B,))
+        assert cur.fetchone() == ("open",)
+
+
 def test_fresh_heartbeat_conflict_is_not_covered_by_mirror(
     client: TestClient,
     migrated_db: str,

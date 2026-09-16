@@ -854,9 +854,9 @@ def main() -> None:
     p.add_argument("--side", choices=["long", "short"], required=True,
                    help="position book to manage")
     p.add_argument("--percent", type=float, default=None,
-                   help="rejected: close is always 100%; use partial --percent")
+                   help="rejected: close is always 100%%; use partial --percent")
     p.add_argument("--quantity", type=float, default=None,
-                   help="rejected: close is always 100%; use partial --quantity")
+                   help="rejected: close is always 100%%; use partial --quantity")
     common(p, management=True)
     p.set_defaults(fn=cmd_close)
 

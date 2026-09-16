@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Mapping, Optional
 from uuid import UUID, uuid4
 
-from execution_domain.account_execution_ledger import ReconciledExecutionState
+from execution_domain.account_execution_ledger import BookKey, PositionState, ReconciledExecutionState
 from execution_domain.entry_batch import batch_reference_price, owned_quantity, record_fill
 from execution_domain.order_ownership import (
     is_robot_client_order_id,
@@ -751,18 +751,11 @@ class IntentExecutionStrategy(Strategy):
         expected_keys = self._expected_protection_keys(stash)
         if not expected_keys:
             return
-        position = self._protection_position(
-            instrument_id,
-            str(stash.get("entry_side") or ""),
-        )
-        if position is None:
-            stash.pop("watchdog_repair_failure_count", None)
+        observed_keys = self._exchange_protection_keys(intent_key, stash)
+        if self._defer_flat_or_unknown_protection(intent_key, stash):
             return
-        observed_keys = self._exchange_protection_keys(
-            intent_key,
-            stash,
-        )
-        if observed_keys is None:
+        position = self._protection_position(instrument_id, str(stash.get("entry_side") or ""))
+        if position is None or observed_keys is None:
             return
         missing_keys = tuple(
             expected_key
@@ -773,7 +766,10 @@ class IntentExecutionStrategy(Strategy):
             )
         )
         if not missing_keys:
-            stash.pop("watchdog_repair_failure_count", None)
+            previous_failures = stash.pop("watchdog_repair_failure_count", None)
+            self._recover_protection_freeze(instrument_id, confirmed_intent=intent_key)
+            if previous_failures is not None:
+                self._queue_entry_protection_stash_persist()
             return
         repaired = self._repair_missing_protection_orders(
             intent_key,
@@ -815,6 +811,147 @@ class IntentExecutionStrategy(Strategy):
             },
         )
         self._queue_entry_protection_stash_persist()
+
+    def _defer_flat_or_unknown_protection(self, intent_key: str, stash: dict[str, Any]) -> bool:
+        # Batch ownership and late fills already have their own closing fence.
+        if stash.get("batch_entry_ids") or self._planner_simulation_mode():
+            return False
+        instrument_id = str(stash.get("instrument_id") or "")
+        if not _valid_uuid_text(intent_key) or stash.get("entry_side") not in {"BUY", "SELL"}:
+            return True
+        side = "LONG" if stash.get("entry_side") == "BUY" else "SHORT"
+        state = self._build_reconciled_state(instrument_id)
+        if state is not None:
+            assessment = state.assess(BookKey(self.config.account_id, instrument_id, side))
+            if assessment.state is PositionState.KNOWN_OPEN:
+                return False
+            if assessment.venue_fresh:
+                # A fill delivered after the snapshot must receive protection
+                # immediately; the older flat snapshot cannot retire its owner.
+                snapshot = self._cached_venue_evidence()
+                if snapshot is not None:
+                    snapshot_at = snapshot.get("positions_fetched_at", snapshot["fetched_at"])
+                    prefix = "B" + UUID(intent_key).hex
+                    cached = self._protection_position(instrument_id, str(stash.get("entry_side") or ""))
+                    for order in self._cache_orders_all(instrument_id):
+                        cid = object_client_order_id(order)
+                        if cached is None or not cid.startswith(prefix) or not cid[-2:].isdigit():
+                            continue
+                        if not 1 <= int(cid[-2:]) <= 9 or self._order_status_name(order) not in {"FILLED", "PARTIALLY_FILLED"}:
+                            continue
+                        try:
+                            filled_at = datetime.fromtimestamp(int(getattr(order, "ts_last", 0)) / 1e9, tz=timezone.utc)
+                        except (TypeError, ValueError, OverflowError):
+                            continue
+                        if snapshot_at < filled_at <= self._now():
+                            return False
+                if self._retire_flat_legacy_protection(intent_key, stash):
+                    self._queue_entry_protection_stash_persist()
+                    self._recover_protection_freeze(instrument_id)
+        return True
+
+    def _retire_flat_legacy_protection(self, intent_key: str, stash: dict[str, Any]) -> bool:
+        """Retire metadata only after flat evidence newer than every terminal order.
+
+        Open-order absence, a failed cancel, and stale cache positions are never
+        terminal proof. Batch ownership tombstones retain their late-fill path.
+        """
+        if stash.get("batch_entry_ids") or stash.get("pending_cancel_ids") or self._has_pending_tp_market_fallback(stash):
+            return False
+        instrument_id = str(stash.get("instrument_id") or "")
+        if instrument_id in self._pending_order_confirmations.values():
+            return False
+        snapshot = self._cached_venue_evidence()
+        if snapshot is None or stash.get("entry_side") not in {"BUY", "SELL"}:
+            return False
+        side = "LONG" if stash["entry_side"] == "BUY" else "SHORT"
+        symbol = _canonical_symbol(instrument_id)
+        for row in snapshot["positions"]:
+            if _canonical_symbol(row["symbol"]) != symbol:
+                continue
+            if row["position_side"] in {side, "BOTH"} and Decimal(str(row["quantity"])) != 0:
+                return False
+        try:
+            entry_max = int(stash.get("entry_sequence_max", 1))
+            if not 1 <= entry_max <= 9:
+                return False
+            expected = {encode_client_order_id(UUID(intent_key), seq) for seq in range(1, entry_max + 1)}
+        except (ValueError, TypeError):
+            return False
+        protection_ids = set(stash.get("protection_ids") or ()) | set(stash.get("protection_roles") or {})
+        if self._expected_protection_keys(stash) and not protection_ids:
+            return False
+        expected.update(protection_ids)
+        prefix = "B" + UUID(intent_key).hex
+        for field in ("regular_orders", "algo_orders"):
+            for row in snapshot[field]:
+                cid = str(row.get("client_order_id") or "")
+                if not cid or not row.get("symbol"):
+                    return False
+                if cid.startswith(prefix) or cid in expected:
+                    return False
+        proof_times: dict[str, datetime] = {}
+        for event in stash.get("protection_terminal_events") or ():
+            if not isinstance(event, Mapping) or event.get("event_type") not in {
+                "OrderFilled", "OrderCanceled", "OrderCancelled", "OrderExpired", "OrderRejected", "OrderDenied",
+            }:
+                continue
+            try:
+                proof_times[str(event["client_order_id"])] = datetime.fromisoformat(event["observed_at"])
+            except (KeyError, ValueError, TypeError):
+                continue
+        for order in self._cache_orders_all(instrument_id):
+            cid = object_client_order_id(order)
+            if not cid.startswith(prefix) and cid not in expected:
+                continue
+            expected.add(cid)
+            if self._order_status_name(order) not in self._PROTECTION_TERMINAL_STATUSES:
+                return False
+            try:
+                timestamp = int(getattr(order, "ts_last", 0))
+                if timestamp > 0:
+                    proof_times[cid] = datetime.fromtimestamp(timestamp / 1e9, tz=timezone.utc)
+            except (ValueError, TypeError, OverflowError):
+                return False
+        try:
+            records = self._intent_execution_inbox.records()
+        except (OSError, RuntimeError, ValueError):
+            return False
+        for record in records:
+            if record.intent_id != intent_key:
+                continue
+            expected.update(record.client_order_ids)
+            try:
+                timestamp = datetime.fromisoformat(record.updated_at)
+            except (ValueError, TypeError):
+                return False
+            for cid in record.terminal_client_order_ids:
+                proof_times.setdefault(cid, timestamp)
+        snapshot_at = snapshot.get("positions_fetched_at", snapshot["fetched_at"])
+        try:
+            if any(cid not in proof_times or proof_times[cid] > snapshot_at for cid in expected):
+                return False
+        except TypeError:
+            return False
+        self._entry_protection_stash.pop(intent_key, None)
+        self._cancel_clock_timer(self._PROTECTION_TIMER_PREFIX + intent_key)
+        return True
+
+    def _recover_protection_freeze(self, instrument_id: str, *, confirmed_intent: str = "") -> None:
+        symbol = _canonical_symbol(instrument_id)
+        if self._symbol_open_freezes.get(symbol) != "protection order repair failed twice":
+            return
+        for key, other in self._entry_protection_stash.items():
+            if _canonical_symbol(str(other.get("instrument_id") or "")) != symbol or key == confirmed_intent:
+                continue
+            if other.get("protection_frozen") or self._has_pending_tp_market_fallback(other):
+                return
+            expected = self._expected_protection_keys(other)
+            observed = self._exchange_protection_keys(key, other)
+            if observed is None or any(not any(_protection_keys_match(want, got) for got in observed) for want in expected):
+                return
+        # Receipt uncertainty remains independently visible in symbol_open_freezes.
+        self._symbol_open_freezes.pop(symbol, None)
 
     def _expected_protection_keys(
         self,
@@ -1086,6 +1223,36 @@ class IntentExecutionStrategy(Strategy):
             return False
         return True
 
+    def _cached_venue_evidence(self) -> Mapping[str, Any] | None:
+        """One validated, read-only snapshot for planning and protection lifecycle."""
+        cached_snapshot = getattr(self._exchange_evidence_provider, "cached_snapshot", None)
+        if not callable(cached_snapshot):
+            return None
+        try:
+            snapshot = cached_snapshot(max_age_seconds=self._RECONCILED_EVIDENCE_MAX_AGE_SECONDS)
+            if not isinstance(snapshot, Mapping):
+                return None
+            fetched_at = snapshot.get("fetched_at")
+            for field in ("fetched_at", "positions_fetched_at", "regular_orders_fetched_at", "algo_orders_fetched_at"):
+                timestamp = snapshot.get(field, fetched_at)
+                if not isinstance(timestamp, datetime):
+                    return None
+                age = (self._now() - timestamp).total_seconds()
+                if not 0 <= age <= self._RECONCILED_EVIDENCE_MAX_AGE_SECONDS:
+                    return None
+            for field in ("positions", "regular_orders", "algo_orders"):
+                rows = snapshot.get(field)
+                if not isinstance(rows, (list, tuple)) or any(not isinstance(row, Mapping) for row in rows):
+                    return None
+            for row in snapshot["positions"]:
+                if not row.get("symbol") or row.get("position_side") not in {"LONG", "SHORT", "BOTH"}:
+                    return None
+                if not Decimal(str(row.get("quantity"))).is_finite():
+                    return None
+            return snapshot
+        except Exception:
+            return None
+
     def _build_reconciled_state(self, instrument_id: str) -> Any | None:
         """Build a per-book reconciled state from fresh venue evidence.
 
@@ -1095,23 +1262,10 @@ class IntentExecutionStrategy(Strategy):
         UNKNOWN (see ``_planner_simulation_mode``).
         """
 
-        provider = self._exchange_evidence_provider
-        if not provider:
+        snapshot = self._cached_venue_evidence()
+        if snapshot is None:
             return None
-        cached_snapshot = getattr(provider, "cached_snapshot", None)
-        if not callable(cached_snapshot):
-            return None
-        try:
-            snapshot = cached_snapshot(
-                max_age_seconds=self._RECONCILED_EVIDENCE_MAX_AGE_SECONDS,
-            )
-        except Exception:
-            return None
-        if not isinstance(snapshot, Mapping):
-            return None
-        fetched_at = snapshot.get("fetched_at")
-        if not isinstance(fetched_at, datetime):
-            return None
+        fetched_at = snapshot["fetched_at"]
         venue_snapshot = {
             "positions": [
                 {
@@ -3305,6 +3459,8 @@ class IntentExecutionStrategy(Strategy):
             if str(other.get("instrument_id")) != plan.instrument_id:
                 continue
             if str(other.get("entry_side")) != plan.side:
+                continue
+            if key != str(plan.intent_id) and self._retire_flat_legacy_protection(key, other):
                 continue
             if order_plan.get('type') == 'entry_batch' and not other.get('batch_entry_ids'):
                 self._record_denial(OrderDenied('entry_batch_conflicting_owner', key))
@@ -6459,6 +6615,10 @@ class IntentExecutionStrategy(Strategy):
         if not self._has_authorized_protection_parent(intent_key, stash):
             self._queue_entry_protection_stash_persist()
             return
+        if self._defer_flat_or_unknown_protection(intent_key, stash):
+            if intent_key in self._entry_protection_stash:
+                self._reschedule_protection_sync(intent_key, stash)
+            return
         instrument_id = str(stash["instrument_id"])
         instrument = self._instrument_spec(instrument_id)
         if instrument is None:
@@ -7242,10 +7402,21 @@ class IntentExecutionStrategy(Strategy):
 
     def _protection_position(self, instrument_id: str, entry_side: str) -> Optional[Any]:
         target_book = "LONG" if entry_side == "BUY" else "SHORT"
-        for position in _nonzero_positions(self._cache_positions(instrument_id)):
-            if _position_side(position) == target_book:
-                return position
-        return None
+        cached = next((position for position in _nonzero_positions(self._cache_positions(instrument_id))
+                       if _position_side(position) == target_book), None)
+        state = self._build_reconciled_state(instrument_id)
+        if state is not None:
+            assessment = state.assess(BookKey(self.config.account_id, instrument_id, target_book))
+            if assessment.state is PositionState.KNOWN_OPEN:
+                return PositionSnapshot(
+                    instrument_id=instrument_id, side=target_book,
+                    quantity=format(assessment.quantity, "f"),
+                    position_id=_position_id(cached) or f"{instrument_id}-{target_book}",
+                    entry_price=_position_entry_price(cached),
+                )
+        # Legacy callers are gated above on venue state. Batch fill ownership
+        # and simulation retain their existing cache/late-fill handling.
+        return cached
 
     def _protection_order_plans(
         self,

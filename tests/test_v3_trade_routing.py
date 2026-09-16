@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -950,3 +951,13 @@ def test_cli_submits_explicit_action_without_separate_snapshot_read(monkeypatch,
     assert not any(method == "GET" and path == "/api/system/snapshot" for method, path, _ in calls)
     payload = next(payload for method, path, payload in calls if method == "POST")
     assert payload["action"] == "open_position"
+
+
+@pytest.mark.parametrize("command", ["open", "add", "close", "partial", "set-sl", "set-tps", "disable-tps", "cancel", "status", "positions"])
+def test_all_trade_subcommands_can_render_help(command):
+    result = subprocess.run(
+        [sys.executable, str(TRADE_PATH), command, "--help"],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "usage:" in result.stdout

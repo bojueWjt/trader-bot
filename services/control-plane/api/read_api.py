@@ -7096,27 +7096,6 @@ def _load_entry_venue_view(cur, *, account_id: str, symbol: str) -> dict:
         else:
             heartbeat_stale = True
 
-    projection_items: list[dict] = []
-    cur.execute(
-        """
-        SELECT instrument_id, side::text, quantity, avg_entry_price,
-               mark_price
-        FROM positions_projection
-        WHERE account_id=%s AND status='open'
-        """,
-        (account_id,),
-    )
-    for row in cur.fetchall():
-        projection_items.append(
-            {
-                "instrument_id": row[0],
-                "side": row[1],
-                "quantity": row[2],
-                "entry_price": row[3],
-                "mark_price": row[4],
-            }
-        )
-
     state = "unknown"
     venue_items: list[dict] | None = None
     if heartbeat_conflicted or heartbeat_malformed or mirror_malformed:
@@ -7141,14 +7120,7 @@ def _load_entry_venue_view(cur, *, account_id: str, symbol: str) -> dict:
     elif mirror_present or heartbeat_row is not None:
         state = "stale" if heartbeat_stale or mirror_present else "unknown"
 
-    if state == "known" and venue_items is not None:
-        venue_presence = _symbol_book_presence(venue_items, symbol)
-        projection_presence = _symbol_book_presence(projection_items, symbol)
-        for side in ("long", "short"):
-            if projection_presence[side] and not venue_presence[side]:
-                state = "conflict"
-                break
-
+    # Historical event projections are attribution, not current venue evidence.
     notional = None
     presence = {"long": False, "short": False}
     if state == "known" and venue_items is not None:

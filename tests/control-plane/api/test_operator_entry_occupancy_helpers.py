@@ -334,6 +334,20 @@ def test_rejected_parent_does_not_hold_ungenerated_remainder() -> None:
     assert occupancy["venue_working"] == Decimal("0")
 
 
+def test_fresh_flat_venue_is_not_vetoed_by_historical_projection() -> None:
+    now = datetime.now(timezone.utc)
+    cur = ScriptedCursor([
+        ({"positions": []}, now),
+        ([], now, {"reconciliation_state": "healthy"}, now),
+        [("BTCUSDT-PERP.BINANCE", "long", "0.067", "75000", "75000")],
+    ])
+    view = read_api._load_entry_venue_view(cur, account_id="account-b", symbol="BTCUSDT")
+    assert view == {
+        "state": "known", "presence": {"long": False, "short": False},
+        "notional": Decimal("0"),
+    }
+
+
 def test_malformed_positions_payload_is_not_known_flat() -> None:
     now = datetime.now(timezone.utc)
     cur = ScriptedCursor(

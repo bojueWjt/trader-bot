@@ -1218,6 +1218,115 @@ class StrategyShellTest(unittest.TestCase):
             "ProtectionWatchdogSymbolStopped",
         )
 
+    def test_protection_uses_venue_quantity_when_cache_is_missing_or_drifted(self) -> None:
+        strategy, _key, snapshot, _orders = _flat_legacy_protection_strategy()
+        snapshot["positions"] = [{"symbol": "SOLUSDT", "position_side": "LONG", "quantity": "3"}]
+        for cache in ((), strategy._cache_positions("SOLUSDT-PERP.BINANCE")):
+            with self.subTest(cache=bool(cache)), patch.object(strategy, "_cache_positions", return_value=cache):
+                position = strategy._protection_position("SOLUSDT-PERP.BINANCE", "BUY")
+                self.assertIsNotNone(position)
+                self.assertEqual(str(position.quantity), "3")
+
+    def test_new_entry_fill_does_not_wait_for_older_flat_snapshot(self) -> None:
+        strategy, key, snapshot, orders = _flat_legacy_protection_strategy()
+        now = strategy._now()
+        snapshot["fetched_at"] = now - timedelta(seconds=5)
+        orders[0].ts_last = int((now - timedelta(seconds=1)).timestamp() * 1e9)
+        with patch.object(strategy, "_cache_orders_all", return_value=orders):
+            self.assertFalse(strategy._defer_flat_or_unknown_protection(key, strategy._entry_protection_stash[key]))
+        self.assertIn(key, strategy._entry_protection_stash)
+
+    def test_batch_accepts_only_proven_retired_legacy_owner(self) -> None:
+        for terminal in (False, True):
+            with self.subTest(terminal=terminal):
+                strategy, old_key, _snapshot, orders = _flat_legacy_protection_strategy()
+                if not terminal:
+                    orders[-1].status = "NEW"
+                new_id = uuid4()
+                plan = SimpleNamespace(
+                    instrument_id="SOLUSDT-PERP.BINANCE", side="BUY", intent_id=new_id,
+                    tags=(f"intent_id={new_id}", "authorized_by_type=user", "authorized_by_id=test", "source_message_id=new-batch"),
+                )
+                intent = SimpleNamespace(action="open_position", order_plan={"type": "entry_batch", "stop_loss": "90"})
+                with patch.object(strategy, "_cache_orders_all", return_value=orders), patch.object(strategy, "_cancel_order_object") as cancel:
+                    self.assertEqual(strategy._stage_entry_protection(intent, plan), terminal)
+                self.assertEqual(old_key in strategy._entry_protection_stash, not terminal)
+                self.assertEqual(str(new_id) in strategy._entry_protection_stash, terminal)
+                cancel.assert_not_called()
+
+    def test_flat_venue_retires_terminal_legacy_stash_without_order_actions(self) -> None:
+        strategy, intent_key, _snapshot, orders = _flat_legacy_protection_strategy()
+        strategy._symbol_open_freezes["SOLUSDT"] = "protection order repair failed twice"
+        with patch.object(strategy, "_cache_orders_all", return_value=orders):
+            strategy._check_protection_watchdog(intent_key)
+        self.assertNotIn(intent_key, strategy._entry_protection_stash)
+        self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
+        self.assertEqual(strategy.repair_attempts, 0)
+
+    def test_flat_venue_does_not_retire_unknown_working_or_newer_orders(self) -> None:
+        for case in ("missing", "working", "newer", "stale", "malformed", "pending"):
+            with self.subTest(case=case):
+                strategy, intent_key, snapshot, orders = _flat_legacy_protection_strategy()
+                if case == "missing":
+                    orders.pop()
+                elif case == "working":
+                    orders[-1].status = "NEW"
+                elif case == "newer":
+                    orders[-1].ts_last = int((strategy._now() + timedelta(seconds=1)).timestamp() * 1e9)
+                elif case == "stale":
+                    snapshot["fetched_at"] = strategy._now() - timedelta(minutes=1)
+                elif case == "malformed":
+                    snapshot["positions"] = [{"symbol": "SOLUSDT", "quantity": "bad", "position_side": "LONG"}]
+                else:
+                    strategy._pending_order_confirmations[orders[-1].client_order_id] = "SOLUSDT-PERP.BINANCE"
+                with patch.object(strategy, "_cache_orders_all", return_value=orders):
+                    strategy._check_protection_watchdog(intent_key)
+                self.assertIn(intent_key, strategy._entry_protection_stash)
+                self.assertEqual(strategy.repair_attempts, 0)
+
+    def test_watchdog_recovery_preserves_other_freezes_and_unhealthy_owners(self) -> None:
+        for other_reason in ("order confirmation unknown", "protection order repair failed twice"):
+            with self.subTest(reason=other_reason):
+                strategy = _ProtectionWatchdogStrategy()
+                first, second = str(uuid4()), str(uuid4())
+                strategy._entry_protection_stash[first] = _watchdog_stash(first)
+                strategy._entry_protection_stash[second] = _watchdog_stash(second)
+                strategy._symbol_open_freezes["SOLUSDT"] = other_reason
+                def observed(key, _stash):
+                    return (("stop_loss", None),) if key == first else ()
+                with patch.object(strategy, "_exchange_protection_keys", side_effect=observed):
+                    strategy._check_protection_watchdog(first)
+                self.assertEqual(strategy.symbol_open_freezes["SOLUSDT"], other_reason)
+
+    def test_watchdog_repair_submission_does_not_clear_freeze(self) -> None:
+        strategy = _ProtectionWatchdogStrategy(repair_results=[True])
+        key = str(uuid4())
+        strategy._entry_protection_stash[key] = _watchdog_stash(key)
+        strategy._symbol_open_freezes["SOLUSDT"] = "protection order repair failed twice"
+        strategy._check_protection_watchdog(key)
+        self.assertIn("SOLUSDT", strategy.symbol_open_freezes)
+
+    def test_watchdog_recovery_keeps_pending_receipt_fence(self) -> None:
+        strategy = _ProtectionWatchdogStrategy()
+        key = str(uuid4())
+        strategy._entry_protection_stash[key] = _watchdog_stash(key)
+        strategy._symbol_open_freezes["SOLUSDT"] = "protection order repair failed twice"
+        strategy._pending_order_confirmations["pending-order"] = "SOLUSDT-PERP.BINANCE"
+        with patch.object(strategy, "_exchange_protection_keys", return_value=(("stop_loss", None),)):
+            strategy._check_protection_watchdog(key)
+        self.assertEqual(strategy.symbol_open_freezes["SOLUSDT"], "robot order terminal confirmation pending")
+
+    def test_watchdog_confirmed_recovery_clears_only_protection_freeze(self) -> None:
+        intent_id = uuid4()
+        strategy = _ProtectionWatchdogStrategy()
+        strategy._entry_protection_stash[str(intent_id)] = _watchdog_stash(intent_id)
+        strategy._check_protection_watchdog(str(intent_id))
+        strategy._check_protection_watchdog(str(intent_id))
+        self.assertIn("SOLUSDT", strategy.symbol_open_freezes)
+        with patch.object(strategy, "_exchange_protection_keys", return_value=(("stop_loss", None),)):
+            strategy._check_protection_watchdog(str(intent_id))
+        self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
+
     def test_protection_watchdog_repairs_missing_stop_without_freezing_symbol(
         self,
     ) -> None:
@@ -7098,3 +7207,30 @@ def _normal_live_open_gate() -> dict[str, object]:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _flat_legacy_protection_strategy():
+    strategy = _ProtectionWatchdogStrategy()
+    strategy._intent_execution_inbox = SimpleNamespace(records=lambda: ())
+    intent_id = uuid4()
+    intent_key = str(intent_id)
+    entry_id = encode_client_order_id(intent_id, 1)
+    stop_id = encode_client_order_id(intent_id, 11)
+    stash = _watchdog_stash(intent_id)
+    stash["protection_ids"] = (stop_id,)
+    strategy._entry_protection_stash[intent_key] = stash
+    now = strategy._now()
+    snapshot = {
+        "positions": [], "regular_orders": [], "algo_orders": [],
+        "fetched_at": now,
+    }
+    strategy.set_exchange_evidence_provider(SimpleNamespace(
+        cached_snapshot=lambda **_kwargs: snapshot,
+        snapshot=lambda **_kwargs: snapshot,
+    ))
+    terminal_at = int((now - timedelta(seconds=5)).timestamp() * 1e9)
+    orders = [
+        SimpleNamespace(client_order_id=entry_id, status="FILLED", ts_last=terminal_at),
+        SimpleNamespace(client_order_id=stop_id, status="CANCELED", ts_last=terminal_at),
+    ]
+    return strategy, intent_key, snapshot, orders
