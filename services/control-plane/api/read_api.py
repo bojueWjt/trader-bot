@@ -636,6 +636,10 @@ def _execution_order_plan(order_plan: dict | None, risk_budget: dict | None,
             out['entry_expires_at'] = op['entry_expires_at']
         return _preserve_execution_order_plan_metadata(op, out)
     side = str(op.get("side") or "").lower()
+    if op.get("type") == "zone_ladder" and isinstance(op.get("tranches"), list):
+        out = {key: value for key, value in op.items() if key != "entry"}
+        out["side"] = {"long": "buy", "short": "sell"}.get(side, side)
+        return out
     if op.get("type") and op.get("quantity") is not None and side in ("buy", "sell"):
         return op  # already B execution format
     b_side = {"long": "buy", "buy": "buy", "short": "sell", "sell": "sell"}.get(side, side)
@@ -850,6 +854,7 @@ def _zone_ladder_order_plan(
                 "tranche_id": tranche_id,
                 "price": float(price),
                 "quantity": _format_decimal_plain(scaled_quantity),
+                "notional": format(scaled_quantity * price, "f"),
             }
         )
     if len(tranches) != len(_ZONE_LADDER_TRANCHES):
@@ -2111,111 +2116,15 @@ def _durable_entry_order_resume_exemption(
     if _durable_exchange_entry_shape(exchange_order) is False:
         return False
 
-    cur.execute(
-        """
-        SELECT projection.intent_id::text,
-               projection.status,
-               projection.instrument_id,
-               projection.side::text,
-               projection.order_type,
-               projection.quantity,
-               projection.price,
-               projection.reduce_only,
-               projection.payload,
-               intent.status::text,
-               intent.action::text,
-               intent.instrument_id,
-               intent.valid_until,
-               clock_timestamp()
-        FROM orders_projection AS projection
-        JOIN trade_intents AS intent
-          ON intent.intent_id = projection.intent_id
-         AND intent.account_id = projection.account_id
-        WHERE projection.account_id=%s
-          AND projection.client_order_id=%s
-          AND projection.intent_id=%s
-        """,
-        (account_id, client_order_id, intent_id),
+    # The exchange book supplies shape/price/quantity; the CID binds it to
+    # an approved intent. A projection shell or mismatch cannot veto that proof.
+    if any(_positive_order_decimal(exchange_order.get(key)) is False
+           for key in ("price", "quantity")):
+        return False
+    return _intent_backed_entry_exemption(
+        cur, account_id=account_id, exchange_order=exchange_order,
+        client_order_id=client_order_id, intent_id=intent_id, sequence=sequence,
     )
-    row = cur.fetchone()
-    if row is None:
-        # Projection ingress may lag or filter the order out entirely; the
-        # client_order_id embeds the intent id, so fall back to the durable
-        # intent itself with the exchange snapshot supplying the shape.
-        return _intent_backed_entry_exemption(
-            cur,
-            account_id=account_id,
-            exchange_order=exchange_order,
-            client_order_id=client_order_id,
-            intent_id=intent_id,
-            sequence=sequence,
-        )
-    (
-        projection_intent_id,
-        projection_status,
-        projection_instrument_id,
-        projection_side,
-        projection_order_type,
-        projection_quantity,
-        projection_price,
-        projection_reduce_only,
-        raw_projection_payload,
-        intent_status,
-        intent_action,
-        intent_instrument_id,
-        valid_until,
-        database_now,
-    ) = row
-    if str(projection_intent_id) != intent_id:
-        return False
-    if str(projection_status or "").strip().lower() in (
-        _TERMINAL_ORDER_STATES
-    ):
-        return False
-    if intent_status != "approved":
-        return False
-    if intent_action not in {"open_position", "add_position"}:
-        return False
-    if (
-        _canonical_symbol(intent_instrument_id)
-        != _canonical_symbol(projection_instrument_id)
-    ):
-        return False
-    # Working GTC entries were admitted at submit time; intent TTL must not
-    # revoke resume exemption after the order is already on the book.
-    if not isinstance(valid_until, datetime):
-        return False
-    del database_now
-
-    projection_order = {}
-    if isinstance(raw_projection_payload, dict):
-        projection_order.update(raw_projection_payload)
-    projection_order.update(
-        {
-            "client_order_id": client_order_id,
-            "instrument_id": projection_instrument_id,
-            "side": projection_side,
-            "order_type": projection_order_type,
-            "quantity": projection_quantity,
-            "price": projection_price,
-        }
-    )
-    if projection_reduce_only is not None:
-        projection_order["reduce_only"] = projection_reduce_only
-    if _durable_projection_matches_exchange_order(
-        projection_order,
-        exchange_order,
-    ) is False:
-        return False
-    return {
-        "client_order_id": client_order_id,
-        "intent_id": intent_id,
-        "sequence": sequence,
-        "instrument_id": str(projection_instrument_id),
-        "price": _decimal_audit_text(projection_price),
-        "quantity": _decimal_audit_text(projection_quantity),
-        "valid_until": valid_until.isoformat(),
-    }
 
 
 def _intent_backed_entry_exemption(
@@ -2305,52 +2214,6 @@ def _durable_exchange_entry_shape(order: dict) -> bool:
     if raw_time_in_force is None:
         raw_time_in_force = order.get("timeInForce")
     return str(raw_time_in_force or "").strip().upper() == "GTC"
-
-
-def _durable_projection_matches_exchange_order(
-    projection_order: dict,
-    exchange_order: dict,
-) -> bool:
-    if _explicit_reduce_only(projection_order) is not False:
-        return False
-    projection_order_type = str(
-        projection_order.get("order_type")
-        or projection_order.get("type")
-        or ""
-    ).strip().upper()
-    if projection_order_type != "LIMIT":
-        return False
-    if (
-        _snapshot_item_symbol(projection_order)
-        != _snapshot_item_symbol(exchange_order)
-    ):
-        return False
-    if (
-        _entry_order_side(projection_order)
-        != _entry_order_side(exchange_order)
-    ):
-        return False
-    for field_name in ("quantity", "price"):
-        projection_value = _positive_order_decimal(
-            projection_order.get(field_name)
-        )
-        exchange_value = _positive_order_decimal(
-            exchange_order.get(field_name)
-        )
-        if projection_value is False or exchange_value is False:
-            return False
-        if projection_value != exchange_value:
-            return False
-    return True
-
-
-def _entry_order_side(order: dict) -> str:
-    raw_side = str(order.get("side") or "").strip().upper()
-    if raw_side in {"BUY", "LONG"}:
-        return "BUY"
-    if raw_side in {"SELL", "SHORT"}:
-        return "SELL"
-    return ""
 
 
 def _positive_order_decimal(value) -> Decimal | bool:
@@ -7354,24 +7217,16 @@ _RELEASED_ENTRY_ORDER_STATES = frozenset(
         "failed",
     }
 )
-_OCCUPANCY_INTENT_STATUSES = frozenset(
-    {
-        "approved",
-        "rejected",
-        "denied",
-        "failed",
-        "cancelled",
-        "canceled",
-        "expired",
-    }
-)
 _RESERVING_INTENT_STATUSES = frozenset({"approved"})
 
 
 def _order_is_entry_working(status, order_type, payload) -> bool:
     if str(status or "").strip().lower() in _TERMINAL_ORDER_STATES:
         return False
-    if isinstance(payload, dict) and payload.get("reduce_only") is True:
+    if isinstance(payload, dict) and any(
+        value is True or value == "true"
+        for value in (payload.get("reduce_only"), payload.get("reduceOnly"))
+    ):
         return False
     if str(order_type or "").upper() in _PROTECTION_ORDER_TYPES:
         return False
@@ -7384,9 +7239,12 @@ def _entry_order_risk_class(status, order_type, payload) -> str:
     ignore: protection / reduce-only (not entry risk)
     filled / released: no remaining occupancy here (fills live in venue notional)
     pre_venue / venue_working: remaining unfilled entry risk
-    unknown: lost/empty/unrecognized — caller must fail closed
+    unknown: lost/empty/unrecognized — reserve the intent budget ceiling
     """
-    if isinstance(payload, dict) and payload.get("reduce_only") is True:
+    if isinstance(payload, dict) and any(
+        value is True or value == "true"
+        for value in (payload.get("reduce_only"), payload.get("reduceOnly"))
+    ):
         return "ignore"
     if str(order_type or "").upper() in _PROTECTION_ORDER_TYPES:
         return "ignore"
@@ -7448,22 +7306,24 @@ def _planned_entry_legs(order_plan) -> list[dict] | None:
                 return None
             legs.append({"seq": seq, "notional": notional})
         return legs or None
-    return [{"seq": 1, "notional": _leg_plan_notional(plan)}]
+    if plan_type in {"limit", "market"}:
+        return [{"seq": 1, "notional": _leg_plan_notional(plan)}]
+    return None
 
 
 def _projection_entry_seq(intent_id, client_order_id, payload) -> int | None:
+    identity = _entry_order_identity(str(client_order_id or ""))
+    if identity is not False:
+        projected_intent, sequence = identity
+        if projected_intent == str(intent_id):
+            return sequence
+        return None
     if isinstance(payload, dict) and payload.get("seq") is not None:
         try:
             return int(payload["seq"])
         except (TypeError, ValueError):
             return None
-    identity = _entry_order_identity(str(client_order_id or ""))
-    if identity is False:
-        return None
-    projected_intent, sequence = identity
-    if projected_intent != str(intent_id):
-        return None
-    return sequence
+    return None
 
 
 def _require_entry_budget(budget) -> Decimal:
@@ -7479,18 +7339,6 @@ def _require_entry_budget(budget) -> Decimal:
             detail="approved unfinished intent max_notional is invalid",
         )
     return budget_notional
-
-
-def _order_is_pre_venue_entry(status, order_type, payload) -> bool:
-    if str(status or "").strip().lower() not in _PRE_VENUE_ORDER_STATES:
-        return False
-    return _order_is_entry_working(status, order_type, payload)
-
-
-def _order_is_venue_accepted_working(status, order_type, payload) -> bool:
-    if _order_is_pre_venue_entry(status, order_type, payload):
-        return False
-    return _order_is_entry_working(status, order_type, payload)
 
 
 def _entry_remaining_notional(
@@ -7560,28 +7408,67 @@ def _snapshot_predates_accept(
     return snapshot_at < accept_at
 
 
-def _entry_intent_occupancy(cur, account_id: str) -> dict[str, Decimal]:
-    """Split occupancy so each notional is counted once.
+def _entry_venue_orders(cur, account_id: str) -> dict[str, dict[str, tuple]]:
+    """Read the existing exchange mirror; never infer cancellation from absence."""
+    cur.execute(
+        "SELECT payload, updated_at FROM exchange_state_mirror WHERE account_id=%s",
+        (account_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return {}
+    payload, observed_at = row
+    if not isinstance(payload, dict) or not _timestamp_is_fresh_with_max_age(
+        observed_at, datetime.now(timezone.utc), DEFAULT_STALENESS_MS / 1000,
+    ):
+        return {}
+    # The recorder writes account and orders from the same captured snapshot.
+    # Use capture time, not the later DB write, to avoid reserving that margin twice.
+    captured_at = observed_at
+    if payload.get("fetched_at"):
+        try:
+            parsed = datetime.fromisoformat(str(payload["fetched_at"]).replace("Z", "+00:00"))
+        except ValueError:
+            return {}
+        if not _timestamp_is_fresh_with_max_age(
+            parsed, datetime.now(timezone.utc), DEFAULT_STALENESS_MS / 1000,
+        ):
+            return {}
+        captured_at = min(observed_at, parsed)
+    grouped: dict[str, dict[str, tuple]] = {}
+    orders = payload.get("open_orders")
+    if not isinstance(orders, list):
+        return {}
+    for order in orders:
+        if not isinstance(order, dict):
+            continue
+        cid = client_order_id_from_row(order)
+        identity = _entry_order_identity(cid)
+        if identity is False:
+            continue
+        intent_id, _sequence = identity
+        grouped.setdefault(intent_id, {})[cid] = (
+            order.get("status") or "accepted", order.get("type") or order.get("order_type"),
+            order.get("origQty", order.get("quantity")),
+            order.get("executedQty", order.get("filled_quantity", "0")),
+            order.get("price"), order, observed_at, cid, None, captured_at,
+        )
+    return grouped
 
-    off_venue: not yet accepted by the venue (inbox / initialized /
-    submitted) plus approved unsent planned entry legs from order_plan.
-    venue_working: remaining unfilled qty on venue-accepted entry orders
-    (GTC still on book even past valid_until, including after the parent
-    intent is rejected).
-    available_hold: off_venue plus accepted remaining whose account
-    snapshot predates accept (margin not yet in available_balance).
-    Filled size lives in venue position notional, not here.
-    risk_budget.max_notional is a ceiling, not an unsent-leg remainder.
-    Lost/unknown entry legs fail closed instead of releasing risk.
+
+def _entry_intent_occupancy(cur, account_id: str) -> dict[str, Decimal]:
+    """Count known working legs; plans reserve only legs not yet sent.
+
+    Unknown evidence reserves the intent ceiling instead of disabling the
+    account. Fresh venue rows override older projections with the same CID;
+    absence from a snapshot is never used as terminal evidence.
     """
     snapshot_at = _account_snapshot_at(cur, account_id)
+    venue_orders = _entry_venue_orders(cur, account_id)
     cur.execute(
         """
-        SELECT intent_id::text,
-               risk_budget,
-               valid_until < clock_timestamp(),
-               status::text,
-               order_plan
+        SELECT intent_id::text, risk_budget, valid_until < clock_timestamp(),
+               status::text, order_plan
         FROM trade_intents
         WHERE account_id=%s
           AND action::text IN ('open_position', 'add_position')
@@ -7596,165 +7483,140 @@ def _entry_intent_occupancy(cur, account_id: str) -> dict[str, Decimal]:
     venue_working = Decimal("0")
     available_hold = Decimal("0")
     for row in cur.fetchall():
-        intent_id, budget, expired = row[0], row[1], row[2]
-        intent_status = (
-            str(row[3] or "").strip().lower() if len(row) > 3 else "approved"
-        )
+        intent_id, budget, expired = row[:3]
+        intent_status = str(row[3] or "").lower() if len(row) > 3 else "approved"
         order_plan = row[4] if len(row) > 4 else {}
         still_reserving = intent_status in _RESERVING_INTENT_STATUSES
         cur.execute(
             """
             SELECT status, order_type, quantity, filled_quantity, price,
-                   payload, ts_event, client_order_id
-            FROM orders_projection
-            WHERE intent_id=%s
+                   payload, ts_event, client_order_id, reduce_only
+            FROM orders_projection WHERE intent_id=%s AND account_id=%s
             """,
-            (intent_id,),
+            (intent_id, account_id),
         )
-        orders = cur.fetchall()
-        has_any_order = False
-        entry_seen = False
-        projected_seqs: set[int] = set()
+        projected = cur.fetchall()
+        remaining_venue = dict(venue_orders.get(str(intent_id), {}))
+        orders = []
+        for projected_order in projected:
+            cid = projected_order[7] if len(projected_order) > 7 else None
+            venue_order = remaining_venue.pop(cid, None)
+            projection_at = _aware_datetime(projected_order[6]) if len(projected_order) > 6 else None
+            if venue_order is not None and (
+                projection_at is None or venue_order[6] >= projection_at
+            ):
+                orders.append(venue_order)
+            else:
+                orders.append(projected_order)
+        orders.extend(remaining_venue.values())
+
+        sent_seqs: set[int] = set()
         unsequenced_entry = 0
-        pre_venue_remaining = Decimal("0")
+        entry_seen = False
+        uncertain = False
+        pre_remaining = Decimal("0")
         venue_remaining = Decimal("0")
-        unconfirmed_remaining = Decimal("0")
-        budget_notional: Decimal | None = None
+        unconfirmed = Decimal("0")
         for order in orders:
-            has_any_order = True
-            status = order[0]
-            order_type = order[1]
-            quantity = order[2]
-            filled = order[3]
-            price = order[4]
-            payload = order[5]
+            status, order_type, quantity, filled, price, raw_payload = order[:6]
+            payload = dict(raw_payload) if isinstance(raw_payload, dict) else {}
+            if len(order) > 8 and order[8] is not None:
+                payload["reduce_only"] = order[8]
             ts_event = order[6] if len(order) > 6 else None
-            client_order_id = order[7] if len(order) > 7 else None
+            cid = order[7] if len(order) > 7 else None
+            identity = _entry_order_identity(str(cid or ""))
+            if identity is not False and identity[1] >= 10:
+                continue
             kind = _entry_order_risk_class(status, order_type, payload)
             if kind == "ignore":
                 continue
-            if kind == "unknown":
-                raise HTTPException(
-                    status_code=409,
-                    detail="entry occupancy is unknown",
-                )
             entry_seen = True
-            seq = _projection_entry_seq(intent_id, client_order_id, payload)
+            seq = _projection_entry_seq(intent_id, cid, payload)
             if seq is None:
                 unsequenced_entry += 1
             else:
-                projected_seqs.add(seq)
+                # Terminal legs are sent too: do not reserve them again. Extra
+                # terminal or working sequences never invalidate other symbols.
+                sent_seqs.add(seq)
+            if kind in {"filled", "released"}:
+                continue
+            if kind == "unknown":
+                uncertain = True
+                continue
+            try:
+                remaining = _entry_remaining_notional(
+                    quantity=quantity, filled=filled, price=price,
+                )
+            except HTTPException:
+                uncertain = True
+                continue
             if kind == "pre_venue":
-                remaining = _entry_remaining_notional(
-                    quantity=quantity,
-                    filled=filled,
-                    price=price,
-                    budget_notional=None,
-                )
-                pre_venue_remaining += remaining
-                continue
-            if kind == "venue_working":
-                remaining = _entry_remaining_notional(
-                    quantity=quantity,
-                    filled=filled,
-                    price=price,
-                    budget_notional=None,
-                )
+                pre_remaining += remaining
+            else:
                 venue_remaining += remaining
-                if _snapshot_predates_accept(snapshot_at, ts_event):
-                    unconfirmed_remaining += remaining
-        if has_any_order and not entry_seen:
-            raise HTTPException(
-                status_code=409,
-                detail="entry occupancy is unknown",
-            )
-        venue_working += venue_remaining
-        off_venue += pre_venue_remaining
-        available_hold += pre_venue_remaining + unconfirmed_remaining
-        if entry_seen:
-            if still_reserving:
+                margin_evidence_at = order[9] if len(order) > 9 else ts_event
+                if _snapshot_predates_accept(snapshot_at, margin_evidence_at):
+                    unconfirmed += remaining
+
+        if orders:
+            if entry_seen and still_reserving:
                 planned = _planned_entry_legs(order_plan)
-                if planned is None:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="entry occupancy is unknown",
-                    )
-                if unsequenced_entry and (
-                    len(planned) != 1 or projected_seqs or unsequenced_entry != 1
+                if planned is not None:
+                    if unsequenced_entry:
+                        if len(planned) == 1 and not sent_seqs and unsequenced_entry == 1:
+                            sent_seqs.add(int(planned[0]["seq"]))
+                        else:
+                            uncertain = True
+                    for leg in planned:
+                        if int(leg["seq"]) in sent_seqs:
+                            continue
+                        notional = leg.get("notional")
+                        if notional is None or notional <= 0:
+                            uncertain = True
+                        else:
+                            pre_remaining += notional
+                elif isinstance(order_plan, dict) and (
+                    order_plan.get("type") in {"zone_ladder", "entry_batch"}
+                    or "entry_batch" in order_plan
                 ):
-                    raise HTTPException(
-                        status_code=409,
-                        detail="entry occupancy is unknown",
-                    )
-                if unsequenced_entry == 1 and len(planned) == 1:
-                    projected_seqs.add(int(planned[0]["seq"]))
-                extra = projected_seqs - {int(leg["seq"]) for leg in planned}
-                if extra:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="entry occupancy is unknown",
-                    )
-                for leg in planned:
-                    if int(leg["seq"]) in projected_seqs:
-                        continue
-                    notional = leg.get("notional")
-                    if notional is None or notional <= 0:
-                        raise HTTPException(
-                            status_code=409,
-                            detail="unsent entry leg notional is unknown",
-                        )
-                    off_venue += notional
-                    available_hold += notional
-            continue
-        cur.execute(
-            """
-            SELECT event_type
-            FROM execution_events
-            WHERE intent_id=%s
-            """,
-            (intent_id,),
-        )
-        events = {str(event_row[0] or "") for event_row in cur.fetchall()}
-        if events & _FILL_EVENT_TYPES:
-            if still_reserving:
-                raise HTTPException(
-                    status_code=409,
-                    detail="entry occupancy is unknown",
-                )
-            continue
-        cur.execute(
-            "SELECT count(*) FROM execution_commands WHERE intent_id=%s",
-            (intent_id,),
-        )
-        command_count = int((cur.fetchone() or [0])[0] or 0)
-        if events & _VENUE_ACCEPT_EVENT_TYPES:
-            raise HTTPException(
-                status_code=409,
-                detail="venue working occupancy is unknown",
+                    uncertain = True
+                # Legacy semantic plans contain no reliable unsent-leg map.
+                # Known venue legs stand on their own, including seq 02/03.
+        else:
+            cur.execute(
+                "SELECT event_type FROM execution_events WHERE intent_id=%s",
+                (intent_id,),
             )
-        if not still_reserving:
-            continue
-        if events & _VENUE_FAIL_EVENT_TYPES and command_count == 0:
-            continue
-        if expired and command_count == 0 and not events:
-            continue
-        planned = _planned_entry_legs(order_plan)
-        planned_total = Decimal("0")
-        if planned:
-            sized = True
-            for leg in planned:
-                notional = leg.get("notional")
-                if notional is None or notional <= 0:
-                    sized = False
-                    break
-                planned_total += notional
-            if sized and planned_total > 0:
-                off_venue += planned_total
-                available_hold += planned_total
-                continue
-        budget_notional = _require_entry_budget(budget)
-        off_venue += budget_notional
-        available_hold += budget_notional
+            events = {str(event[0] or "") for event in cur.fetchall()}
+            if events & _FILL_EVENT_TYPES:
+                # A fill proves sent risk, not that every planned leg is done.
+                uncertain = still_reserving
+            else:
+                cur.execute(
+                    "SELECT count(*) FROM execution_commands WHERE intent_id=%s",
+                    (intent_id,),
+                )
+                command_count = int((cur.fetchone() or [0])[0] or 0)
+                if events & _VENUE_ACCEPT_EVENT_TYPES:
+                    uncertain = True
+                elif not still_reserving:
+                    continue
+                elif events & _VENUE_FAIL_EVENT_TYPES and command_count == 0:
+                    continue
+                elif expired and command_count == 0 and not events:
+                    continue
+                else:
+                    planned = _planned_entry_legs(order_plan)
+                    if planned and all(leg.get("notional") for leg in planned):
+                        pre_remaining = sum((leg["notional"] for leg in planned), Decimal("0"))
+                    else:
+                        uncertain = True
+        if uncertain:
+            ceiling = _require_entry_budget(budget)
+            pre_remaining = max(pre_remaining, ceiling - venue_remaining, Decimal("0"))
+        venue_working += venue_remaining
+        off_venue += pre_remaining
+        available_hold += pre_remaining + unconfirmed
     return {
         "off_venue": off_venue,
         "venue_working": venue_working,
@@ -9673,6 +9535,14 @@ def operator_order(
         "max_notional": risk_max_notional,
         "max_leverage": leverage or caps["max_leverage"],
     }
+
+    if action in _OPERATOR_ENTRY_ACTIONS and entry_type == "zone":
+        execution_plan = _execution_order_plan(order_plan, risk_budget, symbol, action)
+        if execution_plan.get("type") == "zone_ladder":
+            # Freeze the same legs that execution will consume, before approval.
+            order_plan["type"] = "zone_ladder"
+            order_plan["tranches"] = execution_plan["tranches"]
+            order_plan["time_in_force"] = execution_plan["time_in_force"]
 
     raw_channel = "hermes-operator"
     has_provenance = False

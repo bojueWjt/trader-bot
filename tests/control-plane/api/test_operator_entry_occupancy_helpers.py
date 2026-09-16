@@ -19,6 +19,11 @@ _NOW = datetime.now(timezone.utc)
 _SNAP = (_NOW, _NOW.isoformat())
 
 
+@pytest.fixture(autouse=True)
+def no_venue_snapshot(monkeypatch):
+    monkeypatch.setattr(read_api, "_entry_venue_orders", lambda cur, account_id: {})
+
+
 class ScriptedCursor:
     def __init__(self, queue: list):
         self.queue = list(queue)
@@ -110,10 +115,10 @@ def test_protection_orders_are_not_entry_working_occupancy() -> None:
             ],
         ]
     )
-    with pytest.raises(read_api.HTTPException) as exc:
-        read_api._entry_intent_occupancy(cur, "account-b")
-    assert exc.value.status_code == 409
-    assert "unknown" in str(exc.value.detail)
+    occupancy = read_api._entry_intent_occupancy(cur, "account-b")
+    assert occupancy["off_venue"] == Decimal("0")
+    assert occupancy["available_hold"] == Decimal("0")
+    assert occupancy["venue_working"] == Decimal("0")
 
 
 def test_rejected_parent_still_occupies_accepted_working_leg() -> None:
@@ -158,7 +163,7 @@ def test_rejected_parent_filled_only_is_not_off_venue() -> None:
     assert occupancy["venue_working"] == Decimal("0")
 
 
-def test_lost_entry_leg_fail_closes_occupancy() -> None:
+def test_lost_entry_leg_reserves_intent_budget() -> None:
     intent_id = str(uuid4())
     cur = ScriptedCursor(
         [
@@ -167,13 +172,13 @@ def test_lost_entry_leg_fail_closes_occupancy() -> None:
             [("lost", "LIMIT", Decimal("10"), Decimal("0"), Decimal("6"), {}, _NOW)],
         ]
     )
-    with pytest.raises(read_api.HTTPException) as exc:
-        read_api._entry_intent_occupancy(cur, "account-b")
-    assert exc.value.status_code == 409
-    assert "unknown" in str(exc.value.detail)
+    occupancy = read_api._entry_intent_occupancy(cur, "account-b")
+    assert occupancy["off_venue"] == Decimal("60")
+    assert occupancy["available_hold"] == Decimal("60")
+    assert occupancy["venue_working"] == Decimal("0")
 
 
-def test_rejected_parent_lost_leg_fail_closes() -> None:
+def test_rejected_parent_lost_leg_reserves_intent_budget() -> None:
     intent_id = str(uuid4())
     cur = ScriptedCursor(
         [
@@ -182,9 +187,10 @@ def test_rejected_parent_lost_leg_fail_closes() -> None:
             [("lost", "LIMIT", Decimal("10"), Decimal("0"), Decimal("6"), {}, _NOW)],
         ]
     )
-    with pytest.raises(read_api.HTTPException) as exc:
-        read_api._entry_intent_occupancy(cur, "account-b")
-    assert exc.value.status_code == 409
+    occupancy = read_api._entry_intent_occupancy(cur, "account-b")
+    assert occupancy["off_venue"] == Decimal("60")
+    assert occupancy["available_hold"] == Decimal("60")
+    assert occupancy["venue_working"] == Decimal("0")
 
 
 def test_unsent_planned_ladder_leg_is_reserved() -> None:
@@ -263,7 +269,7 @@ def test_released_invalid_budget_without_legs_does_not_block() -> None:
     assert occupancy["venue_working"] == Decimal("0")
 
 
-def test_ambiguous_unsent_leg_fail_closes() -> None:
+def test_ambiguous_unsent_leg_reserves_intent_budget() -> None:
     intent_id = str(uuid4())
     plan = {
         "type": "entry_batch",
@@ -290,9 +296,10 @@ def test_ambiguous_unsent_leg_fail_closes() -> None:
             ],
         ]
     )
-    with pytest.raises(read_api.HTTPException) as exc:
-        read_api._entry_intent_occupancy(cur, "account-b")
-    assert exc.value.status_code == 409
+    occupancy = read_api._entry_intent_occupancy(cur, "account-b")
+    assert occupancy["off_venue"] == Decimal("70")
+    assert occupancy["available_hold"] == Decimal("70")
+    assert occupancy["venue_working"] == Decimal("0")
 
 
 def test_rejected_parent_does_not_hold_ungenerated_remainder() -> None:
@@ -562,3 +569,50 @@ def test_account_lock_sql_is_shared_two_arg_hashtext() -> None:
     sql, params = cur.statements[0]
     assert "pg_advisory_xact_lock(hashtext(%s), 0)" in sql
     assert params == ("account-c",)
+
+
+@pytest.mark.parametrize("plan", [{}, {"entry": {"type": "zone"}}, {"type": "limit", "quantity": "10", "price": 6}])
+def test_three_working_legs_count_remaining_without_plan_shape_veto(plan) -> None:
+    intent = str(uuid4())
+    orders = [("accepted", "LIMIT", 10, 2, 6, {}, _NOW,
+               f"B{intent.replace('-', '')}{seq:02d}") for seq in (1, 2, 3)]
+    cur = ScriptedCursor([_SNAP, [(intent, {"max_notional": 180}, False, "approved", plan)], orders])
+    assert read_api._entry_intent_occupancy(cur, "account-b") == {
+        "venue_working": Decimal("144"), "off_venue": Decimal("0"),
+        "available_hold": Decimal("0"),
+    }
+
+
+@pytest.mark.parametrize("status", ["filled", "canceled", "cancelled", "expired"])
+def test_terminal_extra_legs_with_empty_quantity_never_reserve_or_veto(status) -> None:
+    intent = str(uuid4())
+    orders = [("accepted", "LIMIT", 10, 0, 6, {}, _NOW, f"B{intent.replace('-', '')}01")]
+    orders += [(status, "MARKET", None, None, None, {}, _NOW,
+                f"B{intent.replace('-', '')}{seq:02d}") for seq in (2, 3)]
+    plan = {"type": "limit", "quantity": "10", "price": 6}
+    cur = ScriptedCursor([_SNAP, [(intent, {"max_notional": 180}, False, "approved", plan)], orders])
+    assert read_api._entry_intent_occupancy(cur, "account-b")["off_venue"] == 0
+
+
+@pytest.mark.parametrize("seq,payload,order_type", [
+    (10, {}, None), (11, {}, None), (99, {}, None),
+    (1, {"reduceOnly": "true"}, "LIMIT"), (1, {}, "TAKE_PROFIT_MARKET"),
+])
+def test_protection_only_thin_shell_has_zero_occupancy(seq, payload, order_type) -> None:
+    intent = str(uuid4())
+    orders = [("accepted", order_type, None, None, None, payload, _NOW,
+               f"B{intent.replace('-', '')}{seq:02d}")]
+    cur = ScriptedCursor([_SNAP, [(intent, {"max_notional": 180}, False, "approved")], orders])
+    assert read_api._entry_intent_occupancy(cur, "account-b") == {
+        "venue_working": Decimal("0"), "off_venue": Decimal("0"), "available_hold": Decimal("0"),
+    }
+
+
+def test_unknown_leg_reserves_ceiling_without_double_counting_known_working() -> None:
+    intent = str(uuid4())
+    orders = [("accepted", "LIMIT", 10, 0, 6, {}, _NOW, f"B{intent.replace('-', '')}01"),
+              ("lost", None, None, None, None, {}, _NOW, f"B{intent.replace('-', '')}02")]
+    cur = ScriptedCursor([_SNAP, [(intent, {"max_notional": 100}, False, "approved")], orders])
+    assert read_api._entry_intent_occupancy(cur, "account-b") == {
+        "venue_working": Decimal("60"), "off_venue": Decimal("40"), "available_hold": Decimal("40"),
+    }

@@ -211,6 +211,16 @@ class ExchangeStateRecorderTest(unittest.TestCase):
 
         self.assertEqual(row["position_side"], "LONG")
 
+    def test_slim_order_preserves_remaining_quantity_evidence(self) -> None:
+        module = _load_module()
+        row = module.slim_order({
+            "type": "LIMIT", "origQty": "10", "executedQty": "4",
+            "status": "PARTIALLY_FILLED", "price": "6",
+        })
+        self.assertEqual(row["quantity"], "10")
+        self.assertEqual(row["filled_quantity"], "4")
+        self.assertEqual(row["status"], "PARTIALLY_FILLED")
+
     def test_build_binance_opener_reads_http_proxy_from_environment(self) -> None:
         module = _load_module()
 

@@ -2855,7 +2855,7 @@ def test_resume_rejects_durable_entry_without_explicit_reduce_only_false(
     )
 
 
-def test_resume_rejects_durable_entry_with_exchange_quantity_drift(
+def test_resume_uses_venue_quantity_when_projection_drifts(
     client: TestClient,
     migrated_db: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -2879,10 +2879,7 @@ def test_resume_rejects_durable_entry_with_exchange_quantity_drift(
         json=_resume_body(None),
     )
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == (
-        "robot-owned orders are not terminal"
-    )
+    assert response.status_code == 200, response.text
 
 
 def test_resume_rejects_durable_entry_with_intent_instrument_drift(
@@ -4729,3 +4726,32 @@ def test_resume_projection_shell_uses_only_same_fresh_venue_protection(
         if expected_status == 200:
             cur.execute("SELECT status FROM node_heartbeats WHERE node_id=%s", (NODE_A,))
             assert cur.fetchone() == ('HALTED',)
+
+
+@pytest.mark.parametrize("projection_state", ["thin", "mismatch", "terminal"])
+def test_resume_preserves_live_ladder_despite_projection_shape(
+    client: TestClient, migrated_db: str, monkeypatch: pytest.MonkeyPatch,
+    projection_state: str,
+) -> None:
+    monkeypatch.setattr(read_api, "_binance_mark_price", lambda _symbol: 102)
+    intent, orders = _seed_exchange_accepted_durable_entry_ladder(client, migrated_db)
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        if projection_state == "thin":
+            cur.execute("UPDATE orders_projection SET quantity=NULL, price=NULL, order_type=NULL, reduce_only=NULL WHERE intent_id=%s", (intent,))
+        elif projection_state == "mismatch":
+            cur.execute("UPDATE orders_projection SET quantity=999, price=1 WHERE intent_id=%s", (intent,))
+        else:
+            cur.execute("UPDATE orders_projection SET status='canceled' WHERE intent_id=%s", (intent,))
+        cur.execute("SELECT order_plan FROM trade_intents WHERE intent_id=%s", (intent,))
+        persisted = cur.fetchone()[0]
+        assert persisted["type"] == "zone_ladder"
+        assert [leg["seq"] for leg in persisted["tranches"]] == [1, 2, 3]
+        assert all(Decimal(leg["notional"]) > 0 for leg in persisted["tranches"])
+    # Polling after the market moves must use the exact approved legs.
+    monkeypatch.setattr(read_api, "_binance_mark_price", lambda _symbol: 90)
+    downlink = read_api._execution_order_plan(persisted, {"max_notional": 12}, SYMBOL, "open_position")
+    assert downlink["tranches"] == persisted["tranches"]
+    _seed_heartbeat(migrated_db, regular_orders=orders)
+    _seed_reviewed_release_and_permit(migrated_db)
+    response = client.post("/v1/commands", headers=_risk_headers(str(uuid4())), json=_resume_body(None))
+    assert response.status_code == 200, response.text

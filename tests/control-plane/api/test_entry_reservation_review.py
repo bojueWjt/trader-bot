@@ -371,10 +371,9 @@ def test_rejected_parent_does_not_drop_ungenerated_when_lost(
     intent_id = _approve(client, "rejected-parent-lost")
     _insert_order(migrated_db, intent_id, "lost")
     _reject(migrated_db, intent_id)
-    with pytest.raises(HTTPException) as exc:
-        _occupancy(migrated_db)
-    assert exc.value.status_code == 409
-    assert "unknown" in str(exc.value.detail)
+    occupancy = _occupancy(migrated_db)
+    assert occupancy["off_venue"] == Decimal(str(BUDGET))
+    assert occupancy["available_hold"] == Decimal(str(BUDGET))
 
 
 def test_approved_partial_ladder_holds_unsent_planned_leg(
@@ -432,3 +431,54 @@ def test_completed_single_entry_does_not_reserve_unused_budget(
     assert occ["venue_working"] == Decimal("0"), occ
     exc, _checks = _reserve(migrated_db, 50)
     assert exc is None, getattr(exc, "detail", exc)
+
+
+@pytest.mark.parametrize("canonical", [False, True])
+def test_fresh_venue_ladder_overrides_thin_projection_without_canceling(
+    client: TestClient, migrated_db: str, canonical: bool,
+) -> None:
+    intent = _approve(client, "venue-three-legs")
+    _set_order_plan(migrated_db, intent, {"entry": {"type": "zone"}})
+    _insert_order(migrated_db, intent, "accepted", quantity=None, price=None)
+    now = datetime.now(timezone.utc)
+    working = [{
+        "clientOrderId": f"B{UUID(intent).hex}{seq:02d}", "symbol": "PAXGUSDT",
+        "type": "LIMIT", "status": "NEW", "origQty": "10", "executedQty": "2",
+        "price": "6", "reduceOnly": False,
+    } for seq in (1, 2, 3)]
+    working.append({"clientOrderId": f"B{UUID(intent).hex}10", "status": "NEW"})
+    working.append({"clientOrderId": "aos_user_manual", "status": "NEW", "origQty": "10000", "price": "6"})
+    if canonical:
+        renames = {"clientOrderId": "client_order_id", "origQty": "quantity",
+                   "executedQty": "filled_quantity", "reduceOnly": "reduce_only"}
+        working = [{renames.get(key, key): value for key, value in order.items()}
+                   for order in working]
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO exchange_state_mirror (account_id, payload, updated_at) VALUES (%s,%s,%s) "
+                    "ON CONFLICT(account_id) DO UPDATE SET payload=EXCLUDED.payload, updated_at=EXCLUDED.updated_at",
+                    (ACCOUNT_B, Json({"open_orders": working, "fetched_at": now.isoformat()}),
+                     now + timedelta(milliseconds=100)))
+    _set_account(migrated_db, equity=1000, available=800, updated_at=now)
+    assert _occupancy(migrated_db) == {
+        "venue_working": Decimal("144"), "off_venue": Decimal("0"), "available_hold": Decimal("0"),
+    }
+    error, _checks = _reserve(migrated_db, 50)
+    assert error is None
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute("SELECT payload->'open_orders' FROM exchange_state_mirror WHERE account_id=%s", (ACCOUNT_B,))
+        assert cur.fetchone()[0] == working
+        cur.execute("SELECT count(*) FROM execution_commands WHERE intent_id=%s", (intent,))
+        assert cur.fetchone()[0] == 0
+
+
+def test_unknown_old_intent_becomes_funding_rejection_not_account_409(
+    client: TestClient, migrated_db: str,
+) -> None:
+    intent = _approve(client, "unknown-old-entry")
+    _insert_order(migrated_db, intent, "lost", quantity=None, price=None)
+    _set_account(migrated_db, equity=1000, available=100, updated_at=datetime.now(timezone.utc))
+    error, _checks = _reserve(migrated_db, 50)
+    assert error is not None and error.status_code == 400
+    _set_account(migrated_db, equity=1000, available=200, updated_at=datetime.now(timezone.utc))
+    error, _checks = _reserve(migrated_db, 50)
+    assert error is None

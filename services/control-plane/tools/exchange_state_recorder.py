@@ -319,6 +319,8 @@ def slim_order(o: dict, order_kind: str = "regular") -> dict:
         "side": o.get("side"),
         "type": o.get("type") or o.get("orderType"),
         "quantity": o.get("origQty") or o.get("quantity"),
+        "filled_quantity": o.get("executedQty"),
+        "status": o.get("status"),
         "price": o.get("price"),
         "trigger_price": o.get("stopPrice") or o.get("triggerPrice"),
         "reduce_only": o.get("reduceOnly"),
