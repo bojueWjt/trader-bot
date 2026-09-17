@@ -22,8 +22,9 @@ from strategy.intent_execution_strategy import (  # noqa: E402
     _hedge_cache_blocks_reduce_only,
     IntentExecutionStrategy,
     IntentExecutionStrategyConfig,
+    _management_operation_ids,
 )
-from strategy.intent_execution_planner import OrderPlan, encode_client_order_id
+from strategy.intent_execution_planner import ManagementPlan, OrderPlan, encode_client_order_id
 from runtime.intent_execution_inbox import IntentExecutionIdentity
 from nautilus_trader.model.enums import OmsType
 
@@ -41,6 +42,49 @@ def _pos(position_id: str, quantity: str, side: str = "LONG") -> SimpleNamespace
 
 
 class HedgeReduceOnlySubmissionTest(unittest.TestCase):
+    def test_management_children_retain_durable_operator_authorization(self) -> None:
+        for action in ("partial_close", "move_stop_loss", "move_stop_to_entry", "replace_take_profits"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as directory:
+                strategy = _SubmissionHarness(directory, [])
+                intent_id = uuid4()
+                auth = {"authorized_by_type": "user", "authorized_by_id": "mobile-operator",
+                        "source_message_id": "mobile-close", "parent_intent_id": str(intent_id)}
+                identity = IntentExecutionIdentity(
+                    account_id="account-a", intent_id=str(intent_id),
+                    idempotency_key=sha256(str(intent_id).encode()).hexdigest(),
+                    instrument_id=INSTRUMENT_ID, action=action,
+                )
+                children = tuple(OrderPlan(
+                    intent_id=intent_id, client_order_id=encode_client_order_id(intent_id, sequence=seq),
+                    instrument_id=INSTRUMENT_ID, side="SELL", order_type="MARKET",
+                    quantity="1", price=None, time_in_force="IOC", reduce_only=True,
+                    tags=tuple(f"{key}={value}" for key, value in auth.items()) + (
+                        "account_id=account-a", f"position_id={INSTRUMENT_ID}-LONG",
+                    ),
+                ) for seq in ((11, 12) if action == "replace_take_profits" else (1,)))
+                management = ManagementPlan(
+                    intent_id=intent_id, action=action, instrument_id=INSTRUMENT_ID,
+                    target_position_id=f"{INSTRUMENT_ID}-LONG", target_position_side="LONG",
+                    cancel_order_ids=(), orders=children, authorization=auth,
+                )
+                strategy._intent_execution_inbox.register_received(identity, {
+                    "action": action, "order_plan": {"authorization": auth, "position_side": "LONG", "quantity": "2"},
+                })
+                strategy._intent_execution_inbox.begin_dispatch(identity, _management_operation_ids(management))
+                fetched = datetime.now(timezone.utc)
+                strategy._exchange_evidence_provider = SimpleNamespace(cached_snapshot=lambda **kwargs: {
+                    "fetched_at": fetched, "positions": [{"symbol": "ALGOUSDT", "position_side": "LONG", "quantity": "2"}],
+                    "regular_orders": [], "algo_orders": [],
+                })
+                try:
+                    for child in children:
+                        self.assertTrue(strategy._submit_order_plan(child), strategy.denials)
+                        self.assertEqual(strategy._intent_execution_inbox.get_by_client_order_id(child.client_order_id).intent_id, str(intent_id))
+                    marker = _management_operation_ids(replace(management, orders=()))
+                    self.assertEqual(marker, (encode_client_order_id(intent_id, sequence=99),))
+                finally:
+                    strategy.on_stop()
+
     def test_actual_submit_paths_require_fresh_authorized_reduction(self) -> None:
         for mode in ("sync", "prepared"):
             for case in ("empty", "undersized", "external", "sufficient", "unknown", "stale",

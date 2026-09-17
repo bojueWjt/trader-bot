@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -741,6 +741,9 @@ class IntentExecutionStrategy(Strategy):
         stash = self._entry_protection_stash.get(intent_key)
         if not isinstance(stash, dict):
             return
+        # Closing is a lifecycle phase, even when protection repair was frozen.
+        if self._defer_flat_or_unknown_protection(intent_key, stash):
+            return
         if stash.get("protection_frozen"):
             return
         instrument_id = str(stash.get("instrument_id") or "")
@@ -752,8 +755,6 @@ class IntentExecutionStrategy(Strategy):
         if not expected_keys:
             return
         observed_keys = self._exchange_protection_keys(intent_key, stash)
-        if self._defer_flat_or_unknown_protection(intent_key, stash):
-            return
         position = self._protection_position(instrument_id, str(stash.get("entry_side") or ""))
         if position is None or observed_keys is None:
             return
@@ -813,8 +814,30 @@ class IntentExecutionStrategy(Strategy):
         self._queue_entry_protection_stash_persist()
 
     def _defer_flat_or_unknown_protection(self, intent_key: str, stash: dict[str, Any]) -> bool:
+        snapshot = self._cached_venue_evidence()
+        close_at = stash.get("position_closed_at")
+        if close_at:
+            try:
+                closed_at = datetime.fromisoformat(close_at)
+                if snapshot is None:
+                    return True
+                snapshot_at = snapshot.get("positions_fetched_at", snapshot["fetched_at"])
+                if snapshot_at <= closed_at:
+                    return True
+            except (TypeError, ValueError):
+                return True
+        entry_at = stash.get("last_entry_fill_at")
+        if not close_at and entry_at and snapshot is not None:
+            try:
+                snapshot_at = snapshot.get("positions_fetched_at", snapshot["fetched_at"])
+                if datetime.fromisoformat(entry_at) > snapshot_at:
+                    # A newer attributed fill may already have a cache position;
+                    # otherwise wait, never clean it up from an older flat view.
+                    return self._protection_position(str(stash["instrument_id"]), str(stash["entry_side"])) is None
+            except (TypeError, ValueError):
+                return True
         # Batch ownership and late fills already have their own closing fence.
-        if stash.get("batch_entry_ids") or self._planner_simulation_mode():
+        if (stash.get("batch_entry_ids") and not close_at) or self._planner_simulation_mode():
             return False
         instrument_id = str(stash.get("instrument_id") or "")
         if not _valid_uuid_text(intent_key) or stash.get("entry_side") not in {"BUY", "SELL"}:
@@ -824,12 +847,13 @@ class IntentExecutionStrategy(Strategy):
         if state is not None:
             assessment = state.assess(BookKey(self.config.account_id, instrument_id, side))
             if assessment.state is PositionState.KNOWN_OPEN:
-                return False
+                # A new book/late fill is not permission to revive the closed
+                # owner's plans. Only a newer, attributed entry fill clears this.
+                return bool(close_at)
             if assessment.venue_fresh:
                 # A fill delivered after the snapshot must receive protection
                 # immediately; the older flat snapshot cannot retire its owner.
-                snapshot = self._cached_venue_evidence()
-                if snapshot is not None:
+                if snapshot is not None and not close_at:
                     snapshot_at = snapshot.get("positions_fetched_at", snapshot["fetched_at"])
                     prefix = "B" + UUID(intent_key).hex
                     cached = self._protection_position(instrument_id, str(stash.get("entry_side") or ""))
@@ -845,10 +869,154 @@ class IntentExecutionStrategy(Strategy):
                             continue
                         if snapshot_at < filled_at <= self._now():
                             return False
+                if snapshot is not None and self._trading_state().upper() == "ACTIVE":
+                    self._queue_flat_protection_cleanup(intent_key, stash, snapshot)
                 if self._retire_flat_legacy_protection(intent_key, stash):
                     self._queue_entry_protection_stash_persist()
                     self._recover_protection_freeze(instrument_id)
         return True
+
+    def _flat_protection_cancel_ids(self, intent_key: str, stash: dict[str, Any], snapshot: Mapping) -> tuple[str, ...]:
+        """Only this owner's robot SL/TP; never another book or a manual order."""
+        symbol = _canonical_symbol(str(stash.get("instrument_id") or ""))
+        book = "LONG" if stash.get("entry_side") == "BUY" else "SHORT"
+        explicit = set(stash.get("protection_ids") or ()) | set(stash.get("protection_roles") or {})
+        result = set()
+        for field in ("regular_orders", "algo_orders"):
+            for row in snapshot[field]:
+                cid = str(row.get("client_order_id") or "")
+                if not is_robot_client_order_id(cid) or _canonical_symbol(str(row.get("symbol") or "")) != symbol:
+                    continue
+                if row.get("position_side") != book:
+                    continue
+                trace = decode_client_order_id(cid)
+                own = str(trace.intent_id) == intent_key and trace.sequence >= 11
+                if own or cid in explicit:
+                    result.add(cid)
+        return tuple(sorted(result))
+
+    def _queue_flat_protection_cleanup(self, intent_key: str, stash: dict[str, Any], snapshot: Mapping) -> None:
+        if not self._terminal_exchange_worker:
+            return
+        ids = self._flat_protection_cancel_ids(intent_key, stash, snapshot)
+        if any(p.get("kind") == "protection_cleanup" and p.get("intent_key") == intent_key
+               for p in self._pending_terminal_exchange.values()):
+            return
+        saved = dict(stash.get("protection_cleanup_requests") or {})
+        missing = tuple(cid for cid in ids if cid not in saved)
+        if missing:
+            requests = self._management_cancel_requests(str(stash["instrument_id"]), missing)
+            if requests is False:
+                return
+            for request in requests:
+                saved[request.client_order_id] = asdict(request)
+        if not saved:
+            return
+        stash["protection_cleanup_requests"] = saved
+        stash["pending_cancel_ids"] = tuple(sorted(set(stash.get("pending_cancel_ids") or ()) | set(ids)))
+        # Save venue IDs before submitting. If cancellation succeeds but its
+        # receipt is lost, restart can reconcile even after the mirror drops it.
+        self._queue_entry_protection_stash_persist(continuation={
+            "kind": "protection_cleanup_submit", "intent_key": intent_key,
+        })
+
+    def _continue_flat_protection_cleanup(self, intent_key: str) -> None:
+        stash = self._entry_protection_stash.get(intent_key)
+        if not isinstance(stash, dict) or self._trading_state().upper() != "ACTIVE":
+            return
+        snapshot = self._cached_venue_evidence()
+        if snapshot is None:
+            return
+        snapshot_at = snapshot.get("positions_fetched_at", snapshot["fetched_at"])
+        for field in ("position_closed_at", "last_entry_fill_at"):
+            if stash.get(field):
+                try:
+                    event_at = datetime.fromisoformat(stash[field])
+                    if event_at > snapshot_at or (field == "position_closed_at" and event_at == snapshot_at):
+                        return
+                except (TypeError, ValueError):
+                    return
+        symbol = _canonical_symbol(str(stash.get("instrument_id") or ""))
+        book = "LONG" if stash.get("entry_side") == "BUY" else "SHORT"
+        if any(_canonical_symbol(str(row["symbol"])) == symbol and row["position_side"] in {book, "BOTH"}
+               and Decimal(str(row["quantity"])) != 0 for row in snapshot["positions"]):
+            return
+        if not self._terminal_exchange_worker:
+            return
+        if any(p.get("kind") == "protection_cleanup" and p.get("intent_key") == intent_key
+               for p in self._pending_terminal_exchange.values()):
+            return
+        from runtime.exchange_cancel_adapter import CancelOrderRequest, TerminalExchangeRequest
+
+        saved = stash.get("protection_cleanup_requests") or {}
+        explicit = set(stash.get("protection_ids") or ()) | set(stash.get("protection_roles") or {})
+        requests = []
+        try:
+            for cid in sorted(saved):
+                if cid not in stash.get("pending_cancel_ids", ()):
+                    continue
+                if not is_robot_client_order_id(cid):
+                    raise ValueError("not robot owned")
+                trace = decode_client_order_id(cid)
+                if not (str(trace.intent_id) == intent_key and trace.sequence >= 11) and cid not in explicit:
+                    raise ValueError("different owner")
+                request = CancelOrderRequest(**saved[cid])
+                if (request.client_order_id != cid or request.account_id != str(self.config.account_id)
+                        or request.symbol != symbol or request.position_side != book):
+                    raise ValueError("different account or book")
+                requests.append(request)
+        except (TypeError, ValueError):
+            self._record_denial(OrderDenied("protection_cleanup_scope_mismatch", intent_key))
+            return
+        if not requests:
+            return
+
+        request_id = f"protection-cleanup:{intent_key}:{uuid4().hex}"
+        self._pending_terminal_exchange[request_id] = {
+            "kind": "protection_cleanup", "intent_key": intent_key,
+            "expected_cancel_ids": tuple(r.client_order_id for r in requests),
+        }
+        request = TerminalExchangeRequest(
+            request_id=request_id, account_id=str(self.config.account_id), operation="cancel_batch",
+            purpose="closed_position_protections", deadline_monotonic=self._terminal_exchange_worker.new_deadline(),
+            cancel_requests=tuple(requests),
+        )
+        if not self._terminal_exchange_worker.submit(request):
+            self._pending_terminal_exchange.pop(request_id, None)
+            self._record_denial(OrderDenied("terminal_exchange_queue_rejected", intent_key))
+
+    def _complete_flat_protection_cleanup(self, result: Any, pending: dict[str, Any]) -> None:
+        intent_key = str(pending["intent_key"])
+        stash = self._entry_protection_stash.get(intent_key)
+        if not isinstance(stash, dict):
+            return
+        expected = set(pending["expected_cancel_ids"])
+        for outcome in getattr(result, "cancel_outcomes", ()):
+            cid = str(outcome.request.client_order_id or "")
+            terminal = outcome.status == "confirmed" and outcome.terminal_status in {"CANCELED", "CANCELLED"}
+            if outcome.status == "terminal" and outcome.terminal_status == "FILLED":
+                terminal = True
+            if (cid not in expected or outcome.request.account_id != str(self.config.account_id)
+                    or not terminal or outcome.error):
+                continue
+            self._remove_pending_cancel_id(stash, cid)
+            saved = stash.get("protection_cleanup_requests")
+            if isinstance(saved, dict):
+                saved.pop(cid, None)
+            events = stash.setdefault("protection_terminal_events", [])
+            events.append({"client_order_id": cid, "event_type": "OrderFilled" if outcome.terminal_status == "FILLED" else "OrderCanceled",
+                           "observed_at": self._now().isoformat(), "source": "closed_position_cleanup"})
+            stash["protection_terminal_events"] = events[-self._PROTECTION_TERMINAL_EVENT_LIMIT:]
+        if stash.get("pending_cancel_ids"):
+            key = ("protection_cleanup_unconfirmed", intent_key)
+            if key not in self._reported_protection_denials:
+                self._reported_protection_denials.add(key)
+                self._record_denial(OrderDenied("protection_cleanup_unconfirmed", intent_key))
+        # Unknown/partial cancellation remains pending. A successful request is
+        # not permission to discard state before a later flat snapshot confirms it.
+        self._queue_entry_protection_stash_persist(continuation={
+            "kind": "protection_schedule_delay", "intent_key": intent_key, "delay_seconds": 30.0,
+        })
 
     def _retire_flat_legacy_protection(self, intent_key: str, stash: dict[str, Any]) -> bool:
         """Retire metadata only after flat evidence newer than every terminal order.
@@ -905,10 +1073,13 @@ class IntentExecutionStrategy(Strategy):
             if not cid.startswith(prefix) and cid not in expected:
                 continue
             expected.add(cid)
-            if self._order_status_name(order) not in self._PROTECTION_TERMINAL_STATUSES:
-                return False
             try:
                 timestamp = int(getattr(order, "ts_last", 0))
+                proof = proof_times.get(cid)
+                if self._order_status_name(order) not in self._PROTECTION_TERMINAL_STATUSES:
+                    if proof is None or (timestamp > 0 and proof.timestamp() * 1e9 < timestamp):
+                        return False
+                    continue
                 if timestamp > 0:
                     proof_times[cid] = datetime.fromtimestamp(timestamp / 1e9, tz=timezone.utc)
             except (ValueError, TypeError, OverflowError):
@@ -1941,6 +2112,9 @@ class IntentExecutionStrategy(Strategy):
             return
         if kind == "management_cancel":
             self._complete_management_cancels(result, pending)
+            return
+        if kind == "protection_cleanup":
+            self._complete_flat_protection_cleanup(result, pending)
             return
         if kind == "take_profit_retry":
             self._complete_take_profit_retry(result, pending)
@@ -3947,6 +4121,7 @@ class IntentExecutionStrategy(Strategy):
         self._confirm_live_canary_order_event(event)
 
     def on_order_filled(self, event: Any) -> None:
+        self._release_closed_protection_fence(event)
         self._record_batch_fill(event)
         self._confirm_durable_intent_order_event(event)
         self._confirm_filled_order_event(event)
@@ -3999,6 +4174,68 @@ class IntentExecutionStrategy(Strategy):
                 for key, other in tuple(self._entry_protection_stash.items()):
                     if str(other.get("instrument_id")) == instrument_id:
                         self._schedule_protection_sync(key)
+
+    def on_position_closed(self, event: Any) -> None:
+        """Fence repair immediately; only newer venue flat evidence permits cleanup."""
+        instrument_id = _event_instrument_id(event)
+        position_id = str(getattr(event, "position_id", "") or "")
+        book = _position_book_from_id(position_id)
+        if not instrument_id or not book or position_id != f"{instrument_id}-{book}":
+            return
+        try:
+            timestamp = int(getattr(event, "ts_closed", 0))
+            closed_at = datetime.fromtimestamp(timestamp / 1e9, tz=timezone.utc)
+            if timestamp <= 0 or closed_at > self._now():
+                return
+        except (TypeError, ValueError, OverflowError):
+            return
+        for key, stash in tuple(self._entry_protection_stash.items()):
+            own_book = "LONG" if stash.get("entry_side") == "BUY" else "SHORT"
+            if str(stash.get("instrument_id")) != instrument_id or own_book != book:
+                continue
+            try:
+                prior = stash.get("position_closed_at")
+                newer_entry = stash.get("last_entry_fill_at")
+                if prior and datetime.fromisoformat(prior) >= closed_at:
+                    continue
+                if newer_entry and datetime.fromisoformat(newer_entry) > closed_at:
+                    continue
+            except (TypeError, ValueError):
+                self._record_denial(OrderDenied("protection_close_evidence_invalid", key))
+                continue
+            stash["position_closed_at"] = closed_at.isoformat()
+            self._queue_entry_protection_stash_persist(continuation={
+                "kind": "protection_schedule", "intent_key": key,
+            })
+
+    def _release_closed_protection_fence(self, event: Any) -> None:
+        cid = _event_client_order_id(event)
+        if not cid or not is_robot_client_order_id(cid):
+            return
+        trace = decode_client_order_id(cid)
+        key = str(trace.intent_id)
+        stash = self._entry_protection_stash.get(key)
+        if not stash:
+            return
+        try:
+            if not 1 <= trace.sequence <= int(stash.get("entry_sequence_max", 1)):
+                return
+            filled_at = datetime.fromtimestamp(int(getattr(event, "ts_event", 0)) / 1e9, tz=timezone.utc)
+            if not datetime(1970, 1, 1, tzinfo=timezone.utc) < filled_at <= self._now() or not _event_last_qty(event):
+                return
+            instrument_id = _event_instrument_id(event)
+            if instrument_id and instrument_id != str(stash.get("instrument_id")):
+                return
+            prior = stash.get("last_entry_fill_at")
+            if prior and datetime.fromisoformat(prior) >= filled_at:
+                return
+            stash["last_entry_fill_at"] = filled_at.isoformat()
+            closed_at = stash.get("position_closed_at")
+            if closed_at and datetime.fromisoformat(closed_at) < filled_at:
+                stash.pop("position_closed_at")
+            self._queue_entry_protection_stash_persist()
+        except (ValueError, TypeError, OverflowError):
+            return
 
     def _batch_order_role(self, stash, client_order_id):
         if not is_robot_client_order_id(client_order_id):
@@ -4845,6 +5082,9 @@ class IntentExecutionStrategy(Strategy):
             self._continue_protection_revision_submit(
                 continuation
             )
+            return
+        if kind == "protection_cleanup_submit":
+            self._continue_flat_protection_cleanup(str(continuation["intent_key"]))
             return
         if kind == "management_dispatch_after_persist":
             self._queue_management_dispatch_task(
@@ -6051,6 +6291,10 @@ class IntentExecutionStrategy(Strategy):
             pending = tuple(stash.get("pending_cancel_ids") or ())
             if client_order_id not in pending:
                 continue
+            if client_order_id in (stash.get("protection_cleanup_requests") or {}):
+                # A cancel rejection plus cache absence is not terminal proof.
+                # The durable cleanup lane must reconcile the venue order.
+                return
             live_ids = {
                 str(getattr(order, "client_order_id", ""))
                 for order in self._live_protection_orders(
@@ -6070,6 +6314,10 @@ class IntentExecutionStrategy(Strategy):
             return
         for stash in self._entry_protection_stash.values():
             if client_order_id in tuple(stash.get("pending_cancel_ids") or ()):
+                saved = stash.get("protection_cleanup_requests") or {}
+                if client_order_id in saved:
+                    self._record_protection_terminal_event(event, stash, client_order_id, None)
+                    saved.pop(client_order_id)
                 self._remove_pending_cancel_id(stash, client_order_id)
                 self._queue_entry_protection_stash_persist()
                 return
@@ -6602,6 +6850,10 @@ class IntentExecutionStrategy(Strategy):
             return
         stash.pop("sync_scheduled", None)
         self._normalize_protection_stash(intent_key, stash)
+        if not self._planner_simulation_mode() and self._defer_flat_or_unknown_protection(intent_key, stash):
+            if intent_key in self._entry_protection_stash:
+                self._reschedule_protection_sync(intent_key, stash)
+            return
         if stash.get("protection_frozen"):
             self._queue_entry_protection_stash_persist()
             return
@@ -6614,10 +6866,6 @@ class IntentExecutionStrategy(Strategy):
             return
         if not self._has_authorized_protection_parent(intent_key, stash):
             self._queue_entry_protection_stash_persist()
-            return
-        if self._defer_flat_or_unknown_protection(intent_key, stash):
-            if intent_key in self._entry_protection_stash:
-                self._reschedule_protection_sync(intent_key, stash)
             return
         instrument_id = str(stash["instrument_id"])
         instrument = self._instrument_spec(instrument_id)
@@ -6813,6 +7061,8 @@ class IntentExecutionStrategy(Strategy):
             return
         pending = stash.get("pending_protection_revision")
         if not isinstance(pending, dict):
+            return
+        if self._defer_flat_or_unknown_protection(intent_key, stash):
             return
         expected_ids = tuple(
             str(value)
@@ -9112,6 +9362,13 @@ class IntentExecutionStrategy(Strategy):
         The original plan still supplies Binance's LONG/SHORT position ID. This
         changes only Nautilus's internal cache check, never fabricates a position.
         """
+        if _tag_value(plan.tags, "lifecycle_role") in {"stop_loss", "take_profit"}:
+            match = self._protection_role_for_order(plan.client_order_id, plan.instrument_id)
+            owner = self._entry_protection_stash.get(str(plan.intent_id))
+            if match is not None:
+                owner = match[1]
+            if owner and owner.get("position_closed_at"):
+                return OrderDenied("protection_position_closed", str(plan.intent_id))
         if not plan.reduce_only:
             return plan
         try:
@@ -11824,7 +12081,9 @@ def _management_parent_intent_id(plan: ManagementPlan) -> str:
 def _management_operation_ids(
     plan: ManagementPlan,
 ) -> tuple[str, ...]:
-    if plan.action == "close_position" and plan.orders:
+    # Every submitted child must resolve to its durable approval. The synthetic
+    # marker is only for operations that create no venue order (e.g. cancel).
+    if plan.orders:
         return tuple(order.client_order_id for order in plan.orders)
     return (
         encode_client_order_id(

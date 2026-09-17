@@ -699,6 +699,14 @@ class TerminalExchangeWorker:
                     )
                 )
                 continue
+            except OrderAlreadyFilledError:
+                # A filled order is terminal, but cancellation did not succeed.
+                # Replacement callers still require "confirmed"; flat-position
+                # cleanup may consume this distinct, venue-verified outcome.
+                outcomes.append(TerminalExchangeCancelOutcome(
+                    request=request, status="terminal", terminal_status="FILLED",
+                ))
+                continue
             except Exception as exc:
                 outcomes.append(
                     TerminalExchangeCancelOutcome(

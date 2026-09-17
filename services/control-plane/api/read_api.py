@@ -5450,7 +5450,7 @@ def _parse_history_hours(raw: str | None) -> int | None:
     """GET /v1/accounts?history_hours=.. (contracts/backend-api.md §8).
 
     Absent parameter -> None (caller must leave the response byte-identical
-    to the pre-§8 shape). Present but out of [1, 168] or non-integer -> 400,
+    to the pre-§8 shape). Present but out of [1, 8760] or non-integer -> 400,
     matching this module's existing manual-validation error style (not
     FastAPI's default 422 Query() constraint violations).
     """
@@ -5461,12 +5461,12 @@ def _parse_history_hours(raw: str | None) -> int | None:
     except (TypeError, ValueError):
         raise HTTPException(
             status_code=400,
-            detail="history_hours must be an integer between 1 and 168",
+            detail="history_hours must be an integer between 1 and 8760",
         )
-    if not (1 <= value <= 168):
+    if not (1 <= value <= 8760):
         raise HTTPException(
             status_code=400,
-            detail="history_hours must be an integer between 1 and 168",
+            detail="history_hours must be an integer between 1 and 8760",
         )
     return value
 
@@ -5476,20 +5476,31 @@ def _decimal_str(value) -> str:
 
 
 _EQUITY_HISTORY_BUCKET_SECONDS = 1800
-_EQUITY_HISTORY_MAX_POINTS = 336
 
 
 def _equity_history(conn, hours: int, account_ids: tuple[str, ...]) -> tuple[list[dict], dict]:
     now = datetime.now(timezone.utc)
     since = now - timedelta(hours=hours)
+    bucket_seconds = _EQUITY_HISTORY_BUCKET_SECONDS
+    if hours > 720:
+        bucket_seconds = 86400
+    elif hours > 168:
+        bucket_seconds = 21600
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        # Sum simultaneous account samples first, then retain the latest actual
+        # snapshot in each display interval. Mixing different account timestamps
+        # or summing equity over time would fabricate an account balance.
         cur.execute(
+            "WITH totals AS ("
             "SELECT bucket_at, SUM(equity) AS equity_sum, SUM(available) AS available_sum, "
             "COUNT(*) AS accounts_sampled "
             "FROM account_equity_samples WHERE bucket_at >= %s AND bucket_at <= %s "
             "AND account_id = ANY(%s) "
-            "GROUP BY bucket_at ORDER BY bucket_at ASC LIMIT %s",
-            (since, now, list(account_ids), _EQUITY_HISTORY_MAX_POINTS),
+            "GROUP BY bucket_at), selected AS ("
+            "SELECT DISTINCT ON (FLOOR(EXTRACT(EPOCH FROM bucket_at) / %s)) * FROM totals "
+            "ORDER BY FLOOR(EXTRACT(EPOCH FROM bucket_at) / %s), bucket_at DESC) "
+            "SELECT * FROM selected ORDER BY bucket_at ASC",
+            (since, now, list(account_ids), bucket_seconds, bucket_seconds),
         )
         bucket_rows = [dict(r) for r in cur.fetchall()]
         cur.execute(
@@ -5508,7 +5519,7 @@ def _equity_history(conn, hours: int, account_ids: tuple[str, ...]) -> tuple[lis
         for row in bucket_rows
     ]
     meta = {
-        "bucket_seconds": _EQUITY_HISTORY_BUCKET_SECONDS,
+        "bucket_seconds": bucket_seconds,
         "accounts_expected": len(account_ids),
         "since": since.isoformat(),
         "first_sample_at": _iso(first_row["first_sample_at"]) if first_row else None,

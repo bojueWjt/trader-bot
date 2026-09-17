@@ -177,7 +177,7 @@ def test_v1_accounts_history_hours_sums_buckets_and_reports_accounts_sampled(
     assert meta["accounts_expected"] == len(body["accounts"])
 
 
-@pytest.mark.parametrize("bad_value", ["0", "999", "abc", "-1", "12.5"])
+@pytest.mark.parametrize("bad_value", ["0", "8761", "abc", "-1", "12.5"])
 def test_v1_accounts_history_hours_rejects_invalid_values(
     client: TestClient, db_conn, bad_value: str
 ) -> None:
@@ -242,3 +242,31 @@ def test_week_history_is_bounded_and_excludes_future_samples(
 
 def test_equity_history_requires_reader_auth(client: TestClient) -> None:
     assert client.get("/v1/accounts?history_hours=24").status_code == 401
+
+
+@pytest.mark.parametrize("days, interval", [(30, 21600), (365, 86400)])
+def test_long_history_spans_requested_window_and_keeps_latest_snapshot(client: TestClient, db_conn, days, interval):
+    bucket = _bucket_floor(datetime.now(timezone.utc))
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO account_equity_samples (account_id,bucket_at,equity,available,margin,sampled_at) "
+            "SELECT a,t,1000,900,100,t FROM unnest(%s::text[]) a CROSS JOIN "
+            "generate_series(%s - %s * interval '1 day', %s + interval '1 day', interval '30 minutes') t",
+            (list(ACCOUNTS), bucket, days, bucket),
+        )
+        # Latest raw sample is incomplete: never borrow a previous sample from
+        # the missing account to fabricate a complete aggregate at another time.
+        cur.execute("DELETE FROM account_equity_samples WHERE account_id='account-d' AND bucket_at=%s", (bucket,))
+    db_conn.commit()
+    response = client.get(f"/v1/accounts?history_hours={days * 24}", headers=AUTH)
+    assert response.status_code == 200
+    data = response.json()["data"]
+    points = data["equity_history_total"]
+    assert len(points) <= days * 86400 // interval + 1
+    assert len(points) > days * 86400 // interval - 1
+    assert datetime.fromisoformat(points[0]["t"]) < bucket - timedelta(days=days - 1)
+    assert datetime.fromisoformat(points[-1]["t"]) == bucket
+    assert points[-1]["accounts_sampled"] == 3
+    assert points[-1]["equity"] == "3000"
+    assert points[-2]["accounts_sampled"] == 4
+    assert data["equity_history_meta"]["bucket_seconds"] == interval
