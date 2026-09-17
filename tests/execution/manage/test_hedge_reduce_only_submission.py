@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 from uuid import uuid4
 
 
@@ -46,6 +47,7 @@ class HedgeReduceOnlySubmissionTest(unittest.TestCase):
         for action in ("partial_close", "move_stop_loss", "move_stop_to_entry", "replace_take_profits"):
             with self.subTest(action=action), tempfile.TemporaryDirectory() as directory:
                 strategy = _SubmissionHarness(directory, [])
+                strategy._robot_owned_position_quantity = Mock(side_effect=AssertionError("user instruction must not consult robot ownership"))
                 intent_id = uuid4()
                 auth = {"authorized_by_type": "user", "authorized_by_id": "mobile-operator",
                         "source_message_id": "mobile-close", "parent_intent_id": str(intent_id)}
@@ -88,7 +90,7 @@ class HedgeReduceOnlySubmissionTest(unittest.TestCase):
     def test_actual_submit_paths_require_fresh_authorized_reduction(self) -> None:
         for mode in ("sync", "prepared"):
             for case in ("empty", "undersized", "external", "sufficient", "unknown", "stale",
-                         "oversize", "authority_oversize", "account_mismatch", "book_mismatch", "manual_unowned", "first_protection", "short"):
+                         "oversize", "authority_oversize", "account_mismatch", "book_mismatch", "manual_unowned", "first_protection", "short", "missing_tags", "forged_user_tag"):
                 with self.subTest(mode=mode, case=case), tempfile.TemporaryDirectory() as directory:
                     positions = []
                     if case == "undersized":
@@ -100,7 +102,7 @@ class HedgeReduceOnlySubmissionTest(unittest.TestCase):
                     strategy = _SubmissionHarness(directory, positions)
                     book = "SHORT" if case == "short" else "LONG"
                     intent_id = uuid4()
-                    actor_type = "channel" if case in {"manual_unowned", "first_protection"} else "user"
+                    actor_type = "channel" if case in {"manual_unowned", "first_protection", "forged_user_tag"} else "user"
                     auth = {"authorized_by_type": actor_type, "authorized_by_id": "operator",
                             "source_message_id": "approved-close", "parent_intent_id": str(intent_id)}
                     identity = IntentExecutionIdentity(
@@ -124,6 +126,10 @@ class HedgeReduceOnlySubmissionTest(unittest.TestCase):
                         ), instrument_id=INSTRUMENT_ID, side="BUY" if case == "short" else "SELL", order_type="MARKET",
                         quantity="4" if case == "oversize" else "1.5", price=None, time_in_force="IOC", reduce_only=True,
                     )
+                    if case == "missing_tags":
+                        plan = replace(plan, tags=())
+                    elif case == "forged_user_tag":
+                        plan = replace(plan, tags=tuple(tag.replace("authorized_by_type=channel", "authorized_by_type=user") for tag in plan.tags))
                     if case == "first_protection":
                         plan = replace(plan, quantity="0.5", order_type="STOP_MARKET", trigger_price="100")
                         strategy._entry_protection_stash[str(intent_id)] = {
@@ -152,7 +158,7 @@ class HedgeReduceOnlySubmissionTest(unittest.TestCase):
                             submitted = strategy._submit_order_plan_after_durable_prepare(
                                 plan, live_canary_execution=False, prepared_order=prepared,
                             )
-                        success = case in {"empty", "undersized", "external", "sufficient", "first_protection", "short"}
+                        success = case in {"empty", "undersized", "external", "sufficient", "first_protection", "short", "missing_tags"}
                         self.assertEqual(submitted, success)
                         self.assertEqual(len(strategy.sent), int(success))
                         if success:

@@ -161,6 +161,8 @@ def _require_channel_account_route(args, action: str) -> None:
     authorized_by_id = str(args.authorized_by_id or "").strip()
     source_message_id = str(args.source_message_id or "").strip()
 
+    if authorized_by_type == "user" and action not in ("open", "add"):
+        return
     if channel == "operator":
         if authorized_by_type == "channel":
             _channel_route_error(
@@ -298,8 +300,8 @@ def _require_open_provenance(args, action: str = "open") -> str:
 def _add_authorization_context(payload: dict, args) -> None:
     created_by_service = str(args.created_by_service).strip()
     payload["authorized_by_type"] = str(args.authorized_by_type).strip()
-    payload["authorized_by_id"] = str(args.authorized_by_id).strip()
-    payload["source_message_id"] = str(args.source_message_id).strip()
+    payload["authorized_by_id"] = str(args.authorized_by_id or "").strip()
+    payload["source_message_id"] = str(args.source_message_id or args.ref or "").strip()
     payload["created_by_service"] = created_by_service
     payload["source"] = created_by_service
     parent_intent_id = str(args.parent_intent_id or "").strip()
@@ -447,6 +449,9 @@ def _require_management_ref(args, action: str) -> None:
 
 
 def _add_attribution_context(payload: dict, args) -> None:
+    if args.authorized_by_type == "user":
+        payload["channel"] = "operator"
+        return
     channel = str(getattr(args, "channel", "") or "").strip()
     entry_ref = str(getattr(args, "entry_ref", "") or "").strip()
     if channel:
@@ -759,13 +764,13 @@ def main() -> None:
         )
         p.add_argument(
             "--authorized-by-id",
-            required=True,
-            help="user/operator identity or channel identifier",
+            default="",
+            help="required for channel signals; user identity comes from authentication",
         )
         p.add_argument(
             "--source-message-id",
-            required=True,
-            help="stable id of the authorizing request or channel message",
+            default="",
+            help="required for channel signals; user operations default to --ref",
         )
         p.add_argument(
             "--created-by-service",

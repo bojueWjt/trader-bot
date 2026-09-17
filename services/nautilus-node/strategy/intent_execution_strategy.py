@@ -9390,9 +9390,6 @@ class IntentExecutionStrategy(Strategy):
         quantity = _positive_canary_decimal(plan.quantity)
         if quantity is None or quantity > assessment.quantity:
             return OrderDenied("reduction_quantity_exceeds_venue", plan.quantity)
-        authorization = _authorization_from_tags(plan.tags)
-        if not authorization:
-            return OrderDenied("reduction_authorization_missing", str(plan.intent_id))
         account = _tag_value(plan.tags, "account_id")
         if account and account != str(self.config.account_id):
             return OrderDenied("reduction_scope_mismatch", account)
@@ -9401,8 +9398,6 @@ class IntentExecutionStrategy(Strategy):
         if target_book and target != f"{plan.instrument_id}-{book}":
             return OrderDenied("reduction_scope_mismatch", str(target))
         record = self._intent_execution_inbox.get_by_client_order_id(plan.client_order_id)
-        owned_limit = Decimal(self._robot_owned_position_quantity(plan.instrument_id, book, str(assessment.quantity)))
-        limit = owned_limit
         if record is not False:
             if record.state is IntentExecutionState.REJECTED:
                 return OrderDenied("reduction_authorization_missing", "intent rejected")
@@ -9410,21 +9405,23 @@ class IntentExecutionStrategy(Strategy):
             if not isinstance(raw, Mapping):
                 return OrderDenied("reduction_authorization_missing", str(plan.intent_id))
             expected_side = str(raw.get("position_side") or "").upper()
-            if (record.account_id != str(self.config.account_id) or record.instrument_id != plan.instrument_id
+            if (record.intent_id != str(plan.intent_id) or record.account_id != str(self.config.account_id) or record.instrument_id != plan.instrument_id
                     or expected_side and expected_side != book):
                 return OrderDenied("reduction_scope_mismatch", str(plan.intent_id))
-            expected_auth = raw.get("authorization")
+            # Approval is durable once, at ingress. Tags are derived metadata:
+            # missing/stale copies must neither revoke a user nor promote a bot.
+            authorization = raw.get("authorization")
             command_close = bool(record.intent_payload.get("command_id")) and record.action == "close_position"
-            if not command_close:
-                if not isinstance(expected_auth, Mapping) or any(
-                    str(expected_auth.get(key) or "") != authorization[key]
-                    for key in ("authorized_by_type", "authorized_by_id", "source_message_id")
-                ):
-                    return OrderDenied("reduction_authorization_missing", str(plan.intent_id))
+            if command_close and not isinstance(authorization, Mapping):
+                authorization = _authorization_from_tags(plan.tags)
+            if not isinstance(authorization, Mapping) or authorization.get("authorized_by_type") not in {"user", "channel"}:
+                return OrderDenied("reduction_authorization_missing", str(plan.intent_id))
             if record.action not in {"close_position", "partial_close", "move_stop_loss", "move_stop_to_entry", "replace_take_profits"}:
                 return OrderDenied("reduction_authorization_missing", record.action)
             if authorization["authorized_by_type"] == "user":
                 limit = assessment.quantity
+            else:
+                limit = Decimal(self._robot_owned_position_quantity(plan.instrument_id, book, str(assessment.quantity)))
             if raw.get("quantity") is not None:
                 approved = _positive_canary_decimal(raw["quantity"])
                 if approved is None:
@@ -9436,14 +9433,19 @@ class IntentExecutionStrategy(Strategy):
                     return OrderDenied("reduction_authorization_missing", "invalid approved fraction")
                 limit = min(limit, assessment.quantity * fraction)
         else:
+            # Autonomous protection revisions inherit their parent, rather than
+            # claiming the full book merely because a tag says "user".
+            authorization = _authorization_from_tags(plan.tags)
             matching = any(
                 str(stash.get("instrument_id") or "") == plan.instrument_id
+                and authorization
                 and _stash_protection_authorization(stash) == authorization
                 for stash in self._entry_protection_stash.values()
                 if isinstance(stash, dict)
             )
             if not matching:
                 return OrderDenied("reduction_authorization_missing", str(plan.intent_id))
+            limit = Decimal(self._robot_owned_position_quantity(plan.instrument_id, book, str(assessment.quantity)))
         if quantity > limit:
             return OrderDenied("reduction_quantity_exceeds_authority", plan.quantity)
         cache_positions = _nonzero_positions(

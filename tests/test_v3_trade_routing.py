@@ -100,6 +100,25 @@ MANAGEMENT_CASES = (
 )
 
 
+@pytest.mark.parametrize(("command", "expected_action"), MANAGEMENT_CASES)
+def test_explicit_user_management_needs_no_channel_or_duplicate_actor_fields(monkeypatch, command, expected_action):
+    trade = _load_module("user_priority_trade", TRADE_PATH)
+    calls = []
+    monkeypatch.setattr(trade, "_call", _successful_call(calls))
+    monkeypatch.setattr(sys, "argv", [
+        "v3_trade.py", *command, "--account", "account-d", "--authorized-by-type", "user",
+        "--reason", "user directly requests this action", "--ref", "user-management-1", "--no-wait",
+        "--channel", "-1002136478186", "--entry-ref", "stale-entry-context",
+    ])
+    trade.main()
+    payload = next(payload for method, path, payload in calls if method == "POST")
+    assert payload["action"] == expected_action
+    assert payload["account_id"] == "account-d"
+    assert payload["channel"] == "operator"
+    assert "entry_ref" not in payload
+    assert payload["source_message_id"] == "user-management-1"
+
+
 def test_two_entries_are_one_cli_request(monkeypatch):
     trade = _load_module('test_two_entry_trade', TRADE_PATH)
     calls = []

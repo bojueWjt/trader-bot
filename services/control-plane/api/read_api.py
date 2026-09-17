@@ -6649,6 +6649,19 @@ def _order_authorization(
     created_by_service = str(body.get("created_by_service") or "").strip()
     parent_intent_id = str(body.get("parent_intent_id") or "").strip()
     is_internal = _INTERNAL_ORDER_SERVICE_RE.search(created_by_service) is not None
+    # An authenticated user's new instruction is its own authority. An old
+    # signal parent is context, not a prerequisite or a ceiling on that user.
+    if authorized_by_type in {"", "user"} and not is_internal:
+        if not request_id:
+            raise HTTPException(status_code=400, detail="authenticated user order requires X-Request-Id or client_ref")
+        return {
+            "authorized_by_type": "user",
+            "authorized_by_id": authenticated_actor_id,
+            "reason": reason,
+            "source_message_id": client_ref or request_id,
+            "created_by_service": "control-plane",
+            "parent_intent_id": False,
+        }
     if is_internal and not parent_intent_id:
         raise HTTPException(
             status_code=400,
@@ -6712,24 +6725,10 @@ def _order_authorization(
             "parent_intent_id": False,
         }
 
-    if authorized_by_type and authorized_by_type != "user":
-        raise HTTPException(
-            status_code=400,
-            detail=f"authorized_by_type must be one of {list(_ORDER_AUTHORIZATION_TYPES)}",
-        )
-    if not request_id:
-        raise HTTPException(
-            status_code=400,
-            detail="authenticated user order requires X-Request-Id or client_ref",
-        )
-    return {
-        "authorized_by_type": "user",
-        "authorized_by_id": authenticated_actor_id,
-        "reason": reason,
-        "source_message_id": client_ref or request_id,
-        "created_by_service": "control-plane",
-        "parent_intent_id": False,
-    }
+    raise HTTPException(
+        status_code=400,
+        detail=f"authorized_by_type must be one of {list(_ORDER_AUTHORIZATION_TYPES)}",
+    )
 
 
 _AUTHORIZATION_REPLAY_FIELDS = (
@@ -8236,7 +8235,6 @@ def _resolve_attribution(database_url: str, action: str, symbol: str,
     errors = []
     hard_error: str | bool = False
     target_position_id: str | bool = False
-    bypass = channel == "operator"
 
     row = False
     if entry_ref:
@@ -8299,8 +8297,6 @@ def _resolve_attribution(database_url: str, action: str, symbol: str,
         errors.append("channel_missing")
 
     would_reject = bool(errors)
-    if bypass:
-        would_reject = False
     error: str | bool = False
     if errors:
         error = ";".join(errors)
@@ -9606,17 +9602,17 @@ def operator_order(
 
     attribution = False
     attribution_target_position_id: str | bool = False
-    if action in _OPERATOR_MANAGEMENT_ACTIONS:
+    user_management = action in _OPERATOR_MANAGEMENT_ACTIONS and authorization_evidence["authorized_by_type"] == "user"
+    if user_management:
+        # Drop signal-only metadata before targeting, dedup and dry-run. The
+        # selected account/book and authenticated actor are authoritative.
+        body = {**body, "channel": "operator", "entry_ref": False,
+                "parent_intent_id": authorization_evidence.get("parent_intent_id", False)}
+        raw_channel = "operator"
+        attribution = {"resolution": "operator", "owner_channel": False,
+                       "channel_match": "unknown", "would_reject": False}
+    elif action in _OPERATOR_MANAGEMENT_ACTIONS:
         channel = str(body.get("channel") or "").strip()
-        if (
-            channel
-            and channel != "operator"
-            and authorization_evidence["authorized_by_type"] != "channel"
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail="channel-sourced management requires authorized_by_type=channel",
-            )
         entry_ref = str(body.get("entry_ref") or "").strip()
         if action == "cancel_order":
             owner_channel = cancel_order_owner["owner_channel"]
@@ -9654,20 +9650,28 @@ def operator_order(
         }
         if hard_error:
             raise HTTPException(status_code=400, detail=hard_error)
-        if authorization_evidence["authorized_by_type"] == "channel":
-            channel_valid = (
-                channel == authorization_evidence["authorized_by_id"]
-                and attribution_event["resolution"] in {"intent", "order"}
-                and attribution_event["channel_match"] is True
-                and attribution_event["would_reject"] is False
-            )
-            if not channel_valid:
-                raise HTTPException(
-                    status_code=400,
-                    detail="channel authorization attribution failed",
-                )
+        channel_valid = (
+            channel == authorization_evidence["authorized_by_id"]
+            and attribution_event["resolution"] in {"intent", "order"}
+            and attribution_event["channel_match"] is True
+            and attribution_event["would_reject"] is False
+        )
+        if not channel_valid:
+            raise HTTPException(status_code=400, detail="channel authorization attribution failed")
 
     target_position_id: str | bool = parent_target_position_id
+    if user_management and action != "cancel_order" and not position_side and not target_position_id:
+        # Legacy clients may omit side for a single open book. Resolve from
+        # current venue truth, without needing an entry's ownership/approval.
+        conn = _database_connection(database_url)
+        try:
+            with conn.cursor() as cur:
+                venue = _load_entry_venue_view(cur, account_id=account_id, symbol=symbol)
+        finally:
+            conn.close()
+        books = [side for side, present in venue["presence"].items() if present]
+        if venue["state"] == "known" and len(books) == 1:
+            target_position_id = _canonical_position_id(_nautilus_instrument_id(symbol), books[0]) or False
     if attribution_target_position_id:
         if (
             target_position_id
@@ -9711,9 +9715,8 @@ def operator_order(
         raise HTTPException(
             status_code=400,
             detail=(
-                "management action requires a server-resolved "
-                "target_position_id; pass parent_intent_id, entry_ref, "
-                "or position_side"
+                "management action requires an unambiguous position; "
+                "pass position_side"
             ),
         )
 
