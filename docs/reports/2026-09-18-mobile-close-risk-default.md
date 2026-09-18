@@ -39,3 +39,9 @@ App 两个入口（持仓卡片快捷抽屉、持仓详情页）均修复：fill
 - 节点修复镜像已生成并预检；节点换版尚未执行。换版后的恢复必须由用户明确授权 RESUME。
 - 新版 App 尚未安装：构建 Mac 100.111.192.24 当时 Tailscale 离线，本机 adb 无设备；等待电脑上线和手机连接。
 - 原有 SOL 保护单数量镜像曾仍显示 0.49。本轮没有修改真实保护订单，保护单缩量应单独核对，不能把本轮状态修复当作保护单生命周期已验收。
+
+最终待部署节点候选：commit `634073da594cf7c9ed1d5d86ae1f2a30ddc7eedd`；
+release `df48c66dcd9eeb206dff70afbd3ca724c40560aa2ae78e07add5d901f00f7cf7`；
+image `sha256:7db0448d24bc906ad9fd2a955fe3233f9e3230736d593d0d056a982ebe857525`。
+jp-24 staging `/srv/trader-staging/mobile-close-final-634073d/` 的 preflight.log 确认 PREFLIGHT OK。
+最后追加的 RESUME 回归共 126 项全部通过。节点换版与恢复授权已向用户请求，尚未执行。
