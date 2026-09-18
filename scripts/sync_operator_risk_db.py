@@ -35,6 +35,7 @@ ALLOWED_TABLES = {
         "execution_account_id",
         "risk_capital_multiplier",
         "risk_capital_addon",
+        "default_risk_ratio",
         "is_enabled",
     ),
     "channel_routing": (

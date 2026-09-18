@@ -890,3 +890,85 @@ def _raw_order_event(index: int) -> dict[str, Any]:
         "instrument_id": "BTCUSDT-PERP.BINANCE",
         "ts_event": 1_786_000_000_000_000_000 + index,
     }
+
+@pytest.mark.parametrize(('filled', 'leaves'), [('0.12', '0.12'), ('0.24', '0')])
+def test_immutable_native_fill_keeps_actual_order_quantity_before_queue(
+    tmp_path: Path, filled: str, leaves: str,
+) -> None:
+    from dataclasses import dataclass
+
+    @dataclass(frozen=True, slots=True)
+    class OrderFilled:
+        client_order_id: str = 'B313a882dd45344d98201eb9fb5259ed201'
+        instrument_id: str = 'SOLUSDT-PERP.BINANCE'
+        venue_order_id: str = '242397468311'
+        trade_id: str = '3530924074'
+        last_qty: str = filled
+        last_px: str = '101.86'
+        ts_event: int = 1789695382172000000
+
+    order = SimpleNamespace(quantity='0.24', filled_qty=filled, leaves_qty=leaves)
+    sink = _BlockingSink()
+    projection = ProjectionActor(
+        ProjectionConfig(node_id='node-d', account_id='account-d'),
+        sink, JsonExecutionSpool(tmp_path / 'events.wal'),
+    )
+
+    class CachedActor(ExecutionProjectionActor):
+        def _cache(self):
+            return SimpleNamespace(order=lambda _cid: order)
+
+    actor = CachedActor(projection)
+    actor.on_start()
+    try:
+        assert actor.on_event(OrderFilled())
+        # Later order mutations must not change the queued event's quantities.
+        order.quantity = '999'
+        order.filled_qty = '999'
+        order.leaves_qty = '0'
+        assert sink.started.wait(timeout=0.5)
+        sink.release.set()
+        assert _wait_until(lambda: len(sink.events) == 1)
+        payload = sink.events[0].payload
+        assert payload['quantity'] == '0.24'
+        assert payload['filled_qty'] == filled
+        assert payload['leaves_qty'] == leaves
+    finally:
+        sink.release.set()
+        actor.on_stop()
+
+
+def test_real_nautilus_order_fill_enrichment(tmp_path: Path) -> None:
+    pytest.importorskip('nautilus_trader')
+    from nautilus_trader.core.uuid import UUID4
+    from nautilus_trader.model.enums import OrderSide
+    from nautilus_trader.model.identifiers import ClientOrderId, StrategyId, TraderId
+    from nautilus_trader.model.objects import Quantity
+    from nautilus_trader.model.orders import MarketOrder
+    from nautilus_trader.test_kit.providers import TestInstrumentProvider
+    from nautilus_trader.test_kit.stubs.events import TestEventStubs
+
+    instrument = TestInstrumentProvider.btcusdt_perp_binance()
+    order = MarketOrder(
+        trader_id=TraderId('TRADER-001'), strategy_id=StrategyId('S-001'),
+        instrument_id=instrument.id,
+        client_order_id=ClientOrderId('B313a882dd45344d98201eb9fb5259ed201'),
+        order_side=OrderSide.SELL, quantity=Quantity.from_str('0.240'),
+        init_id=UUID4(), ts_init=0,
+    )
+    event = TestEventStubs.order_filled(order=order, instrument=instrument)
+    with pytest.raises(AttributeError):
+        event._projection_payload_extra = {'quantity': '0.240'}
+    projection = ProjectionActor(
+        ProjectionConfig(node_id='node-d', account_id='account-d'),
+        _BlockingSink(), JsonExecutionSpool(tmp_path / 'native.wal'),
+    )
+
+    class CachedActor(ExecutionProjectionActor):
+        def _cache(self):
+            return SimpleNamespace(order=lambda _cid: order)
+
+    envelope = CachedActor(projection)._prepare_order_event(event)
+    assert envelope.payload['quantity'] == '0.240'
+    assert envelope.payload['last_qty'] == '0.240'
+    assert projection.ingest_event(envelope).outcome == ProjectionIngestOutcome.DURABLE

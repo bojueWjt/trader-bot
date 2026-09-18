@@ -8311,7 +8311,7 @@ def _resolve_attribution(database_url: str, action: str, symbol: str,
         "owner_channel": owner_channel,
         "channel_match": channel_match,
         "would_reject": would_reject,
-        "bypass": bypass,
+        "bypass": False,
         "error": error,
     }
     return event, hard_error, target_position_id
@@ -8399,24 +8399,32 @@ def _account_equity(account_id: str) -> float | None:
     return state["real_equity"]
 
 
-def _symbol_risk_ratio(symbol: str) -> float:
-    """Per-symbol risk fraction — the user's config in the watcher DB is the
-    single source of truth (e.g. BTCUSDT 0.02 = risk 2% of equity per trade);
-    symbols without a config default to 1%."""
+def _symbol_risk_ratio(symbol: str, account_id: str) -> float:
+    """Symbol override, then execution account default, then system default."""
+    import sqlite3
+
     try:
-        import sqlite3
         conn = sqlite3.connect(f"file:{_WATCHER_TRADING_DB}?mode=ro", uri=True)
         try:
             row = conn.execute(
                 "SELECT risk_ratio FROM symbol_risk_configs WHERE symbol=?", (symbol,)
             ).fetchone()
-            if row and row[0] and 0 < float(row[0]) <= 0.1:
-                return float(row[0])
+            if row is None:
+                row = conn.execute(
+                    "SELECT default_risk_ratio FROM account_configs "
+                    "WHERE execution_account_id=?", (account_id,)
+                ).fetchone()
         finally:
             conn.close()
-    except Exception:
-        pass
-    return float(os.environ.get("OPERATOR_DEFAULT_RISK_RATIO", "0.01"))
+        raw = row[0] if row is not None else os.environ.get("OPERATOR_DEFAULT_RISK_RATIO", "0.01")
+        ratio = float(raw)
+        if not math.isfinite(ratio) or not 0 < ratio <= 0.1:
+            raise ValueError("risk ratio must be in (0, 0.1]")
+        return ratio
+    except (sqlite3.Error, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503, detail="account risk ratio configuration is unavailable or invalid",
+        ) from exc
 
 
 def _size_entry_batch(explicit_notional, symbol, account_id, side, first_type,
@@ -8521,7 +8529,7 @@ def _size_open_order(explicit_notional, symbol, account_id, side, entry_type,
         if side == "long" and stop_loss >= ref:
             raise HTTPException(status_code=400, detail="long stop_loss must be below entry")
         stop_frac = abs(ref - stop_loss) / ref
-        risk_ratio = _symbol_risk_ratio(symbol)
+        risk_ratio = _symbol_risk_ratio(symbol, account_id)
         auto = effective_equity * risk_ratio / stop_frac
         allow_canary_override = (
             caps.get("_canary_explicit_notional_override") is True

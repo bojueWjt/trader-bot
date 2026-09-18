@@ -74,7 +74,9 @@ class ProjectionEventMapper:
         self._config = config
         self._now = now or (lambda: datetime.now(timezone.utc))
 
-    def to_envelope(self, event: Any) -> ExecutionEventEnvelopeV1 | None:
+    def to_envelope(
+        self, event: Any, *, payload_extra: dict[str, Any] | None = None,
+    ) -> ExecutionEventEnvelopeV1 | None:
         event_type = _event_type(event)
         if event_type not in EVENT_MAPPING_CATALOG:
             return None
@@ -102,7 +104,7 @@ class ProjectionEventMapper:
         ):
             return None
         intent_id = _intent_id(event, client_order_id)
-        payload = _payload(event, instrument_id=instrument_id)
+        payload = _payload(event, instrument_id=instrument_id, extra=payload_extra)
         event_id = stable_event_id(
             account_id=self._config.account_id,
             event_type=event_type,
@@ -174,7 +176,9 @@ def _event_type(event: Any) -> str:
     return event.__class__.__name__
 
 
-def _payload(event: Any, *, instrument_id: str | None) -> dict[str, Any]:
+def _payload(
+    event: Any, *, instrument_id: str | None, extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     keys = (
         "instrument_id",
         "order_side",
@@ -210,10 +214,7 @@ def _payload(event: Any, *, instrument_id: str | None) -> dict[str, Any]:
         "reason",
     )
     payload: dict[str, Any] = {}
-    # Enriched order fields attached upstream (mounted actor wrapper): price,
-    # trigger_price, quantity, side, order_type, reduce_only, position_id. The
-    # thin native event payloads left orders_projection without prices.
-    extra = getattr(event, "_projection_payload_extra", None)
+    # Native Nautilus events are immutable. Pass cached order fields explicitly.
     if isinstance(extra, dict):
         for key, value in extra.items():
             payload[key] = _jsonable(value)

@@ -94,6 +94,12 @@ class ProjectionActor:
                 return False
             return dict(position)
 
+    def prepare_event(self, event: Any, payload_extra: dict[str, Any]) -> Any:
+        if isinstance(event, ExecutionEventEnvelopeV1):
+            return event
+        envelope = self._mapper.to_envelope(event, payload_extra=payload_extra)
+        return envelope if envelope is not None else event
+
     def on_event(self, event: Any) -> str | None:
         result = self.ingest_event(event)
         if result.outcome not in {

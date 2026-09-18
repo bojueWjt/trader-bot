@@ -44,7 +44,7 @@ def client(monkeypatch: pytest.MonkeyPatch, migrated_db: str) -> TestClient:
     monkeypatch.setenv("RISK_ADMIN_TOKEN", RISK_TOKEN)
     monkeypatch.setenv("OPERATOR_MAX_LEVERAGE", "1")
     monkeypatch.setattr(read_api, "_account_risk_capital_addon", lambda _account_id: 0.0)
-    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol: 0.06)
+    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol, _account: 0.06)
     _activate_redis_epoch(migrated_db)
     _seed_reviewed_rollout(migrated_db)
     _seed_account(migrated_db, account_id=ACCOUNT_B, node_id=NODE_B)

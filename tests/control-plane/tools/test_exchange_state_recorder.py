@@ -624,3 +624,18 @@ def _load_module() -> types.ModuleType:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_exchange_filters_use_real_market_precision_and_cache():
+    module = _load_module()
+    opener = Mock()
+    opener.open.return_value = io.BytesIO(json.dumps({'symbols': [{
+        'symbol': 'SOLUSDT', 'filters': [
+            {'filterType': 'LOT_SIZE', 'stepSize': '0.01', 'minQty': '0.01'},
+            {'filterType': 'MARKET_LOT_SIZE', 'stepSize': '0.01', 'minQty': '0.01'},
+        ],
+    }]}).encode())
+    filters = module.exchange_quantity_filters('https://fapi.binance.com', opener)
+    assert filters['SOLUSDT'] == {'quantity_step': '0.01', 'min_quantity': '0.01'}
+    assert module.exchange_quantity_filters('https://fapi.binance.com', opener) == filters
+    opener.open.assert_called_once()

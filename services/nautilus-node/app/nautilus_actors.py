@@ -603,6 +603,8 @@ def order_snapshot_payload(order: Any) -> dict:
         "order_type": _order_field(order, ("order_type", "type")),
         "side": _order_field(order, ("side", "order_side")),
         "quantity": _order_field(order, ("quantity", "qty")),
+        "filled_qty": _order_field(order, ("filled_qty",)),
+        "leaves_qty": _order_field(order, ("leaves_qty",)),
         "price": _order_field(order, ("price", "limit_price")),
         "trigger_price": _order_field(order, ("trigger_price", "stop_price")),
         "reduce_only": _order_field(order, ("reduce_only", "is_reduce_only")),
@@ -1309,7 +1311,7 @@ class ExecutionProjectionActor(Actor):
                 + self._durable_ingress_deadline_seconds
             )
         publication = _ProjectionPublication(
-            event=event,
+            event=self._prepare_order_event(event),
             submitted_at=submitted_at,
             deadline_at=deadline_at,
         )
@@ -1330,7 +1332,6 @@ class ExecutionProjectionActor(Actor):
         self,
         publication: _ProjectionPublication,
     ) -> _ProjectionPersistenceState:
-        self._attach_order_payload_fields(publication.event)
         ingest = getattr(self._projection_actor, "ingest_event")
         try:
             result = ingest(publication.event)
@@ -1816,25 +1817,16 @@ class ExecutionProjectionActor(Actor):
             return
 
     def _project_event(self, event: Any) -> Any:
-        self._attach_order_payload_fields(event)
         return self._projection_actor.on_event(event)
 
-    def _attach_order_payload_fields(self, event: Any) -> None:
+    def _prepare_order_event(self, event: Any) -> Any:
+        # Snapshot the cache on the actor thread, before queued later fills can
+        # change it. Native Cython events cannot accept arbitrary attributes.
         extra = order_event_payload_fields(event, self._cache())
-        if extra:
-            attach = getattr(
-                self._projection_actor, "attach_order_payload_fields", None
-            )
-            if callable(attach):
-                try:
-                    attach(event, extra)
-                except Exception:
-                    pass
-            else:
-                try:
-                    setattr(event, "_projection_payload_extra", extra)
-                except Exception:
-                    pass
+        prepare = getattr(self._projection_actor, "prepare_event", None)
+        if extra and callable(prepare):
+            return prepare(event, extra)
+        return event
 
     def _update_queue_pressure(self) -> None:
         queue_size = self._event_queue.qsize()
@@ -1990,7 +1982,7 @@ class ExecutionProjectionActor(Actor):
         self._report_fatal(reason)
 
     def _cache(self) -> Any:
-        return _first_attr(self, ("cache", "_cache")) or _first_attr(
+        return _first_attr(self, ("cache",)) or _first_attr(
             self._projection_actor, ("cache", "_cache")
         )
 

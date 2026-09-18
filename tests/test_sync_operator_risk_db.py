@@ -328,3 +328,14 @@ def test_missing_target_is_created_on_first_sync(tmp_path: Path) -> None:
             "SELECT COUNT(*) FROM channel_routing"
         ).fetchone()
     assert count == (2,)
+
+
+def test_sync_preserves_account_default_risk_ratio(tmp_path):
+    source, target = tmp_path / 'watcher.db', tmp_path / 'risk.db'
+    _create_source(source)
+    with sqlite3.connect(source) as conn:
+        conn.execute('UPDATE account_configs SET default_risk_ratio=0.02')
+    result = _run(source, target)
+    assert result.returncode == 0, result.stderr
+    with _connect_readonly(target) as conn:
+        assert conn.execute('SELECT DISTINCT default_risk_ratio FROM account_configs').fetchall() == [(0.02,)]

@@ -206,7 +206,7 @@ def client(monkeypatch: pytest.MonkeyPatch, migrated_db: str) -> TestClient:
         lambda _account_id: 0.0,
     )
     # Deterministic sizing: never read the operator's watcher sqlite config.
-    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol: 0.01)
+    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol, _account: 0.01)
     _activate_redis_epoch(migrated_db)
     _seed_account_state(migrated_db)
     _seed_reviewed_rollout(migrated_db)

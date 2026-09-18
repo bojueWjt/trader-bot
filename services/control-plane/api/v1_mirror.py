@@ -48,7 +48,7 @@ def _filter_value(payload: dict, symbol: str, *keys: str) -> str:
     for key in keys:
         if payload.get(key) is not None:
             return _dec_text(payload.get(key))
-    return "0.001"
+    return ""
 
 
 def _client_id(order: dict) -> str:

@@ -35,6 +35,31 @@ from urllib.error import HTTPError
 import psycopg2
 
 DEFAULT_REFRESH_INTERVAL_SECONDS = 3
+_EXCHANGE_FILTER_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def exchange_quantity_filters(base: str, opener) -> dict:
+    cached = _EXCHANGE_FILTER_CACHE.get(base)
+    if cached is not None and time.monotonic() - cached[0] < 3600:
+        return cached[1]
+    request = urllib.request.Request(base.rstrip("/") + "/fapi/v1/exchangeInfo")
+    with opener.open(request, timeout=15) as response:
+        info = json.loads(response.read())
+    filters = {}
+    for symbol in info["symbols"]:
+        lots = [item for item in symbol.get("filters", [])
+                if item.get("filterType") in {"LOT_SIZE", "MARKET_LOT_SIZE"}]
+        if not lots:
+            continue
+        step = max(Decimal(item["stepSize"]) for item in lots)
+        minimum = max(Decimal(item["minQty"]) for item in lots)
+        if step > 0 and minimum > 0:
+            filters[symbol["symbol"]] = {
+                "quantity_step": format(step, "f"),
+                "min_quantity": format(minimum, "f"),
+            }
+    _EXCHANGE_FILTER_CACHE[base] = (time.monotonic(), filters)
+    return filters
 
 ACCOUNTS = {
     "account-a": ("trader-v3-node-a", "BINANCE_ACCOUNT_A"),
@@ -427,10 +452,17 @@ def snapshot_account(base: str, key: str, sec: str, opener=None) -> dict:
     )
     algo_rows = algo_raw.get("orders", algo_raw) if isinstance(algo_raw, dict) else algo_raw
     algo = [slim_order(o, "algo") for o in algo_rows]
+    try:
+        filters = exchange_quantity_filters(base, request_opener)
+    except Exception as exc:
+        # Missing precision must not stop recording actual positions or balances.
+        log(f"exchange quantity filters unavailable: {type(exc).__name__}")
+        filters = {}
     return {
         "source": "binance_fapi",
         "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "account": account,
+        "filters": filters,
         "positions": [
             {"symbol": p["symbol"], "position_amt": p["positionAmt"],
              "entry_price": p.get("entryPrice"), "mark_price": p.get("markPrice"),

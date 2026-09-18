@@ -556,7 +556,7 @@ def test_sizing_adds_fixed_risk_capital_addon(
         }
 
     monkeypatch.setattr(read_api, "_account_financial_state", financial_state)
-    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol: 0.01)
+    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol, _account: 0.01)
     addon = 6000.0
 
     results = []
@@ -690,7 +690,7 @@ def test_sizing_accepts_zero_risk_capital_addon(monkeypatch) -> None:
             "available_balance": 3000.0,
         },
     )
-    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol: 0.01)
+    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol, _account: 0.01)
     checks = []
 
     notional = read_api._size_open_order(
@@ -756,7 +756,7 @@ def test_sizing_rejects_explicit_notional_above_dynamic_auto(
             "available_balance": 1000.0,
         },
     )
-    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol: 0.01)
+    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol, _account: 0.01)
 
     with pytest.raises(HTTPException) as exc:
         read_api._size_open_order(
@@ -790,7 +790,7 @@ def test_sizing_allows_explicit_notional_below_dynamic_auto(
             "available_balance": 1000.0,
         },
     )
-    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol: 0.01)
+    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol, _account: 0.01)
     checks = []
 
     notional = read_api._size_open_order(
@@ -825,7 +825,7 @@ def test_explicit_notional_limit_tracks_profit_and_loss(
         }
 
     monkeypatch.setattr(read_api, "_account_financial_state", financial_state)
-    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol: 0.01)
+    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol, _account: 0.01)
 
     def size_explicit() -> float:
         return read_api._size_open_order(
@@ -866,7 +866,7 @@ def test_canary_explicit_notional_override_keeps_real_funds_gate(
             "available_balance": 1.0,
         },
     )
-    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol: 0.01)
+    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol, _account: 0.01)
     caps = _caps()
     caps["_canary_explicit_notional_override"] = True
 
@@ -900,7 +900,7 @@ def test_sizing_keeps_real_available_balance_as_hard_gate(monkeypatch) -> None:
             "available_balance": 50.0,
         },
     )
-    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol: 0.01)
+    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol, _account: 0.01)
 
     with pytest.raises(HTTPException) as exc:
         read_api._size_open_order(
@@ -1064,3 +1064,48 @@ def test_management_semantic_digest_covers_mutating_fields(
     )
 
     assert first["sha256"] != second["sha256"]
+
+
+def test_risk_ratio_uses_execution_account_default_and_symbol_override(tmp_path, monkeypatch):
+    path = tmp_path / 'risk.db'
+    with sqlite3.connect(path) as conn:
+        conn.executescript('''
+            CREATE TABLE account_configs (execution_account_id TEXT, default_risk_ratio REAL);
+            INSERT INTO account_configs VALUES ('account-a', 0.02), ('account-d', 0.03);
+            CREATE TABLE symbol_risk_configs (symbol TEXT, risk_ratio REAL);
+            INSERT INTO symbol_risk_configs VALUES ('ZECUSDT', 0.012);
+        ''')
+    monkeypatch.setattr(read_api, '_WATCHER_TRADING_DB', str(path))
+    monkeypatch.setenv('OPERATOR_DEFAULT_RISK_RATIO', '0.01')
+    assert read_api._symbol_risk_ratio('SOLUSDT', 'account-a') == 0.02
+    assert read_api._symbol_risk_ratio('SOLUSDT', 'account-d') == 0.03
+    assert read_api._symbol_risk_ratio('ZECUSDT', 'account-a') == 0.012
+    assert read_api._symbol_risk_ratio('SOLUSDT', 'unconfigured') == 0.01
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE account_configs SET default_risk_ratio=NULL WHERE execution_account_id='account-a'")
+    with pytest.raises(HTTPException) as exc:
+        read_api._symbol_risk_ratio('SOLUSDT', 'account-a')
+    assert exc.value.status_code == 503
+
+
+def test_account_default_risk_drives_auto_sizing(tmp_path, monkeypatch):
+    path = tmp_path / 'risk.db'
+    with sqlite3.connect(path) as conn:
+        conn.executescript('''
+            CREATE TABLE account_configs (execution_account_id TEXT, default_risk_ratio REAL);
+            INSERT INTO account_configs VALUES ('account-d', 0.02);
+            CREATE TABLE symbol_risk_configs (symbol TEXT, risk_ratio REAL);
+        ''')
+    monkeypatch.setattr(read_api, '_WATCHER_TRADING_DB', str(path))
+    monkeypatch.setattr(read_api, '_account_financial_state', lambda _: {
+        'real_equity': 1000, 'available_balance': 1000,
+    })
+    checks = []
+    notional = read_api._size_open_order(
+        None, 'SOLUSDT', 'account-d', 'long', 'limit', 100, None, None,
+        95, 10, _caps(), checks, 500,
+    )
+    assert notional == 600
+    sizing = next(item for item in checks if item['name'] == 'risk_sizing')
+    assert sizing['risk_ratio'] == 0.02
+    assert sizing['est_risk'] == 30
