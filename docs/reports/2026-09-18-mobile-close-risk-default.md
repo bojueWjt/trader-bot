@@ -27,21 +27,34 @@ App 两个入口（持仓卡片快捷抽屉、持仓详情页）均修复：fill
 - 控制面查询服务与交易所镜像服务已重启并核对；账户默认风险、真实数量精度已生效。SOL 步长/最小量均 0.01。
 - 根据签名交易所订单和已有去重成交总量，仅修正上述一笔订单投影的 quantity/status/payload，未新建/撤销交易，未修改成交数量、均价或执行事件。
 - 修正与前后快照在同一事务审计：`ebfffcf6-f86b-4507-b053-07c36c8c64b4`，事件 `order_projection.venue_reconciled`。API 随后确认 status=filled。
-- 四个交易节点仍 ACTIVE、心跳正常；未执行 HALT/RESUME。
+- 用户明确授权本次换版并恢复四账户后，已执行审计 HALT、换版和 RESUME；四个交易节点现均 ACTIVE、心跳 <2 秒。
 - 线上 RESUME 的已有 partial 投影豁免热修补同步回源代码，避免后续完整部署覆盖现状。
 - 备份、预检、签名只读订单凭证、修正 SQL 和执行回执位于 jp-24 `/srv/trader-staging/mobile-close-risk-20260918/`。
 
-## 验证与尚未生效部分
+## 验证与待完成事项
 
 - App：27 suites、231 tests 全过；TypeScript 和 ESLint 通过。覆盖两个入口 filled/partial、超时持仓刷新、已成交提示、没有重复 POST。
 - 节点：真实 Nautilus wheel 下 44 tests 通过，包括不可修改原生 OrderFilled、部分成交/全成交数量、入队后缓存变化、回调预算。
 - 控制面：风险来源优先级、2% 实际定量、配置同步、交易所精度缓存、镜像接口与已有订单测试通过。
-- 节点修复镜像已生成并预检；节点换版尚未执行。换版后的恢复必须由用户明确授权 RESUME。
+- 节点修复镜像已完成预检、部署和恢复；实际镜像及 43 个发布文件哈希通过 verify-live。
 - 新版 App 尚未安装：构建 Mac 100.111.192.24 当时 Tailscale 离线，本机 adb 无设备；等待电脑上线和手机连接。
 - 原有 SOL 保护单数量镜像曾仍显示 0.49。本轮没有修改真实保护订单，保护单缩量应单独核对，不能把本轮状态修复当作保护单生命周期已验收。
 
-最终待部署节点候选：commit `634073da594cf7c9ed1d5d86ae1f2a30ddc7eedd`；
-release `df48c66dcd9eeb206dff70afbd3ca724c40560aa2ae78e07add5d901f00f7cf7`；
+最终已部署节点版本：commit `634073da594cf7c9ed1d5d86ae1f2a30ddc7eedd`；
+release `cccb84fbfc4cce6529a0f099aa2bc368fc175d2e339eab1c1ada05aa8e43d1ca`；
 image `sha256:7db0448d24bc906ad9fd2a955fe3233f9e3230736d593d0d056a982ebe857525`。
-jp-24 staging `/srv/trader-staging/mobile-close-final-634073d/` 的 preflight.log 确认 PREFLIGHT OK。
-最后追加的 RESUME 回归共 126 项全部通过。节点换版与恢复授权已向用户请求，尚未执行。
+执行 staging `/srv/trader-staging/mobile-close-final-634073d/`，execute.log 确认 DEPLOY OK。
+部署备份 `/srv/trader-v3/backups/deploy-20260918T021035Z-account-stall-hardening/`。
+最后追加的 RESUME 回归共 126 项全部通过。
+
+本次 RESUME 已复核 command_node_acks=completed、operator_command 审计和最新心跳，未引用旧恢复记录：
+
+| 账户 | RESUME 审计时间 UTC | command_id | 最终状态 |
+|---|---|---|---|
+| A | 2026-09-18 02:13:15.790 | 12b92cce-d5b6-456b-bb15-7f902f596548 | ACTIVE |
+| B | 2026-09-18 02:13:22.368 | 270ad0b1-9970-4c16-a459-45fcc1a2b296 | ACTIVE |
+| C | 2026-09-18 02:13:48.207 | 0742ceba-d84d-4618-a4d8-3963ded5acbb | ACTIVE |
+| D | 2026-09-18 02:13:54.769 | 7e7927b3-6cb3-4239-a4c4-65f12604336a | ACTIVE |
+
+C 恢复期间出现订单证据时效门和保证金快照超过 30 秒的 409；等待新快照后通过，未削弱门禁或伪造快照时间。
+四角色服务均 active；四节点均运行新镜像。App 安装仍待构建 Mac 上线及手机连接。
