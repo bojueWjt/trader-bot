@@ -289,7 +289,13 @@ def _snapshot_response(
     }
 
 
-def _successful_call(calls, *, positions_by_account=None, snapshot_stale=False):
+def _successful_call(
+    calls,
+    *,
+    positions_by_account=None,
+    snapshot_stale=False,
+    snapshot=None,
+):
     def fake_call(method, path, payload=None):
         calls.append((method, path, payload))
         if method == "GET" and path.startswith("/v1/query/channel-route?"):
@@ -298,6 +304,8 @@ def _successful_call(calls, *, positions_by_account=None, snapshot_stale=False):
             route = next(row for row in FOUR_CHANNEL_ROUTES if row[0] == channel)
             return {"execution_account_id": route[2], "risk_capital_addon": route[5]}
         if method == "GET" and path == "/api/system/snapshot":
+            if snapshot is not None:
+                return snapshot
             return _snapshot_response(
                 positions_by_account=positions_by_account,
                 stale=snapshot_stale,
@@ -634,99 +642,61 @@ _MANAGE_AUTH = [
 ]
 
 
-def test_resolve_partial_close_quantity_20_percent_of_snapshot() -> None:
-    trade = _load_module("test_partial_qty_helper", TRADE_PATH)
-    assert trade.resolve_partial_close_quantity(
-        quantity=None, percent=20, position_quantity=1407,
-    ) == 281.4
-    assert trade.resolve_partial_close_quantity(
-        quantity=None, percent=20, position_quantity=11871.2,
-    ) == pytest.approx(2374.24)
-    assert trade.resolve_partial_close_quantity(
-        quantity=281.0, percent=None, position_quantity=1407,
-    ) == 281.0
+def test_resolve_partial_close_request_percent_is_structured_fraction() -> None:
+    from decimal import Decimal
+
+    trade = _load_module("test_partial_fraction_helper", TRADE_PATH)
+    assert trade.resolve_partial_close_request(quantity=None, percent=20) == {
+        "fraction": "0.2",
+    }
+    assert trade.resolve_partial_close_request(quantity=None, percent=30) == {
+        "fraction": "0.3",
+    }
+    assert trade.resolve_partial_close_request(quantity=None, percent=100) == {
+        "fraction": "1",
+    }
+    qty = trade.resolve_partial_close_request(quantity=0.0924, percent=None)
+    assert Decimal(qty["quantity"]) == Decimal("0.0924")
+    assert "fraction" not in qty
 
 
 def test_resolve_partial_close_rejects_missing_and_illegal_ratios() -> None:
     trade = _load_module("test_partial_qty_illegal", TRADE_PATH)
     with pytest.raises(ValueError, match="exactly one"):
-        trade.resolve_partial_close_quantity(
-            quantity=None, percent=None, position_quantity=1407,
-        )
+        trade.resolve_partial_close_request(quantity=None, percent=None)
     with pytest.raises(ValueError, match="exactly one"):
-        trade.resolve_partial_close_quantity(
-            quantity=281, percent=20, position_quantity=1407,
-        )
+        trade.resolve_partial_close_request(quantity=281, percent=20)
     with pytest.raises(ValueError, match="percent"):
-        trade.resolve_partial_close_quantity(
-            quantity=None, percent=0, position_quantity=1407,
-        )
+        trade.resolve_partial_close_request(quantity=None, percent=0)
     with pytest.raises(ValueError, match="percent"):
-        trade.resolve_partial_close_quantity(
-            quantity=None, percent=120, position_quantity=1407,
-        )
-    with pytest.raises(ValueError, match="no open position"):
-        trade.resolve_partial_close_quantity(
-            quantity=None, percent=20, position_quantity=None,
-        )
+        trade.resolve_partial_close_request(quantity=None, percent=120)
 
 
-def test_resolve_partial_close_rejects_non_finite_percent_quantity_and_position() -> None:
+def test_resolve_partial_close_rejects_non_finite_percent_and_quantity() -> None:
     trade = _load_module("test_partial_qty_nonfinite", TRADE_PATH)
     nan = float("nan")
     inf = float("inf")
     ninf = float("-inf")
     with pytest.raises(ValueError, match="illegal percent"):
-        trade.resolve_partial_close_quantity(
-            quantity=None, percent=nan, position_quantity=1407,
-        )
+        trade.resolve_partial_close_request(quantity=None, percent=nan)
     with pytest.raises(ValueError, match="illegal percent"):
-        trade.resolve_partial_close_quantity(
-            quantity=None, percent=inf, position_quantity=1407,
-        )
+        trade.resolve_partial_close_request(quantity=None, percent=inf)
     with pytest.raises(ValueError, match="illegal percent"):
-        trade.resolve_partial_close_quantity(
-            quantity=None, percent=ninf, position_quantity=1407,
-        )
+        trade.resolve_partial_close_request(quantity=None, percent=ninf)
     with pytest.raises(ValueError, match="illegal quantity"):
-        trade.resolve_partial_close_quantity(
-            quantity=nan, percent=None, position_quantity=1407,
-        )
+        trade.resolve_partial_close_request(quantity=nan, percent=None)
     with pytest.raises(ValueError, match="illegal quantity"):
-        trade.resolve_partial_close_quantity(
-            quantity=inf, percent=None, position_quantity=1407,
-        )
+        trade.resolve_partial_close_request(quantity=inf, percent=None)
     with pytest.raises(ValueError, match="illegal quantity"):
-        trade.resolve_partial_close_quantity(
-            quantity=ninf, percent=None, position_quantity=1407,
-        )
-    with pytest.raises(ValueError, match="illegal position_quantity"):
-        trade.resolve_partial_close_quantity(
-            quantity=None, percent=20, position_quantity=nan,
-        )
-    with pytest.raises(ValueError, match="illegal position_quantity"):
-        trade.resolve_partial_close_quantity(
-            quantity=None, percent=20, position_quantity=inf,
-        )
+        trade.resolve_partial_close_request(quantity=ninf, percent=None)
 
 
-def test_partial_percent_20_posts_partial_close_not_full(
+def test_partial_percent_20_posts_fraction_not_absolute_qty(
     monkeypatch,
 ) -> None:
     trade = _load_module("test_partial_percent_20", TRADE_PATH)
     calls = []
     monkeypatch.setattr(trade, "_call", _successful_call(calls))
-    monkeypatch.setattr(
-        trade,
-        "_position_for",
-        lambda symbol, account_id, side=None: {
-            "quantity": 1407,
-            "account_id": account_id,
-            "instrument_id": symbol,
-            "side": side,
-            "status": "open",
-        },
-    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -739,7 +709,13 @@ def test_partial_percent_20_posts_partial_close_not_full(
         if method == "POST" and path == "/v1/operator/orders"
     )
     assert payload["action"] == "partial_close"
-    assert payload["quantity"] == pytest.approx(281.4)
+    from decimal import Decimal
+    assert Decimal(str(payload["fraction"])) == Decimal("0.2")
+    assert "quantity" not in payload
+    assert not any(
+        method == "GET" and path == "/api/system/snapshot"
+        for method, path, _ in calls
+    )
     first = dict(payload)
     calls.clear()
     trade.main()
@@ -748,7 +724,7 @@ def test_partial_percent_20_posts_partial_close_not_full(
         for method, path, payload in calls
         if method == "POST" and path == "/v1/operator/orders"
     )
-    assert retry["quantity"] == first["quantity"]
+    assert retry["fraction"] == first["fraction"]
     assert retry["client_ref"] == first["client_ref"]
 
 
@@ -779,44 +755,28 @@ def test_partial_without_quantity_or_percent_is_rejected(monkeypatch) -> None:
     with pytest.raises(SystemExit) as exited:
         trade.main()
     assert exited.value.code == 1
-    assert calls == []
+    assert [path for _method, path, _payload in calls if path == "/v1/operator/orders"] == []
 
 
 @pytest.mark.parametrize(
-    ("extra_argv", "position_quantity"),
+    "extra_argv",
     [
-        (["--percent", "nan"], 1407),
-        (["--percent", "inf"], 1407),
-        (["--percent=-inf"], 1407),
-        (["--quantity", "nan"], None),
-        (["--quantity", "inf"], None),
-        (["--quantity=-inf"], None),
-        (["--percent", "20"], float("nan")),
-        (["--percent", "20"], float("inf")),
+        ["--percent", "nan"],
+        ["--percent", "inf"],
+        ["--percent=-inf"],
+        ["--quantity", "nan"],
+        ["--quantity", "inf"],
+        ["--quantity=-inf"],
     ],
 )
 def test_partial_non_finite_cli_exits_without_post(
     monkeypatch,
     extra_argv: list[str],
-    position_quantity: float | None,
 ) -> None:
     label = "_".join(extra_argv).replace("-", "")
-    pos = "none" if position_quantity is None else str(position_quantity)
-    trade = _load_module(f"test_partial_nonfinite_{label}_{pos}", TRADE_PATH)
+    trade = _load_module(f"test_partial_nonfinite_{label}", TRADE_PATH)
     calls = []
     monkeypatch.setattr(trade, "_call", _successful_call(calls))
-    if position_quantity is not None:
-        monkeypatch.setattr(
-            trade,
-            "_position_for",
-            lambda symbol, account_id, side=None, qty=position_quantity: {
-                "quantity": qty,
-                "account_id": account_id,
-                "instrument_id": symbol,
-                "side": side,
-                "status": "open",
-            },
-        )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -825,7 +785,202 @@ def test_partial_non_finite_cli_exits_without_post(
     with pytest.raises(SystemExit) as exited:
         trade.main()
     assert exited.value.code == 1
-    assert calls == []
+    assert [path for _method, path, _payload in calls if path == "/v1/operator/orders"] == []
+
+
+_TAO_PARTIAL_AUTH = [
+    "--account", "account-c",
+    "--side", "long",
+    "--reason", "坚果TV消息6925: TAO到240止盈30%-50%并推保本;区间取下限30%减当前本频道多仓,保留余仓看周末涨幅",
+    "--ref", "tg-sig-c1002189417451-m6925",
+    "--channel", "-1002189417451",
+    "--entry-ref", "tg-sig-c1002189417451-m6894",
+    "--authorized-by-type", "channel",
+    "--authorized-by-id", "-1002189417451",
+    "--source-message-id", "tg-sig-c1002189417451-m6925",
+    "--no-wait",
+]
+
+
+def _tao_conflict_snapshot(
+    *,
+    stale: bool = False,
+    include_c_long: bool = True,
+    include_c_short: bool = True,
+    include_d_long: bool = True,
+    missing_c: bool = False,
+) -> dict:
+    """Live TAO incident: projection 0.308 vs venue LONG 9.890 on account-c."""
+    projection = [
+        {
+            "account_id": "account-c",
+            "instrument_id": "TAOUSDT-PERP.BINANCE",
+            "side": "long",
+            "quantity": "0.308",
+            "status": "open",
+        }
+    ]
+    c_positions = []
+    if include_c_long:
+        c_positions.append(
+            {
+                "symbol": "TAOUSDT",
+                "position_side": "LONG",
+                "position_amt": "9.890",
+                "quantity_step": "0.001",
+            }
+        )
+    if include_c_short:
+        c_positions.append(
+            {
+                "symbol": "TAOUSDT",
+                "position_side": "SHORT",
+                "position_amt": "1.000",
+                "quantity_step": "0.001",
+            }
+        )
+    d_positions = []
+    if include_d_long:
+        d_positions.append(
+            {
+                "symbol": "TAOUSDT",
+                "position_side": "LONG",
+                "position_amt": "99.000",
+                "quantity_step": "0.001",
+            }
+        )
+    rows = []
+    if not missing_c:
+        rows.append(
+            {
+                "account_id": "account-c",
+                "stale": stale,
+                "updated_at": "2026-09-18T03:14:41+00:00",
+                "payload": {"positions": c_positions},
+            }
+        )
+    rows.append(
+        {
+            "account_id": "account-d",
+            "stale": False,
+            "updated_at": "2026-09-18T03:14:41+00:00",
+            "payload": {"positions": d_positions},
+        }
+    )
+    return {
+        "stale": stale,
+        "data": {
+            "positions": projection,
+            "exchange_state": rows,
+        },
+    }
+
+
+def _posted_partial(calls):
+    return next(
+        payload
+        for method, path, payload in calls
+        if method == "POST" and path == "/v1/operator/orders"
+    )
+
+
+def test_partial_percent_posts_fraction_not_mirror_or_projection(monkeypatch) -> None:
+    trade = _load_module("test_tao_percent_fraction", TRADE_PATH)
+    calls = []
+    monkeypatch.setattr(
+        trade,
+        "_call",
+        _successful_call(calls, snapshot=_tao_conflict_snapshot()),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["v3_trade.py", "partial", "TAOUSDT", "--percent", "30", *_TAO_PARTIAL_AUTH],
+    )
+    trade.main()
+    from decimal import Decimal
+    payload = _posted_partial(calls)
+    assert payload["action"] == "partial_close"
+    assert Decimal(str(payload["fraction"])) == Decimal("0.3")
+    assert "quantity" not in payload
+    assert payload["account_id"] == "account-c"
+    assert payload["position_side"] == "long"
+    assert payload["authorized_by_type"] == "channel"
+    assert not any(
+        method == "GET" and path == "/api/system/snapshot"
+        for method, path, _ in calls
+    )
+
+
+def test_partial_percent_keeps_side_in_payload_without_local_qty(monkeypatch) -> None:
+    trade = _load_module("test_tao_percent_side", TRADE_PATH)
+    calls = []
+    monkeypatch.setattr(trade, "_call", _successful_call(calls))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["v3_trade.py", "partial", "TAOUSDT", "--percent", "30", *_TAO_PARTIAL_AUTH],
+    )
+    trade.main()
+    from decimal import Decimal
+    payload = _posted_partial(calls)
+    assert payload["position_side"] == "long"
+    assert Decimal(str(payload["fraction"])) == Decimal("0.3")
+    calls.clear()
+    short_auth = list(_TAO_PARTIAL_AUTH)
+    short_auth[short_auth.index("long")] = "short"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["v3_trade.py", "partial", "TAOUSDT", "--percent", "30", *short_auth],
+    )
+    trade.main()
+    short_payload = _posted_partial(calls)
+    assert short_payload["position_side"] == "short"
+    assert Decimal(str(short_payload["fraction"])) == Decimal("0.3")
+
+
+def test_partial_explicit_quantity_is_not_silently_rewritten(monkeypatch) -> None:
+    trade = _load_module("test_tao_qty_raw", TRADE_PATH)
+    calls = []
+    monkeypatch.setattr(
+        trade,
+        "_call",
+        _successful_call(calls, snapshot=_tao_conflict_snapshot()),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "v3_trade.py",
+            "partial",
+            "TAOUSDT",
+            "--quantity",
+            "0.0924",
+            *_TAO_PARTIAL_AUTH,
+        ],
+    )
+    trade.main()
+    from decimal import Decimal
+    payload = _posted_partial(calls)
+    assert Decimal(str(payload["quantity"])) == Decimal("0.0924")
+    assert "fraction" not in payload
+
+
+def test_partial_percent_does_not_parse_ratio_from_reason(monkeypatch) -> None:
+    trade = _load_module("test_tao_no_reason_parse", TRADE_PATH)
+    calls = []
+    monkeypatch.setattr(trade, "_call", _successful_call(calls))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["v3_trade.py", "partial", "TAOUSDT", "--quantity", "0.05", *_TAO_PARTIAL_AUTH],
+    )
+    trade.main()
+    from decimal import Decimal
+    payload = _posted_partial(calls)
+    assert Decimal(str(payload["quantity"])) == Decimal("0.05")
+    assert "fraction" not in payload
 
 
 _ENTRY_AUTH = [

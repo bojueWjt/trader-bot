@@ -2733,6 +2733,41 @@ class IntentExecutionStrategy(Strategy):
             return tuple(positions)
         return self._all_open_positions()
 
+    def _planner_robot_owned_quantity(
+        self,
+        instrument_id: str,
+        order_plan: Mapping[str, Any] | Any,
+        reconciled_state: Any,
+    ) -> str | None:
+        if not isinstance(order_plan, Mapping):
+            return None
+        authorization = order_plan.get("authorization")
+        if not isinstance(authorization, Mapping):
+            return None
+        if authorization.get("authorized_by_type") != "channel":
+            return None
+        book = str(order_plan.get("position_side") or "").upper()
+        if book not in {"LONG", "SHORT"}:
+            return None
+        venue_qty = None
+        if reconciled_state is not None:
+            try:
+                from execution_domain.account_execution_ledger import BookKey
+                assessment = reconciled_state.assess(
+                    BookKey(str(self.config.account_id), instrument_id, book)
+                )
+            except Exception:
+                assessment = None
+            if (
+                assessment is not None
+                and str(getattr(assessment.state, "value", assessment.state)) == "known_open"
+                and bool(getattr(assessment, "venue_fresh", False))
+            ):
+                venue_qty = format(assessment.quantity, "f")
+        if venue_qty is None:
+            return None
+        return self._robot_owned_position_quantity(instrument_id, book, venue_qty)
+
     def _robot_owned_position_quantity(
         self,
         instrument_id: str,
@@ -3214,6 +3249,11 @@ class IntentExecutionStrategy(Strategy):
             existing_intent_ids=existing_intent_ids,
             reconciled_state=reconciled_state,
             simulation=simulation,
+            robot_owned_quantity=self._planner_robot_owned_quantity(
+                instrument_id,
+                raw_order_plan,
+                reconciled_state,
+            ),
         )
         if str(raw_order_plan.get("type", "")).lower() in {'zone_ladder', 'entry_batch'}:
             self._handle_zone_ladder(
@@ -9418,20 +9458,38 @@ class IntentExecutionStrategy(Strategy):
                 return OrderDenied("reduction_authorization_missing", str(plan.intent_id))
             if record.action not in {"close_position", "partial_close", "move_stop_loss", "move_stop_to_entry", "replace_take_profits"}:
                 return OrderDenied("reduction_authorization_missing", record.action)
+            if raw.get("quantity") is not None and raw.get("fraction") is not None:
+                return OrderDenied("reduction_authorization_missing", "quantity_and_fraction")
             if authorization["authorized_by_type"] == "user":
-                limit = assessment.quantity
+                scope = assessment.quantity
             else:
-                limit = Decimal(self._robot_owned_position_quantity(plan.instrument_id, book, str(assessment.quantity)))
+                scope = Decimal(
+                    self._robot_owned_position_quantity(
+                        plan.instrument_id, book, str(assessment.quantity)
+                    )
+                )
             if raw.get("quantity") is not None:
                 approved = _positive_canary_decimal(raw["quantity"])
                 if approved is None:
                     return OrderDenied("reduction_authorization_missing", "invalid approved quantity")
-                limit = min(limit, approved)
+                limit = min(scope, approved)
             elif raw.get("fraction") is not None:
                 fraction = _positive_canary_decimal(raw["fraction"])
                 if fraction is None or fraction > 1:
                     return OrderDenied("reduction_authorization_missing", "invalid approved fraction")
-                limit = min(limit, assessment.quantity * fraction)
+                if scope <= 0:
+                    if authorization["authorized_by_type"] == "channel":
+                        return OrderDenied(
+                            "reduction_owned_unavailable",
+                            format(scope, "f"),
+                        )
+                    return OrderDenied(
+                        "reduction_evidence_unavailable",
+                        format(scope, "f"),
+                    )
+                limit = scope * fraction
+            else:
+                limit = scope
         else:
             # Autonomous protection revisions inherit their parent, rather than
             # claiming the full book merely because a tag says "user".

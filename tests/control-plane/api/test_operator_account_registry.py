@@ -1022,6 +1022,7 @@ def test_channel_rebind_keeps_historical_management_on_entry_account(
     ("field", "first_value", "second_value"),
     [
         ("quantity", "0.01", "0.02"),
+        ("fraction", "0.3", "0.5"),
         ("stop_loss", 60000.0, 61000.0),
         (
             "take_profits",

@@ -79,6 +79,7 @@ class PlannerContext:
     # Cache-only position checks for simulated engines/tests that have no venue
     # subsystem. Production must attach reconciled_state; None is UNKNOWN.
     simulation: bool = False
+    robot_owned_quantity: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -298,13 +299,50 @@ def _plan_management_intent(
     orders: tuple[OrderPlan, ...]
 
     if action == PARTIAL_CLOSE:
-        sized = _resolve_exit_quantity(order_plan, position, required=True)
-        if isinstance(sized, OrderDenied):
-            return sized
+        raw_quantity = order_plan.get("quantity")
+        raw_fraction = order_plan.get("fraction")
+        has_quantity = raw_quantity is not None
+        has_fraction = raw_fraction is not None
+        if has_quantity and has_fraction:
+            return OrderDenied("unsupported_order_spec", "quantity_and_fraction")
+        if not has_quantity and not has_fraction:
+            return OrderDenied("unsupported_order_spec", "quantity_or_fraction_required")
+        quantity_limit = None
+        if has_fraction:
+            fraction = _decimal(raw_fraction, "fraction")
+            if isinstance(fraction, OrderDenied):
+                return fraction
+            if fraction <= Decimal("0") or fraction > Decimal("1"):
+                return OrderDenied("unsupported_order_spec", "fraction")
+            scoped = _reduction_scope_quantity(
+                authorization,
+                context,
+                instrument_id,
+                str(position.side).upper(),
+            )
+            if isinstance(scoped, OrderDenied):
+                return scoped
+            scope, venue = scoped
+            sized = scope * fraction
+            quantity_limit = format(venue, "f")
+        else:
+            sized = _decimal(raw_quantity, "quantity")
+            if isinstance(sized, OrderDenied):
+                return sized
+            if sized <= Decimal("0"):
+                return OrderDenied("unsupported_order_spec", "quantity")
         exit_plan = dict(order_plan)
         exit_plan.pop("fraction", None)
         exit_plan["quantity"] = sized
-        order = _build_exit_order(intent, action, exit_plan, context.instrument, position, side)
+        order = _build_exit_order(
+            intent,
+            action,
+            exit_plan,
+            context.instrument,
+            position,
+            side,
+            quantity_limit=quantity_limit,
+        )
         if isinstance(order, OrderDenied):
             return order
         orders = (order,)
@@ -511,6 +549,56 @@ def _build_order_spec(
     return OrderDenied("unsupported_order_spec", f"type={order_type}")
 
 
+def _fresh_venue_quantity(
+    context: PlannerContext,
+    instrument_id: str,
+    position_side: str,
+) -> Decimal | OrderDenied:
+    assessment = _reconciled_assessment(context, instrument_id, position_side)
+    if assessment is None:
+        return OrderDenied("reduction_evidence_unavailable", "reconciled_state_missing")
+    state = getattr(assessment, "state", None)
+    state_value = str(getattr(state, "value", state) or "")
+    if state_value != "known_open" or not bool(getattr(assessment, "venue_fresh", False)):
+        return OrderDenied(
+            "reduction_evidence_unavailable",
+            str(getattr(assessment, "detail", instrument_id)),
+        )
+    try:
+        qty = Decimal(str(assessment.quantity))
+    except (InvalidOperation, ValueError, TypeError):
+        return OrderDenied("reduction_evidence_unavailable", "venue_quantity")
+    if not qty.is_finite() or qty <= 0:
+        return OrderDenied("reduction_evidence_unavailable", "venue_quantity")
+    return qty
+
+
+def _reduction_scope_quantity(
+    authorization: Mapping[str, Any],
+    context: PlannerContext,
+    instrument_id: str,
+    position_side: str,
+) -> tuple[Decimal, Decimal] | OrderDenied:
+    venue = _fresh_venue_quantity(context, instrument_id, position_side)
+    if isinstance(venue, OrderDenied):
+        return venue
+    if str(authorization.get("authorized_by_type") or "") == "user":
+        return venue, venue
+    raw_owned = context.robot_owned_quantity
+    if raw_owned is None:
+        return OrderDenied("reduction_owned_unavailable", "robot_owned_quantity")
+    try:
+        owned = Decimal(str(raw_owned))
+    except (InvalidOperation, ValueError, TypeError):
+        return OrderDenied("reduction_owned_unavailable", "robot_owned_quantity")
+    if not owned.is_finite() or owned <= 0:
+        return OrderDenied(
+            "reduction_owned_unavailable",
+            format(owned, "f") if owned.is_finite() else "robot_owned_quantity",
+        )
+    return min(owned, venue), venue
+
+
 def _resolve_exit_quantity(
     order_plan: dict[str, Any],
     position: PositionSnapshot,
@@ -549,6 +637,7 @@ def _build_exit_order(
     instrument: InstrumentSpec,
     position: PositionSnapshot,
     side: str,
+    quantity_limit: str | None = None,
 ) -> OrderPlan | OrderDenied:
     normalized = dict(order_plan)
     normalized["side"] = side.lower()
@@ -561,7 +650,8 @@ def _build_exit_order(
     order_spec = _build_order_spec(normalized, instrument, round_quantity_down=True)
     if isinstance(order_spec, OrderDenied):
         return order_spec
-    quantity_denial = _deny_if_quantity_exceeds_position(order_spec.quantity, position.quantity)
+    cap = position.quantity if quantity_limit is None else quantity_limit
+    quantity_denial = _deny_if_quantity_exceeds_position(order_spec.quantity, cap)
     if quantity_denial is not None:
         return quantity_denial
     return OrderPlan(

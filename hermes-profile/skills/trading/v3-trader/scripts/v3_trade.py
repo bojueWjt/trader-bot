@@ -482,13 +482,8 @@ def _finite_decimal(raw, label: str):
     return value
 
 
-def resolve_partial_close_quantity(
-    *,
-    quantity: float | None,
-    percent: float | None,
-    position_quantity: float | None,
-) -> float:
-    """Size a partial close. Missing/illegal ratios fail closed — never 100%."""
+def resolve_partial_close_request(*, quantity, percent):
+    """CLI sizing: --percent is a structured fraction; --quantity stays raw."""
     from decimal import Decimal
 
     has_quantity = quantity is not None
@@ -499,19 +494,14 @@ def resolve_partial_close_quantity(
         ratio = _finite_decimal(percent, "percent")
         if ratio <= 0 or ratio > 100:
             raise ValueError("percent must be >0 and <=100")
-        if position_quantity is None:
-            raise ValueError("no open position to apply percent against")
-        pos = _finite_decimal(position_quantity, "position_quantity")
-        if pos <= 0:
-            raise ValueError("no open position to apply percent against")
-        sized = pos * ratio / Decimal("100")
-        if not sized.is_finite() or sized <= 0:
-            raise ValueError("percent rounds to zero quantity")
-        return float(sized)
+        fraction = ratio / Decimal("100")
+        if fraction <= 0 or fraction > 1:
+            raise ValueError("percent must be >0 and <=100")
+        return {"fraction": format(fraction.normalize(), "f")}
     sized = _finite_decimal(quantity, "quantity")
     if sized <= 0:
         raise ValueError("quantity must be positive")
-    return float(sized)
+    return {"quantity": format(sized, "f")}
 
 
 def cmd_close(args) -> None:
@@ -537,33 +527,20 @@ def cmd_close(args) -> None:
 
 def cmd_partial(args) -> None:
     _require_management_ref(args, "partial")
-    percent = getattr(args, "percent", None)
-    quantity = args.quantity
-    position_quantity = None
-    if percent is not None:
-        position = _position_for(args.symbol.upper(), args.account, args.side)
-        if position is not None:
-            try:
-                position_quantity = float(position.get("quantity") or 0)
-            except (TypeError, ValueError):
-                position_quantity = None
-            if not position_quantity:
-                position_quantity = None
     try:
-        quantity = resolve_partial_close_quantity(
-            quantity=quantity,
-            percent=percent,
-            position_quantity=position_quantity,
+        sizing = resolve_partial_close_request(
+            quantity=args.quantity,
+            percent=getattr(args, "percent", None),
         )
     except ValueError as exc:
         _illegal_close_ratio_error(str(exc))
     payload = {
         "action": "partial_close",
         "symbol": args.symbol.upper(),
-        "quantity": quantity,
         "account_id": args.account,
         "reason": args.reason,
         "source": "hermes-agent",
+        **sizing,
     }
     payload["position_side"] = args.side
     payload["client_ref"] = args.ref
@@ -872,8 +849,8 @@ def main() -> None:
     p.add_argument("--quantity", type=float, default=None,
                    help="base quantity to close; mutually exclusive with --percent")
     p.add_argument("--percent", type=float, default=None,
-                   help="percent of current position to close (e.g. 20); "
-                        "missing/illegal percent is rejected, never treated as 100")
+                   help="percent of authorized scope as structured fraction "
+                        "(e.g. 20 -> 0.2); mutually exclusive with --quantity")
     common(p, management=True)
     p.set_defaults(fn=cmd_partial)
 

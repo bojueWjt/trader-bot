@@ -25,9 +25,10 @@ from strategy.intent_execution_strategy import (  # noqa: E402
     IntentExecutionStrategyConfig,
     _management_operation_ids,
 )
-from strategy.intent_execution_planner import ManagementPlan, OrderPlan, encode_client_order_id
+from strategy.intent_execution_planner import ManagementPlan, OrderDenied, OrderPlan, encode_client_order_id
 from runtime.intent_execution_inbox import IntentExecutionIdentity
 from nautilus_trader.model.enums import OmsType
+from execution_domain.account_execution_ledger import ReconciledExecutionState
 
 
 INSTRUMENT_ID = "ALGOUSDT-PERP.BINANCE"
@@ -43,6 +44,33 @@ def _pos(position_id: str, quantity: str, side: str = "LONG") -> SimpleNamespace
 
 
 class HedgeReduceOnlySubmissionTest(unittest.TestCase):
+    def test_planner_owned_context_is_fresh_side_specific_and_venue_capped(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            strategy = _SubmissionHarness(directory, [])
+            strategy._entry_protection_stash.update({
+                "long": {"instrument_id": INSTRUMENT_ID, "entry_side": "BUY", "protected_quantity": "0.308"},
+                "short": {"instrument_id": INSTRUMENT_ID, "entry_side": "SELL", "protected_quantity": "1.1"},
+                "other": {"instrument_id": "BTCUSDT-PERP.BINANCE", "entry_side": "BUY", "protected_quantity": "99"},
+            })
+            try:
+                for side, venue, expected in (("LONG", "9.890", "0.308"), ("LONG", "0.2", "0.2"), ("SHORT", "3", "1.1")):
+                    with self.subTest(side=side, venue=venue):
+                        state = ReconciledExecutionState.build(
+                            account_id="account-a",
+                            venue_snapshot={"positions": [{"symbol": "ALGOUSDT", "position_side": side, "position_amt": venue}], "open_orders": [], "algo_orders": []},
+                            venue_fetched_at=now,
+                            cache_positions=(),
+                            now=now,
+                        )
+                        raw = {"authorization": {"authorized_by_type": "channel"}, "position_side": side.lower()}
+                        self.assertEqual(strategy._planner_robot_owned_quantity(INSTRUMENT_ID, raw, state), expected)
+                        self.assertIsNone(strategy._planner_robot_owned_quantity(INSTRUMENT_ID, raw, None))
+                        raw["authorization"]["authorized_by_type"] = "user"
+                        self.assertIsNone(strategy._planner_robot_owned_quantity(INSTRUMENT_ID, raw, state))
+            finally:
+                strategy.on_stop()
+
     def test_management_children_retain_durable_operator_authorization(self) -> None:
         for action in ("partial_close", "move_stop_loss", "move_stop_to_entry", "replace_take_profits"):
             with self.subTest(action=action), tempfile.TemporaryDirectory() as directory:
@@ -216,6 +244,539 @@ class HedgeReduceOnlySubmissionTest(unittest.TestCase):
                 INSTRUMENT_ID, "SELL", "2374.2", positions,
             )
         )
+
+    def test_tao_channel_denied_detail_is_plan_quantity_not_authority_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            strategy = _SubmissionHarness(directory, [_pos(f"{INSTRUMENT_ID}-LONG", "9.890")])
+            intent_id = uuid4()
+            auth = {
+                "authorized_by_type": "channel",
+                "authorized_by_id": "-1002189417451",
+                "source_message_id": "tg-sig-c1002189417451-m6925",
+                "created_by_service": "hermes-agent",
+            }
+            identity = IntentExecutionIdentity(
+                account_id="account-a",
+                intent_id=str(intent_id),
+                idempotency_key=sha256(str(intent_id).encode()).hexdigest(),
+                instrument_id=INSTRUMENT_ID,
+                action="partial_close",
+            )
+            order_id = encode_client_order_id(intent_id, sequence=1)
+            strategy._intent_execution_inbox.register_received(identity, {
+                "action": "partial_close",
+                "order_plan": {
+                    "authorization": auth,
+                    "position_side": "long",
+                    "quantity": "0.0924",
+                },
+            })
+            strategy._intent_execution_inbox.begin_dispatch(identity, (order_id,))
+            fetched = datetime.now(timezone.utc)
+            strategy._exchange_evidence_provider = SimpleNamespace(cached_snapshot=lambda **_kwargs: {
+                "fetched_at": fetched,
+                "positions": [{"symbol": "ALGOUSDT", "position_side": "LONG", "quantity": "9.890"}],
+                "regular_orders": [],
+                "algo_orders": [],
+            })
+            plan = OrderPlan(
+                intent_id=intent_id,
+                client_order_id=order_id,
+                tags=tuple(f"{key}={value}" for key, value in auth.items()) + (
+                    "account_id=account-a",
+                    f"position_id={INSTRUMENT_ID}-LONG",
+                    "action=partial_close",
+                ),
+                instrument_id=INSTRUMENT_ID,
+                side="SELL",
+                order_type="MARKET",
+                quantity="0.092",
+                price=None,
+                time_in_force="IOC",
+                reduce_only=True,
+            )
+            try:
+                denied = strategy._plan_for_submission(plan)
+                self.assertIsInstance(denied, OrderDenied)
+                self.assertEqual(denied.reason, "reduction_quantity_exceeds_authority")
+                self.assertEqual(denied.detail, "0.092")
+                self.assertNotEqual(denied.detail, "0.0924")
+            finally:
+                strategy.on_stop()
+
+    def test_tao_channel_allows_quantized_qty_when_robot_owned_covers_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            strategy = _SubmissionHarness(directory, [_pos(f"{INSTRUMENT_ID}-LONG", "9.890")])
+            intent_id = uuid4()
+            auth = {
+                "authorized_by_type": "channel",
+                "authorized_by_id": "-1002189417451",
+                "source_message_id": "tg-sig-c1002189417451-m6925",
+            }
+            identity = IntentExecutionIdentity(
+                account_id="account-a",
+                intent_id=str(intent_id),
+                idempotency_key=sha256(str(intent_id).encode()).hexdigest(),
+                instrument_id=INSTRUMENT_ID,
+                action="partial_close",
+            )
+            order_id = encode_client_order_id(intent_id, sequence=1)
+            strategy._intent_execution_inbox.register_received(identity, {
+                "action": "partial_close",
+                "order_plan": {
+                    "authorization": auth,
+                    "position_side": "long",
+                    "quantity": "0.0924",
+                },
+            })
+            strategy._intent_execution_inbox.begin_dispatch(identity, (order_id,))
+            strategy._entry_protection_stash[str(intent_id)] = {
+                "instrument_id": INSTRUMENT_ID,
+                "entry_side": "BUY",
+                "protected_quantity": "9.890",
+                "entry_intent_id": str(intent_id),
+            }
+            fetched = datetime.now(timezone.utc)
+            strategy._exchange_evidence_provider = SimpleNamespace(cached_snapshot=lambda **_kwargs: {
+                "fetched_at": fetched,
+                "positions": [{"symbol": "ALGOUSDT", "position_side": "LONG", "quantity": "9.890"}],
+                "regular_orders": [],
+                "algo_orders": [],
+            })
+            plan = OrderPlan(
+                intent_id=intent_id,
+                client_order_id=order_id,
+                tags=tuple(f"{key}={value}" for key, value in auth.items()) + (
+                    "account_id=account-a",
+                    f"position_id={INSTRUMENT_ID}-LONG",
+                ),
+                instrument_id=INSTRUMENT_ID,
+                side="SELL",
+                order_type="MARKET",
+                quantity="0.092",
+                price=None,
+                time_in_force="IOC",
+                reduce_only=True,
+            )
+            try:
+                result = strategy._plan_for_submission(plan)
+                self.assertEqual(result, plan)
+            finally:
+                strategy.on_stop()
+
+    def test_channel_fraction_owned_0_308_of_venue_9_890_allows_0_092(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            strategy = _SubmissionHarness(directory, [_pos(f"{INSTRUMENT_ID}-LONG", "0.308")])
+            intent_id = uuid4()
+            auth = {
+                "authorized_by_type": "channel",
+                "authorized_by_id": "-1002189417451",
+                "source_message_id": "tg-sig-c1002189417451-m6925",
+            }
+            identity = IntentExecutionIdentity(
+                account_id="account-a",
+                intent_id=str(intent_id),
+                idempotency_key=sha256(str(intent_id).encode()).hexdigest(),
+                instrument_id=INSTRUMENT_ID,
+                action="partial_close",
+            )
+            order_id = encode_client_order_id(intent_id, sequence=1)
+            strategy._intent_execution_inbox.register_received(identity, {
+                "action": "partial_close",
+                "order_plan": {
+                    "authorization": auth,
+                    "position_side": "long",
+                    "fraction": "0.3",
+                },
+            })
+            strategy._intent_execution_inbox.begin_dispatch(identity, (order_id,))
+            strategy._entry_protection_stash[str(intent_id)] = {
+                "instrument_id": INSTRUMENT_ID,
+                "entry_side": "BUY",
+                "protected_quantity": "0.308",
+                "entry_intent_id": str(intent_id),
+            }
+            fetched = datetime.now(timezone.utc)
+            strategy._exchange_evidence_provider = SimpleNamespace(cached_snapshot=lambda **_kwargs: {
+                "fetched_at": fetched,
+                "positions": [{"symbol": "ALGOUSDT", "position_side": "LONG", "quantity": "9.890"}],
+                "regular_orders": [],
+                "algo_orders": [],
+            })
+            plan = OrderPlan(
+                intent_id=intent_id,
+                client_order_id=order_id,
+                tags=tuple(f"{key}={value}" for key, value in auth.items()) + (
+                    "account_id=account-a",
+                    f"position_id={INSTRUMENT_ID}-LONG",
+                ),
+                instrument_id=INSTRUMENT_ID,
+                side="SELL",
+                order_type="MARKET",
+                quantity="0.092",
+                price=None,
+                time_in_force="IOC",
+                reduce_only=True,
+            )
+            try:
+                result = strategy._plan_for_submission(plan)
+                self.assertEqual(result, plan)
+            finally:
+                strategy.on_stop()
+
+    def test_channel_fraction_owned_9_890_allows_2_967(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            strategy = _SubmissionHarness(directory, [_pos(f"{INSTRUMENT_ID}-LONG", "9.890")])
+            intent_id = uuid4()
+            auth = {
+                "authorized_by_type": "channel",
+                "authorized_by_id": "-1002189417451",
+                "source_message_id": "tg-sig-c1002189417451-m6925",
+            }
+            identity = IntentExecutionIdentity(
+                account_id="account-a",
+                intent_id=str(intent_id),
+                idempotency_key=sha256(str(intent_id).encode()).hexdigest(),
+                instrument_id=INSTRUMENT_ID,
+                action="partial_close",
+            )
+            order_id = encode_client_order_id(intent_id, sequence=1)
+            strategy._intent_execution_inbox.register_received(identity, {
+                "action": "partial_close",
+                "order_plan": {
+                    "authorization": auth,
+                    "position_side": "long",
+                    "fraction": "0.3",
+                },
+            })
+            strategy._intent_execution_inbox.begin_dispatch(identity, (order_id,))
+            strategy._entry_protection_stash[str(intent_id)] = {
+                "instrument_id": INSTRUMENT_ID,
+                "entry_side": "BUY",
+                "protected_quantity": "9.890",
+                "entry_intent_id": str(intent_id),
+            }
+            fetched = datetime.now(timezone.utc)
+            strategy._exchange_evidence_provider = SimpleNamespace(cached_snapshot=lambda **_kwargs: {
+                "fetched_at": fetched,
+                "positions": [{"symbol": "ALGOUSDT", "position_side": "LONG", "quantity": "9.890"}],
+                "regular_orders": [],
+                "algo_orders": [],
+            })
+            plan = OrderPlan(
+                intent_id=intent_id,
+                client_order_id=order_id,
+                tags=tuple(f"{key}={value}" for key, value in auth.items()) + (
+                    "account_id=account-a",
+                    f"position_id={INSTRUMENT_ID}-LONG",
+                ),
+                instrument_id=INSTRUMENT_ID,
+                side="SELL",
+                order_type="MARKET",
+                quantity="2.967",
+                price=None,
+                time_in_force="IOC",
+                reduce_only=True,
+            )
+            try:
+                result = strategy._plan_for_submission(plan)
+                self.assertEqual(result, plan)
+            finally:
+                strategy.on_stop()
+
+    def test_channel_fraction_missing_stash_is_denied(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            strategy = _SubmissionHarness(directory, [_pos(f"{INSTRUMENT_ID}-LONG", "9.890")])
+            intent_id = uuid4()
+            auth = {
+                "authorized_by_type": "channel",
+                "authorized_by_id": "-1002189417451",
+                "source_message_id": "tg-sig-c1002189417451-m6925",
+            }
+            identity = IntentExecutionIdentity(
+                account_id="account-a",
+                intent_id=str(intent_id),
+                idempotency_key=sha256(str(intent_id).encode()).hexdigest(),
+                instrument_id=INSTRUMENT_ID,
+                action="partial_close",
+            )
+            order_id = encode_client_order_id(intent_id, sequence=1)
+            strategy._intent_execution_inbox.register_received(identity, {
+                "action": "partial_close",
+                "order_plan": {
+                    "authorization": auth,
+                    "position_side": "long",
+                    "fraction": "0.3",
+                },
+            })
+            strategy._intent_execution_inbox.begin_dispatch(identity, (order_id,))
+            fetched = datetime.now(timezone.utc)
+            strategy._exchange_evidence_provider = SimpleNamespace(cached_snapshot=lambda **_kwargs: {
+                "fetched_at": fetched,
+                "positions": [{"symbol": "ALGOUSDT", "position_side": "LONG", "quantity": "9.890"}],
+                "regular_orders": [],
+                "algo_orders": [],
+            })
+            plan = OrderPlan(
+                intent_id=intent_id,
+                client_order_id=order_id,
+                tags=tuple(f"{key}={value}" for key, value in auth.items()) + (
+                    "account_id=account-a",
+                    f"position_id={INSTRUMENT_ID}-LONG",
+                ),
+                instrument_id=INSTRUMENT_ID,
+                side="SELL",
+                order_type="MARKET",
+                quantity="0.092",
+                price=None,
+                time_in_force="IOC",
+                reduce_only=True,
+            )
+            try:
+                denied = strategy._plan_for_submission(plan)
+                self.assertIsInstance(denied, OrderDenied)
+                self.assertEqual(denied.reason, "reduction_owned_unavailable")
+            finally:
+                strategy.on_stop()
+
+    def test_user_fraction_uses_venue_scope_not_robot_owned(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            strategy = _SubmissionHarness(directory, [_pos(f"{INSTRUMENT_ID}-LONG", "9.890")])
+            strategy._robot_owned_position_quantity = Mock(
+                side_effect=AssertionError("user instruction must not consult robot ownership")
+            )
+            intent_id = uuid4()
+            auth = {
+                "authorized_by_type": "user",
+                "authorized_by_id": "mobile-operator",
+                "source_message_id": "user-reduce",
+            }
+            identity = IntentExecutionIdentity(
+                account_id="account-a",
+                intent_id=str(intent_id),
+                idempotency_key=sha256(str(intent_id).encode()).hexdigest(),
+                instrument_id=INSTRUMENT_ID,
+                action="partial_close",
+            )
+            order_id = encode_client_order_id(intent_id, sequence=1)
+            strategy._intent_execution_inbox.register_received(identity, {
+                "action": "partial_close",
+                "order_plan": {
+                    "authorization": auth,
+                    "position_side": "long",
+                    "fraction": "0.3",
+                },
+            })
+            strategy._intent_execution_inbox.begin_dispatch(identity, (order_id,))
+            fetched = datetime.now(timezone.utc)
+            strategy._exchange_evidence_provider = SimpleNamespace(cached_snapshot=lambda **_kwargs: {
+                "fetched_at": fetched,
+                "positions": [{"symbol": "ALGOUSDT", "position_side": "LONG", "quantity": "9.890"}],
+                "regular_orders": [],
+                "algo_orders": [],
+            })
+            plan = OrderPlan(
+                intent_id=intent_id,
+                client_order_id=order_id,
+                tags=tuple(f"{key}={value}" for key, value in auth.items()) + (
+                    "account_id=account-a",
+                    f"position_id={INSTRUMENT_ID}-LONG",
+                ),
+                instrument_id=INSTRUMENT_ID,
+                side="SELL",
+                order_type="MARKET",
+                quantity="2.967",
+                price=None,
+                time_in_force="IOC",
+                reduce_only=True,
+            )
+            try:
+                result = strategy._plan_for_submission(plan)
+                self.assertEqual(result, plan)
+            finally:
+                strategy.on_stop()
+
+    def test_channel_fraction_does_not_use_venue_times_fraction_as_second_cap(self) -> None:
+        """owned*fraction plan must not be capped again by venue*fraction."""
+        with tempfile.TemporaryDirectory() as directory:
+            strategy = _SubmissionHarness(directory, [_pos(f"{INSTRUMENT_ID}-LONG", "0.308")])
+            intent_id = uuid4()
+            auth = {
+                "authorized_by_type": "channel",
+                "authorized_by_id": "-1002189417451",
+                "source_message_id": "tg-sig-c1002189417451-m6925",
+            }
+            identity = IntentExecutionIdentity(
+                account_id="account-a",
+                intent_id=str(intent_id),
+                idempotency_key=sha256(str(intent_id).encode()).hexdigest(),
+                instrument_id=INSTRUMENT_ID,
+                action="partial_close",
+            )
+            order_id = encode_client_order_id(intent_id, sequence=1)
+            strategy._intent_execution_inbox.register_received(identity, {
+                "action": "partial_close",
+                "order_plan": {
+                    "authorization": auth,
+                    "position_side": "long",
+                    "fraction": "0.3",
+                },
+            })
+            strategy._intent_execution_inbox.begin_dispatch(identity, (order_id,))
+            strategy._entry_protection_stash[str(intent_id)] = {
+                "instrument_id": INSTRUMENT_ID,
+                "entry_side": "BUY",
+                "protected_quantity": "0.308",
+                "entry_intent_id": str(intent_id),
+            }
+            fetched = datetime.now(timezone.utc)
+            strategy._exchange_evidence_provider = SimpleNamespace(cached_snapshot=lambda **_kwargs: {
+                "fetched_at": fetched,
+                "positions": [{"symbol": "ALGOUSDT", "position_side": "LONG", "quantity": "9.890"}],
+                "regular_orders": [],
+                "algo_orders": [],
+            })
+            plan = OrderPlan(
+                intent_id=intent_id,
+                client_order_id=order_id,
+                tags=tuple(f"{key}={value}" for key, value in auth.items()) + (
+                    "account_id=account-a",
+                    f"position_id={INSTRUMENT_ID}-LONG",
+                ),
+                instrument_id=INSTRUMENT_ID,
+                side="SELL",
+                order_type="MARKET",
+                quantity="2.967",
+                price=None,
+                time_in_force="IOC",
+                reduce_only=True,
+            )
+            try:
+                denied = strategy._plan_for_submission(plan)
+                self.assertIsInstance(denied, OrderDenied)
+                self.assertEqual(denied.reason, "reduction_quantity_exceeds_authority")
+                self.assertEqual(denied.detail, "2.967")
+            finally:
+                strategy.on_stop()
+
+    def test_quantity_and_fraction_together_are_denied_at_submission(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            strategy = _SubmissionHarness(directory, [_pos(f"{INSTRUMENT_ID}-LONG", "9.890")])
+            intent_id = uuid4()
+            auth = {
+                "authorized_by_type": "user",
+                "authorized_by_id": "mobile-operator",
+                "source_message_id": "user-reduce",
+            }
+            identity = IntentExecutionIdentity(
+                account_id="account-a",
+                intent_id=str(intent_id),
+                idempotency_key=sha256(str(intent_id).encode()).hexdigest(),
+                instrument_id=INSTRUMENT_ID,
+                action="partial_close",
+            )
+            order_id = encode_client_order_id(intent_id, sequence=1)
+            strategy._intent_execution_inbox.register_received(identity, {
+                "action": "partial_close",
+                "order_plan": {
+                    "authorization": auth,
+                    "position_side": "long",
+                    "quantity": "0.0924",
+                    "fraction": "0.3",
+                },
+            })
+            strategy._intent_execution_inbox.begin_dispatch(identity, (order_id,))
+            fetched = datetime.now(timezone.utc)
+            strategy._exchange_evidence_provider = SimpleNamespace(cached_snapshot=lambda **_kwargs: {
+                "fetched_at": fetched,
+                "positions": [{"symbol": "ALGOUSDT", "position_side": "LONG", "quantity": "9.890"}],
+                "regular_orders": [],
+                "algo_orders": [],
+            })
+            plan = OrderPlan(
+                intent_id=intent_id,
+                client_order_id=order_id,
+                tags=tuple(f"{key}={value}" for key, value in auth.items()) + (
+                    "account_id=account-a",
+                    f"position_id={INSTRUMENT_ID}-LONG",
+                ),
+                instrument_id=INSTRUMENT_ID,
+                side="SELL",
+                order_type="MARKET",
+                quantity="0.092",
+                price=None,
+                time_in_force="IOC",
+                reduce_only=True,
+            )
+            try:
+                denied = strategy._plan_for_submission(plan)
+                self.assertIsInstance(denied, OrderDenied)
+                self.assertEqual(denied.reason, "reduction_authorization_missing")
+                self.assertEqual(denied.detail, "quantity_and_fraction")
+            finally:
+                strategy.on_stop()
+
+    def test_channel_still_rejects_qty_above_approved_and_does_not_widen(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            strategy = _SubmissionHarness(directory, [_pos(f"{INSTRUMENT_ID}-LONG", "9.890")])
+            intent_id = uuid4()
+            auth = {
+                "authorized_by_type": "channel",
+                "authorized_by_id": "-1002189417451",
+                "source_message_id": "tg-sig-c1002189417451-m6925",
+            }
+            identity = IntentExecutionIdentity(
+                account_id="account-a",
+                intent_id=str(intent_id),
+                idempotency_key=sha256(str(intent_id).encode()).hexdigest(),
+                instrument_id=INSTRUMENT_ID,
+                action="partial_close",
+            )
+            order_id = encode_client_order_id(intent_id, sequence=1)
+            strategy._intent_execution_inbox.register_received(identity, {
+                "action": "partial_close",
+                "order_plan": {
+                    "authorization": auth,
+                    "position_side": "long",
+                    "quantity": "0.0924",
+                },
+            })
+            strategy._intent_execution_inbox.begin_dispatch(identity, (order_id,))
+            strategy._entry_protection_stash[str(intent_id)] = {
+                "instrument_id": INSTRUMENT_ID,
+                "entry_side": "BUY",
+                "protected_quantity": "9.890",
+                "entry_intent_id": str(intent_id),
+            }
+            fetched = datetime.now(timezone.utc)
+            strategy._exchange_evidence_provider = SimpleNamespace(cached_snapshot=lambda **_kwargs: {
+                "fetched_at": fetched,
+                "positions": [{"symbol": "ALGOUSDT", "position_side": "LONG", "quantity": "9.890"}],
+                "regular_orders": [],
+                "algo_orders": [],
+            })
+            plan = OrderPlan(
+                intent_id=intent_id,
+                client_order_id=order_id,
+                tags=tuple(f"{key}={value}" for key, value in auth.items()) + (
+                    "account_id=account-a",
+                    f"position_id={INSTRUMENT_ID}-LONG",
+                ),
+                instrument_id=INSTRUMENT_ID,
+                side="SELL",
+                order_type="MARKET",
+                quantity="2.967",
+                price=None,
+                time_in_force="IOC",
+                reduce_only=True,
+            )
+            try:
+                denied = strategy._plan_for_submission(plan)
+                self.assertIsInstance(denied, OrderDenied)
+                self.assertEqual(denied.reason, "reduction_quantity_exceeds_authority")
+                self.assertEqual(denied.detail, "2.967")
+            finally:
+                strategy.on_stop()
 
     def test_buy_reduce_uses_short_book(self) -> None:
         positions = (

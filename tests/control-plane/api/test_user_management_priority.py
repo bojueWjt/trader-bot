@@ -60,6 +60,82 @@ def test_user_management_without_side_requires_a_unique_current_book(client, mig
     assert "pass position_side" in response.json()["detail"]
 
 
+def test_partial_close_fraction_persists_and_is_exclusive_with_quantity(
+    client, migrated_db, monkeypatch,
+):
+    _same_side_books(migrated_db)
+    monkeypatch.setattr(read_api, "_resolve_attribution", lambda *args, **kwargs: ({}, False, False))
+    body = {
+        "action": "partial_close",
+        "symbol": "ATOMUSDT",
+        "account_id": "account-b",
+        "position_side": "long",
+        "fraction": "0.3",
+        "authorized_by_type": "user",
+        "reason": "percent reduce via structured fraction",
+        "client_ref": "user-fraction-1",
+        "dry_run": True,
+    }
+    response = client.post("/v1/operator/orders", headers=_headers("user-fraction-1"), json=body)
+    assert response.status_code == 200, response.text
+    preview = response.json()["order_plan_preview"]
+    assert preview["fraction"] == "0.3"
+    assert "quantity" not in preview
+    assert preview["request_semantics"]["sha256"]
+
+    both = dict(body)
+    both["quantity"] = "0.1"
+    both["client_ref"] = "user-fraction-both"
+    denied = client.post("/v1/operator/orders", headers=_headers("user-fraction-both"), json=both)
+    assert denied.status_code == 400
+    assert "quantity or fraction" in denied.json()["detail"]
+
+    missing = dict(body)
+    missing.pop("fraction")
+    missing["client_ref"] = "user-fraction-missing"
+    missing_resp = client.post(
+        "/v1/operator/orders", headers=_headers("user-fraction-missing"), json=missing,
+    )
+    assert missing_resp.status_code == 400
+
+    for bad in ("0", "-0.2", "1.2", "20"):
+        illegal = dict(body)
+        illegal["fraction"] = bad
+        illegal["client_ref"] = f"user-fraction-bad-{bad}"
+        resp = client.post(
+            "/v1/operator/orders",
+            headers=_headers(illegal["client_ref"]),
+            json=illegal,
+        )
+        assert resp.status_code == 400, bad
+
+
+def test_partial_close_fraction_replay_keeps_idempotency(client, migrated_db, monkeypatch):
+    _same_side_books(migrated_db)
+    monkeypatch.setattr(read_api, "_resolve_attribution", lambda *args, **kwargs: ({}, False, False))
+    body = {
+        "action": "partial_close",
+        "symbol": "ATOMUSDT",
+        "account_id": "account-b",
+        "position_side": "long",
+        "fraction": "0.3",
+        "authorized_by_type": "user",
+        "reason": "percent reduce replay",
+        "client_ref": "user-fraction-replay",
+    }
+    first = client.post("/v1/operator/orders", headers=_headers("user-fraction-replay"), json=body)
+    assert first.status_code == 200, first.text
+    replay = client.post("/v1/operator/orders", headers=_headers("user-fraction-replay"), json=body)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["intent_id"] == first.json()["intent_id"]
+    changed = dict(body)
+    changed["fraction"] = "0.5"
+    conflict = client.post(
+        "/v1/operator/orders", headers=_headers("user-fraction-replay"), json=changed,
+    )
+    assert conflict.status_code in {409, 400}
+
+
 def test_internal_derived_order_still_requires_its_parent():
     with pytest.raises(read_api.HTTPException, match="parent_intent_id"):
         read_api._order_authorization(

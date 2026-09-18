@@ -9425,6 +9425,7 @@ def operator_order(
     notional = None
     entry_batch = False
     quantity = None
+    fraction = None
     canary_actual_notional = None
     protection_policy = None
     operator_warnings: list[str] = []
@@ -9506,7 +9507,24 @@ def operator_order(
                 open_risk_capital_addon,
             )
     elif action == "partial_close":
-        quantity = _op_num(body.get("quantity"), "quantity", required=True)
+        raw_quantity = body.get("quantity")
+        raw_fraction = body.get("fraction")
+        has_quantity = raw_quantity is not None
+        has_fraction = raw_fraction is not None
+        if has_quantity == has_fraction:
+            raise HTTPException(
+                status_code=400,
+                detail="partial_close requires exactly one of quantity or fraction",
+            )
+        if has_fraction:
+            fraction = _op_decimal(raw_fraction, "fraction", required=True)
+            if fraction > Decimal("1"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="fraction must be > 0 and <= 1",
+                )
+        else:
+            quantity = _op_num(raw_quantity, "quantity", required=True)
 
     expire_hours = _op_num(body.get("expire_hours"), "expire_hours")
     valid_seconds = int(_op_num(body.get("valid_seconds"), "valid_seconds") or 900)
@@ -9553,6 +9571,8 @@ def operator_order(
             order_plan["expire_hours"] = expire_hours
         if quantity is not None:
             order_plan["quantity"] = str(quantity)
+        if fraction is not None:
+            order_plan["fraction"] = format(fraction, "f")
         if canary_open and canary_price is not None:
             order_plan["entry"]["price"] = format(canary_price, "f")
         if position_side and action in ("close_position", "partial_close"):
