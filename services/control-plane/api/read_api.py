@@ -1969,6 +1969,7 @@ def _validate_owned_orders_terminal(
 ) -> list[dict]:
     durable_entry_order_exemptions: dict[str, dict] = {}
     venue_protection_orders: dict[str, dict] = {}
+    venue_robot_order_ids: set[str] = set()
     fresh_venue_evidence = _resume_venue_order_evidence_is_fresh(heartbeat)
     for field_name in ("regular_orders", "algo_orders"):
         snapshot = heartbeat.get(field_name)
@@ -1985,6 +1986,7 @@ def _validate_owned_orders_terminal(
                 )
             if not row_is_robot_order(item):
                 continue
+            venue_robot_order_ids.add(client_order_id_from_row(item))
             if _robot_order_is_resume_exempt(item):
                 if fresh_venue_evidence:
                     venue_protection_orders[client_order_id_from_row(item)] = item
@@ -2018,7 +2020,8 @@ def _validate_owned_orders_terminal(
                order_type,
                reduce_only,
                payload,
-               instrument_id
+               instrument_id,
+               filled_quantity
         FROM orders_projection
         WHERE account_id=%s
           AND client_order_id ~ '^B[0-9a-f]{32}[0-9]{2}$'
@@ -2033,6 +2036,7 @@ def _validate_owned_orders_terminal(
         reduce_only,
         raw_payload,
         instrument_id,
+        filled_quantity,
     ) in cur.fetchall():
         if str(status or "").strip().lower() in _TERMINAL_ORDER_STATES:
             continue
@@ -2054,6 +2058,19 @@ def _validate_owned_orders_terminal(
             # never a terminal inference or a mutation of the lagging projection.
             continue
         if client_order_id in durable_entry_order_exemptions:
+            continue
+        if (
+            fresh_venue_evidence
+            and client_order_id not in venue_robot_order_ids
+            and _resume_projection_has_fill_or_terminal_event(
+                cur,
+                account_id=account_id,
+                client_order_id=client_order_id,
+                filled_quantity=filled_quantity,
+            )
+        ):
+            # Filled leftover: the open-order snapshot no longer lists this CID,
+            # and fills/cancels are positive proof. Absence alone is not used.
             continue
         raise HTTPException(
             status_code=409,
@@ -2098,6 +2115,36 @@ def _resume_venue_order_evidence_is_fresh(heartbeat: dict) -> bool:
                     return False
                 seen_order_ids.add(client_order_id)
     return True
+
+
+def _resume_projection_has_fill_or_terminal_event(
+    cur,
+    *,
+    account_id: str,
+    client_order_id: str,
+    filled_quantity,
+) -> bool:
+    if _positive_order_decimal(filled_quantity) is not False:
+        return True
+    cur.execute(
+        """
+        SELECT 1
+        FROM execution_events
+        WHERE account_id=%s
+          AND client_order_id=%s
+          AND event_type IN (
+                'OrderFilled',
+                'OrderPartiallyFilled',
+                'OrderCanceled',
+                'OrderCancelled',
+                'OrderExpired',
+                'OrderRejected'
+          )
+        LIMIT 1
+        """,
+        (account_id, client_order_id),
+    )
+    return cur.fetchone() is not None
 
 
 def _durable_entry_order_resume_exemption(

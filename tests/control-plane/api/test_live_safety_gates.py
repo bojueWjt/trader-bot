@@ -67,6 +67,7 @@ def client(monkeypatch: pytest.MonkeyPatch, migrated_db: str) -> TestClient:
         "_account_risk_capital_addon",
         lambda _account_id: 0.0,
     )
+    monkeypatch.setattr(read_api, "_symbol_risk_ratio", lambda _symbol, _account: 0.01)
     _activate_redis_epoch(migrated_db, REDIS_FENCING_EPOCH)
     test_client = TestClient(read_api.app)
     try:
@@ -4755,3 +4756,22 @@ def test_resume_preserves_live_ladder_despite_projection_shape(
     _seed_reviewed_release_and_permit(migrated_db)
     response = client.post("/v1/commands", headers=_risk_headers(str(uuid4())), json=_resume_body(None))
     assert response.status_code == 200, response.text
+
+
+def test_resume_retains_live_partial_projection_reconciliation():
+    from unittest.mock import Mock
+
+    cur = Mock()
+    assert read_api._resume_projection_has_fill_or_terminal_event(
+        cur, account_id='account-d', client_order_id='bot-order', filled_quantity='0.24',
+    )
+    cur.execute.assert_not_called()
+    cur.fetchone.return_value = None
+    assert not read_api._resume_projection_has_fill_or_terminal_event(
+        cur, account_id='account-d', client_order_id='bot-order', filled_quantity='0',
+    )
+    assert cur.execute.call_args.args[1] == ('account-d', 'bot-order')
+    cur.fetchone.return_value = (1,)
+    assert read_api._resume_projection_has_fill_or_terminal_event(
+        cur, account_id='account-d', client_order_id='bot-order', filled_quantity=None,
+    )
