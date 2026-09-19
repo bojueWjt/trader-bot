@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import dataclasses
 import math
+import os
 import platform
 import time
 from dataclasses import dataclass, field, replace
@@ -28,6 +30,7 @@ import numpy as np
 import polars as pl
 from scipy.stats import beta
 
+from quant_lab.research import paths
 from quant_lab.research.api import Candidate, PanelInputs, PipelineConfig, RuleSpec, run_pipeline
 from quant_lab.research.ledger import MemoryLedger
 
@@ -448,10 +451,40 @@ def aggregate_pair_ok(fitted: float, mean: float, sd: float, n: int) -> tuple[bo
     return bool(d <= tol), d, tol
 
 
-def aggregate_preserved(fitted: list, mean: list, sd: list, n: int) -> bool:
+def aggregate_preserved(fitted: list, mean: list, sd: list, n) -> bool:
+    """n 可以是标量或**逐对**样本数（R6-G：某对不可估时它的有效 n 比 n_grid 小）。"""
     if not fitted or len(fitted) != len(mean) or len(fitted) != len(sd):
         return False
-    return all(aggregate_pair_ok(f, m, s, n)[0] for f, m, s in zip(fitted, mean, sd))
+    ns = list(n) if isinstance(n, (list, tuple)) else [n] * len(fitted)
+    if len(ns) != len(fitted):
+        return False
+    return all(aggregate_pair_ok(f, m, s, k)[0] for f, m, s, k in zip(fitted, mean, sd, ns))
+
+
+def max_realizable_sd(mean: float, n: int) -> float:
+    """给定 n 次抽样与样本均值 m，ddof=1 样本标准差的**精确**上界（取值域 [-1,1]）。
+
+    R6-G 用的 `s² ≤ n/(n−1)(1−m²)` 只是必要条件，有限 n 时未必可达（七审 R7-G：n=2、m=−0.9 时它给
+    0.61644，真实上界是 0.141421）。精确解：在 Σx=n·m、x∈[-1,1] 上最大化 Σx²，最优点是至多一个坐标
+    不在端点的顶点——设 a 个 +1、n−1−a 个 −1、余一个 r∈[-1,1]，则 Σx²=(n−1)+r²，
+    r = n·m + (n−1) − 2a。枚举使 |r|≤1 的整数 a 取最大 r²，再换算方差。
+    """
+    if n < 2 or not math.isfinite(mean) or abs(mean) > 1.0:
+        return math.inf
+    s_sum = n * mean
+    base = (s_sum + (n - 1)) / 2.0
+    best = None
+    for a_ in {math.floor(base) - 1, math.floor(base), math.ceil(base), math.ceil(base) + 1}:
+        if 0 <= a_ <= n - 1:
+            r = s_sum + (n - 1) - 2 * a_
+            if abs(r) <= 1.0 + 1e-12:
+                # R8-M：直接对**离差**求和，而不是 Σx² − n·m²。后者在 |m|→1 时相消：
+                # n=1000、m=0.9999999999 的真实上界是 3.16e−9，相消写法算出 1.5e−8（偏大 5 倍）。
+                ss = a_ * (1.0 - mean) ** 2 + (n - 1 - a_) * (1.0 + mean) ** 2 + (r - mean) ** 2
+                best = ss if best is None else max(best, ss)
+    if best is None:                      # |mean| ≤ 1 时总有可行点；保守退回必要条件
+        return math.sqrt(max(0.0, n / (n - 1) * (1.0 - mean * mean)))
+    return math.sqrt(max(0.0, best / (n - 1)))
 
 
 def _correlation_preserved(a: float, b: float) -> bool:
@@ -524,6 +557,16 @@ def assert_not_episode_shuffle(orig: PanelInputs, null: PanelInputs, day: np.nda
 
 
 # ---------------------------------------------------------------- MC 验收
+def artifact_identity_digest() -> str:
+    """运行制品身份摘要（冻结源码 + 声明依赖清单）。见 paths.artifact_identity_digest。
+
+    G0 R-10 裁定 §2.2/§2.3：通用运行状态反射已移除，改为结构性关闭——
+    未申报的状态根本过不去进程边界，而不是事后检测它们。
+    """
+    from quant_lab.research.paths import artifact_identity_digest as _a
+    return _a()
+
+
 def research_code_digest() -> str:
     """转发到唯一实现（quant_lab.research.paths），使账本血缘与报告内嵌哈希同源（R4-L）。"""
     from quant_lab.research.paths import research_code_digest as _d
@@ -675,13 +718,16 @@ def run_mc(mechanism: str, *, kind: str = "null", n_rep: int = 1000, seed0: int 
     gm_cross = (np.nanmean(gc, axis=0).tolist() if gc is not None else [math.nan] * len(gf_cross))
     gs_cross = (np.nanstd(gc, axis=0, ddof=1).tolist() if (gc is not None and gc.shape[0] >= 2) else [math.nan] * len(gf_cross))
     n_grid = int(gc.shape[0]) if gc is not None else 0
+    # R6-G：**逐对**有效样本数。某一对不可估时 nanmean/nanstd 用的样本比 n_grid 少，
+    # 拿共同 n_grid 当分母会高估精度（带宽被算窄），也让 sd 的可实现性上界失去依据。
+    n_cross = (np.isfinite(gc).sum(axis=0).astype(int).tolist() if gc is not None else [0] * len(gf_cross))
     gm_ac = float(np.nanmean(grid_ac)) if grid_ac else math.nan
     # R5-W：总体门判"均值 vs 拟合"，带宽按均值的 SE 校准；块间 ac1 只报告不判（见 checks 注释）
-    agg_ok = aggregate_preserved(gf_cross, gm_cross, gs_cross, n_grid)
+    agg_ok = aggregate_preserved(gf_cross, gm_cross, gs_cross, n_cross)
     diag["grid_dependence"] = {"fitted_ac1": gf_ac, "null_mean_ac1": gm_ac, "fitted_cross": gf_cross,
-                               "null_mean_cross": gm_cross, "null_sd_cross": gs_cross, "n_grid": n_grid,
+                               "null_mean_cross": gm_cross, "null_sd_cross": gs_cross, "n_grid": n_grid, "n_cross": n_cross,
                                "pairs": grid_pair_labels(len(gf_cross) and len(INSTRUMENTS)),
-                               "band": [aggregate_pair_ok(f_, m_, s_, n_grid)[2] for f_, m_, s_ in zip(gf_cross, gm_cross, gs_cross)],
+                               "band": [aggregate_pair_ok(f_, m_, s_, k_)[2] for f_, m_, s_, k_ in zip(gf_cross, gm_cross, gs_cross, n_cross)],
                                "ok": bool(agg_ok)}
     diag["dependence_aggregate"] = {"block_ac1": agg["block_ac1"], "cross_instrument": agg["cross_instrument"], "ok": bool(agg_ok),
                                     "note": "episode 级依赖统计量仅作报告（实测无区分力）；判定以 grid_dependence 为准"}
@@ -700,6 +746,9 @@ def run_mc(mechanism: str, *, kind: str = "null", n_rep: int = 1000, seed0: int 
     diag["guard_failures_by_check"] = guard_fail
     diag["all_T0"] = bool(tiers.get("T0", 0) == n_done and n_done > 0)
     diag["chosen_block_len"] = chosen_L           # 训练诊断预注册的主 L 分布（block_len_days=None 时）
+    # R6-L：显式声明 L 模式。原先"空字典"既表示固定 L、也表示分布被清空，于是清空即可跳过整个计数门。
+    diag["block_len_mode"] = "auto" if pc.block_len_days is None else "fixed"
+    diag["block_len_fixed"] = None if pc.block_len_days is None else int(pc.block_len_days)
     n_ok = n_done - n_fail
     if n_ok == 0:
         v = "invalid_null_model" if n_invalid > 0 else "not_run"
@@ -741,6 +790,24 @@ def verify_report_text(text: str) -> dict:
     if embedded != current:
         raise ValueError(f"制品陈旧（A31）：报告由代码 {str(embedded)[:12]} 生成，当前研究代码为 {current[:12]}——"
                          f"门或流水线已变更，必须重跑 MC 再验收，不得用旧制品判定")
+    # 生成来源的回执字段本身也必须在场且自洽——否则删掉它们就等于把 R6-H 那道门从制品里摘掉。
+    # 父进程的执行修订可被判读方独立重算（覆盖集合由包决定），因此这里是真比对，不是抄录。
+    meta = data.get("meta") or {}
+    for k in ("worker_receipts_confirmed", "worker_code_sha256", "worker_artifact_identity", "parent_artifact_identity"):
+        if k not in meta:
+            raise ValueError(f"生成来源回执字段缺失：{k}（R6-H：删字段不得等于摘掉门）")
+    if type(meta["worker_receipts_confirmed"]) is not int or meta["worker_receipts_confirmed"] != len(data["results"]):
+        raise ValueError(f"worker 回执数 {meta['worker_receipts_confirmed']!r} 与结果行数 {len(data['results'])} 不符："
+                         f"每个 job 恰好回传一份回执、产出一行结果")
+    if meta["worker_code_sha256"] != [embedded]:
+        raise ValueError(f"worker 磁盘身份 {meta['worker_code_sha256']} 与制品生成身份 {str(embedded)[:12]} 不一致")
+    cur_exec = artifact_identity_digest()
+    if meta["parent_artifact_identity"] != cur_exec:
+        raise ValueError(f"制品陈旧：报告由制品身份 {str(meta['parent_artifact_identity'])[:12]} 生成，"
+                         f"当前制品身份为 {cur_exec[:12]}——必须重跑 MC 再验收")
+    if meta["worker_artifact_identity"] != [meta["parent_artifact_identity"]]:
+        raise ValueError(f"worker 制品身份 {meta['worker_artifact_identity']} 与父进程 "
+                         f"{str(meta['parent_artifact_identity'])[:12]} 不一致：存在混版")
     rows = data["results"]
     primary = [r for r in rows if r["kind"] in ("null", "power")]
     keys = [(r["kind"], r["mechanism"]) for r in primary]
@@ -784,27 +851,51 @@ def verify_report_text(text: str) -> dict:
         require(count(diag.get("n_invalid", 0)) == 0 and count(r.get("n_invalid", 0)) == 0, "未知 invalid 计数字段")
         # R4-V：结构门判读必须从**原始诊断重算**，并与 invalid_reason / verdict / 各失败计数互相对账。
         # 只核 ok 标志时，篡改任一字段都能让总体门失效而计数、区间、哈希、§3.2 全部照旧。
+        failures = diag["guard_failures_by_check"]
+        n_invalid = count(diag["n_invalid_null_model"])
         gridd = diag.get("grid_dependence")
         require(isinstance(gridd, dict), "grid_dependence 缺失")
-        require(all(k in gridd for k in ("fitted_cross", "null_mean_cross", "null_sd_cross", "n_grid", "pairs",
-                                         "fitted_ac1", "null_mean_ac1", "ok")), "grid_dependence 字段不完整")
+        require(all(k in gridd for k in ("fitted_cross", "null_mean_cross", "null_sd_cross", "n_grid", "n_cross",
+                                         "pairs", "band", "fitted_ac1", "null_mean_ac1", "ok")), "grid_dependence 字段不完整")
         fc, mc_, sc_ = gridd["fitted_cross"], gridd["null_mean_cross"], gridd["null_sd_cross"]
+        nc_, band_ = gridd["n_cross"], gridd["band"]
         # R5-G：向量必须按冻结世界核齐全集与顺序，并落在相关系数的值域内——只比两边长度相等是不够的
         require(gridd["pairs"] == grid_pair_labels(), "跨品种对标识缺失/顺序不符/含未知或重复对")
-        require(all(isinstance(v, list) and len(v) == len(gridd["pairs"]) for v in (fc, mc_, sc_)), "相关向量与品种对数不一致")
+        require(all(isinstance(v, list) and len(v) == len(gridd["pairs"]) for v in (fc, mc_, sc_, nc_, band_)),
+                "相关向量与品种对数不一致")
         for v in list(fc) + list(mc_):
             require(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and -1.0 <= v <= 1.0,
                     f"跨品种相关取值非法：{v!r}（须为有限实数且落在 [-1,1]）")
-        for v in sc_:
-            require(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v >= 0.0, f"相关标准差非法：{v!r}")
         n_grid = count(gridd["n_grid"])
         require(n - len(diag.get("errors", [])) <= n_grid <= n, "格点观测数与完成数不自洽")
-        agg_ok = aggregate_preserved(fc, mc_, sc_, n_grid)               # 与 run_mc 同一判据，独立重算
+        # R6-G：sd 不是随便一个非负数——相关系数恒在 [-1,1]，样本 sd 有硬上界 s² ≤ n/(n−1)·(1−m²)。
+        # 超界的 sd 不可能由任何合法抽样产生，用它撑开带宽就能吞掉整段真实相关的丢失。
+        sd_for_decision: list[float] = []
+        for j, (m_, s_, k_) in enumerate(zip(mc_, sc_, nc_)):
+            require(isinstance(s_, (int, float)) and not isinstance(s_, bool) and math.isfinite(s_) and s_ >= 0.0,
+                    f"相关标准差非法：{s_!r}")
+            require(type(k_) is int and 2 <= k_ <= n_grid, f"第 {j} 对的有效样本数非法：{k_!r}（须为 2..n_grid 的整数）")
+            cap = max_realizable_sd(m_, k_)
+            # **接收**与**判定**是两件事（九审 R9-M）。接收留 1e-6 相对容差，是为了容忍双精度在
+            # |m|→1 时对上界本身的算术误差；但判定绝不能用超过精确上界的 sd——否则只把 sd 抬高
+            # 5e-7 相对量就能把带撑宽约 3.8e-8，足以让一个本该失败的临界判定变成通过。
+            require(s_ <= cap * (1 + 1e-6) + 1e-12,
+                    f"第 {j} 对的相关标准差 {s_} 不可实现：均值 {m_}、n={k_} 时上界为 {cap}")
+            sd_for_decision.append(min(s_, cap))
+        # R7-G：逐对缺测必须在总账里出现。fitted 有限时，某 replicate 该对不可估会让
+        # _corr_preserved_z(finite, nan) 为 False → 该次 cross_instrument 失败并计 invalid。
+        # 于是「n_cross 远小于 n_grid」与「cross_instrument 零失败」不能同时成立。
+        missing = [n_grid - k_ for k_ in nc_]
+        cross_fail = count(failures.get("cross_instrument", 0))
+        require(max(missing, default=0) <= cross_fail,
+                f"逐对缺测 {missing} 未计入 cross_instrument 失败（记 {cross_fail}）：报告声称了两件不能同时成立的事")
+        agg_ok = aggregate_preserved(fc, mc_, sd_for_decision, nc_)      # 与 run_mc 同一判据，用**钳到精确上界**的 sd
+        for j, (f_, m_, s_, k_, b_) in enumerate(zip(fc, mc_, sd_for_decision, nc_, band_)):   # 派生带宽必须能被重算
+            require(isinstance(b_, (int, float)) and not isinstance(b_, bool), f"第 {j} 对的带宽非数：{b_!r}")
+            close(b_, aggregate_pair_ok(f_, m_, s_, k_)[2])
         require(gridd["ok"] is agg_ok, "grid_dependence.ok 与重算不符")
         require((diag.get("dependence_aggregate") or {}).get("ok") is agg_ok, "dependence_aggregate.ok 与重算不符")
 
-        failures = diag["guard_failures_by_check"]
-        n_invalid = count(diag["n_invalid_null_model"])
         per_check = [count(v) for v in failures.values()]
         # 一次 replicate 可同时命中多个 check，故 max ≤ n_invalid ≤ sum；三处计数必须同源
         require(max(per_check, default=0) <= n_invalid <= sum(per_check), "guard 失败计数与 invalid 数不自洽")
@@ -834,13 +925,62 @@ def verify_report_text(text: str) -> dict:
         require(expected_reason is None, f"空模型无效：{expected_reason}")
         require(not diag.get("all_T0"), "全部 T0")
         require(len(diag.get("errors", [])) <= failed and tiers.get("error", 0) <= failed, "错误计数不一致")
+        # R6-L：L 模式必须显式声明——原先"空字典"既表示固定 L、又能表示分布被清空，清空即可跳过整个计数门。
+        # R7-L：并且不采信自报——模式必须与 meta 里**结构化的冻结配置**一致，否则自称 fixed 就能跳过 auto 的计数门。
+        mode = diag.get("block_len_mode")
+        require(mode in ("auto", "fixed"), f"block_len_mode 缺失或非法：{mode!r}")
+        require("pipeline_block_len_days" in meta, "meta 缺结构化冻结配置 pipeline_block_len_days（R7-L）")
+        frozen_L = meta["pipeline_block_len_days"]
+        require(frozen_L is None or (type(frozen_L) is int and frozen_L > 0), f"冻结 L 非法：{frozen_L!r}")
+        # 自审：结构化冻结配置本身也是自报的——只改它和逐结果三个字段就能跳过 auto 计数门。
+        # 报告里另有两处独立编码同一件事（PipelineConfig 的 repr 与 §1 的 L 字段），要求三者一致，
+        # 伪造者必须同时改到三处才谈得上自洽。这不消除溯源边界，只是把"改三个字段"的成本抬掉。
+        # 只能拿**正文**比，不能拿整份文档比：整份文档含那段 JSON，被改过的值必然"出现在文档里"，条件恒真。
+        body = text[:text.rindex("```json")]
+        require(str(meta.get("pipeline", "")) in body and str(meta.get("world", "")) in body,
+                "正文渲染的世界/流水线配置与内嵌 meta 不同源")
+        # 本模块 CLI 无条件构造 PipelineConfig(..., block_len_days=None)，没有任何选项能设固定 L；
+        # 因此"命令是本 CLI"与"冻结为 fixed"互相矛盾。**若将来给 CLI 加了该选项，这条断言必须同步改。**
+        if str(meta.get("command", "")).startswith("python -m quant_lab.research.nullmodel"):
+            require(meta["pipeline_block_len_days"] is None,
+                    f"记录的命令是本模块 CLI（无固定 L 选项），却声称冻结 L={meta['pipeline_block_len_days']!r}")
+        mm = re.search(r"block_len_days=([^,)\s]+)", str(meta.get("pipeline", "")))
+        require(mm is not None, "meta.pipeline 里读不到 block_len_days（R7-L 交叉核对）")
+        repr_L = None if mm.group(1) == "None" else int(mm.group(1))
+        require(repr_L == frozen_L, f"meta.pipeline 的 block_len_days={repr_L!r} 与结构化冻结配置 {frozen_L!r} 不符")
+        mL = meta.get("L")
+        require((isinstance(mL, str) and mL.startswith("auto")) == (frozen_L is None),
+                f"meta.L={mL!r} 与冻结配置 block_len_days={frozen_L!r} 不符")
+        if frozen_L is not None:
+            require(mL == frozen_L, f"meta.L={mL!r} 与冻结 L {frozen_L} 不符")
+        require(mode == ("auto" if frozen_L is None else "fixed"),
+                f"自报 block_len_mode={mode} 与冻结配置 block_len_days={frozen_L!r} 不符（R7-L）")
+        require(diag.get("block_len_fixed") == frozen_L, f"block_len_fixed 与冻结配置不符：{diag.get('block_len_fixed')!r} vs {frozen_L!r}")
         chosen = diag.get("chosen_block_len", {})
-        # R5-C：结构早退（invalid）与异常（error）都没进流水线，不该有主 L；其余完成的 replicate 应各有一个
-        if chosen:
+        if mode == "auto":
+            require(isinstance(chosen, dict) and bool(chosen), "auto 模式必须给出主 L 分布（空分布不得兼任免检开关）")
+            require(set(chosen) <= {"L=1", "L=3", "L=7"}, f"主 L 取值非法：{sorted(chosen)}")
+            # R5-C：结构早退（invalid）与异常（error）都没进流水线，不该有主 L；其余完成的 replicate 应各有一个
             got = sum(count(v) for v in chosen.values())
             require(n - failed <= got <= n - len(diag.get("errors", [])) - n_invalid,
                     f"块长计数不一致：主 L 共 {got}，但完成 {n}、失败 {failed}、invalid {n_invalid}、error {len(diag.get('errors', []))}")
-        require(all(count(v) <= n - failed for v in diag.get("positive_by_block_len", {}).values()), "阳性计数不一致")
+        else:
+            require(not chosen, "fixed 模式不应给出主 L 分布")
+            require(type(diag.get("block_len_fixed")) is int and diag["block_len_fixed"] > 0, "fixed 模式须声明固定 L")
+            # 固定 L 的合法值域由流水线决定，不擅自缩成 {1,3,7}
+        # R9-ACCOUNT（能翻转结论的那条）：阳性只能来自**既非 T0、又没出错、也没判结构无效**的 replicate。
+        # 否则可以写成 T0=499 / T1=2 / error=499 却报 480 个阳性——每条计数、每个 CP 区间都自洽，
+        # 判读照样接受，而实际只有 2 个 replicate 有机会产出阳性。
+        eligible = n - count(tiers.get("T0", 0)) - count(tiers.get("error", 0)) - count(tiers.get("invalid", 0))
+        require(0 <= eligible <= n, "可产出阳性的 replicate 数计算越界")
+        require(x <= eligible, f"阳性 {x} 超过可产出阳性的 replicate 数 {eligible}"
+                               f"（T0={tiers.get('T0', 0)}、error={tiers.get('error', 0)}、invalid={n_invalid}）")
+        require(all(count(v) <= eligible for v in diag.get("positive_by_block_len", {}).values()), "阳性计数不一致")
+        require(count(r.get("n_recovered", 0)) <= eligible,
+                f"规则找回数 {r.get('n_recovered')} 超过可产出阳性的 replicate 数 {eligible}")
+        # error 档与错误清单是同一件事的两种记法（run_mc 每次异常同时写两处），必须逐条对上
+        require(len(diag.get("errors", [])) == count(tiers.get("error", 0)),
+                f"错误清单 {len(diag.get('errors', []))} 条与 error 档 {tiers.get('error', 0)} 不一致")
         require(n > failed and ns > 0, "没有可复算样本")
         worst = x
         if r["kind"].startswith("null"):
@@ -1010,6 +1150,21 @@ def write_report(results: list[MCResult], out: Path, *, meta: dict, code_digest:
         "`grid_dependence.ok` / `dependence_aggregate.ok` / `invalid_reason` / `verdict` / `tiers.invalid` / "
         "`n_invalid_null_model` / `guard_fail_rate` / `guard_failures_by_check` 八处彼此自洽——单改任意一处即被拒收。",
         "",
+        f"**带宽的分母与 sd 都不是自由参数**（R6-G）：带宽用**逐对**有效样本数 `n_cross`（某对不可估时它小于 `n_grid`，"
+        f"拿共同 n_grid 当分母会把带宽算窄）；相关系数逐次取值恒在 [-1,1]，故样本 sd 有硬上界 "
+        f"精确上界（见 `max_realizable_sd`）——超界的 sd 不可能由任何合法抽样产生，判读按该上界拒收，"
+        f"`band` 也必须能由 (fitted, mean, sd, n_cross) 重算出来。这条不属溯源边界："
+        f"不必相信 fitted 是真值、也不必重跑 MC 就能否证。用的是**精确**上界而非 `n/(n−1)·(1−m²)`："
+        f"后者只是必要条件，有限 n 时未必可达（n=2、m=−0.9 时它给 0.616，真实上界是 0.141，R7-G）。",
+        "",
+        f"**逐对缺测必须在总账里出现**（R7-G）：fitted 有限时，某次该对不可估会让逐 replicate 的 "
+        f"`cross_instrument` 判据为假、该次计 invalid。因此「`n_cross` 远小于 `n_grid`」与「`cross_instrument` 零失败」"
+        f"不能同时成立，判读强制 `max(n_grid − n_cross) ≤ guard_failures_by_check['cross_instrument'] ≤ n_invalid`。"
+        f"否则把某对的有效样本数报成 2，就能用一个**本身可实现**的 sd 把带宽撑开。",
+        "",
+        f"**主 L 分布显式声明模式**（R6-L）：`block_len_mode` 为 auto 时必须给出合法分布并无条件核上下界；"
+        f"为 fixed 时必须声明固定 L 且不给分布。原先「空字典」既表示固定 L、又能表示分布被清空，于是清空即可跳过整个计数门。",
+        "",
         "另有三条记账约束（R5-C / R5-G / R5-O）：**(a)** `tiers.invalid + tiers.error ≤ n_failed`，"
         "且主 L 分布只覆盖真正进入流水线的 replicate——结构早退者不该有主 L；结构失败必须真正计进失败数，"
         "否则三分母最坏界会被低估到足以翻转 7% 准入。**(b)** 跨品种相关向量按冻结世界核对齐全集与顺序"
@@ -1020,8 +1175,18 @@ def write_report(results: list[MCResult], out: Path, *, meta: dict, code_digest:
         f"生成身份（A31 / R5-H）：MC 起跑冻结父进程源码摘要，**每个 worker 另行回传自己起跑与收尾的摘要**，"
         f"父进程逐份核对，任何不等或缺回执都拒绝落盘。本报告的 worker 回执数："
         f"{meta.get('worker_receipts_confirmed', '—')}，回执摘要集合：{meta.get('worker_code_sha256', '—')}。"
-        f"**边界**：本机制绑定的是各 worker 自报的源码视图，未实现"
-        f"「从同一份只读源码快照启动整组 worker」；父进程异常退出时不落盘，代价是丢弃 worker 已算结果。",
+        f"**结构性隔离，不是事后检测**（G0 R-10 裁定 §2.2/§2.3）：本轮起**移除**对任意运行状态的通用反射，"
+        f"改为让未申报的状态根本过不去进程边界——整组 worker 由**全新解释器**（显式 spawn）启动、"
+        f"配置以**纯数据**过界并在 worker 内重建、每个 job 回传**制品身份**（冻结源码摘要 + 声明依赖清单），"
+        f"父进程逐份核对。父进程制品身份：{str(meta.get('parent_artifact_identity', '—'))[:16]}…；"
+        f"worker 制品身份集合：{[str(x)[:16] + '…' for x in meta.get('worker_artifact_identity', [])]}；"
+        f"依赖清单：{meta.get('artifact_manifest', {}).get('deps', '—')}。",
+        "",
+        f"**能力边界**（A39，方法边界而非待办）：对支持域内的**事故类**混版——陈旧 `__pycache__`、"
+        f"fork 继承父进程模块对象、普通导入顺序——本系统以结构性隔离关闭。对**对抗类**"
+        f"（复现必须在 worker 进程内执行代码去绑定 globals、改注册表项、改类属性或默认参数），"
+        f"**本系统不声称防护**，且该防护对任意 callable 不可判定。判别一条反例属哪类只问一句："
+        f"**能不能在不向 worker 进程内注入代码的前提下复现**。详见 docs/adr/capability-G3-execution-identity.md。",
         "",
         "全部落 T0 的机制标 not_run_T0（cap=0 无搜索，FPR 平凡为 0，不作 T1 验收替身）。",
         "",
@@ -1048,27 +1213,112 @@ def write_report(results: list[MCResult], out: Path, *, meta: dict, code_digest:
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _run_mc_job(**kw) -> dict:
+#: 正式验收入口允许的**纯数据**标量类型（精确类型，不收子类——IntEnum 之类另有取值语义）
+_PURE_SCALARS = (bool, int, float, str, type(None))
+_PURE_MAX_DEPTH = 6
+
+
+def as_pure_data(value, path: str = "<config>", depth: int = 0):
+    """把配置校验成**纯数据**，不是纯数据就具名拒绝。
+
+    这是顾问建议的窄入口：正式 MC 不再把父进程的活对象（可调用实例、闭包、任意外部类型）
+    传给 worker，worker 在自己进程里用校验过的数据重建配置。任意 Python 行为依赖因此
+    根本进不到验收路径，而不是靠反射去证明它们已被完整编码。
+    """
+    if depth > _PURE_MAX_DEPTH:
+        raise UnsupportedConfigValue(f"配置嵌套超过 {_PURE_MAX_DEPTH} 层：{path}")
+    if type(value) in _PURE_SCALARS:
+        if isinstance(value, float) and not math.isfinite(value):
+            raise UnsupportedConfigValue(f"配置含非有限浮点：{path}={value!r}")
+        return value
+    if type(value) in (list, tuple):
+        return [as_pure_data(v, f"{path}[{i}]", depth + 1) for i, v in enumerate(value)]
+    if type(value) is dict:
+        out = {}
+        for k, v in value.items():
+            if type(k) is not str:
+                raise UnsupportedConfigValue(f"配置字典键必须是 str：{path} 的 {k!r}")
+            out[k] = as_pure_data(v, f"{path}.{k}", depth + 1)
+        return out
+    raise UnsupportedConfigValue(f"配置值不是纯数据：{path}（类型 {type(value).__module__}.{type(value).__name__}）")
+
+
+class UnsupportedConfigValue(TypeError):
+    """正式验收入口只接受纯数据配置；活对象在这里被具名拒绝（顾问建议的窄入口）。"""
+
+
+def _checked_fields(data: dict, cls) -> dict:
+    """未申报字段**具名拒绝，不是忽略**（G0 R-10 裁定 §4 的 P1 最小集要求）。
+
+    直接 `cls(**data)` 对多余键会抛 TypeError，但消息里看不出是「schema 外字段」；
+    缺字段则会被默认值悄悄补上。这里把两种都变成具名失败。
+    """
+    declared = {f.name for f in dataclasses.fields(cls)}
+    extra = sorted(set(data) - declared)
+    missing = sorted(declared - set(data))
+    if extra:
+        raise UnsupportedConfigValue(f"{cls.__name__} 配置含未申报字段：{extra}（schema 外字段必须拒绝，不得忽略）")
+    if missing:
+        raise UnsupportedConfigValue(f"{cls.__name__} 配置缺字段：{missing}（不得用默认值悄悄补齐）")
+    return dict(data)
+
+
+def _config_to_data(cfg) -> dict:
+    return as_pure_data({f.name: getattr(cfg, f.name) for f in dataclasses.fields(cfg)},
+                        f"<{type(cfg).__name__}>")
+
+
+def _run_mc_job(*, world_cfg_data: dict, pipe_cfg_data: dict, **kw) -> dict:
+    """worker 侧从**纯数据**重建配置，再自报生成身份。
+
+    配置以数据过界、在 worker 内构造，父进程的活对象不再跨进程传递（顾问建议的窄入口）；
+    身份回执保留：起跑与收尾各取一次磁盘与执行摘要，父进程逐份核对。
+    """
+    wc = WorldConfig(**_checked_fields(as_pure_data(world_cfg_data, "<WorldConfig>"), WorldConfig))
+    pd_ = _checked_fields(as_pure_data(pipe_cfg_data, "<PipelineConfig>"), PipelineConfig)
+    if isinstance(pd_.get("block_len_sensitivity"), list):
+        pd_["block_len_sensitivity"] = tuple(pd_["block_len_sensitivity"])
+    pc = PipelineConfig(**pd_)
+    return _run_mc_job_impl(world_cfg=wc, pipe_cfg=pc, **kw)
+
+
+def _run_mc_job_impl(**kw) -> dict:
     """worker 侧自报生成身份（R5-H）：起跑与收尾各取一次递归源码摘要，随结果回传，父进程逐份核对。
 
     父进程首尾摘要相等**不能**证明各 worker 见到的源码与它相同——spawn 的延迟导入、
     不同 worker 的源码视图、A→B→A 式往返都不在父进程那两次测量的覆盖范围内。
     """
-    d0 = research_code_digest()
+    d0, e0 = research_code_digest(), artifact_identity_digest()
     r = run_mc(**kw)
-    return {"digest_start": d0, "digest_end": research_code_digest(), "result": r}
+    return {"digest_start": d0, "digest_end": research_code_digest(),
+            "artifact_start": e0, "artifact_end": artifact_identity_digest(),
+            "pid": os.getpid(), "result": r}
 
 
-def check_worker_receipt(payload, frozen_digest: str) -> "MCResult":
-    """父进程侧核对 worker 回执（R5-H）：缺回执、起跑或收尾摘要与冻结身份不等，一律拒绝发布。"""
+def check_worker_receipt(payload, frozen_digest: str, frozen_exec: str | None = None) -> "MCResult":
+    """父进程侧核对 worker 回执：缺回执、磁盘摘要或**执行修订**摘要与冻结身份不等，一律拒绝发布。
+
+    磁盘摘要（R5-H）查的是"文件长什么样"，执行摘要（R6-H）查的是"这个 worker 实际跑的是哪一版"——
+    导入缓存 / 驻留修订能让两者背离：六审的反例正是首尾磁盘摘要全等、但两个 worker 执行了另一修订。
+    """
     if not isinstance(payload, dict) or "result" not in payload:
         raise SystemExit("worker 未回传生成身份回执：结果不得发布（R5-H）")
+    if payload["result"] is None or not isinstance(payload["result"], MCResult):
+        raise SystemExit(f"worker 回执里的结果不是 MCResult（{type(payload['result']).__name__}）：不得发布")
     for key in ("digest_start", "digest_end"):
         got = payload.get(key)
         if got != frozen_digest:
-            raise SystemExit(f"worker 的 {key}={str(got)[:12]} 与父进程冻结身份 {frozen_digest[:12]} 不一致："
+            raise SystemExit(f"worker 的 {key}={str(got)[:12]} 与父进程冻结磁盘身份 {frozen_digest[:12]} 不一致："
                              f"该结果并非由本次冻结的源码产生，不得发布（R5-H）")
+    if frozen_exec is not None:
+        for key in ("artifact_start", "artifact_end"):
+            got = payload.get(key)
+            if got != frozen_exec:
+                raise SystemExit(f"worker 的 {key}={str(got)[:12]} 与父进程冻结制品身份 {frozen_exec[:12]} 不一致："
+                                 f"该 worker 跑的不是被冻结的那一份制品，不得发布")
     return payload["result"]
+
+
 
 
 def _main(argv=None):  # pragma: no cover - CLI
@@ -1085,7 +1335,8 @@ def _main(argv=None):  # pragma: no cover - CLI
     ap.add_argument("--n-clusters", type=int, default=1600, help="内层折 K 与基线 DEFF 降档后仍落 T1 所需的合成簇数（S06 口径）")
     ap.add_argument("--n-clusters-t1", type=int, default=2400, help="机制多数落 T0 时的预注册重跑簇数")
     ap.add_argument("--no-ext", action="store_true")
-    ap.add_argument("--jobs", type=int, default=5, help="并行进程数（每个 run_mc 一个进程；seed 清单不变，结果与串行一致）")
+    ap.add_argument("--jobs", type=int, default=min(10, (os.cpu_count() or 5)),
+                    help="并行进程数（每个 run_mc 一个进程；seed 清单不变，结果与串行一致）")
     ap.add_argument("--rebuild", default=None, help="从既有报告的原始 JSON 重排版（不重跑 MC），用于报告格式/派生列更新")
     a = ap.parse_args(argv)
     if a.rebuild:
@@ -1101,7 +1352,9 @@ def _main(argv=None):  # pragma: no cover - CLI
               "| renderer:", meta["renderer_code_sha256"][:12])
         return
     frozen_digest = research_code_digest()          # A31：MC 起跑即冻结生成身份，结束时确认源码未在运行期变动
+    frozen_exec = artifact_identity_digest()           # 制品身份：冻结源码 + 声明依赖清单
     print("generating code sha256 (frozen at start):", frozen_digest, flush=True)
+    print("artifact identity (frozen at start):", frozen_exec, flush=True)
     wc = WorldConfig(n_clusters=a.n_clusters)
     pc = PipelineConfig(B=a.B, block_len_days=None)      # 主 L 由每 replicate 首折训练窗残差诊断预注册（1/3/7）
     results: list[MCResult] = []
@@ -1110,6 +1363,7 @@ def _main(argv=None):  # pragma: no cover - CLI
         print(f"[{m}/{k}] {i} done  positive={pos} failed={fail}", flush=True)
 
     from concurrent.futures import ProcessPoolExecutor
+    from multiprocessing import get_context
     mechs = [m for m in a.mechanisms.split(",") if m]
     jobs = []      # (kind_override, label, kwargs)
     for m in mechs:
@@ -1118,20 +1372,38 @@ def _main(argv=None):  # pragma: no cover - CLI
         jobs.append(("power", "", dict(mechanism=m, kind="power", n_rep=a.n_rep, seed0=11 + MECHANISMS.index(m), world_cfg=wc, pipe_cfg=pc, delta=a.delta)))
 
     worker_receipts: list[str] = []
+    worker_execs: list[str] = []
+
+    def _as_job_kwargs(kw: dict) -> dict:
+        """把活的配置对象换成纯数据后再过界——正式入口不传活对象。"""
+        out = dict(kw)
+        out["world_cfg_data"] = _config_to_data(out.pop("world_cfg"))
+        out["pipe_cfg_data"] = _config_to_data(out.pop("pipe_cfg"))
+        return out
 
     def run_jobs(js):
-        with ProcessPoolExecutor(max_workers=max(1, a.jobs)) as ex:
-            futs = [ex.submit(_run_mc_job, **kw) for _, _, kw in js]
+        # 显式 spawn：不依赖平台默认值，保证每个 worker 都是**全新解释器**、不继承父进程已加载的模块
+        with ProcessPoolExecutor(max_workers=max(1, a.jobs), mp_context=get_context("spawn")) as ex:
+            futs = [ex.submit(_run_mc_job, **_as_job_kwargs(kw)) for _, _, kw in js]
             out = []
             for (kind_o, label, _), fu in zip(js, futs):
                 payload = fu.result()
-                r = check_worker_receipt(payload, frozen_digest)     # 缺回执 / 与冻结身份不等 → 拒绝发布
-                worker_receipts.append(payload["digest_end"])
+                r = check_worker_receipt(payload, frozen_digest, frozen_exec)   # 缺回执 / 身份不等 → 拒绝发布
+                worker_receipts.append(payload["digest_end"]); worker_execs.append(payload["artifact_end"])
                 r.kind = kind_o; r.label = label or r.label
                 print(r.to_dict(), flush=True)
                 out.append(r)
         return out
 
+    # 固定网格的功效敏感性与主阶段**没有依赖关系**，同批提交即可把 8 个短任务塞进主阶段的空闲核，
+    # 墙钟从"主阶段 + 扩展阶段"压到"最长单任务"（实测 45 分钟 → 26 分钟）。
+    # 只有下面两条 null_ext 规则依赖主阶段判定，必须留在第二阶段。
+    if not a.no_ext:
+        grid = [(d, ns, nc) for d in (0.2, 0.4) for ns in (1.0, 0.6) for nc in (a.n_clusters, a.n_clusters * 3 // 2)]
+        for d, ns, nc in grid:
+            jobs.append(("power_sens", f"δ={d} noise×{ns} clusters={nc}",
+                         dict(mechanism="common_shock", kind="power", n_rep=200, seed0=41,
+                              world_cfg=replace(wc, noise_scale=ns, n_clusters=nc), pipe_cfg=pc, delta=d)))
     results += run_jobs(jobs)
     if not a.no_ext:
         ext = []
@@ -1142,15 +1414,21 @@ def _main(argv=None):  # pragma: no cover - CLI
             if r.verdict == "not_run_T0" or r.tiers.get("T0", 0) > r.n_done / 2:
                 ext.append(("null_ext", f"多数 replicate 落 T0（cap=0，FPR 平凡为 0）→ 预注册 n_clusters={a.n_clusters_t1} 重跑使其落 T1",
                             dict(mechanism=r.mechanism, kind="null", n_rep=a.n_rep, seed0=31 + MECHANISMS.index(r.mechanism), world_cfg=replace(wc, n_clusters=a.n_clusters_t1), pipe_cfg=pc)))
-        grid = [(d, ns, nc) for d in (0.2, 0.4) for ns in (1.0, 0.6) for nc in (a.n_clusters, a.n_clusters * 3 // 2)]
-        for d, ns, nc in grid:
-            ext.append(("power_sens", f"δ={d} noise×{ns} clusters={nc}",
-                        dict(mechanism="common_shock", kind="power", n_rep=200, seed0=41, world_cfg=replace(wc, noise_scale=ns, n_clusters=nc), pipe_cfg=pc, delta=d)))
-        results += run_jobs(ext)
+        if ext:
+            results += run_jobs(ext)
+    # 只按 kind 归位；Python 的 sort 是稳定的，各 kind 内部保持提交顺序，报告行序与并行化之前一致
+    order = {"null": 0, "power": 1, "null_ext": 2, "power_sens": 3}
+    results.sort(key=lambda r: order.get(r.kind, 9))
     meta = {"command": " ".join(["python -m quant_lab.research.nullmodel"] + (argv or [])), "world": str(wc), "n_candidates": len(default_candidates(wc.n_candidates)),
             "candidates": "12 独立特征 × 规则 {gt_q30, lt_q30, gt_q70}（36 提交，T1 cap=12 → 按规范顺序前 12 个 = f00..f03 × 3 规则，含植入候选 f00:gt_q30）", "pipeline": str(pc), "B": pc.B, "alpha": pc.alpha,
             "L": "auto(1/3/7 训练诊断)" if pc.block_len_days is None else pc.block_len_days, "delta": a.delta, "pi": wc.pi,
-        "worker_receipts_confirmed": len(worker_receipts), "worker_code_sha256": sorted(set(worker_receipts))}
+        "pipeline_block_len_days": pc.block_len_days,          # R7-L：结构化冻结配置，判读侧据此核每条记录自报的 L 模式
+        "worker_receipts_confirmed": len(worker_receipts), "worker_code_sha256": sorted(set(worker_receipts)),
+        "worker_artifact_identity": sorted(set(worker_execs)), "parent_artifact_identity": frozen_exec,
+        "artifact_manifest": __import__("quant_lab.research.paths", fromlist=["x"]).artifact_identity()}
+    end_exec = artifact_identity_digest()
+    if end_exec != frozen_exec:
+        raise SystemExit(f"父进程的制品身份在 MC 运行期间发生变化（起 {frozen_exec[:12]} / 止 {end_exec[:12]}）：不得落盘")
     end_digest = research_code_digest()
     if end_digest != frozen_digest:                 # 运行期改过源码 → 结果与任何单一代码身份都不对应，拒绝落盘
         raise SystemExit(f"研究代码在 MC 运行期间发生变化（起 {frozen_digest[:12]} / 止 {end_digest[:12]}）："
@@ -1163,5 +1441,5 @@ if __name__ == "__main__":  # pragma: no cover
     _main()
 
 
-__all__ = ["INSTRUMENTS", "MECHANISMS", "research_code_digest", "MCResult", "ResidualModel", "World", "WorldConfig", "assert_not_episode_shuffle", "check_worker_receipt", "clopper_pearson",
+__all__ = ["INSTRUMENTS", "MECHANISMS", "research_code_digest", "MCResult", "ResidualModel", "World", "WorldConfig", "assert_not_episode_shuffle", "artifact_identity_digest", "check_worker_receipt", "clopper_pearson",
            "default_candidates", "fit_residual_model", "resample_null", "run_mc", "synth_world", "write_report"]
