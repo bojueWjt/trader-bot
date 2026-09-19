@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Trader Bot · 系统架构",
+    "locale": "zh-CN",
+    "animation": "none",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "signal-path",
+        "label": "信号主路径",
+        "focus": ["telegram", "ingress", "hermes", "controlPlane", "nodes", "binance"],
+        "note": "频道消息经信号接入与 Hermes 决策后，由控制面授权，Nautilus 才下单。"
+      },
+      {
+        "id": "operator-path",
+        "label": "读模型与管理",
+        "focus": ["clients", "controlPlane", "postgres", "nodes"],
+        "note": "App/看板在生产边界外读投影，并走独立管理入口。"
+      },
+      {
+        "id": "execution-observe",
+        "label": "执行与采集",
+        "focus": ["nodes", "redis", "observers", "postgres", "binance"],
+        "note": "执行节点与租约在主机内；采集监测也在 jp-24，交易所在外面。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "telegram",
+      "type": "external",
+      "label": "Telegram",
+      "pos": [24, 248],
+      "size": [120, 60]
+    },
+    {
+      "id": "ingress",
+      "type": "backend",
+      "label": "信号接入",
+      "pos": [200, 248],
+      "size": [128, 60]
+    },
+    {
+      "id": "hermes",
+      "type": "backend",
+      "label": "Hermes",
+      "pos": [384, 248],
+      "size": [120, 60]
+    },
+    {
+      "id": "controlPlane",
+      "type": "security",
+      "label": "控制面",
+      "pos": [560, 246],
+      "size": [132, 64]
+    },
+    {
+      "id": "nodes",
+      "type": "backend",
+      "label": "Nautilus A–D",
+      "pos": [748, 246],
+      "size": [140, 64]
+    },
+    {
+      "id": "binance",
+      "type": "external",
+      "label": "Binance",
+      "pos": [960, 248],
+      "size": [120, 60]
+    },
+    {
+      "id": "clients",
+      "type": "frontend",
+      "label": "App / 看板",
+      "pos": [560, 64],
+      "size": [132, 64]
+    },
+    {
+      "id": "observers",
+      "type": "cloud",
+      "label": "采集监测",
+      "pos": [384, 430],
+      "size": [120, 60]
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "PostgreSQL",
+      "pos": [560, 430],
+      "size": [132, 64]
+    },
+    {
+      "id": "redis",
+      "type": "database",
+      "label": "Redis",
+      "pos": [748, 430],
+      "size": [140, 64]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "jp-24 生产",
+      "wraps": ["ingress", "hermes", "controlPlane", "nodes", "observers", "postgres", "redis"],
+      "pad": 18
+    },
+    {
+      "kind": "security-group",
+      "label": "执行与租约域",
+      "wraps": ["nodes", "redis"],
+      "pad": 12
+    }
+  ],
+  "connections": [
+    {
+      "id": "tg-to-ingress",
+      "from": "telegram",
+      "to": "ingress",
+      "label": "频道消息",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ingress-to-hermes",
+      "from": "ingress",
+      "to": "hermes",
+      "label": "一次性 job",
+      "variant": "emphasis"
+    },
+    {
+      "id": "hermes-to-control",
+      "from": "hermes",
+      "to": "controlPlane",
+      "label": "结构化决策",
+      "variant": "emphasis"
+    },
+    {
+      "id": "control-to-nodes",
+      "from": "controlPlane",
+      "to": "nodes",
+      "label": "已批准意图",
+      "variant": "emphasis"
+    },
+    {
+      "id": "nodes-to-binance",
+      "from": "nodes",
+      "to": "binance",
+      "label": "下单",
+      "variant": "emphasis"
+    },
+    {
+      "id": "clients-to-control",
+      "from": "clients",
+      "to": "controlPlane",
+      "label": "读模型 / 管理",
+      "labelDy": 24
+    },
+    {
+      "id": "control-to-postgres",
+      "from": "controlPlane",
+      "to": "postgres",
+      "label": "落库",
+      "labelDy": 24
+    },
+    {
+      "id": "nodes-to-redis",
+      "from": "nodes",
+      "to": "redis",
+      "label": "租约",
+      "labelDy": 24
+    },
+    {
+      "id": "observers-to-postgres",
+      "from": "observers",
+      "to": "postgres",
+      "label": "镜像"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "信号与授权 G1–G3",
+      "items": [
+        "G1 白名单 / 去重 / ingress+outbox 先于 Hermes",
+        "G2 schema / user·channel / 来源身份",
+        "G3 risk_state 与 node 分离；全表 OR 为已知缺口"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "分发执行与对账 G4–G6",
+      "items": [
+        "G4 有效期 / 幂等 / inbox；迟到 halted ACK 未根治",
+        "G5 租约·ready / 减仓 / 入场批次互斥",
+        "G6 受理≠成交 / REST 镜像 / 保护覆盖"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "部署恢复 G7–G8",
+      "items": [
+        "G7 停机前预检；fault 1h / capacity 24h",
+        "G8 用户 RESUME / 审计+心跳递增",
+        "完整检查矩阵在同目录 system-guide.html"
+      ]
+    }
+  ]
+}

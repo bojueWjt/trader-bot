@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/Users/balen/projects/trader-bot/docs/architecture/system-architecture.architecture.json",
+  "output": "/Users/balen/projects/trader-bot/docs/architecture/system-architecture.html",
+  "specification": {
+    "sha256": "ae5325f2aa4a0d07d855d8fa64d4a151ce11f65669630366a8f0e2f2161e158e",
+    "bytes": 4968
+  },
+  "artifact": {
+    "sha256": "b8ed3c05c3a11bb4b0a2ad6199b0455ac5bc8337a5be4eb9091db27c708da2c6",
+    "bytes": 810677
+  },
+  "validation": {
+    "checksPassed": 9,
+    "checkCount": 9,
+    "compositionProfile": "showcase",
+    "compositionStatus": "pass",
+    "errors": 0,
+    "warnings": 0
+  }
+}

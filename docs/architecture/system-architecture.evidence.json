@@ -1,0 +1,253 @@
+{
+  "title": "Trader Bot 系统架构事实证据",
+  "snapshot": "2026-09-18",
+  "timezone_note": "部署与心跳时刻若未标明均为 UTC；下文「北京时间」条目为 Asia/Shanghai。",
+  "not_realtime": true,
+  "no_private_ips": true,
+  "no_public_github_source_claim": true,
+  "grokSessionId": "01a0b513-6e71-70d2-b30a-8a39a4df643a",
+  "tooling": {
+    "archify_repo": "https://github.com/tt-a1i/archify",
+    "archify_commit": "72c750bb070d95171dbb2244e5b62b1b7da69c12",
+    "archify_version": "2.17.0-dev.1",
+    "archify_path": "/Users/balen/.codex/artifacts/trader-bot-architecture-20260918/tooling/archify",
+    "node": "v24.13.0",
+    "quality_profile": "showcase",
+    "animation": "none",
+    "locale": "zh-CN"
+  },
+  "revisions": {
+    "backend_deployed": "b9ba8079bc0f0112ffe8143fb8ed902d313c6def",
+    "backend_worktree": "/Users/balen/projects/trader-bot/.worktrees/tao-reduction-authority-20260918",
+    "backend_worktree_head": "4f91b940e4d9ebb75ba0417652fdcdba1d1838f9",
+    "close_reduction_report": "docs/reports/2026-09-18-close-reduction-fix.md"
+  },
+  "topology": {
+    "production_host": "jp-24",
+    "retired": "HK 旧交易栈 2026-08-23 停用；旧 hk 脚本名不代表当前部署地点",
+    "main_path": [
+      "Telegram 频道",
+      "信号接入（内部：trader-watcher-1 + canonical ingress :8087 + hermes_signal_feeder）",
+      "Hermes（trader profile，v3-trader skill）",
+      "控制面（operator-query / node-control / event-ingest）",
+      "Nautilus A–D（同主机四独立容器）",
+      "Binance USDT-M"
+    ],
+    "llm_does_not_hold_execution": true,
+    "submitted_is_not_filled": true,
+    "exactly_once_not_claimed": true
+  },
+  "sources": [
+    {
+      "path": "docs/agent-operations.md",
+      "fact": "生产排障链路：Telegram→trader-watcher-1→feeder→hermes-gateway-trader；意图漏斗与审计；RESUME 闸门；Redis 租约"
+    },
+    {
+      "path": "AGENTS.md",
+      "fact": "生产在 jp-24；HK 旧栈 2026-08-23 停用；RESUME 必须用户明确授权；机器人 CID；控制面更新须重启对应 systemd"
+    },
+    {
+      "path": "bridge/services/telegram-watcher/package.json",
+      "fact": "现役 Watcher 为 Node telegram-watcher，SQLite 落库"
+    },
+    {
+      "path": "services/ingress/ingress/service.py",
+      "fact": "canonical ingress 将 Telegram 原始消息与 queued_for_hermes outbox 同事务写入 Postgres"
+    },
+    {
+      "path": "infra/systemd/trader-v3-ingress.service",
+      "fact": "ingress 监听 127.0.0.1:8087"
+    },
+    {
+      "path": "scripts/hermes_signal_feeder.py",
+      "fact": "feeder 只运输：先保证规范 ingress，再 hermes cron create/run 一次性 job；不做交易判断"
+    },
+    {
+      "path": "infra/systemd/trader-v3-hermes-feeder.service",
+      "fact": "feeder systemd 单元"
+    },
+    {
+      "path": "hermes-profile/skills/trading/v3-trader/SKILL.md",
+      "fact": "Hermes 经控制面下单；禁止直连交易所；partial --percent 只提交 fraction"
+    },
+    {
+      "path": "services/control-plane/api/app_roles.py",
+      "fact": "operator-query / node-control / event-ingest 路由与数据库角色隔离"
+    },
+    {
+      "path": "services/control-plane/api/read_api.py",
+      "fact": "POST /v1/operator/orders、POST /v1/commands、读模型；partial_close 数量或比例二选一；user 与 channel 授权"
+    },
+    {
+      "path": "services/control-plane/decision_gateway/gateway.py",
+      "fact": "消费已落库 HermesDecisionV1，风控后写 ApprovedTradeIntentV1；LLM 自然语言不进入执行"
+    },
+    {
+      "path": "services/control-plane/db/pools.py",
+      "fact": "三角色独立连接池"
+    },
+    {
+      "path": "services/control-plane/tools/exchange_state_recorder.py",
+      "fact": "只读采集 Binance 持仓/订单/algo 到 exchange_state_mirror；账户容器名 trader-v3-node-a..d"
+    },
+    {
+      "path": "scripts/order_lifecycle_monitor.py",
+      "fact": "生命周期监测只告警/唤醒 Hermes，不自行撤单；忽略 aos_/stToAg_"
+    },
+    {
+      "path": "services/nautilus-node/README.md",
+      "fact": "一账户一容器一 TradingNode；启动 HALTED；RESUME 非自动"
+    },
+    {
+      "path": "services/nautilus-node/runtime/intent_execution_inbox.py",
+      "fact": "inbox 幂等登记/重放，不宣称 exactly-once"
+    },
+    {
+      "path": "services/nautilus-node/persistence/RECOVERY.md",
+      "fact": "每账户 Redis 租约命名空间 + fencing token + persistence instance"
+    },
+    {
+      "path": "services/nautilus-node/persistence/redis_namespace_lease.py",
+      "fact": "租约注册表与 120s max_age"
+    },
+    {
+      "path": "infra/compose/multi-account.sandbox.yml",
+      "fact": "四节点同 compose、独立 secrets/spool/health port 8081-8084"
+    },
+    {
+      "path": "packages/execution-domain/execution_domain/order_ownership.py",
+      "fact": "机器人 CID ^B[0-9a-f]{32}[0-9]{2}$"
+    },
+    {
+      "path": "scripts/ownership_ledger.py",
+      "fact": "手动单前缀 aos_/stToAg_"
+    },
+    {
+      "path": ".worktrees/tao-reduction-authority-20260918/services/nautilus-node/strategy/intent_execution_planner.py",
+      "fact": "channel 减仓基数 min(robot_owned, fresh same-side venue)；user 用 venue；fraction 按 step 向下取整；无 owned 拒绝"
+    },
+    {
+      "path": "docs/reports/2026-09-18-close-reduction-fix.md",
+      "fact": "b9ba807 已部署；例 venue 9.890 / owned 0.308 / 30% / step 0.001 → 0.092；B/GLM 迟到 halted ACK 仅单行恢复"
+    }
+  ],
+  "control_plane_roles": {
+    "operator-query": "App/看板读投影；POST /v1/operator/orders 与 POST /v1/commands；systemd trader-v3-controlplane-operator-query",
+    "node-control": "心跳、意图拉取、命令 ACK、节点事故；systemd trader-v3-controlplane-node-control",
+    "event-ingest": "执行事件入账；systemd trader-v3-controlplane-event-ingest",
+    "restart_required": "控制面代码更新后必须重启对应服务；落盘不等于生效"
+  },
+  "accounts": {
+    "shape": "同主机四个独立执行容器，不是四台物理主机",
+    "containers": [
+      "trader-v3-node-a",
+      "trader-v3-node-b",
+      "trader-v3-node-c",
+      "trader-v3-node-d"
+    ],
+    "isolation": "独立密钥、独立 spool、独立 health 端口。Redis 为共享实例，不在四个节点容器内；账户之间靠租约命名空间隔离。主图「执行与租约域」是逻辑分组，不是 Redis 进了节点容器。"
+  },
+  "authorization": {
+    "robot_client_order_id": "^B[0-9a-f]{32}[0-9]{2}$",
+    "manual_prefixes": [
+      "aos_",
+      "stToAg_"
+    ],
+    "user_vs_channel": "权限分开；不得把 channel 提升为 user",
+    "channel_reduction_base": "min(robot_owned, fresh same-side venue)",
+    "user_reduction_base": "fresh same-side venue",
+    "owned_grain": "账户/品种/方向级，不是 per-channel",
+    "fraction_rule": "乘 fraction 后按 step 向下取整；无 owned 则 channel 拒绝",
+    "example": "venue 9.890 / owned 0.308 / fraction 0.3 / step 0.001 → 0.092"
+  },
+  "deploy_2026_09_18": {
+    "backend": "b9ba8079bc0f0112ffe8143fb8ed902d313c6def 已上线 jp-24",
+    "accounts": "用户明确 RESUME 后 A–D 恢复 ACTIVE，新审计与两轮递增心跳核验",
+    "app": "Android 构建完成，手机待安装，未做真机交易验证",
+    "glm_ack_defect": "B/GLM 意图在节点重启后被迟到 halted ACK 从 approved 改为 rejected；仅对该行做证据化 status 恢复；通用代码路径未根治"
+  },
+  "risk_state_vs_node_active_2026_09_18_evening": {
+    "status": "unfixed",
+    "verification": "独立只读任务核查，经 Codex 复核；本次未改风险状态、未下单、未再 ssh",
+    "beijing_time": {
+      "23:01": "account-b RESUME completed；之后无新 HALT",
+      "23:07": "Hermes DM：GET /v1/risk/state 返回 HALTED，同时 GET /v1/nodes 为 ACTIVE",
+      "23:23": "A–D 节点复核 ACTIVE",
+      "23:27": "仅再次复核 B；心跳递增且 ready healthy"
+    },
+    "root_cause": "account-b risk_state 仍有 BTCUSDT/ETHUSDT mode=HALTED。审计：锁来自 2026-08-10 ghost-active HALT（instruments 含 BTC/ETH/SOL）。08-19 只 RESUME SOL。2026-09-18 RESUME 无 instruments，故 BTC/ETH 仍是未解除的独立锁，不能按日期认无效。风险接口无账户/币种过滤地汇总所有 risk_state，任意 HALTED 令接口返回全局 HALTED，Hermes 因此拒绝 GLM 新增风险。锁是否仍应作为有效门尚未另证，不称无效记录。23:30 未提交加仓。",
+    "rule": "节点 ACTIVE 不能等同所有交易入口可用"
+  },
+  "checkpoints": {
+    "schema": "按交易生命周期组织为 G1–G8。机制：代码强制 / 运维流程 / 提示约定 / 状态观察。过滤「已实现」不等于在线 PASS。",
+    "snapshot": "2026-09-18",
+    "path_convention": "依据字段写「相对仓库根」或工作树 .worktrees/tao-reduction-authority-20260918/…，不把短文件名冒充根路径。",
+    "counts_note": "以 guide DOM article.check 为准，页面加载时 recount。生成器 8 组 33 项。",
+    "groups": [
+      {
+        "id": "G1",
+        "title": "信号接入与持久投递",
+        "items": 3
+      },
+      {
+        "id": "G2",
+        "title": "结构化决策与身份授权",
+        "items": 4
+      },
+      {
+        "id": "G3",
+        "title": "风控与作用范围",
+        "items": 5
+      },
+      {
+        "id": "G4",
+        "title": "意图分发和重复/迟到处理",
+        "items": 4
+      },
+      {
+        "id": "G5",
+        "title": "节点执行前校验",
+        "items": 6
+      },
+      {
+        "id": "G6",
+        "title": "交易所结果、保护单与对账",
+        "items": 4
+      },
+      {
+        "id": "G7",
+        "title": "部署门禁与回滚",
+        "items": 4
+      },
+      {
+        "id": "G8",
+        "title": "HALT/RESUME与验收",
+        "items": 3
+      }
+    ],
+    "gaps": [
+      "GET /v1/risk/state 无账户/币种过滤 OR 全表",
+      "节点 ACTIVE 不能代表目标交易可用；Hermes 误用全局 HALTED 拒绝 GLM",
+      "迟到 halted ACK 覆盖 approved；仅单行恢复"
+    ],
+    "observe_not_bug": [
+      "BTC/ETH 独立锁不随节点 RESUME 自动清除，需对该品种显式处置"
+    ],
+    "unverified": [
+      "CLI add_position 与仓库主线 operator 动作白名单不一致；工作树白名单含该项；线上 b9ba807 未做运行时验证"
+    ]
+  },
+  "browser_acceptance": {
+    "latest_html": "not_executed",
+    "latest_artifact_sha256": "b8ed3c05c3a11bb4b0a2ad6199b0455ac5bc8337a5be4eb9091db27c708da2c6",
+    "latest_specification_sha256": "ae5325f2aa4a0d07d855d8fa64d4a151ce11f65669630366a8f0e2f2161e158e",
+    "reason": "CUA file URL 被拒；禁止 localhost/其他浏览器规避。本轮未启动浏览器。旧 visual-check 对应 8d25b3bd…，不得冒充本版。",
+    "previous_visual_check": {
+      "path": "docs/architecture/system-architecture.visual-check.json",
+      "artifact_sha256": "8d25b3bdfebe03dd2e65729bea3244352620b520c1bc823ec39646445e5a0970",
+      "status": "pass",
+      "visualReview": "pending",
+      "note": "对应修订前 HTML。Codex 曾用 view_image 审阅该版 1440 浅色 PNG，拓扑与版式通过。本版 HTML SHA 已变化，不得把旧 PNG/旧 receipt 当作新版自动化或人工验收。"
+    }
+  }
+}
