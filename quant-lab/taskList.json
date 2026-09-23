@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-23T18:13:28Z",
+  "updatedAt": "2026-09-23T19:59:41Z",
   "phase": "P1",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -657,7 +657,15 @@
           "id": "D-01",
           "title": "环境 + 骨架 + research-schema 字段定稿提交 G0",
           "status": "done",
-          "verify": ".venv-g1/bin/python -m pytest tests/data -q --co 2>&1 | grep -E 'collected [1-9]' && .venv-g1/bin/python -c 'import quant_lab.data'"
+          "verify": ".venv-g1/bin/python -m pytest tests/data -q --co 2>&1 | grep -Eq '[1-9][0-9]* tests? collected' && .venv-g1/bin/python -c 'import quant_lab.data'",
+          "verifyHistory": [
+            {
+              "at": "2026-09-23T19:59:41Z",
+              "old": ".venv-g1/bin/python -m pytest tests/data -q --co 2>&1 | grep -E 'collected [1-9]' && .venv-g1/bin/python -c 'import quant_lab.data'",
+              "why": "旧 grep 'collected [1-9]' 对 pytest 9.1.1 的输出（'N tests collected'）永不匹配，整条链必 rc=1，却标着 done（contracts/README §2.5 早已给出规范写法）。改为规范写法；不放宽：仍要求收集数 ≥1 且可导入。",
+              "by": "用户会话 0f23fe43（经用户授权）"
+            }
+          ]
         },
         {
           "id": "D-02",
@@ -978,7 +986,15 @@
           "id": "M-01",
           "title": "环境 + 骨架 + execution-interface 签名定稿提交 G0（as-of 签名、ExecutionRequest/Result）",
           "status": "done",
-          "verify": ".venv-g2/bin/python -m pytest tests/market -q --co 2>&1 | grep -E 'collected [1-9]' && .venv-g2/bin/python -c 'import quant_lab.market, nautilus_trader;print(nautilus_trader.__version__)'"
+          "verify": ".venv-g2/bin/python -m pytest tests/market -q --co 2>&1 | grep -Eq '[1-9][0-9]* tests? collected' && .venv-g2/bin/python -c 'import quant_lab.market, nautilus_trader;print(nautilus_trader.__version__)'",
+          "verifyHistory": [
+            {
+              "at": "2026-09-23T19:59:41Z",
+              "old": ".venv-g2/bin/python -m pytest tests/market -q --co 2>&1 | grep -E 'collected [1-9]' && .venv-g2/bin/python -c 'import quant_lab.market, nautilus_trader;print(nautilus_trader.__version__)'",
+              "why": "同 D-01：旧 grep 永不匹配。改为 contracts/README §2.5 规范写法；不放宽。",
+              "by": "用户会话 0f23fe43（经用户授权）"
+            }
+          ]
         },
         {
           "id": "M-02",
@@ -1861,19 +1877,43 @@
           "id": "OR-01",
           "title": "契约定稿：三份子契约与 G1/G2 提交的签名合并，置 frozen",
           "status": "done",
-          "verify": "python scripts/task.py show | grep -q 'frozen' ; test -f contracts/research-schema.md && test -f contracts/execution-interface.md && test -f contracts/feature-snapshot.md"
+          "verify": "python3 -c \"import json,sys;d=json.load(open('taskList.json'));sys.exit(0 if d['contracts']['frozen'] is True else 1)\" && test -f contracts/research-schema.md && test -f contracts/execution-interface.md && test -f contracts/feature-snapshot.md",
+          "verifyHistory": [
+            {
+              "at": "2026-09-23T19:59:41Z",
+              "old": "python scripts/task.py show | grep -q 'frozen' ; test -f contracts/research-schema.md && test -f contracts/execution-interface.md && test -f contracts/feature-snapshot.md",
+              "why": "OR-05 I07：旧命令用 ';' 串联，冻结检查的退出码被丢弃；且本机没有 python 命令、只 grep 'frozen' 一词。改为读结构化 contracts.frozen 真值并以 && 串联每段。",
+              "by": "用户会话 0f23fe43（经用户授权）"
+            }
+          ]
         },
         {
           "id": "OR-02",
           "title": "评审循环（/loop 20m）：跑各模块 verify、核接缝、写 review、推进里程碑",
           "status": "doing",
-          "verify": "python scripts/task.py show"
+          "verify": "python3 scripts/task.py show",
+          "verifyHistory": [
+            {
+              "at": "2026-09-23T19:59:41Z",
+              "old": "python scripts/task.py show",
+              "why": "本机没有 python 命令（contracts/README §3b），旧命令 rc=127。",
+              "by": "用户会话 0f23fe43（经用户授权）"
+            }
+          ]
         },
         {
           "id": "OR-03",
           "title": "阻塞协调 + 用户决策闸门跟踪（合并稿 H.2 六项，状态写 integration.blockers）",
           "status": "doing",
-          "verify": "python scripts/task.py show | grep -E 'blockers'"
+          "verify": "python3 scripts/task.py show | grep -Eq 'blockers=[0-9]+'",
+          "verifyHistory": [
+            {
+              "at": "2026-09-23T19:59:41Z",
+              "old": "python scripts/task.py show | grep -E 'blockers'",
+              "why": "本机没有 python 命令，旧管道里 python 失败被 grep 掩盖。改用 python3，并匹配 show 实际输出的 blockers=N。",
+              "by": "用户会话 0f23fe43（经用户授权）"
+            }
+          ]
         },
         {
           "id": "OR-04",
@@ -1885,7 +1925,15 @@
           "id": "OR-05",
           "title": "[Codex adversarial review] 集成 review：前视、幸存偏差、契约漂移、凭据边界、AGENTS.md 铁律",
           "status": "todo",
-          "verify": "test -f docs/adr/review-G0-integration.md && ! grep -q '必修.*未闭合' docs/adr/review-G0-integration.md"
+          "verify": "python3 -c \"import re,sys;t=open('docs/adr/review-G0-integration.md',encoding='utf-8').read();v=re.findall(r'^终裁：(\\S+)\\s*$',t,re.M);print('verdicts',v);sys.exit(0 if v and v[-1]=='pass' else 1)\"",
+          "verifyHistory": [
+            {
+              "at": "2026-09-23T19:59:41Z",
+              "old": "test -f docs/adr/review-G0-integration.md && ! grep -q '必修.*未闭合' docs/adr/review-G0-integration.md",
+              "why": "OR-05 I07：旧命令只查文件存在加一条负向措辞 grep，不读终裁，无终裁也 rc=0。改为正向解析终裁行：必须至少一条，且最后一轮为 pass；无终裁、fail、insufficient、历史 pass 加最新 fail 均非零。",
+              "by": "用户会话 0f23fe43（经用户授权）"
+            }
+          ]
         },
         {
           "id": "OR-06",
