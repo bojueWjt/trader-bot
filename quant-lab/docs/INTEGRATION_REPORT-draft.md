@@ -1,7 +1,7 @@
 # quant-lab 集成报告（OR-06 草稿）
 
-> **状态：草稿。** 定稿条件 = P1 三条腿全绿（见 §6）。当前 R-10 六审 fail，故本文件**不得**改名为 `INTEGRATION_REPORT.md`。
-> 契约版本 **v1.55**，78 条 changeLog。本文件由 G0（session `427ed064`）出具，非独立审查。
+> **状态：草稿。** 定稿条件 = P1 三条腿全绿（见 §6）。**P1 当前不成立**：2026-09-12 的宣告已于 2026-09-24 撤回，未闭合项见 `taskList.json` 中 `integration.milestones.P1_主链路_合成数据.openItems`。在此之前本文件**不得**改名为 `INTEGRATION_REPORT.md`。
+> 契约版本 **v1.61**，84 条 changeLog。本文件由 G0（session `427ed064`）出具，非独立审查；2026-09-24 的更正由用户会话 `0f23fe43` 写入。
 
 ## 1. 交付范围
 
@@ -56,7 +56,7 @@
 |---|---|---|---|
 | G1 | D-10 | **G0 裁决书**（`ruling-G0-D10-classification-closure.md`），经 verify 析取第二支 | done。**非审查方 pass**：`review-G1-P1.md` 及 r3/r4/r5 终裁均 fail。用户在 G1 会话经 `AskUserQuestion` 预授权该路径。残余 **7 条**（S08/S13/S14/V01/W01–W03） |
 | G2 | M-10 | `review-G2-P1.md` **十四审终裁 pass**（审查方自行给出） | done。10 项 partial-P2，`P2_UNSUPPORTED` 四键如实声明 |
-| G3 | R-10 | **G0 范围重定裁决**（`ruling-G0-R10-scope-and-acceptance.md`）+ 具名能力证据 | **done**，G0 亲跑新 verify rc=0 / 403 passed。**非审查方 pass**：`review-G3-P1.md` 十五轮均 fail，43016 行原样保留。第 9–15 轮 **15 条对抗类反例保持 open**（能力文档 §2.2），已由 G0 正式接受残余风险 |
+| G3 | R-10 | **G0 范围重定裁决**（`ruling-G0-R10-scope-and-acceptance.md`）+ 具名能力证据 | **未闭合（2026-09-24 撤回）**。原记录：G0 在未提交的工作树上亲跑新 verify，rc=0 / 403 passed；该代码不在本地 HEAD，HEAD 上 R-08/R-10 递归不终止、R-11 报 ImportError。**非审查方 pass**：`review-G3-P1.md` 十五轮均 fail，43016 行原样保留。范围重定裁决待用户追认（P1-OPEN-1）；第 9–15 轮 **15 条对抗类反例**的残余风险是 G0 提议，**尚未获用户接受**（P1-OPEN-2）；R-11 与执行身份的技术缺口见 P1-OPEN-3/4/5 |
 
 **用户决策闸门六项全部 pending，但无一挡 P1**（`affects` 为 D-05/08/09/11、R-05/08/09、OR-06）。`integration.blockedByUserGate = false`。
 
@@ -76,8 +76,8 @@
 
 **当前 `readyForStitch = false`。** 置 true 需**全部**满足：
 
-0. **R-11 闭合**（依赖内容哈希并入制品身份，裁定 §10 的 P1 阻断项）。
-1. **P1 三条腿全绿**：`review-G<N>-P1.md` 终裁 pass，或经用户授权的 G0 分类闭合裁决（现状：G1 ✅ 裁决、G2 ✅ 审查、G3 ✅ 裁决 + 能力证据）。
+0. **R-11 闭合**（依赖内容哈希并入制品身份，裁定 §10 的 P1 阻断项）。现状：未闭合，只哈希了 `RECORD` 文本，且漏了 `polars-runtime-32`（P1-OPEN-3/4）。
+1. **P1 三条腿全绿**：`review-G<N>-P1.md` 终裁 pass，或经用户授权的 G0 分类闭合裁决（现状：G1 ✅ 裁决并有用户预授权、G2 ✅ 审查、G3 ⛔ 裁决无用户授权记录，技术项未闭合）。
 2. **OR-05 对抗式集成 review 无未闭合必修项**（现状：todo，本会话禁止派发）。
 3. **接缝清单 §2 九条全部有实跑证据**，且 `force_close_net_R`（S7）的"无消费方"结论仍成立。
 4. **已知缺口表逐条有债主与触发事件**，无"待回填"占位。
