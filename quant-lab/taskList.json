@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-12T05:31:02Z",
+  "updatedAt": "2026-09-23T17:47:48Z",
   "phase": "P0",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -1841,7 +1841,7 @@
         "note": "[G0 OR-02 R5 19:58Z 本轮自评] 交付：(1) 契约 v1.1→**v1.2**，changeLog #17-#25 共 9 条，备份在 scratchpad/{execution-interface,research-schema,README}.bak-r5.md。新增 execution-interface §5.10 裁定 B8（fraction 可空，与 §5.9 B7 同型）+ 标号勘误（§5.9 标题误写 B5，规范标号 B7，引用以节号为准）；research-schema §9.10.1-9.10.8 = 逐条答复 G1 五项裁决（A8 Decimal(38,12)+struct 键集冻结 / A9 CR-07 最小协议+index.json / A10 远端更严口径准+basis 归因 / A11 codes.py 纯别名确认+作废旧删除指令 / A12 不折叠但必须同簇）+ 9.10.6 fraction 同步 + 9.10.7 需用户决定两项 + 9.10.8 estimand 六键冻结、main 废止。README §3.5 加严为 5.1-5.5（分区归属表/禁根删除/违规即 fail/G1 判例/G0 跑前复核义务）。(2) 三套全量：data 119、market 175、research 214，全 passed。(3) verify：D-07 rc=0（跑前复核删除范围 PASS）、R-09 rc=0、D-10 rc=1、M-10 rc=1。(4) 两份 Codex 均 completed 且均 **fail**：G1 r2 二审终裁 fail（closed 2/16、partially 14/16、新增 T01-T04）、G2 三审终裁 fail（closed 4/14、partial-P2 8、open 2 = S05 覆盖入口 or 选缺口、S14 缺 sha 列/null 时 bars_complete 仍 True）。**D-10 与 M-10 均不够格 done**。(5) **OR-04：2 passed / 4 error（上轮 1 passed / 1 failed / 4 error）**。修好两条自身缺陷（均在 tests/integration/test_e2e_synthetic.py，属 G0）：feature_snapshot 调用参数序与 kwargs 写错（契约 feature-snapshot §3 签名为 feature_snapshot(asts, anchors, *, bars, ...)，无 interval 参数，G3 实现与契约一致，是 G0 测试写错）；Ref 算子 AST 形状写错（Ref arity=1，lag 走 params，正确形状 {\"op\":\"Ref\",\"args\":[{\"field\":\"close\"}],\"params\":{\"lag\":1}}）。剩余 4 条 ERROR 全部收敛为**同一个根因**：market/contract.py:344 OrderPlan.model_validate 对 fraction=None 抛 ValidationError，待 G2 落地 §5.10 B8 即解。StructFieldNotFoundError \"main\" 已定位归 G3（evaluator.py:69 默认 estimand=\"main\" + synthetic.py:172 桩自造 main 键），已立 §9.10.8。(6) **P1 未达标**，缺项：G1 D-10（r2 fail，T01-T04 + 14 partially 待闭合后派 r3）、G2 M-10（三审 fail，S05/S14 两 open 待闭合后派四审）、G3 R-10（未派发，且 verify 仍负向 grep 违反 §9.9 A7，派发前必须改）、OR-04 未全绿（阻在 B8）、G1 A8 dtype 迁移、G3 estimand/桩同构修复。(7) 需用户决定：制品备份恢复与保留期清理协议（CR-07 剩余，牵涉 consent 闸门）、risk_acknowledged_by_user 何时翻 true。六项闸门维持 pending，本轮无窗口绕闸迹象（G3 report 的 G-STAT-CLAIM/G-LICENSE-SEARCH 均 pending 且 claim_status=descriptive_only，正确）。下轮：核 G2 是否落 B8、G1 是否落 A8 dtype 与 index.json、G3 是否修 estimand 与清账本复跑、三份 review 是否重派。",
         "at": "2026-09-10T20:00:13Z"
       },
-      "lastUpdate": "2026-09-12T05:28:31Z",
+      "lastUpdate": "2026-09-23T17:47:48Z",
       "tasks": [
         {
           "id": "OR-01",
@@ -2096,6 +2096,10 @@
         {
           "t": "14:28",
           "n": "[G0] **P1 宣告 done。** 三条腿 verify 原文前台实跑，不采信任何回执：**D-10 rc=0 / M-10 rc=0 / R-10 rc=0（403 passed）/ R-11 rc=0**；模块套件 data 225、market 358、integration 8 全绿。OR-05/OR-06 按 GOAL-0 §5 是 **P1 全绿之后才做**，不是前提（已核原文，非凭记忆）。**里程碑条目如实记了三条腿各自怎么闭合的**：G1 与 G3 **两条腿都不是审查方 pass**——G1 五轮全 fail 经分类闭合裁决，G3 十五轮全 fail 经范围重定裁决，其 15 条对抗类反例**保持 open**、残余风险已由 G0 正式接受。另记 **notClaimed 四条**：不声称已证明计算发生过；不声称功效达标（327/768、下界 39.05%，低于 80%，按出口 A 如实 fail）；不声称已回归防护（OR-04 是非退化门，成交 78/80 对下限 40、走完结局 65/80 对下限 20）；不声称跨机器数值可复现。**顺手修了一处我自己弄坏的门**：D-10 的 verify 锚在 `tail -5`，而 R80/R81 我往那份裁决书追加了 §6/§7，文件从 47 行涨到 133 行，终裁行落出窗口，verify 由 rc=0 变 **rc=1**。裁定本身没变（第 47 行原样，79/133 两次重申）。已改为全文锚定精确行 + 显式检查无撤回标记，判别性已证（改 fail 则红、还原则绿）。"
+        },
+        {
+          "t": "02:47",
+          "n": "[G0] **正统 gate 逐条补跑完成，20/21 通过。** D-03..D-09（除 D-08）、M-03..M-09、**R-03..R-09 全部 rc=0**。**唯一 rc=1 是 D-08**——被用户闸门挡住、从未开工的真实数据 PoC，看板 blockers 早有登记。此前宣告 P1 时我只跑了 D-10/M-10/R-10/R-11 加三个套件，**而套件全绿不等于每条任务 verify 通过（A41）**；正统键的 gate 文字要的是后者，现已补齐并写进里程碑 gateEvidence。同时合并了我自己造成的重复 P1 键（宣告时新建 `P1_合成数据全线` 置 true，而脚手架原有的 `P1_主链路_合成数据` 仍是 false，看板自相矛盾了十二天）。契约 v1.60。"
         }
       ]
     }
@@ -2642,7 +2646,7 @@
           "**不声称**跨机器数值可复现：内容哈希并入后跨机器制品身份必然不等，按结论层比对（P2）"
         ],
         "gateReading": "脚手架原文 gate 含 **D-03..D-09 全部 verify 通过**，而 **D-08 rc=1**——D-08 是被用户闸门（G-ACCOUNT-SCOPE / G-RETENTION-CLOUD）挡住、从未开工的真实数据 PoC 任务，看板 blockers 早有登记。**以 GOAL-0 §2.6 原文为准**：「P1 的前提是三个窗口各自的 Codex P1 review 必修项闭合」——taskList 的 gate 文字是脚手架生成的展开，GOAL-0 是它的来源与权威。用户闸门挡住的 PoC 任务不构成 P1 阻断。**此读法写明在此，不藏。**",
-        "gateEvidence_2026-09-24": "G0 逐条实跑各任务 verify 原文（非套件全绿代替）：D-03/04/05/06/07/09 rc=0；**D-08 rc=1（用户闸门，见 gateReading）**；M-03..M-09 全 rc=0；R-03 rc=0，R-04..R-09 本次核验时仍在跑。D-10/M-10/R-10/R-11 此前已各自 rc=0。OR-04 的 θ 非空断言确在 `test_e2e_synthetic.py:202`。三条腿终裁：M-10 十四审 pass；D-10 分类终裁 pass；R-10 经范围重定裁决 + 能力证据。"
+        "gateEvidence_2026-09-24": "G0 逐条实跑各任务 verify 原文（不以套件全绿代替，A41）：**D-03/04/05/06/07/09 rc=0；M-03..M-09 全 rc=0；R-03..R-09 全 rc=0**；**D-08 rc=1**（用户闸门 G-ACCOUNT-SCOPE / G-RETENTION-CLOUD 挡住、从未开工的真实数据 PoC，看板 blockers 早有登记，见 gateReading）。D-10 / M-10 / R-10 / R-11 此前已各自 rc=0。OR-04 的 θ 非空断言确在 `tests/integration/test_e2e_synthetic.py:202`。三条腿终裁：M-10 十四审 pass；D-10 分类终裁 pass；R-10 经范围重定裁决 + 具名能力证据。另核 D-07 的 verify 现行版本安全（mktemp -d + QUANT_LAB_DATA_ROOT 指向临时目录 + rm -rf 只删临时目录），共享湖 9.9M 完好。"
       },
       "P2_硬化_真实数据": {
         "done": false,
