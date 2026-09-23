@@ -12,13 +12,13 @@
 
 | 项 | 值 |
 |---|---|
-| 制品身份（冻结源码 + 依赖清单） | `35e8c9b1089849a0622c73b1b31535ad77211fb949c1d9cb1a4eac06e86644b9` |
-| 冻结源码摘要 | `1c5e00f19ae961b4c81615b9ae0e907ed7b13932e3951291d4bb60e94df89370` |
+| 制品身份（冻结源码 + 依赖清单） | `ed39a8fe00c1952c6f3e60feae1c0dd42de2c2abb8f13e9b7e359f7de55880e8` |
+| 冻结源码摘要 | `f213c44670f1ad4d741d6e6bc3c93f9217737ccd83667c1203b383c548f072a3` |
 | 依赖清单（版本 + **按实际文件字节的内容哈希**） | 见下表 |
 | 配置哈希（规范 JSON：world + pipeline + B/alpha/L/delta/pi，取自报告 meta） | `4035193384091d61c4343e1c72bcc05fd095b1125b00175e56009d722c98c741` |
-| 报告文件哈希 | `d51568adc71adbeb87eac9d6a5fb10d6170018ac8a28c65bcc85420ba6ca67b8` |
+| 报告文件哈希 | `3ee9b3d879bbe319c800dd2dc851cec1db1ed2bd0f6535aef9c84bb09b0b42f8` |
 | worker 回执数 / 逐 job 绑定回执数 / 结果行数 | 13 / 13 / 13 |
-| worker 制品身份集合 | `['35e8c9b1089849a0622c73b1b31535ad77211fb949c1d9cb1a4eac06e86644b9']` |
+| worker 制品身份集合 | `['ed39a8fe00c1952c6f3e60feae1c0dd42de2c2abb8f13e9b7e359f7de55880e8']` |
 | 父进程以本次新建的空 pyc 前缀启动 | `True` |
 | 冻结流水线 block_len_days | `None` |
 

@@ -409,3 +409,305 @@ M-10 的三次收紧已知方向成立；D-10 的分类析取和 R-10 的能力�
 格式验收命令：`wc -l docs/adr/review-G0-integration.md`；`grep -c '^终裁：' docs/adr/review-G0-integration.md`。
 
 终裁：fail
+
+## 7. 二审（2026-09-24，提交 b2a30eb）：必修闭合核验
+
+二审证据完整性：完成。结论：I01、I02、I03、I04、I06 闭合；I05、I07 未闭合。新增独立编号 0 条；两项修复不完整沿用原编号，不重复计数。终裁为 fail。
+
+基线为 `b2a30eb3dbde8ad6e4303bb61770803b7204ab03`；已审 `git show bf1fe55 b2a30eb` 的源码、测试及门控变化。开始时 quant-lab 无工作树改动，根仓库其他目录已有用户改动；这些改动不属于本审查。MCP 委派被 approval=never 拒绝，companion CLI 因自身 state.json 写入 EPERM 无法启动，按项目规则降级由 Codex 执行。
+
+唯一仓库写入是本节起的末尾追加；§1–§6 和一审终裁按字节保留。不运行 R-09 verify，不运行正式 MC 生成，不写真实 data、taskList 或源码。测试中的新湖、账本、缓存、门控夹具及进程内突变全部隔离；PYTHONDONTWRITEBYTECODE=1，pytest 缓存关闭。
+
+本轮原始取证目录：`/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/or05-second-nk782h7t`。`I01.sh`–`I07.sh` 是从一审原文直接抽取的命令，配套 `.log`/`.rc` 保存真实输出与退出码；`*-baseline.log`/`*-mutant.log`、`or05_mutator.py` 保存独立突变证据；`original-review.md` 保存追加前完整字节。该目录是本机临时证据，关键结论及输出在本文内留存，不把临时目录当长期制品。
+
+全套命令均在 quant-lab/ 执行，每套先单独运行：
+
+```sh
+T=$(mktemp -d)
+cp -R data "$T/data"
+export QUANT_LAB_DATA_ROOT="$T/data"
+export PYTHONDONTWRITEBYTECODE=1
+export PYTEST_ADDOPTS='-p no:cacheprovider'
+```
+
+| 命令 | 本次最终完整实跑输出 | 退出码 |
+|---|---|---|
+
+| `.venv-g0/bin/python -m pytest tests/integration -q` | `42 passed in 2.99s` | 0 |
+
+| `.venv-g1/bin/python -m pytest tests/data -q` | `225 passed in 36.29s` | 0 |
+
+| `.venv-g2/bin/python -m pytest tests/market -q` | `379 passed in 22.85s` | 0 |
+
+| `.venv-g3/bin/python -m pytest tests/research -q -p no:cacheprovider` | `565 passed in 262.77s (0:04:22)` | 0 |
+
+共 1211 项通过，无 skip。通过总数不替代下面的反例。最初同样隔离的一轮也全部通过（42 / 225 / 379 / 565）；最终表使用逐字 shell 初始化命令的复核回执。
+
+独立突变运行方式：`PYTHONPATH=<取证目录>:<quant-lab>/src OR05_MUTANT=Ixx .venv-gN/bin/python -m pytest <下列节点> -q -p or05_mutator`，其余隔离环境如上；基线清空 OR05_MUTANT。插件只在该测试进程内替换一个守卫/函数。I03–I05 第一版临时插件误导入 g3 venv 未安装的 httpx，rc=3；修正为按需导入后，均得到下列业务断言失败 rc=1。初版工具错误日志也保留，但不算突变证据。
+
+### 7.1 I01：闭合
+
+原样执行 §2 I01 的完整 sh 代码块（自动抽取，未改一字）；进程退出码 `0`。实际输出：
+
+```text
+G1= /tmp/or05-read-only-sentinel/lake/telegram/bronze
+G2= /private/tmp/or05-read-only-sentinel/lake/market
+G3= /private/tmp/or05-read-only-sentinel
+G2_inside_root= True
+```
+
+`LakePaths.default()` 明确专用 override 优先，其次全局数据根，最后项目绝对路径；`load_market_from_lake` 的缺省入口也走该解析。集成 quarantine 改用本轮 Layout/API。并非只比较路径字符串：`tests/market/test_review_or05_i01_i02_i04.py::test_i01_data_root_only_loader_uses_copy_not_cwd` 从根内 100 / 根外 999 两份冲突行情消费价格；`::test_i01_data_root_only_fetch_writes_copy_fingerprint_unchanged` 用录制 client 写副本并核外部指纹不变，均随 market 套件通过。override、无环境变量、G1/G3 路径一致性另有同文件回归。
+
+该文件两个主测试自带切回 cwd 默认根、切回旧 loader 的内存突变，复用原断言并要求 AssertionError。本轮独立突变再次证实：
+
+独立突变选中 `tests/market/test_review_or05_i01_i02_i04.py::test_i01_data_root_only_loader_uses_copy_not_cwd`；将默认湖强制改为 cwd 下 data/lake/market，实际读到外部 999，价格断言失败。基线与突变的实际 pytest 摘要如下（退出码依次为 0、1；完整失败栈见 `I01-mutant.log`）：
+
+```text
+baseline: 1 passed in 0.32s
+mutant: 1 failed in 0.10s
+```
+
+### 7.2 I02：闭合
+
+原样执行 §2 I02 的完整 sh 代码块（自动抽取，未改一字）；进程退出码 `0`。实际输出：
+
+```text
+I02 strict_asof= 100.0 last_closed= 100.0 mark_price= (Decimal('100.0'), None)
+```
+
+`last_closed_bar` 同时校验 close_time 与显式 available_at；未知行拒绝、晚到行拒绝，mark 两入口共享此实现。无 available_at 列才采用 H0 latency，保留收盘等号；有实际到达时不再叠加假设延迟。
+
+同文件 `test_i02_late_available_at_not_exposed_on_four_entries`、`test_i02_null_available_at_not_exposed_on_four_entries` 覆盖 asof_join / last_closed_bar / mark_bar_at / mark_price_at；`test_i02_h0_equality_without_available_at_column`、`test_i02_explicit_equality_without_sequence_rejected`、`test_i02_explicit_equality_with_asof_sequence_only`、`test_i02_sequence_null_equal_reverse_reject_equality` 及 `test_i02_staleness_exact_120_and_plus_1us` 均通过。测试内部删除到达守卫、翻转顺序及陈旧边界的突变均必须抛断言；集成 `test_seam_g2_late_bar_clock` 和 `test_mutation_late_bar_ignores_arrival` 也通过。
+
+独立突变选中 `tests/market/test_review_or05_i01_i02_i04.py::test_i02_late_available_at_not_exposed_on_four_entries`；在 last_closed_bar 入口删除 available_at 列，恢复仅依赖收盘时钟的旧行为。基线与突变的实际 pytest 摘要如下（退出码依次为 0、1；完整失败栈见 `I02-mutant.log`）：
+
+```text
+baseline: 1 passed in 0.27s
+mutant: 1 failed in 0.05s
+```
+
+### 7.3 I03：闭合
+
+原样执行 §2 I03 的完整 sh 代码块（自动抽取，未改一字）；进程退出码 `0`。实际输出：
+
+```text
+I03 unknown_dependency_value= None valid= False
+```
+
+`_dependency_availability` 沿 AST 传播必要槽位的 unknown 与最大到达时刻；Ref 只移位其必要槽，窗口聚合与 EMA 累计分开处理，EMA 数值重置后才清除旧依赖。旧缓存通过 AVAILABILITY_VERSION=2 隔离。
+
+`tests/research/test_feature_availability_or05.py::test_required_arrival_unknown_ontime_late_and_unneeded`、`::test_nested_and_branch_dependencies`、`::test_ema_reset_discards_only_pre_reset_dependencies`、`::test_ref_missing_intermediate_slot_is_not_a_dependency`、`::test_cache_availability_semantics_version_prevents_legacy_hit` 均随 research 通过。`::test_mutation_removing_dependency_guard_is_killed` 对 Ref / EMA / rolling 的 unknown、late 六个对照复用正向行为断言，必须捕获 AssertionError。集成的 `test_seam_g3_unknown_dependency_clock` 与反向突变也通过。
+
+独立突变选中 `tests/research/test_feature_availability_or05.py::test_i03_review_ref_999_reproduction`；把所有 __avail_unknown 强制设为 False，原 999/null 反例重新穿透。基线与突变的实际 pytest 摘要如下（退出码依次为 0、1；完整失败栈见 `I03-mutant.log`）：
+
+```text
+baseline: 1 passed in 0.04s
+mutant: 1 failed in 0.08s
+```
+
+### 7.4 I04：闭合
+
+原样执行 §2 I04 的完整 sh 代码块（自动抽取，未改一字）；进程退出码 `1`。实际输出：
+
+```text
+I04 latency_s= 0 value= 100.0 valid= True
+Traceback (most recent call last):
+  File "<stdin>", line 11, in <module>
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/features.py", line 228, in feature_snapshot
+    ctx = _resolve_ctx(ctx, cutoff, latency, max_staleness, step)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/features.py", line 132, in _resolve_ctx
+    _check_time_parameters(latency, max_staleness)
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/features.py", line 122, in _check_time_parameters
+    raise SnapshotInvalid("latency 必须为非负 timedelta")
+quant_lab.research.features.SnapshotInvalid: latency 必须为非负 timedelta
+```
+
+rc=1 是明确的 SnapshotInvalid 拒绝，发生在负 latency 分支；0 秒仍有效。`_resolve_ctx` 校验便捷参数和 SnapshotContext，G2 公共入口也有负值守卫。research `test_i04_review_negative_latency_rejected` 覆盖两入口 × -1µs/-60s；`test_nonnegative_latency_preserves_equality` 保留 0/正延迟；`test_max_staleness_invalid_domain_rejected` 及严格正边界通过。market 的 `test_i04_public_entries_reject_negative_latency_keep_h0_equality`、`test_i04_missing_guard_did_not_raise_per_entry` 与 integration `test_seam_negative_latency_clock` 通过。
+
+对应内存突变删除研究层参数守卫、删除 G2 latency 守卫，分别使同一拒收断言出现 DID NOT RAISE；并非只改 ExecutionPolicy。
+
+独立突变选中 `tests/research/test_feature_availability_or05.py::test_i04_review_negative_latency_rejected`；将 _check_time_parameters 换为空函数，两入口 × 两个负值全部失败。基线与突变的实际 pytest 摘要如下（退出码依次为 0、1；完整失败栈见 `I04-mutant.log`）：
+
+```text
+baseline: 4 passed in 0.03s
+mutant: 4 failed in 0.08s
+```
+
+### 7.5 I05：未闭合
+
+原样执行 §2 I05 的完整 sh 代码块（自动抽取，未改一字）；进程退出码 `1`。实际输出：
+
+```text
+Traceback (most recent call last):
+  File "<stdin>", line 6, in <module>
+TypeError: episodes() missing 1 required positional argument: 'fresh_lake'
+```
+
+旧命令因 `episodes` 新增 fresh_lake 参数而提前退出，尚未执行身份伪造；不能把此 TypeError 当作拒绝外来图的证据。补跑 `or05-adapted.py`：先驱动 fresh_lake 的生成器夹具，再将其传给 episodes；其余 I05 的 baseline/foreign_graph 逻辑保持不变。真实输出（同一次补跑也包含下节 I06）：
+
+```text
+
+I06 fresh build: 1.224s; root=/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/or05-i06-i77cgsq4/data; batch=tg-de7710d283f0
+I05 baseline status= ok theta= 0.0 n_evaluated= 45
+I05 foreign_graph EvalProtocolError baseline 臂 的 graph_version 与冻结机会集不一致（56 行，例 ['027317e07d034bff84f16a2a181ea508', '0e7575d4c223ff00a9f6b60633623515', '0f0c1d2b210d6ea5d3240f4eef1ef301']）：结果不来自本机会集所冻结的图版本 / 决策快照，不得评估
+I06 forged REJECTED AssertionError 时钟特征值不符
+I06 test_seam_g2_build_request_is_sole_entrypoint REJECTED 执行结果与完整机会集不相等
+I06 test_e2e_sample_is_not_degenerate ACCEPTED reduced_rows=1
+I06 test_seam_g3_pair_arms_consumes_g2_output REJECTED 执行结果与完整机会集不相等
+```
+
+已修部分：冻结的 provenance 含逐 episode graph_version / decision_snapshot_hash / t_dec，并纳入 digest；evaluate 把它传入 pair_arms，逐臂对照。`tests/research/test_opportunity_provenance.py::test_single_identity_mismatch_is_refused`、`::test_two_arms_consistently_wrong_are_refused`、`::test_unresolved_alias_does_not_match_the_frozen_version`、`::test_provenance_is_part_of_the_frozen_digest`、`::test_refusal_leaves_a_failed_terminal_state_in_the_ledger` 均通过。alias 测试只证明未解析字符串不能冒充固定版本，不冒称已做真实磁盘 alias 重指向验收。
+
+已有 `test_mutation_without_provenance_check_the_forgery_is_paired` 通过省略 provenance 证明臂间比较单独不足；本轮另把 evaluate 实际经过的 `_check_provenance` 删除，核对原拒收测试会红：
+
+独立突变选中 `tests/research/test_opportunity_provenance.py::test_two_arms_consistently_wrong_are_refused`；将 _check_provenance 换为空函数，两臂同时来自错误图仍被接受，pytest 报 DID NOT RAISE EvalProtocolError。基线与突变的实际 pytest 摘要如下（退出码依次为 0、1；完整失败栈见 `I05-mutant.log`）：
+
+```text
+baseline: 1 passed in 0.09s
+mutant: 1 failed in 0.12s
+```
+
+残留是 §2 I05 已要求的“特征来源同时绑定”，不是从 A01 提升一个新范围：`features.py::feature_snapshot` 返回时丢弃 anchors 上的 graph_version / decision_snapshot_hash；`evaluator.py::_evaluate` 只检查 features **已有**的来源列。于是同 episode_id、同 t_dec 的另一图特征经过正常公开 API 后，只留下 t_dec，仍可用于本机会集。
+
+补充复现（quant-lab/、副本环境、g3 venv；未改源码、不传 ledger）：
+
+```python
+import polars as pl
+from quant_lab.research.features import feature_snapshot, SnapshotContext
+from tests.research.test_opportunity_provenance import _setup, _eval
+from tests.research.test_evaluator import AST
+_, opp, ex, _ = _setup()
+n = len(opp.episode_ids)
+anchors = opp.provenance.with_columns(
+    pl.lit('BTCUSDT-PERP.BINANCE-UM').alias('instrument_id'),
+    pl.lit('foreign-graph').alias('graph_version'),
+    pl.lit('foreign-snapshot').alias('decision_snapshot_hash'))
+bars = pl.DataFrame({'instrument_id':['BTCUSDT-PERP.BINANCE-UM']*n,
+    'interval':['1m']*n, 'close_time':opp.provenance['t_dec'], 'close':[999.]*n})
+f = feature_snapshot([AST], anchors, bars=bars,
+                     ctx=SnapshotContext(graph_version='foreign-graph'))
+print(f.columns)
+r = _eval(opp, ex, f)
+print(r.status, r.theta, r.n_evaluated)
+# 对照：仅补回同一快照本来携带的外来图列，便明确拒绝。
+_eval(opp, ex, f.with_columns(pl.lit('foreign-graph').alias('graph_version')))
+```
+
+实际输出摘自 `I05-extra.log`：
+
+```text
+foreign_snapshot_columns= ['episode_id', 't_dec', 'f_2fbe45dd48a486255e2e7fe5b278bc4819e8df728ee897445c9e087e8dd21b29', 'validity_2fbe45dd48a486255e2e7fe5b278bc4819e8df728ee897445c9e087e8dd21b29']
+foreign_snapshot status= ok theta= 0.0 n_evaluated= 4
+same_snapshot_with_provenance= EvalProtocolError features 的 graph_version 与冻结机会集不一致（4 行，例 ['a', 'b', 'c']）：结果不来自本机会集所冻结的图版本 / 决策快照，不得评估
+```
+
+现有 `test_features_carrying_foreign_identity_are_refused` 仅覆盖人工附带 graph_version 的 frame，没有覆盖正常 feature_snapshot 丢列后的路径。修复需使快照来源成为不可省略、可核对的身份，并增加以上公开路径的回归与突变对照。另测 ns/ms 时间戳在字符串比较下被拒绝；该探针改变了规范时间精度，未据此另列新增缺陷。
+
+### 7.6 I06：闭合
+
+原样执行 §2 I06 的完整 sh 代码块（自动抽取，未改一字）；进程退出码 `1`。实际输出：
+
+```text
+Traceback (most recent call last):
+  File "<stdin>", line 6, in <module>
+TypeError: episodes() missing 1 required positional argument: 'fresh_lake'
+```
+
+同 I05，旧脚本的 rc=1 仅是夹具签名变化。`or05-adapted.py` 补齐 fresh_lake，时钟测试改按现签名传 convenience/0；上节输出证明伪造全 invalid/999999 被拒，漏一整批仅留一行也分别被 build_request 接缝及完整机会集配对断言拒绝。`test_e2e_sample_is_not_degenerate` 单独仍接受一行；它本来只是比例非退化门，完整集合守卫另有独立断言，不将其包装为单独的完整性门。
+
+本轮 integration 从空临时湖调用当前 G1 api.build，`test_seam_g1_fresh_build_identity` 核本轮图、批次、输入 hash 及当前源码/输入文件 hash。`test_e2e_loss_table_and_quarantine_readable` 固定逐 ID 核 Q/MAP/LOSS；不是非空/height>=0 断言。已通过的反向控制包括：
+
+- `test_mutation_feature_all_invalid`、`test_mutation_feature_future_changes_past`：复用逐值时钟断言。
+- `test_mutation_unknown_dependency_assumed_known`、`test_mutation_late_bar_ignores_arrival`、`test_mutation_feature_accepts_negative_latency`、`test_mutation_market_accepts_negative_latency`：I02–I04 反例进入集成时钟门。
+- `test_mutation_execution_missing_episode`：两个独立完整集合检查都必须失败。
+- `test_mutation_quarantine_known_object_disappears`、`test_mutation_mapping_known_object_disappears`、`test_mutation_loss_fabricated`：已知隔离对象、映射及本批计数/分层/身份缺失必须失败。
+- `test_mutation_published_episodes_wrong_identity`：图或批次换掉必须失败。
+
+以上函数均位于 `tests/integration/test_e2e_synthetic.py`；42 项全套含参数化控制。额外独立突变：
+
+独立突变选中 `tests/integration/test_e2e_synthetic.py::test_seam_g3_feature_snapshot_respects_t_dec`；用 999999/False 伪造 feature_snapshot，保留正确 ID/时间/列名，六个时钟参数组合均被原断言杀死。基线与突变的实际 pytest 摘要如下（退出码依次为 0、1；完整失败栈见 `I06-mutant.log`）：
+
+```text
+baseline: 6 passed in 0.28s
+mutant: 6 failed in 0.14s
+```
+
+### 7.7 I07：未闭合
+
+原样执行 §2 I07 的完整 sh 代码块（自动抽取，未改一字）；进程退出码 `0`。实际输出：
+
+```text
+OR05 terminal_count= 1 rc= 1
+OR01 forced_show_failure=1 rc= 0
+```
+
+OR-05 已能拒绝当前一审 fail。旧 OR-01 探针仍注入 `python()`，修复后实际调用的是 `python3`，所以该 rc=0 不是上游失败被吞的证据。必须用当前调用名复测。
+
+补测在临时 `gates/` 建目录、复制 contracts 与 taskList；取 `tasks[id]['verify']` 原文执行，仅替换临时报告正文/临时 frozen 值。OR-01 的实际失败注入是 `python3() { return 1; }; ` 加原 verify。报告输入：none 为仅标题；fail/insufficient/bare_pass 只有对应终裁；complete_pass 加“证据完整性：完成”；incomplete_pass 加“证据完整性：未完成”；codeblock_pass 为真实 fail 后附一个 text fenced block，其中出现 pass 终裁行。全部实际输出：
+
+```text
+OR05 none: rc=1; verdicts []
+OR05 fail: rc=1; verdicts ['fail']
+OR05 insufficient: rc=1; verdicts ['insufficient']
+OR05 pass_then_fail: rc=1; verdicts ['pass', 'fail']
+OR05 complete_pass: rc=0; verdicts ['pass']
+OR05 incomplete_pass: rc=0; verdicts ['pass']
+OR05 bare_pass: rc=0; verdicts ['pass']
+OR05 codeblock_pass: rc=0; verdicts ['fail', 'pass']
+OR01 frozen=True: rc=0
+OR01 frozen=False: rc=1
+OR01 frozen='true': rc=1
+OR01 python3 forced failure: rc=1
+OR05 old-gate mutant on fail: rc=0; expected nonzero assertion=FAIL
+OR01 semicolon mutant frozen=False: rc=0; expected nonzero assertion=FAIL
+```
+
+OR-01 的 true/false/字符串及 python3 失败传播已闭合。OR-05 的无终裁、fail、insufficient、历史 pass 加末轮 fail 已闭合；但原 §2 验收要求的证据完整性仍没有被检查，且 regex 把代码块示例当作正式终裁。`bare_pass`、`incomplete_pass`、`codeblock_pass` 的 rc=0 是当前门的可复现误放行，属本条修复不完整，沿 I07 计数。
+
+本轮另将门控矩阵落成临时 pytest `test_or05_gates.py`，以真正的退出码断言复核：
+
+```text
+baseline: 2 passed in 0.73s; rc=0
+mutant: 2 failed in 0.43s; rc=1
+remaining: 3 failed in 0.14s; rc=1
+```
+
+`::test_rejects_failure[OR-01/OR-05]` 基线通过；切旧门/分号后两个断言确实失败。`::test_requires_complete_formal_pass` 的三个当前代码反例都失败，分别对应 bare_pass / incomplete_pass / codeblock_pass。
+
+仓库没有针对 OR-01/OR-05 verify 的持久回归测试；本轮的临时门控矩阵就是直接执行原文的回归证据。末两行是独立突变对照：恢复旧 OR-05 门后 fail 输入变 rc=0；OR-01 将 && 改回分号后 frozen=False 变 rc=0；两者都违反同一个“应非零”断言。当前正向门还需绑定本轮证据完成状态并区分正文终裁与代码示例；允许历史轮次存在，不要求删掉一审终裁。
+
+### 7.8 修复增量与二审计数
+
+未另立新编号：0 条。I05 的特征血缘省略、I07 的完整性/终裁解析缺口均是原修复范围内的残留，不能以套件全绿宣布闭合。bf1fe55 的依赖内容身份、worker 启动及 job 绑定增量随本次 565 项 research 回归通过；此处不把单元回归冒称正式 MC 重跑或已执行 R-09 verify。与本轮修复无关的草稿接缝文案偏差归 §9 A04，应改，不升级。
+
+## 8. 接缝实跑证据索引
+
+下表节点均来自本次四套完整执行，函数名直接对应仓库；不是仅 collect、历史回执或文件存在性。PASS 仅覆盖所列断言，G1/G2/G3 单侧测试与跨层消费明确分开。没有整条完全缺乏测试的接缝；S7 的 G3 θ 消费尚不存在，消费差分不适用，不以估值单测冒充。
+
+| 接缝 | 本次实际覆盖的测试（文件::函数） | 本次结果与证据边界 |
+|---|---|---|
+| S1 G1→G3 决策视图 | `tests/data/test_lifecycle.py::test_api_views_and_manifest_barrier`；`tests/data/test_lifecycle.py::test_decision_view_invariant_to_future_events_full_row`；`tests/integration/test_e2e_synthetic.py::test_seam_g1_decision_view`；`tests/integration/test_e2e_synthetic.py::test_e2e_theta_ledger_loss_quarantine` | PASS，data 225 / integration 42。G1 门含非空 t_dec、资格、致命码与 manifest；集成从本轮新湖消费到冻结机会集及 evaluate。 |
+| S2 G1→G3 决策边 | `tests/data/test_lifecycle.py::test_decision_events_only_before_t_dec`；`tests/data/test_lifecycle.py::test_api_views_and_manifest_barrier` | PASS，data 225。实际调用 load_episode_events，join t_dec 后断言严格 `<`；这是 G1 导出 API 证据，当前集成没有单独把边表输入 G3 的端到端断言。 |
+| S3 G1→* LOSS / quarantine | `tests/data/test_lifecycle.py::test_loss_six_layers_conserved`；`tests/integration/test_e2e_synthetic.py::test_e2e_loss_table_and_quarantine_readable`；`tests/integration/test_e2e_synthetic.py::test_mutation_quarantine_known_object_disappears`；`tests/integration/test_e2e_synthetic.py::test_mutation_mapping_known_object_disappears`；`tests/integration/test_e2e_synthetic.py::test_mutation_loss_fabricated` | PASS，data 225 / integration 42。六层守恒、本批身份与固定隔离 cohort 的逐 ID 断言及突变均执行。 |
+| S4 G3→G2 build_request | `tests/market/test_contract.py::test_build_request_from_episode_row`；`tests/market/test_contract.py::test_b8_fractions_nullable_policy_split_and_hashed`；`tests/integration/test_e2e_synthetic.py::test_seam_g2_build_request_is_sole_entrypoint` | PASS，market 379 / integration 42。null fraction 保留作者未知语义，执行分配由具名 policy 解析并入 hash，不能将此说成拒绝所有政策分配。 |
+| S5 G3→G2 simulate_batch | `tests/market/test_execution_api.py::test_simulate_requires_market_and_checks_manifest`；`tests/market/test_execution_api.py::test_simulate_batch_schema_and_pairing`；`tests/market/test_execution_api.py::test_simulate_batch_non_strict_keeps_error_rows`；`tests/market/test_outcome_kind.py::test_b16_b17_conflict_gate_is_wired_and_reports_conflicting_hashes`；`tests/market/test_execution_api.py::test_g3_evaluate_consumes_frozen_contract_output` | PASS，market 379。包含 A/B 入口、strict 抛错及真实批量 hash 冲突门、G3 消费。当前契约是每个 policy_version 恰好对应一个 hash，非整批只能一个 hash；草稿缩写应修正。 |
+| S6 G2→G3 outcome.kind | `tests/market/test_outcome_kind.py::test_every_result_maps_to_exactly_one_of_seven_values`；`tests/market/test_outcome_kind.py::test_six_values_reachable_and_filled_closed_unreachable_in_v0`；`tests/market/test_outcome_kind.py::test_batch_exposes_both_columns`；`tests/market/test_execution_api.py::test_g3_evaluate_consumes_frozen_contract_output` | PASS，market 379。契约 §9.10.11 七值包含 unfilled_expired，不包含 cancelled；草稿“已并入 cancelled”与现行契约相反，不能用这些 PASS 证明该句话。v0 六值真实可达，第七值有政策腿构造对照。 |
+| S7 G2→G3 force_close_net_R | `tests/market/test_force_close_net_r.py::test_accounting_and_read_only`；`tests/market/test_force_close_net_r.py::test_fixture_asof_and_sentinel`；`tests/market/test_force_close_net_r.py::test_force_close_empty_registration` | PASS，market 379。核估值、返回值哨兵、事件/原对象不变，以及扫描到的实际调用方集合和登记集合均为空。G3 θ 消费差分：不适用（当前无消费方）。 |
+| S8 G3 calendar_blocks.n_nonempty | `tests/research/test_maxt.py::test_hand_computed_theta_and_jackknife_se`；`tests/research/test_maxt.py::test_B20_sufficiency_floor_pairs_block_len_and_pins_cross_and_span`；`tests/research/test_maxt.py::test_B20_max_t_panel_uses_declared_floor`；`tests/research/test_review_p1_closure.py::test_s11_censored_blocks_do_not_count_as_nonempty` | PASS，research 565。手算非空块、19/20 下限、删失块不充数、block_len 与门限成对。 |
+| S9 全局 Decimal(38,12) | `tests/data/test_review_probes.py::test_a18_verbatim_source_string_reaches_gold`；`tests/data/test_lifecycle.py::test_a8_decimal_columns_and_hash_normalization`；`tests/market/test_execution_api.py::test_simulate_batch_schema_and_pairing`；`tests/market/test_contract.py::test_b8_fractions_nullable_policy_split_and_hashed` | PASS，data 225 / market 379。原始高精度数字逐字到 gold、物理 Decimal 类型、执行输出 Decimal 与 1/3 分配余量；这些是具名路径证据，不是任意未来插件转换均无损的证明。 |
+
+## 9. 应改转已知缺口
+
+A01–A03 维持应改；下列是建议债主及可执行的触发事件，不表示已派发或已接受风险。A04 是本次新增的应改，代码与契约偏差的来源早于 bf1fe55/b2a30eb。
+
+| 编号 | 已知缺口 | 建议债主 | 触发事件与应补证据 |
+|---|---|---|---|
+| A01 | G1 撤权源→G3 热缓存 / cache=False 尚缺同源端到端验收；单个 callback 测试不能替代跨层撤权 | G0 接缝负责；G1 提供 manifest/tombstone；G3 接入统一拒读 | 首次把真实 G1 图撤权接入 G3 缓存，或启用会复用图的研究任务前：新图生成快照→同图 tombstone→热读和无缓存重算均拒绝→合法新图可重放。I05 的特征身份残留另行处理，不混入此项。 |
+| A02 | alias/index/tombstone 及同月行情分区的并发发布/撤权缺故障试验 | G1 负责图元数据；G2 负责行情分区；G0 负责联合调度 | 首次允许同一分区两个 writer，或发布与撤权可交错前：并发幂等、kill/retry、读改写冲突、无丢更新、撤权胜出证据。当前没有动态 lost-update 结论。 |
+| A03 | 其余 verify 的关键词/位置/数量门尚未绑定内容、退出码和本轮身份 | G0 总负责；G1/G2/G3 分别偿还 D/M/R 任务门 | 每条弱 verify 下次被用于 done/里程碑签字或修改命令时：正反夹具、上游失败传播、制品内容和本轮输入/code/attempt 身份绑定；M-08、R-05 等仍按一审分类保留。OR-01/OR-05 的范围专属 I07，不借此降级。 |
+| A04 | 集成草稿 S5“整批 hash 唯一”、S6“unfilled_expired 并入 cancelled”与现行 B16/B17、A15 不一致 | G0 文档债主；G2 核对导出枚举与批量门；G3 核对消费解释 | OR-06 草稿定稿/复制进最终接缝表前：将 S5 改成按 policy_version 唯一 hash；S6 使用契约七值并链接本次测试。只改草稿措辞即可，不将既有契约改去迎合草稿。 |
+
+交付验收：追加前原文逐字节相等；quant-lab 范围的 `git diff --stat -- quant-lab` 仅显示本文件。全仓不带路径的 diff --stat 还包含任务开始前已有的用户改动，因此无法字面只剩本文件；保留它们并对照开始时工作树快照核验，本次新增变更集合仅本文件。格式核验输出为 `['fail', 'fail']`，共两行正式终裁。未添加第三行，也未更改一审终裁。
+
+终裁：fail

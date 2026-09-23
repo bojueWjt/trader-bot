@@ -125,7 +125,8 @@ def test_pair_arms_and_evaluate_consume_real_output(eps, real):
     opp = OpportunitySetSub(opp, ids)
     ast = {"op": "Ref", "args": [{"field": "close"}], "params": {"lag": 0}}
     h = canonical_hash(ast)
-    feats = pl.DataFrame({"episode_id": opp.episode_ids, f"f_{h}": [1.0] * len(opp.episode_ids), f"validity_{h}": [True] * len(opp.episode_ids)})
+    feats = pl.DataFrame({"episode_id": opp.episode_ids, f"f_{h}": [1.0] * len(opp.episode_ids), f"validity_{h}": [True] * len(opp.episode_ids)}).join(
+        eps.select("episode_id", "graph_version", "decision_snapshot_hash", "t_dec"), on="episode_id")
     if False:
         pass
     r = evaluate(ast, opp, features=feats, rule=lambda f: pl.Series([True] * f.height), execution=real, fold_id="f0", attempt_id="parity")

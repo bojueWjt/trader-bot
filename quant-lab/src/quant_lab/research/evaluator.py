@@ -336,10 +336,14 @@ def _evaluate(ast, opp, *, features, rule, execution, fold_id, attempt_id, basel
             pl.when(pl.col("take")).then(pl.col("cand_R")).otherwise(0.0).alias("R_cand"),
         ).with_columns(pl.col("__excl").is_null().alias("m")).with_columns((pl.col("R_cand") - pl.col("base_R")).alias("d"))
         n_cov = int((tab["__excl"] == "coverage").sum())
-        fkeys = [k for k in PROVENANCE_KEYS if k in features.columns]
-        if fkeys:                     # 特征带着来源列时，同样逐行对照冻结身份
-            _check_provenance(pl.DataFrame({"episode_id": ids}).join(features.select("episode_id", *fkeys), on="episode_id", how="left"),
-                              opp.provenance, "features", keys=fkeys)
+        # 特征的来源身份不可省略（OR-05 I05 二审）：feature_snapshot 从 anchors 带出图版本 / 决策快照 / t_dec，
+        # 这里逐行对照冻结身份。缺列即拒——否则另一张图上算出的特征只要丢掉身份列就能混进来。
+        fmissing = [k for k in PROVENANCE_KEYS if k not in features.columns]
+        if fmissing:
+            raise EvalProtocolError(f"features 缺来源身份列 {fmissing}：无法核对特征是否来自冻结机会集的图版本 / 决策快照，"
+                                    f"anchors 须带这些列再做 feature_snapshot")
+        _check_provenance(pl.DataFrame({"episode_id": ids}).join(features.select("episode_id", *PROVENANCE_KEYS), on="episode_id", how="left"),
+                          opp.provenance, "features")
         if "t_dec" in features.columns:
             ft = pl.DataFrame({"episode_id": ids}).join(features.select("episode_id", pl.col("t_dec").alias("__ft")), on="episode_id", how="left")
             chk = tab.select("episode_id", "t_dec").join(ft, on="episode_id", how="left")

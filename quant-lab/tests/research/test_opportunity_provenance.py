@@ -132,3 +132,49 @@ def test_refusal_leaves_a_failed_terminal_state_in_the_ledger(damage):
     with pytest.raises(EvalProtocolError):
         _eval(opp, ex, feats, attempt_id=aid, ledger=led)
     assert led.status_of(aid) == "failed"
+
+
+# ---------------------------------------------------------------- 二审残留：公开的 feature_snapshot 路径
+
+def _snapshot(opp, *, graph="gv", snapshot="h", with_identity=True):
+    from quant_lab.research.features import feature_snapshot
+    n = len(opp.episode_ids)
+    anchors = opp.provenance.with_columns(pl.lit("BTCUSDT-PERP.BINANCE-UM").alias("instrument_id"),
+                                          pl.lit(graph).alias("graph_version"), pl.lit(snapshot).alias("decision_snapshot_hash"))
+    if not with_identity:
+        anchors = anchors.drop("graph_version", "decision_snapshot_hash")
+    bars = pl.DataFrame({"instrument_id": ["BTCUSDT-PERP.BINANCE-UM"] * n, "interval": ["1m"] * n,
+                         "close_time": opp.provenance["t_dec"], "close": [1.0] * n})
+    return feature_snapshot([AST], anchors, bars=bars)
+
+
+def test_public_snapshot_carries_the_anchor_identity_and_matching_features_pass():
+    _, opp, ex, _ = _setup()
+    f = _snapshot(opp)
+    assert {"graph_version", "decision_snapshot_hash", "t_dec"} <= set(f.columns)
+    assert _eval(opp, ex, f).status == "ok"
+
+
+def test_public_snapshot_from_a_foreign_graph_is_refused():
+    """二审复现：另一张图的 anchors 经正常 feature_snapshot 算出的特征，以前只剩 t_dec、照样被接受。"""
+    _, opp, ex, _ = _setup()
+    with pytest.raises(EvalProtocolError, match="features"):
+        _eval(opp, ex, _snapshot(opp, graph="foreign-graph", snapshot="foreign-snapshot"))
+
+
+def test_features_without_identity_columns_are_refused():
+    """来源身份不可省略：anchors 不带身份时快照也不带，评估拒收，而不是按「没有就不查」放行。"""
+    _, opp, ex, _ = _setup()
+    with pytest.raises(EvalProtocolError, match="缺来源身份列"):
+        _eval(opp, ex, _snapshot(opp, with_identity=False))
+
+
+def test_mutation_optional_feature_identity_would_accept_the_foreign_snapshot(monkeypatch):
+    """突变：把特征侧核对退回「列在才查」，丢掉身份列的外来快照就被接受——拒收来自这道门。"""
+    import quant_lab.research.evaluator as E
+    _, opp, ex, _ = _setup()
+    foreign = _snapshot(opp, graph="foreign-graph", snapshot="foreign-snapshot").drop("graph_version", "decision_snapshot_hash")
+    real = E._check_provenance
+    monkeypatch.setattr(E, "PROVENANCE_KEYS", ("t_dec",))
+    monkeypatch.setattr(E, "_check_provenance", lambda frame, prov, label, keys=("t_dec",): real(frame, prov, label, keys=("t_dec",)))
+    assert _eval(opp, ex, foreign).status == "ok"

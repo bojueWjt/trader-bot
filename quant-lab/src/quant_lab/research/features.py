@@ -244,6 +244,11 @@ def feature_snapshot(
     a = anchors.select("episode_id", "instrument_id", "t_dec").with_row_index("__row").with_columns(ok.alias("__ok"))
     a = a.with_columns((pl.col("t_dec") - latency).alias("__t_query"))
     out = a.select("__row", "episode_id", "t_dec")
+    # 来源身份随快照输出（OR-05 I05 二审）：anchors 带着图版本 / 决策快照时原样带出，评估侧据此核对特征
+    # 是否来自冻结机会集所在的图与快照。只取 anchors 的逐行身份，不用 ctx 另造——ctx 描述调用方，不描述行。
+    ident = [c for c in ("graph_version", "decision_snapshot_hash") if c in anchors.columns]
+    if ident:
+        out = out.join(anchors.with_row_index("__row").select("__row", *ident), on="__row", how="left")
     ah = anchor_hash(anchors)
     bh = bars_digest(vis_bars) if cache else ""
     for ast in asts:

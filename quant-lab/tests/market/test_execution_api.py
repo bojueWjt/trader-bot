@@ -118,6 +118,8 @@ def test_g3_evaluate_consumes_frozen_contract_output():
     feats = pl.DataFrame({
         "episode_id": ids,
         "t_dec": [by_id[e].t_dec for e in ids],
+        "graph_version": [by_id[e].graph_version for e in ids],                    # 特征带来源身份（OR-05 I05），取自 request
+        "decision_snapshot_hash": [by_id[e].decision_snapshot_hash for e in ids],
         f"f_{h}": [1.0] * len(ids),
         f"validity_{h}": [True] * len(ids),
     }, schema_overrides={"t_dec": pl.Datetime("us", "UTC")})

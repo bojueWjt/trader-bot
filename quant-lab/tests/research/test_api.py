@@ -91,7 +91,8 @@ def test_pipeline_candidate_diffs_match_evaluate():
                          pl.Series("censor_reason", ["LABEL_RIGHT_CENSORED" if c else None for c in inp.censored], dtype=pl.Utf8))
     ast = {"op": "Ref", "args": [{"field": "close"}], "params": {"lag": 0}}
     h = canonical_hash(ast)
-    feats = pl.DataFrame({"episode_id": ids, f"f_{h}": inp.features["f00"], f"validity_{h}": [True] * inp.n})
+    feats = pl.DataFrame({"episode_id": ids, f"f_{h}": inp.features["f00"], f"validity_{h}": [True] * inp.n}).join(
+        eps.select("episode_id", "graph_version", "decision_snapshot_hash", "t_dec"), on="episode_id")
     r = evaluate(ast, opp, features=feats, rule=lambda f: f[f"f_{h}"] > thr, execution=ex, fold_id="f", attempt_id="a")
     assert r.theta == pytest.approx(theta_pipe, abs=1e-9)
 

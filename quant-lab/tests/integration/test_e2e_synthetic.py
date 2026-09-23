@@ -358,7 +358,9 @@ def test_e2e_theta_ledger_loss_quarantine(episodes, execution, opportunity, tmp_
 
     # --- θ：特征快照 + 评估
     ids = _assert_complete_execution(execution, opportunity)
-    anchors = episodes.filter(pl.col("episode_id").is_in(ids)).select("episode_id", "instrument_id", "t_dec")
+    # anchors 带着图版本与决策快照：feature_snapshot 把它们随特征带出，evaluate 逐行对照冻结机会集（OR-05 I05）
+    anchors = episodes.filter(pl.col("episode_id").is_in(ids)).select("episode_id", "instrument_id", "t_dec",
+                                                                      "graph_version", "decision_snapshot_hash")
     insts = tuple(anchors["instrument_id"].unique().sort().to_list())
     t0 = anchors["t_dec"].min() - dt.timedelta(days=30)
     # bars 必须覆盖全部 anchors 的 t_dec（否则 validity=False 触发 NAN_RATE 拒评，那是夹具问题不是模块问题）

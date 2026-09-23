@@ -18,14 +18,18 @@ UTC = pl.Datetime("us", "UTC")
 T0 = dt.datetime(2024, 1, 1, tzinfo=dt.UTC)
 
 
+_LAST_EPISODES: list = [None]      # 最近一次 episodes() 的结果：features() 默认从它取来源身份
+
+
 def episodes(rows):
     """rows: (episode_id, cluster_id, censored)"""
-    return pl.DataFrame({
+    _LAST_EPISODES[0] = ep = pl.DataFrame({
         "episode_id": [r[0] for r in rows], "cluster_id": [r[1] for r in rows], "right_censored": [r[2] for r in rows],
         "t_dec": [T0 + dt.timedelta(hours=i) for i in range(len(rows))], "graph_version": ["gv"] * len(rows),
         "decision_snapshot_hash": ["h"] * len(rows), "is_tombstone": [False] * len(rows),
         "eligibility_by_estimand": [dict.fromkeys(ESTIMANDS, True)] * len(rows),
     }, schema_overrides={"t_dec": UTC})
+    return ep
 
 
 def execution(ep, R, policy="p0", **kw):
@@ -37,9 +41,16 @@ def execution(ep, R, policy="p0", **kw):
                           pl.Series("outcome_kind", [("right_censored" if r is None else "filled_closed") for r in R], dtype=pl.Utf8))
 
 
-def features(ids, vals, valid=None):
+def features(ids, vals, valid=None, *, source=None):
+    """特征帧带上来源身份（graph_version / decision_snapshot_hash / t_dec），与 feature_snapshot 从 anchors 带出的一致。
+    source 缺省取最近一次 episodes() 的结果；身份按 episode_id 取，不按位置。"""
     valid = valid if valid is not None else [v is not None for v in vals]
-    return pl.DataFrame({"episode_id": ids, f"f_{H}": vals, f"validity_{H}": valid}, schema_overrides={f"f_{H}": pl.Float64})
+    f = pl.DataFrame({"episode_id": ids, f"f_{H}": vals, f"validity_{H}": valid}, schema_overrides={f"f_{H}": pl.Float64})
+    src = source if source is not None else _LAST_EPISODES[0]
+    ident = src.select("episode_id", "graph_version", "decision_snapshot_hash", "t_dec")
+    assert set(ids) <= set(ident["episode_id"].to_list()), "features() 的 id 不在来源 episodes 里"
+    return f.join(ident, on="episode_id", how="left").select("episode_id", "t_dec", "graph_version", "decision_snapshot_hash",
+                                                            f"f_{H}", f"validity_{H}")
 
 
 take_all = lambda f: pl.Series([True] * f.height)                     # noqa: E731
@@ -136,7 +147,7 @@ def test_contract_violations_rejected_not_filled():
 
 def test_synthetic_end_to_end_pairs_and_decimal(fake_episodes, fake_execution):
     opp = freeze_opportunity_set(fake_episodes)
-    f = features(opp.episode_ids, [1.0] * len(opp.episode_ids))
+    f = features(opp.episode_ids, [1.0] * len(opp.episode_ids), source=fake_episodes)
     r = evaluate(AST, opp, features=f, rule=take_all, execution=fake_execution, fold_id="f0", attempt_id="e2e")
     elig = fake_episodes.filter(pl.col("episode_id").is_in(opp.episode_ids))
     assert r.status == "ok" and r.theta == 0.0 and r.n_censored_excluded + r.n_coverage_excluded == int(elig["right_censored"].sum())
