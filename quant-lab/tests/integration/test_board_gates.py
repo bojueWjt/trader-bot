@@ -47,6 +47,12 @@ CASES = {
     "codeblock_pass": (f"证据完整性：完成\n终裁：fail\n{FENCE}text\n证据完整性：完成\n终裁：pass\n{FENCE}\n", 1),
     "unclosed_fence_pass": (f"证据完整性：完成\n终裁：fail\n{FENCE}\n终裁：pass\n", 1),
     "evidence_from_an_earlier_round": ("证据完整性：完成\n终裁：fail\n## 二审\n终裁：pass\n", 1),
+    # 三审 §10.2：围栏须按字符与长度匹配，关闭行只能跟空白
+    "four_backticks_inner_three": ("证据完整性：完成\n终裁：fail\n````text\n```\n证据完整性：完成\n终裁：pass\n````\n", 1),
+    "four_tildes_inner_three": ("证据完整性：完成\n终裁：fail\n~~~~text\n~~~\n证据完整性：完成\n终裁：pass\n~~~~\n", 1),
+    "fence_line_with_trailing_text": ("证据完整性：完成\n终裁：fail\n```text\n```not-a-closing-fence\n证据完整性：完成\n终裁：pass\n```\n", 1),
+    "tilde_does_not_close_backticks": ("证据完整性：完成\n终裁：fail\n```\n~~~\n证据完整性：完成\n终裁：pass\n```\n", 1),
+    "longer_close_ends_the_block": ("```\n终裁：fail\n`````\n证据完整性：完成\n终裁：pass\n", 0),
     "complete_pass": ("证据完整性：完成\n终裁：pass\n", 0),
     "history_fail_then_complete_pass": ("证据完整性：完成\n终裁：fail\n## 二审\n证据完整性：完成\n终裁：pass\n", 0),
     "example_in_code_then_complete_pass": (f"{FENCE}\n终裁：fail\n{FENCE}\n证据完整性：完成\n终裁：pass\n", 0),
@@ -95,4 +101,32 @@ def test_mutation_the_old_or01_gate_swallowed_the_failure(sandbox):
     board["contracts"]["frozen"] = False
     (sandbox / "taskList.json").write_text(json.dumps(board, ensure_ascii=False), encoding="utf-8")
     old = _tasks()[0]["OR-01"]["verifyHistory"][0]["old"]
-    assert _run(old, sandbox, prefix="python() { python3 scripts/task.py \"$@\"; }; ") == 0
+    r = subprocess.run(["bash", "-c", 'python() { python3 "$@"; }; ' + old], cwd=sandbox, capture_output=True, text=True)
+    assert r.returncode == 0 and r.stderr == "", (r.returncode, r.stderr)    # 参数原样转发：旧门确实读了 frozen=False 而放行
+
+
+def test_mutation_three_char_fence_matching_lets_the_code_example_through(monkeypatch):
+    """突变：换回「只记前三个字符、startswith 即关闭」的旧围栏判定，四反引号块里的示例 pass 就被当成正文。"""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("review_gate", ROOT / "scripts/review_gate.py")
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    body = CASES["four_backticks_inner_three"][0]
+    assert gate.check(body)[0] == 1
+
+    def old_formal_lines(text):
+        out, fence = [], None
+        for line in text.splitlines():
+            s = line.lstrip()
+            if fence is None and (s.startswith("```") or s.startswith("~~~")):
+                fence = s[:3]
+                continue
+            if fence is not None:
+                if s.startswith(fence):
+                    fence = None
+                continue
+            out.append(line)
+        return out
+
+    monkeypatch.setattr(gate, "formal_lines", old_formal_lines)
+    assert gate.check(body)[0] == 0

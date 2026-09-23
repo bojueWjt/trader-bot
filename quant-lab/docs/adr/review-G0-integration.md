@@ -711,3 +711,153 @@ A01–A03 维持应改；下列是建议债主及可执行的触发事件，不�
 交付验收：追加前原文逐字节相等；quant-lab 范围的 `git diff --stat -- quant-lab` 仅显示本文件。全仓不带路径的 diff --stat 还包含任务开始前已有的用户改动，因此无法字面只剩本文件；保留它们并对照开始时工作树快照核验，本次新增变更集合仅本文件。格式核验输出为 `['fail', 'fail']`，共两行正式终裁。未添加第三行，也未更改一审终裁。
 
 终裁：fail
+
+
+## 10. 三审（2026-09-24，提交 4529c11）
+
+核验对象为 `4529c1134c883128867a9cacd52e31bd43c4b80b`，工作树 HEAD 与之相同，取证前 quant-lab 无工作树差异。只复核 §7 判为未闭合的 I05、I07，以及 `git show 4529c11` 的修复增量。I01–I04、I06 沿用二审闭合结论；本次未发现增量破坏它们的证据，不另行重审。
+
+执行前均在 quant-lab/ 使用以下隔离前缀；测试关闭字节码写入与 pytest 缓存。未运行 R-09 verify、正式 MC 生成或任何生产操作。唯一仓库写入为本章节末尾追加。
+
+```sh
+T=$(mktemp -d); cp -R data "$T/data"; export QUANT_LAB_DATA_ROOT="$T/data"
+export PYTHONDONTWRITEBYTECODE=1
+```
+
+证据临时目录：`/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/tmp.LXkplMCVll`。Grok MCP 被当前不可审批策略拒绝，companion CLI 随后因状态目录写权限报 EPERM，按项目降级约定由 Codex 执行本轮取证及追加。
+
+### 10.1 I05：闭合
+
+`feature_snapshot` 按 anchors 行携带 `graph_version`、`decision_snapshot_hash`，并保留 `t_dec`；evaluate 要求三个来源列齐全，并逐 episode 与冻结 provenance 比较。三列逐个删除或改值的六个探针均明确拒绝，合法快照回归通过。
+
+从 §7.5 的“补充复现”自动抽取原 Python 代码块，保存为临时 `I05-verbatim.py`，内容未改；使用 `.venv-g3/bin/python -B -u <临时脚本>`、`PYTHONPATH=<quant-lab>:<quant-lab>/src` 执行。退出码 **1**，完整实际输出如下（错误已到特征身份守卫，不是夹具签名或导入失败；在第一次 `_eval` 处终止，后面的人工补列对照未执行）：
+
+```text
+['episode_id', 't_dec', 'graph_version', 'decision_snapshot_hash', 'f_2fbe45dd48a486255e2e7fe5b278bc4819e8df728ee897445c9e087e8dd21b29', 'validity_2fbe45dd48a486255e2e7fe5b278bc4819e8df728ee897445c9e087e8dd21b29']
+Traceback (most recent call last):
+  File "/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/tmp.LXkplMCVll/I05-verbatim.py", line 16, in <module>
+    r = _eval(opp, ex, f)
+        ^^^^^^^^^^^^^^^^^
+  File "/Users/balen/projects/trader-bot/quant-lab/tests/research/test_opportunity_provenance.py", line 31, in _eval
+    return evaluate(AST, opp, features=feats, rule=take_all, execution=ex, fold_id="f0", attempt_id=kw.pop("attempt_id", "a0"), **kw)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/evaluator.py", line 294, in evaluate
+    res = _evaluate(ast, opp, features=features, rule=rule, execution=execution, fold_id=fold_id, attempt_id=attempt_id,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/evaluator.py", line 345, in _evaluate
+    _check_provenance(pl.DataFrame({"episode_id": ids}).join(features.select("episode_id", *PROVENANCE_KEYS), on="episode_id", how="left"),
+  File "/Users/balen/projects/trader-bot/quant-lab/src/quant_lab/research/evaluator.py", line 104, in _check_provenance
+    raise EvalProtocolError(f"{label} 的 {k} 与冻结机会集不一致（{bad.height} 行，例 {bad['episode_id'].head(3).to_list()}）："
+quant_lab.research.evaluator.EvalProtocolError: features 的 graph_version 与冻结机会集不一致（4 行，例 ['a', 'b', 'c']）：结果不来自本机会集所冻结的图版本 / 决策快照，不得评估
+```
+
+三个独立拒收维度的补充实际输出（脚本 rc=0，逐例捕获预期 EvalProtocolError）：
+
+```text
+missing graph_version: EvalProtocolError features 缺来源身份列 ['graph_version']：无法核对特征是否来自冻结机会集的图版本 / 决策快照，anchors 须带这些列再做 feature_snapshot
+mismatch graph_version: EvalProtocolError features 的 graph_version 与冻结机会集不一致（4 行，例 ['a', 'b', 'c']）：结果不来自本机会集所冻结的图版本 / 决策快照，不得评估
+missing decision_snapshot_hash: EvalProtocolError features 缺来源身份列 ['decision_snapshot_hash']：无法核对特征是否来自冻结机会集的图版本 / 决策快照，anchors 须带这些列再做 feature_snapshot
+mismatch decision_snapshot_hash: EvalProtocolError features 的 decision_snapshot_hash 与冻结机会集不一致（4 行，例 ['a', 'b', 'c']）：结果不来自本机会集所冻结的图版本 / 决策快照，不得评估
+missing t_dec: EvalProtocolError features 缺来源身份列 ['t_dec']：无法核对特征是否来自冻结机会集的图版本 / 决策快照，anchors 须带这些列再做 feature_snapshot
+mismatch t_dec: EvalProtocolError features 的 t_dec 与冻结机会集不一致（4 行，例 ['a', 'b', 'c']）：结果不来自本机会集所冻结的图版本 / 决策快照，不得评估
+```
+
+常驻回归与突变：`tests/research/test_opportunity_provenance.py` 的 `test_public_snapshot_carries_the_anchor_identity_and_matching_features_pass`、`test_public_snapshot_from_a_foreign_graph_is_refused`、`test_features_without_identity_columns_are_refused`、`test_mutation_optional_feature_identity_would_accept_the_foreign_snapshot` 全部通过。最后一项确实把特征身份检查退回只看 t_dec，外来快照去掉两列后得到 status=ok，证明旧可选身份检查能够漏收。
+
+另做独立进程内突变：从 `git show 4529c11^:quant-lab/src/quant_lab/research/{features,evaluator}.py` 读取两份父提交实现到临时目录，通过临时 pytest 插件只在测试进程中恢复它们，仓库源码未改。对前三个新增回归使用相同选择器：
+
+```text
+baseline: 3 passed in 0.29s; rc=0
+mutant:   3 failed in 0.83s; rc=1
+```
+
+突变失败分别为输出身份列缺失，以及两项拒收断言 DID NOT RAISE EvalProtocolError；不是环境错误。完整记录为 `I05-baseline.log`、`I05-mutant.log`。本条补充复现、合法对照、缺列/错配拒收及突变证据齐全。
+
+### 10.2 I07：未闭合
+
+OR-05 看板 verify 确为 `python3 scripts/review_gate.py docs/adr/review-G0-integration.md`。在临时 gates/ 复制 scripts、contracts、taskList，以看板原文命令运行，只替换临时报告和 frozen 值；§7.7 的八类 OR-05 输入及 OR-01 四类输入全部得到预期退出码。输入按该节描述原样复建：none 仅标题，fail/insufficient/bare_pass 仅终裁，pass_then_fail 为历史 pass 后最终 fail，complete/incomplete_pass 加对应完整性行，codeblock_pass 为正文 fail 后 text 代码块中的 pass。输入全文保存于 `gate-matrix-inputs.json`。
+
+全部实际退出码与输出（末三例为本轮新增边界探针）：
+
+```text
+OR05 none: rc=1; 没有正式终裁行
+OR05 fail: rc=1; 最后一轮终裁为 fail
+OR05 insufficient: rc=1; 最后一轮终裁为 insufficient
+OR05 pass_then_fail: rc=1; 最后一轮终裁为 fail
+OR05 complete_pass: rc=0; 最后一轮终裁 pass，证据完整性完成（共 1 轮）
+OR05 incomplete_pass: rc=1; 最后一轮的证据完整性标记为 ['未完成']，须恰为一条「完成」
+OR05 bare_pass: rc=1; 最后一轮的证据完整性标记为 []，须恰为一条「完成」
+OR05 codeblock_pass: rc=1; 最后一轮终裁为 fail
+OR01 frozen=True: rc=0;
+OR01 frozen=False: rc=1;
+OR01 frozen='true': rc=1;
+OR01 python3 forced failure: rc=1;
+OR05 old-gate mutant on fail: rc=0;
+OR01 semicolon mutant frozen=False: rc=0; usage: task.py [-h]
+               {show,report,claim,done,set-verify,block,unblock,review} ...
+task.py: error: argument cmd: invalid choice: 'scripts/task.py' (choose from show, report, claim, done, set-verify, block, unblock, review)
+OR05 four_backticks: rc=0; 最后一轮终裁 pass，证据完整性完成（共 2 轮）
+OR05 trailing_text: rc=0; 最后一轮终裁 pass，证据完整性完成（共 2 轮）
+OR05 four_tildes: rc=0; 最后一轮终裁 pass，证据完整性完成（共 2 轮）
+```
+
+其中旧 OR-01 突变沿用了常驻测试的 python 包装，因重复传入 scripts/task.py 产生 argparse 错误；该次 rc=0 只能直接证明旧门吞上游失败。为避免把它误称为成功读取 frozen=False，另用正确的参数转发 `python() { python3 "$@"; }; ` 加旧命令复测，实际输出：
+
+```text
+OR01 corrected Python alias, old gate frozen=False: rc=0; stdout=''; stderr=''
+```
+
+常驻覆盖核对：`tests/integration/test_board_gates.py::test_or05_gate_matrix` 覆盖 §7.7 八类输入的判据，另外覆盖重复完整性行、未闭合围栏、跨轮借用完整性、历史 fail 后合法 pass、代码示例后合法 pass；OR-01 的 frozen 真/假/字符串/None 及 python3 上游失败另有参数化测试。旧 OR-05 的 fail/bare_pass/codeblock_pass 和旧 OR-01 的突变也已执行。该文件共 23 项通过，与 provenance 18 项合跑为 `41 passed in 0.87s`、rc=0。
+
+覆盖是行为分类上的覆盖，不声称文本逐字相同：常驻 none 多正文，fail/insufficient/pass_then_fail/codeblock_pass 加了完整性行；本轮另复测了 §7.7 所述原输入。常驻用例未覆盖下列围栏长度及结束行规则。
+
+**三审需修发现（沿 I07）：新门仍会将代码块内的示例终裁当正文。** 位置 `scripts/review_gate.py:25–31`。开始围栏只保留 `s[:3]`，结束只看 `startswith(fence)`：四反引号块内的三反引号行被错误视为结束；四波浪号同理；三反引号后带非空尾随文本也被错误视为结束。后面的示例证据完成/pass 被当成第二轮，真实正文终裁仍为 fail，却 rc=0。
+
+以下最小复现可独立运行（在 quant-lab/，沿用本节隔离环境；只写临时文件，不修改真实报告）：
+
+```python
+import pathlib, subprocess, tempfile
+cases = {
+    'four_backticks': ['终裁：fail', '````text', '```', '证据完整性：完成', '终裁：pass', '````'],
+    'trailing_text': ['终裁：fail', '```text', '```not-a-closing-fence', '证据完整性：完成', '终裁：pass', '```'],
+    'four_tildes': ['终裁：fail', '~~~~text', '~~~', '证据完整性：完成', '终裁：pass', '~~~~'],
+}
+with tempfile.TemporaryDirectory() as tmp:
+    for name, lines in cases.items():
+        path = pathlib.Path(tmp) / (name + '.md')
+        path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        r = subprocess.run(['python3', 'scripts/review_gate.py', str(path)], capture_output=True, text=True)
+        print(name, 'rc=', r.returncode, r.stdout.strip())
+```
+
+三例实际均 rc=0，输出均为“最后一轮终裁 pass，证据完整性完成（共 2 轮）”；预期均非零。这里仅有一轮正文 fail，所谓第二轮全部在代码块内。三个输入全文分别保存在 `four_backticks.md`、`trailing_text.md`、`four_tildes.md`。这是原 I07“仅正文终裁”修复不完整，不因旧矩阵通过而闭合，也不把它拆成三个编号。
+
+改法及验收：围栏状态须保留字符与完整长度；关闭围栏必须同字符、长度不少于起始围栏，后面只能有允许的空白。将上述三例加入常驻矩阵，原 fail 必须被保留；同时保留三字符合法关闭、历史多轮及完整 pass 的正向用例。
+
+### 10.3 增量、计数与交付验证
+
+逐项检查 4529c11 的生产实现、测试夹具、看板及报告增量。三审需修发现 **1 条**，归入原 I07 的围栏解析残留；新增独立编号 **0**。I05 已闭合，I01–I04、I06 继承二审；因此 I01–I07 尚未全部闭合，终裁为 fail。没有发现其他可复现的运行行为回归。
+
+应改 A05：`test_mutation_the_old_or01_gate_swallowed_the_failure` 的 python 包装应改为正确转发参数，并可核 stderr，避免把 argparse 失败当作读到 frozen=False 的证据。本轮修正包装后的独立复测仍 rc=0，现行 OR-01 对四类输入均正确，因此这是突变证据归因的改进，不另计阻断项。原 A01–A04 保留既有分类。
+
+null-model 报告 JSON 的 13 条 results 与父提交逐字段比对，仅 wall_s 改变；统计结果未变，摘要与回执身份随代码更新。本轮不冒称重跑了正式 MC。
+
+四套全量测试（均带 `-B -m pytest ... -q -p no:cacheprovider`）：
+
+| 环境 / 套件 | 实际输出摘要 | rc |
+|---|---|---|
+| `.venv-g3` / `tests/research` | `569 passed in 242.77s (0:04:02)` | 0 |
+| `.venv-g2` / `tests/market` | `379 passed in 22.30s` | 0 |
+| `.venv-g1` / `tests/data` | `225 passed in 35.45s` | 0 |
+| `.venv-g0` / `tests/integration` | `65 passed in 3.81s` | 0 |
+
+全量绿灯与 I07 三个反例并存；终裁由可复现反例决定。原报告字节作为追加前基线保存，交付时核对新增章节前缀与之完全相同；量化目录仅本文件新增 diff，仓库其他既有改动保留。
+
+追加后在 quant-lab/ 执行 `python3 scripts/review_gate.py docs/adr/review-G0-integration.md`，实际 rc=1，完整输出如下：
+
+```text
+最后一轮终裁为 fail
+```
+
+证据完整性：完成
+终裁：fail

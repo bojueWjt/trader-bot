@@ -16,21 +16,26 @@ import sys
 
 _VERDICT = re.compile(r"^终裁：(\S+)\s*$")
 _EVIDENCE = re.compile(r"^证据完整性：(\S+)\s*$")
+#: 围栏行（CommonMark）：至多 3 格缩进，3 个以上同种字符（` 或 ~），其后为信息串
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 
 def formal_lines(text: str) -> list[str]:
-    """去掉代码块后的正文行。未闭合的代码块按「到文末都是代码」处理，里面的行一律不算。"""
+    """去掉代码块后的正文行。未闭合的代码块按「到文末都是代码」处理，里面的行一律不算。
+
+    围栏按 CommonMark 判：开围栏记下字符与长度；只有**同字符、长度不短于开围栏、其后只有空白**的行才关闭它。
+    所以 ```` 块里的 ``` 行、~~~~ 块里的 ~~~ 行、带尾随文字的 ```xxx 行都不会提前结束代码块（OR-05 三审 §10.2）。
+    """
     out, fence = [], None
     for line in text.splitlines():
-        s = line.lstrip()
-        if fence is None and (s.startswith("```") or s.startswith("~~~")):
-            fence = s[:3]
-            continue
-        if fence is not None:
-            if s.startswith(fence):
-                fence = None
-            continue
-        out.append(line)
+        m = _FENCE.match(line)
+        if fence is None:
+            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):    # 反引号围栏的信息串不得含反引号
+                fence = (m.group(1)[0], len(m.group(1)))
+                continue
+            out.append(line)
+        elif m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1] and not m.group(2).strip():
+            fence = None
     return out
 
 
