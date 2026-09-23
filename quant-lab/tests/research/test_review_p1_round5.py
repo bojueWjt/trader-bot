@@ -116,10 +116,11 @@ def test_R5O_first_replicate_has_no_zero_failure_privilege():
 def test_R5H_worker_receipt_binding():
     """R5-H：父进程首尾摘要相等不证明各 worker 见到同一份源码——worker 必须回传自己的生成身份。"""
     frozen = "a" * 64
-    assert NM.check_worker_receipt({"result": "R", "digest_start": frozen, "digest_end": frozen}, frozen) == "R"
-    for bad in ({"result": "R", "digest_start": "b" * 64, "digest_end": frozen},      # worker 起跑时源码已不同
-                {"result": "R", "digest_start": frozen, "digest_end": "b" * 64},      # worker 运行期源码变了
-                {"result": "R", "digest_start": frozen},                              # 缺回执
+    R = NM.MCResult("m", "null", 1, 1, 0, 0, [1], None, None, None, None, {}, 0.0, {}, "not_run", 0, "")
+    assert NM.check_worker_receipt({"result": R, "digest_start": frozen, "digest_end": frozen}, frozen) is R
+    for bad in ({"result": R, "digest_start": "b" * 64, "digest_end": frozen},        # worker 起跑时源码已不同
+                {"result": R, "digest_start": frozen, "digest_end": "b" * 64},        # worker 运行期源码变了
+                {"result": R, "digest_start": frozen},                                # 缺回执
                 {"digest_start": frozen, "digest_end": frozen},                       # 缺结果
                 "not-a-payload"):
         with pytest.raises(SystemExit):

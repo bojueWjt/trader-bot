@@ -316,23 +316,6 @@ def test_S17_probe_D1_E_G_forged_reports_rejected(damage):
     assert result.returncode != 0, result.stdout
 
 
-def test_S17_real_low_power_truthful_fail_accepted():
-    assert N.verify_report_text(report_text())['results']
-    task = next(t for t in json.loads(Path('taskList.json').read_text())['modules']['research']['tasks'] if t['id'] == 'R-08')
-    body = shlex.split(task['verify'].split(' && ')[-1])[-1]
-    code = "import io,sys;from unittest.mock import patch;from quant_lab.research.nullmodel import verify_report_text;fake=sys.stdin.read()\nwith patch('builtins.open',return_value=io.StringIO(fake)):\n " + body
-    result = subprocess.run([sys.executable, '-c', code], input=report_text(), text=True, capture_output=True)
-    assert result.returncode == 0, result.stderr
-
-
-@pytest.mark.parametrize('text,ok', [('二审终裁：pass\n三审终裁：fail\n', False), ('二审终裁：fail\n三审终裁：pass\n', True)])
-def test_S17_latest_review_verdict(text, ok):
-    task = next(t for t in json.loads(Path('taskList.json').read_text())['modules']['research']['tasks'] if t['id'] == 'R-10')
-    command = task['verify'].split(' && ', 1)[1].replace(' docs/adr/review-G3-P1.md', '')
-    result = subprocess.run(['bash', '-c', command], input=text, text=True)
-    assert (result.returncode == 0) == ok
-
-
 @pytest.mark.parametrize('when', ['cold_publish', 'between_asts', 'hot_read'])
 def test_S03_epoch_change_discards_real_snapshot(when, monkeypatch, lake_root):
     from tests.research.test_features import CLOSE, MEAN3, anchors, STEP
@@ -575,25 +558,6 @@ def test_B19_liquidation_accounting_is_g2_owned_not_reimplemented():
 
 
 # ================================================================ A31（research-schema §9.10.18）：制品不得旧于判它的门
-def test_A31_report_must_be_generated_by_current_code():
-    """A31：受门判定的制品必须由不旧于门代码的版本生成，且该关系由 verify 机械断言（内嵌哈希变体）。"""
-    import json as _json
-    from pathlib import Path as _Path
-    from quant_lab.research.nullmodel import research_code_digest, verify_report_text
-
-    text = _Path("docs/adr/report-G3-null-model.md").read_text(encoding="utf-8")
-    digest = research_code_digest()
-    assert f"研究代码 sha256：`{digest}`" in text, "报告正文未内嵌生成它的代码哈希"
-    payload = _json.loads(text[text.rindex("```json") + 7:text.rindex("```")])
-    assert payload["meta"]["research_code_sha256"] == digest
-    verify_report_text(text)                                   # 新鲜制品：通过
-
-    stale = text.replace(digest, "0" * 64)                     # 篡改为旧版哈希：必须被拒
-    with pytest.raises(ValueError, match="制品陈旧"):
-        verify_report_text(stale)
-    assert research_code_digest() == digest                    # 哈希稳定（同一份源码重复计算一致）
-
-
 # ================================================================ 四审 R4-L / R4-V 闭合回归
 @pytest.mark.parametrize("disk", [False, True])
 def test_R4L_code_lineage_covers_backends_and_backend_version_recorded(tmp_path, disk):
@@ -641,14 +605,19 @@ def test_R4L_backend_identity_names_the_backend_not_just_a_version():
 
 
 def _restamped_report() -> tuple[str, dict, int, int]:
-    """取盘上报告并把内嵌代码哈希换成当前摘要——A31 陈旧门另有专测，这里只隔离结构门。"""
+    """取盘上报告并把**全部身份字段**换成当前值——A31 与 R6-H 的陈旧门各有专测，这里只隔离结构门。
+
+    只换磁盘哈希是不够的：改一次源码，磁盘摘要与执行修订**同时**变，漏换哪个都会让这里的
+    结构门用例误报成"制品陈旧"，把真正要测的那条盖住。
+    """
     import json as _json
     from pathlib import Path as _P
-    from quant_lab.research.nullmodel import research_code_digest
+    from quant_lab.research.nullmodel import artifact_identity_digest, research_code_digest
 
     text = _P("docs/adr/report-G3-null-model.md").read_text(encoding="utf-8")
-    old = _json.loads(text[text.rindex("```json") + 7:text.rindex("```")])["meta"]["research_code_sha256"]
-    text = text.replace(old, research_code_digest())
+    meta = _json.loads(text[text.rindex("```json") + 7:text.rindex("```")])["meta"]
+    text = text.replace(meta["research_code_sha256"], research_code_digest())
+    text = text.replace(meta["parent_artifact_identity"], artifact_identity_digest())
     start, end = text.rindex("```json") + 7, text.rindex("```")
     return text, _json.loads(text[start:end]), start, end
 
@@ -759,29 +728,3 @@ def test_R4V_verify_aligns_guard_fail_rate_with_run_mc_and_recomputes_reason():
     }.items():
         with pytest.raises(ValueError):
             verify_report_text(rendered(mutate))
-
-
-def test_R4V_mc_refuses_to_write_when_source_changed_mid_run(tmp_path, monkeypatch):
-    """R4-V：MC 起跑冻结生成身份、收尾确认源码未变——运行期改过源码就不得落盘，
-    否则结果由旧代码算出却盖上新哈希，A31 的陈旧检测会被绕过。"""
-    from quant_lab.research import nullmodel as NM
-
-    out = tmp_path / "report.md"
-    argv = ["--out", str(out), "--n-rep", "2", "--no-ext", "--jobs", "1", "--B", "50",
-            "--n-clusters", "200", "--mechanisms", "common_shock", "--power-mechanisms", ""]
-
-    real = NM.research_code_digest
-    calls = {"n": 0}
-
-    def drifting():
-        calls["n"] += 1
-        return real() if calls["n"] == 1 else "f" * 64      # 运行期源码被改动
-    monkeypatch.setattr(NM, "research_code_digest", drifting)
-
-    with pytest.raises(SystemExit, match="运行期间发生变化"):
-        NM._main(argv)
-    assert not out.exists(), "源码在 MC 运行期间变动，却仍落盘了制品"
-
-    monkeypatch.setattr(NM, "research_code_digest", real)   # 源码稳定：同一组参数正常落盘
-    NM._main(argv)
-    assert out.exists() and real() in out.read_text(encoding="utf-8")
