@@ -16,25 +16,46 @@ import sys
 
 _VERDICT = re.compile(r"^终裁：(\S+)\s*$")
 _EVIDENCE = re.compile(r"^证据完整性：(\S+)\s*$")
-#: 围栏行（CommonMark）：至多 3 格缩进，3 个以上同种字符（` 或 ~），其后为信息串
+#: 围栏行（CommonMark 0.31 §4.5）：至多 3 个 ASCII 空格缩进，3 个以上同种字符（` 或 ~），其后为信息串
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+#: 渲染后不可见或原样输出的 HTML 块（CommonMark §4.6 第 1、2 类）：开头与各自的结束标记
+_HTML_RAW = (
+    (re.compile(r"^ {0,3}<(pre|script|style|textarea)(\s|>|$)", re.I), re.compile(r"</(pre|script|style|textarea)>", re.I)),
+    (re.compile(r"^ {0,3}<!--"), re.compile(r"-->")),
+)
+
+
+def _only_spaces_or_tabs(rest: str) -> bool:
+    """关闭围栏之后只允许 ASCII 空格与制表符（§4.5）；str.strip() 会把 U+00A0、U+3000 也当空白，不能用。"""
+    return rest.strip(" \t") == ""
 
 
 def formal_lines(text: str) -> list[str]:
-    """去掉代码块后的正文行。未闭合的代码块按「到文末都是代码」处理，里面的行一律不算。
+    """去掉代码块与原样 HTML 块后的正文行。未闭合的块按「到文末都是非正文」处理。
 
-    围栏按 CommonMark 判：开围栏记下字符与长度；只有**同字符、长度不短于开围栏、其后只有空白**的行才关闭它。
-    所以 ```` 块里的 ``` 行、~~~~ 块里的 ~~~ 行、带尾随文字的 ```xxx 行都不会提前结束代码块（OR-05 三审 §10.2）。
+    围栏按 CommonMark 判：开围栏记下字符与长度；反引号围栏的信息串不得含反引号；
+    只有**同字符、长度不短于开围栏、其后只有 ASCII 空格或制表符**的行才关闭它。
+    HTML 注释与 <pre>/<script>/<style>/<textarea> 块里的内容渲染后不可见或原样输出，同样不算正文。
+    （OR-05 三审 §10.2、四审 §11）
     """
-    out, fence = [], None
+    out, fence, html_end = [], None, None
     for line in text.splitlines():
+        if html_end is not None:
+            if html_end.search(line):
+                html_end = None
+            continue
         m = _FENCE.match(line)
         if fence is None:
-            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):    # 反引号围栏的信息串不得含反引号
+            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
                 fence = (m.group(1)[0], len(m.group(1)))
                 continue
+            opened = next(((start, end) for start, end in _HTML_RAW if start.match(line)), None)
+            if opened is not None:
+                if not opened[1].search(line[opened[0].match(line).end():]):
+                    html_end = opened[1]
+                continue
             out.append(line)
-        elif m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1] and not m.group(2).strip():
+        elif m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1] and _only_spaces_or_tabs(m.group(2)):
             fence = None
     return out
 

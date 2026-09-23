@@ -861,3 +861,146 @@ null-model 报告 JSON 的 13 条 results 与父提交逐字段比对，仅 wall
 
 证据完整性：完成
 终裁：fail
+
+## 11. 四审（2026-09-24，提交 a743639）：I07
+
+四审结论：**I07 未闭合，终裁为 fail**。三审 §10.2 的三个原反例已修复，但关闭行的 Unicode 空白判定仍会使代码块中的示例 pass 被当成正文。四审需修发现 **1 条**，沿 I07 计数；新增独立编号 **0 条**。两个 Unicode 反例属于同一根因。
+
+本轮只核验围栏修复及其增量，I01–I06 沿用既有闭合结论；未发现本次增量破坏它们的证据，不另行重审。固定 HEAD 为 `a743639e8e2fe0b70a7bad8e4c77b517d879eb80`，取证前 quant-lab 无工作树差异。运行代码及测试增量限于 `scripts/review_gate.py`、`tests/integration/test_board_gates.py`；该提交另包含三审报告追加。
+
+### 11.1 证据与执行边界
+
+原始证据目录：`/tmp/or05-r4-XSjSud`。原报告备份为 `01-report-backup/review-G0-integration.md`，共 **71605 字节**，SHA-256 为 `b4ea2c7ff8afcf5447629e4b4db0a57e9ebb49ed0e52aa4a623c294f96cdf31a`。追加前已逐字节核对备份与报告相同；追加操作以该备份为前缀不变断言。仓库唯一写入为本章节，临时副本、输入和日志均在系统临时目录。所有实际门控输出及输入字节留存于 `03-s10.2-repro/`、`05-matrix/`、`06-probes/`，汇总为 `SUMMARY.json`、`SUMMARY.txt`；关键证据在下文完整留存，不依赖临时目录长期存在。
+
+测试环境设置 `PYTHONDONTWRITEBYTECODE=1`、`PYTEST_ADDOPTS='-p no:cacheprovider'`，避免生成仓库缓存。仅运行获准的 integration 套件与本次只读门控探针。Grok 完成执行取证，Codex 直接读取输入、日志和备份核验后裁决；追加阶段 MCP 受禁止审批策略阻断，companion CLI 因状态文件写入权限返回 EPERM，依仓库双通道失败降级规则由 Codex 追加。
+
+### 11.2 原样复现与二审门控矩阵
+
+从 §10.2 原样抽取 Python 代码块（766 字节），逐字核对相同后在 quant-lab/ 执行。复现进程 rc=0；三个门控子进程的全部实际结果如下，stderr 均为空：
+
+```text
+four_backticks rc= 1 最后一轮终裁为 fail
+trailing_text rc= 1 最后一轮终裁为 fail
+four_tildes rc= 1 最后一轮终裁为 fail
+```
+
+三例现在均保留唯一正文 fail，符合预期。
+
+§7.7 门控矩阵按该节原输入描述重建；该节没有提供完整矩阵脚本，不把重建称为脚本逐字相同。在临时 gates/ 复制 scripts、contracts、taskList，取 `taskList.json` 中 verify 原文执行，仅替换临时报告正文或 frozen 值。OR-05 命令仍为 `python3 scripts/review_gate.py docs/adr/review-G0-integration.md`。八种报告精确输入如下（Python 字符串中的转义表示实际换行）：
+
+```python
+matrix_inputs = {
+    'none': '# 审查\n',
+    'fail': '终裁：fail\n',
+    'insufficient': '终裁：insufficient\n',
+    'pass_then_fail': '终裁：pass\n终裁：fail\n',
+    'complete_pass': '证据完整性：完成\n终裁：pass\n',
+    'incomplete_pass': '证据完整性：未完成\n终裁：pass\n',
+    'bare_pass': '终裁：pass\n',
+    'codeblock_pass': '终裁：fail\n```text\n终裁：pass\n```\n',
+}
+```
+
+全部实际退出码与 stdout 如下；全部 stderr 为空：
+
+```text
+OR05 none: rc=1; 没有正式终裁行
+OR05 fail: rc=1; 最后一轮终裁为 fail
+OR05 insufficient: rc=1; 最后一轮终裁为 insufficient
+OR05 pass_then_fail: rc=1; 最后一轮终裁为 fail
+OR05 complete_pass: rc=0; 最后一轮终裁 pass，证据完整性完成（共 1 轮）
+OR05 incomplete_pass: rc=1; 最后一轮的证据完整性标记为 ['未完成']，须恰为一条「完成」
+OR05 bare_pass: rc=1; 最后一轮的证据完整性标记为 []，须恰为一条「完成」
+OR05 codeblock_pass: rc=1; 最后一轮终裁为 fail
+OR01 frozen=True: rc=0; stdout=''; stderr=''
+OR01 frozen=False: rc=1; stdout=''; stderr=''
+OR01 frozen='true': rc=1; stdout=''; stderr=''
+OR01 python3 forced failure: rc=1; stdout=''; stderr=''
+OR05 old-gate mutant on fail: rc=0; stdout=''; stderr=''
+OR01 corrected Python alias, old gate frozen=False: rc=0; stdout=''; stderr=''
+```
+
+OR-01 的强制失败前缀为 `python3() { return 1; }; `。旧门突变均直接取 `verifyHistory[0].old`；OR-01 使用正确包装 `python() { python3 "$@"; }; `，已核 stderr 为空，未重复传入 scripts/task.py。现行门的十二类输入全部符合预期；旧门两例 rc=0 是突变对照中的错误放行。A05 参数转发问题已修正。
+
+### 11.3 十个新增围栏边界用例
+
+以下输入由本轮另行构造，在临时文件上执行真实 `python3 scripts/review_gate.py <临时文件>`。每个用例都有输入文件、repr、退出码和 stdout/stderr；Unicode 两例的原始字节分别含 `c2 a0`、`e3 80 80`，不是字面反斜线文本。精确输入如下：
+
+```python
+boundary_inputs = {
+    'indent1': '终裁：fail\n ```\n证据完整性：完成\n终裁：pass\n ```\n',
+    'indent2': '终裁：fail\n  ```\n证据完整性：完成\n终裁：pass\n  ```\n',
+    'indent3': '终裁：fail\n   ```\n证据完整性：完成\n终裁：pass\n   ```\n',
+    'indent4': '    ```\n证据完整性：完成\n终裁：pass\n',
+    'invalid_info': '```foo`bar\n证据完整性：完成\n终裁：pass\n',
+    'close_space': '```\n``` \n证据完整性：完成\n终裁：pass\n',
+    'close_tab': '```\n```\t\n证据完整性：完成\n终裁：pass\n',
+    'tilde_inner_backticks': '终裁：fail\n~~~\n```\n证据完整性：完成\n终裁：pass\n~~~\n',
+    'close_nbsp': '终裁：fail\n```\n```\u00a0\n证据完整性：完成\n终裁：pass\n```\n',
+    'close_ideographic_space': '终裁：fail\n```\n```\u3000\n证据完整性：完成\n终裁：pass\n```\n',
+}
+```
+
+| 用例 | 围栏边界 | 预期 rc | 实际 rc | 是否符合「只认正文终裁」 |
+|---|---|---:|---:|---|
+| indent1 | 开关围栏缩进 1 格 | 1 | 1 | 是，块内示例被排除 |
+| indent2 | 开关围栏缩进 2 格 | 1 | 1 | 是，块内示例被排除 |
+| indent3 | 开关围栏缩进 3 格 | 1 | 1 | 是，块内示例被排除 |
+| indent4 | 4 格缩进不是开围栏，后续未缩进的标记是正文 | 0 | 0 | 是，承认正文 pass |
+| invalid_info | 反引号信息串含反引号，不是开围栏 | 0 | 0 | 是，承认正文 pass |
+| close_space | 合法关闭行尾随 U+0020 | 0 | 0 | 是，承认闭栏后正文 pass |
+| close_tab | 合法关闭行尾随 U+0009 | 0 | 0 | 是，承认闭栏后正文 pass |
+| tilde_inner_backticks | 波浪号块中的反引号围栏 | 1 | 1 | 是，异字符不闭栏 |
+| close_nbsp | 候选关闭行尾随 U+00A0 | 1 | **0** | **否，代码示例被当成正文** |
+| close_ideographic_space | 候选关闭行尾随 U+3000 | 1 | **0** | **否，代码示例被当成正文** |
+
+全部 stderr 为空。实际 rc=1 的四例 stdout 均为 `最后一轮终裁为 fail`；符合预期且 rc=0 的四例 stdout 均为 `最后一轮终裁 pass，证据完整性完成（共 1 轮）`；两个 Unicode 反例 stdout 均为 `最后一轮终裁 pass，证据完整性完成（共 2 轮）`。
+
+### 11.4 四审需修发现：关闭行接受了规范之外的空白（沿 I07）
+
+位置：`scripts/review_gate.py:37` 的 `not m.group(2).strip()`。无参数 strip 会去掉 U+00A0、U+3000，因此将含这些字符的行误判为关闭围栏。
+
+[CommonMark 0.31.2 §4.5](https://spec.commonmark.org/0.31.2/#fenced-code-blocks) 规定关闭围栏尾部只允许空格或 tab；[§2.1](https://spec.commonmark.org/0.31.2/#characters-and-lines) 将它们分别定义为 U+0020、U+0009。Unicode 空白并不都能充当关闭行尾部。按该规则，上述两行应继续留在代码块内，只有文件最后的正常围栏才关闭；唯一正文终裁为 fail。当前实现却提前关闭，伪造出第二轮完成/pass 并 rc=0。
+
+可独立重跑的最小复现如下，生成的两份输入与本轮已实测输入相同；仅写临时文件，在 quant-lab/ 运行：
+
+```python
+import pathlib, subprocess, tempfile
+
+with tempfile.TemporaryDirectory() as tmp:
+    for name, suffix in [('U+00A0', '\u00a0'), ('U+3000', '\u3000')]:
+        path = pathlib.Path(tmp) / (name + '.md')
+        body = '终裁：fail\n```\n```' + suffix + '\n证据完整性：完成\n终裁：pass\n```\n'
+        path.write_text(body, encoding='utf-8')
+        r = subprocess.run(['python3', 'scripts/review_gate.py', str(path)],
+                           capture_output=True, text=True)
+        print(name, 'rc=', r.returncode, r.stdout.strip())
+```
+
+两份输入的实际门控结果（预期均为 rc=1）：
+
+```text
+U+00A0 rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮）
+U+3000 rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮）
+```
+
+这是本次围栏关闭规则修复不完整的可复现证据，属于本轮允许列为需修的范围；不要求先证明是本提交新引入，也不扩展为全 Markdown 解析器审查。两例同根因只计一条。建议将关闭行尾部限定为 ASCII 空格/tab（例如 `[ \t]*`），并将两例纳入常驻拒绝矩阵，同时保持空格/tab 合法关闭的正向测试。本轮按只读范围不修源码。
+
+### 11.5 常驻覆盖、计数与交付
+
+已核对常驻矩阵新增的三审三类反例、异字符不关闭和更长合法关闭共五项；常驻文本为正文 fail 补了完整性行，因此本轮另按 §10.2 原文重跑，未拿分类覆盖代替原样复现。`test_mutation_three_char_fence_matching_lets_the_code_example_through` 先断言现行门拒绝，再换回三字符/startswith 旧解析并断言错误放行。A05 修正后的包装透传参数且断言 stderr 为空。它们均在本轮完整 integration 套件中执行。
+
+在 quant-lab/ 执行 `.venv-g0/bin/python -m pytest tests/integration -q`，实际结果：
+
+```text
+.......................................................................  [100%]
+71 passed in 3.20s
+rc=0
+```
+
+套件全绿没有覆盖本轮的两个 Unicode 关闭行反例，不能据此判定 I07 闭合。四审需修发现 1 条，沿 I07；新增独立编号 0 条。A05 已修正，原 A01–A04 保留应改分类，本轮不新增其他应改项。I01–I06 的既有结论保持，I07 的残留阻止整体通过。
+
+本章节只新增一条正式终裁，历史内容完整保留；交付时执行 `python3 scripts/review_gate.py docs/adr/review-G0-integration.md` 并在回复中提供真实退出码与完整输出。
+
+证据完整性：完成
+终裁：fail
