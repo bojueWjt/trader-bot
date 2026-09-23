@@ -1,8 +1,8 @@
 # report-G3-null-model：空模型 FPR / 功效验收（合成 T1 规模，synthetic_validation）
 
-生成本报告的研究代码 sha256：`e475ea4c3f91c6f39a6cae8539563d4ef58cce167459dfcdce3934463477a90c`（A31：制品须由不旧于门代码的版本生成，R-08 verify 机械比对）。
+生成本报告的研究代码 sha256：`1c5e00f19ae961b4c81615b9ae0e907ed7b13932e3951291d4bb60e94df89370`（A31：制品须由不旧于门代码的版本生成，R-08 verify 机械比对）。
 
-日期：2026-09-12 05:03 UTC。状态：合成数据实测；**claim_status = descriptive_only**（G-STAT-CLAIM pending），本报告不构成任何研究优势声明，也不替代真实数据前的空模型验收。
+日期：2026-09-23 20:29 UTC。状态：合成数据实测；**claim_status = descriptive_only**（G-STAT-CLAIM pending），本报告不构成任何研究优势声明，也不替代真实数据前的空模型验收。
 依据：合并稿 D.5、ADR-G3 §10、Claude 验收 R03（按档分级：T1/T2 各机制 1000 次；T3 200 次预注册更宽精确区间）。
 命令：`python -m quant_lab.research.nullmodel`
 
@@ -19,10 +19,10 @@
 
 | 机制 | 计划 n | 完成 | 失败/insufficient | 阳性 x | FPR 点估计 | FPR 95% CI（区间） | 最坏界（失败计阳性）FPR / CI | 有搜索 replicate（非 T0）n / 最坏界 FPR / CI | 阳性数按块长 L=1/3/7（敏感性，不选） | 档分布 | 耗时 s | 判定 |
 |---|---:|---:|---:|---:|---:|---|---|---|---|---|---:|---|
-| common_shock | 1000 | 1000 | 1 | 2 | 0.20% | [0.02%, 0.72%] | 0.30% / [0.06%, 0.87%] | 842 / 0.36% / [0.07%, 1.04%] | 3 / 3 / 3（主 L 分布 {"L=7": 325, "L=1": 281, "L=3": 394}） | {"T0": 158, "T1": 842} | 2047.7 | **pass** |
-| cluster_heavy_tail | 1000 | 1000 | 3 | 6 | 0.60% | [0.22%, 1.31%] | 0.90% / [0.41%, 1.70%] | 974 / 0.92% / [0.42%, 1.75%] | 7 / 6 / 6（主 L 分布 {"L=3": 505, "L=7": 451, "L=1": 44}） | {"T1": 974, "T0": 26} | 2096.1 | **pass** |
-| nonuniform_density | 1000 | 1000 | 11 | 8 | 0.81% | [0.35%, 1.59%] | 1.90% / [1.15%, 2.95%] | 725 / 2.62% / [1.59%, 4.06%] | 9 / 6 / 8（主 L 分布 {"L=1": 786, "L=3": 119, "L=7": 95}） | {"T1": 725, "T0": 275} | 2114.7 | **pass** |
-| circular_shift | 1000 | 1000 | 0 | 4 | 0.40% | [0.11%, 1.02%] | 0.40% / [0.11%, 1.02%] | 993 / 0.40% / [0.11%, 1.03%] | 4 / 4 / 6（主 L 分布 {"L=1": 980, "L=7": 14, "L=3": 6}） | {"T1": 993, "T0": 7} | 2134.2 | **pass** |
+| common_shock | 1000 | 1000 | 1 | 2 | 0.20% | [0.02%, 0.72%] | 0.30% / [0.06%, 0.87%] | 842 / 0.36% / [0.07%, 1.04%] | 3 / 3 / 3（主 L 分布 {"L=7": 325, "L=1": 281, "L=3": 394}） | {"T0": 158, "T1": 842} | 1721.4 | **pass** |
+| cluster_heavy_tail | 1000 | 1000 | 3 | 6 | 0.60% | [0.22%, 1.31%] | 0.90% / [0.41%, 1.70%] | 974 / 0.92% / [0.42%, 1.75%] | 7 / 6 / 6（主 L 分布 {"L=3": 505, "L=7": 451, "L=1": 44}） | {"T1": 974, "T0": 26} | 1794.4 | **pass** |
+| nonuniform_density | 1000 | 1000 | 11 | 8 | 0.81% | [0.35%, 1.59%] | 1.90% / [1.15%, 2.95%] | 725 / 2.62% / [1.59%, 4.06%] | 9 / 6 / 8（主 L 分布 {"L=1": 786, "L=3": 119, "L=7": 95}） | {"T1": 725, "T0": 275} | 1846.4 | **pass** |
+| circular_shift | 1000 | 1000 | 0 | 4 | 0.40% | [0.11%, 1.02%] | 0.40% / [0.11%, 1.02%] | 993 / 0.40% / [0.11%, 1.03%] | 4 / 4 / 6（主 L 分布 {"L=1": 980, "L=7": 14, "L=3": 6}） | {"T1": 993, "T0": 7} | 1794.2 | **pass** |
 
 - 最坏机制 FPR CI 上界：2.95%（阈值 7%）。所有机制均须过门，不混池稀释。
 - T0 replicate（基线 DEFF 降档 → cap=0 无搜索）必然 no_claim，不作 FPR 证据；验收以「有搜索 replicate」条件最坏界为准，并要求其占多数且 ≥ 500 次。
@@ -31,7 +31,7 @@
 
 | 机制 | 计划 n | 完成 | 失败 | 检出 x | 功效点估计 | 功效 95% CI | 最坏界（失败计未检出）功效 / CI | 规则找回率 | base_R sd（噪声） | 耗时 s | 判定 |
 |---|---:|---:|---:|---:|---:|---|---|---:|---:|---:|---|
-| common_shock | 1000 | 1000 | 34 | 327 | 33.85% | [30.87%, 36.93%] | 32.70% / [29.80%, 35.71%]（有搜索 768：42.58% / [39.05%, 46.16%]） | 42.4% | 1.77 | 2023.8 | **fail** |
+| common_shock | 1000 | 1000 | 34 | 327 | 33.85% | [30.87%, 36.93%] | 32.70% / [29.80%, 35.71%]（有搜索 768：42.58% / [39.05%, 46.16%]） | 42.4% | 1.77 | 1723.3 | **fail** |
 
 - 功效未达标时按 D.5「未达标限制声明或扩新样本」处理：本档（T1，约 1600 簇 / 4013 机会，噪声 sd≈1.77R）对 δ=0.2R 的全流程功效见上表；§3.1 给出效应/噪声/样本规模的适用范围。流程的功效瓶颈在 selection（内层 max-t 只见训练窗一半样本）。
 
@@ -84,9 +84,9 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
 
 另有三条记账约束（R5-C / R5-G / R5-O）：**(a)** `tiers.invalid + tiers.error ≤ n_failed`，且主 L 分布只覆盖真正进入流水线的 replicate——结构早退者不该有主 L；结构失败必须真正计进失败数，否则三分母最坏界会被低估到足以翻转 7% 准入。**(b)** 跨品种相关向量按冻结世界核对齐全集与顺序（3 品种恰好 3 对，见上表 `pairs`），取值须为有限实数且落在 [-1,1]，缺项/重复/越界一律拒收。**(c)** 上表展示的 `shuffle_guard` 只是第一个 replicate 的快照，**不是**「首个必须零失败」的门；它失败时必须在 per-check 与 invalid 总量里有对应记账。
 
-生成身份（A31 / R5-H）：MC 起跑冻结父进程源码摘要，**每个 worker 另行回传自己起跑与收尾的摘要**，父进程逐份核对，任何不等或缺回执都拒绝落盘。本报告的 worker 回执数：13，回执摘要集合：['e475ea4c3f91c6f39a6cae8539563d4ef58cce167459dfcdce3934463477a90c']。**结构性隔离，不是事后检测**（G0 R-10 裁定 §2.2/§2.3）：本轮起**移除**对任意运行状态的通用反射，改为让未申报的状态根本过不去进程边界——整组 worker 由**全新解释器**（显式 spawn）启动、配置以**纯数据**过界并在 worker 内重建、每个 job 回传**制品身份**（冻结源码摘要 + 声明依赖清单），父进程逐份核对。父进程制品身份：b4132dd0fb97bff2…；worker 制品身份集合：['b4132dd0fb97bff2…']；依赖清单：{'python': '3.12.13', 'polars': '1.44.2', 'polars.content': 'dfa5912b550157894282a7811d5a8fb4d964aee377e837368a8b3bedee124665', 'numpy': '2.5.3', 'numpy.content': 'd6cd2ad35dd8b8bc0ec88549c333a512114d87e86d9b4f8d4841e84bca8e01af', 'polars-ta': '0.5.17', 'polars-ta.content': '1cbaff9394c025530fcfdb9679d06e6d32b1f8508ae61f12afe5daf77a225848', 'arch': '8.0.0', 'arch.content': '9e45797a64490791ad8c5a8f192ca74e20aed908e94cf19d08fdc0ab88373868', 'scipy': '1.18.1', 'scipy.content': 'd95b7aa2c03940de0bec301021a5753ff3577b5b7ce28e6342d59f9d8556258a', 'pyarrow': '25.0.1', 'pyarrow.content': '0cdfa685a44039ca8ed79959783bae7c71c25dcd0447aed7bc8062ced14e4c93'}。
+生成身份（A31 / R5-H）：MC 起跑冻结父进程源码摘要，**每个 worker 另行回传自己起跑与收尾的摘要**，父进程逐份核对，任何不等或缺回执都拒绝落盘。本报告的 worker 回执数：13，回执摘要集合：['1c5e00f19ae961b4c81615b9ae0e907ed7b13932e3951291d4bb60e94df89370']。**结构性隔离，不是事后检测**（G0 R-10 裁定 §2.2/§2.3）：本轮起**移除**对任意运行状态的通用反射，改为让未申报的状态根本过不去进程边界——整组 worker 由**全新解释器**（显式 spawn）启动、配置以**纯数据**过界并在 worker 内重建、每个 job 回传**制品身份**（冻结源码摘要 + 依赖清单，依赖按已安装文件的实际字节取摘要），并回传**逐 job 绑定**（配置摘要、输入摘要、seed0/n_rep、本进程的 pyc 前缀）与**结果摘要**，父进程逐份核对。worker 一律以本次新建的空 pyc 前缀启动，读不到运行前就存在的 pyc；父进程由 CLI 以同样方式重启（本报告：是），逐 job 回执 13 条。父进程制品身份：35e8c9b1089849a0…；worker 制品身份集合：['35e8c9b1089849a0…']；依赖清单：{'python': '3.12.13', 'polars': '1.44.2', 'polars.content': '05d2ed8397688828941cebe66fd6a2bb5352406e8617c0bdd518b1a4bb955b08', 'numpy': '2.5.3', 'numpy.content': 'fbc110c748def3cd3aae29affba71a5d650d1addde9d06d050244694431939ed', 'polars-ta': '0.5.17', 'polars-ta.content': '3e800e015f2511108d4a310ce2842691ee1616996508095a8d04badd74ea644e', 'arch': '8.0.0', 'arch.content': '8bcb2647738c29b40e142dbd3fbb245d49dc658af645fe33804252915b55c980', 'scipy': '1.18.1', 'scipy.content': '20e7d6ab642f19198834168389a6ba4268e8bf5eacbb0d50738f6db585558f63', 'pyarrow': '25.0.1', 'pyarrow.content': '7a7b571f1bb0609691acfa8bc595e63294d2032ed6320667fd1241993d709a82', 'polars-runtime-32': '1.44.2', 'polars-runtime-32.content': '270d330552c48309047160bbf877a5f49494f354c30852ee49651d953d0aef22', 'more-itertools': '11.1.0', 'more-itertools.content': '04e7e4caaa0565715ecceca44220e20d07184c133dcd074f018765a26afdcb9f', 'numba': '0.67.0', 'numba.content': '980c3e0d7a8d852772addba4c25f0f107cee10f7b1dac2b331b328a0681cfcab', 'pandas': '3.0.5', 'pandas.content': '17d5a0d472e220344355a1284ce79d59ca5f11423ede27817645c1f31acf05be', 'polars-ols': '0.3.5', 'polars-ols.content': '7c9284c1e240b8fc1a9fd1a829c449475d2e003f7d1f41a15bd070e21274e6e0', 'statsmodels': '0.15.0', 'statsmodels.content': '7b7e259b43f8c03a3dde845afb5e12d52796cc6c6e923e3d5c13703c2c989f49', 'packaging': '26.3', 'packaging.content': '5e2e488e37074de5477d271ef6d217f65ed97bca2642b4889d8304dfbe330f6f', 'llvmlite': '0.49.0', 'llvmlite.content': 'bb6f40cc23d3e86b3fba667305449890c6d41ec9ac2d41b8e06a902cd753ec93', 'python-dateutil': '2.9.0.post0', 'python-dateutil.content': 'a60a650b5d274c66eb033dee1d7022c4e95ca520b77e3a8789b1140b7243dd01', 'patsy': '1.0.3', 'patsy.content': '70a781837f16bb42e3ebed8f0d3378548c9d62095081ed23bda94086cd3a57f0', 'formulaic': '1.2.2', 'formulaic.content': '18803d565ad38acedc219dc4d7b68c0d274710d9f8cb9a0ffc115cf6962035f6', 'six': '1.17.0', 'six.content': '1355d5a0fc15010dcdc0db199af2554df141f46f86c07b7dece6d4fac8463a58', 'interface-meta': '2.0.1', 'interface-meta.content': 'af6e019ff24494f18748790b47896a3e5056327650b946a5ef1b3a3de6c0d5b3', 'narwhals': '2.26.0', 'narwhals.content': '77e0cbe7078b335921eeb867042dc9f7e4e14cf1e4b14d00ebfcdda3031477cc', 'typing-extensions': '4.16.0', 'typing-extensions.content': '343c09d7046db9849c1aadcd77b7678fbf35e7f838c210aa50705d03a7370812', 'wrapt': '2.4.0', 'wrapt.content': '317a9fb3b99f83f1304ff8af52969457e9b92385437ee4d65dc0f8fe08b2c58a'}。
 
-**能力边界**（A39，方法边界而非待办）：对支持域内的**事故类**混版——陈旧 `__pycache__`、fork 继承父进程模块对象、普通导入顺序——本系统以结构性隔离关闭。对**对抗类**（复现必须在 worker 进程内执行代码去绑定 globals、改注册表项、改类属性或默认参数），**本系统不声称防护**，且该防护对任意 callable 不可判定。判别一条反例属哪类只问一句：**能不能在不向 worker 进程内注入代码的前提下复现**。详见 docs/adr/capability-G3-execution-identity.md。
+**能力边界**（A39，方法边界而非待办）：对支持域内的**事故类**混版——陈旧 `__pycache__`（新建空前缀）、fork 继承父进程模块对象（spawn）、活对象随配置过界（纯数据）、结果与派发不对应（逐 job 绑定）——本系统以结构性隔离关闭。对**对抗类**（复现必须在 worker 进程内执行代码去绑定 globals、改注册表项、改类属性或默认参数），**本系统不声称防护**，且该防护对任意 callable 不可判定。判别一条反例属哪类只问一句：**能不能在不向 worker 进程内注入代码的前提下复现**。详见 docs/adr/capability-G3-execution-identity.md。
 
 全部落 T0 的机制标 not_run_T0（cap=0 无搜索，FPR 平凡为 0，不作 T1 验收替身）。
 
@@ -98,7 +98,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
 
 ## 6. 资源与限制
 
-- 总耗时 15483s；单 replicate 均值 2.346s；峰值 RSS 见 report.json。
+- 总耗时 13382s；单 replicate 均值 2.028s；峰值 RSS 见 report.json。
 - 限制：合成世界的相关结构是预注册假设，不等于真实频道数据；T3 档（200 次）未运行；块长敏感性只报告不选择；max-t 是依赖假设下近似，不是有限样本保证。
 - 任何真实数据的 θ 声明须另行通过 G-STAT-CLAIM、最终 V 窗口与 latency=1s 敏感性；本报告结果只描述。
 
@@ -120,31 +120,183 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
   "pipeline_block_len_days": null,
   "worker_receipts_confirmed": 13,
   "worker_code_sha256": [
-   "e475ea4c3f91c6f39a6cae8539563d4ef58cce167459dfcdce3934463477a90c"
+   "1c5e00f19ae961b4c81615b9ae0e907ed7b13932e3951291d4bb60e94df89370"
   ],
   "worker_artifact_identity": [
-   "b4132dd0fb97bff25e0416a9ad7fc3fb0831d877d3df39380fff5d5035950e48"
+   "35e8c9b1089849a0622c73b1b31535ad77211fb949c1d9cb1a4eac06e86644b9"
   ],
-  "parent_artifact_identity": "b4132dd0fb97bff25e0416a9ad7fc3fb0831d877d3df39380fff5d5035950e48",
+  "parent_artifact_identity": "35e8c9b1089849a0622c73b1b31535ad77211fb949c1d9cb1a4eac06e86644b9",
   "artifact_manifest": {
-   "source": "e475ea4c3f91c6f39a6cae8539563d4ef58cce167459dfcdce3934463477a90c",
+   "source": "1c5e00f19ae961b4c81615b9ae0e907ed7b13932e3951291d4bb60e94df89370",
    "deps": {
     "python": "3.12.13",
     "polars": "1.44.2",
-    "polars.content": "dfa5912b550157894282a7811d5a8fb4d964aee377e837368a8b3bedee124665",
+    "polars.content": "05d2ed8397688828941cebe66fd6a2bb5352406e8617c0bdd518b1a4bb955b08",
     "numpy": "2.5.3",
-    "numpy.content": "d6cd2ad35dd8b8bc0ec88549c333a512114d87e86d9b4f8d4841e84bca8e01af",
+    "numpy.content": "fbc110c748def3cd3aae29affba71a5d650d1addde9d06d050244694431939ed",
     "polars-ta": "0.5.17",
-    "polars-ta.content": "1cbaff9394c025530fcfdb9679d06e6d32b1f8508ae61f12afe5daf77a225848",
+    "polars-ta.content": "3e800e015f2511108d4a310ce2842691ee1616996508095a8d04badd74ea644e",
     "arch": "8.0.0",
-    "arch.content": "9e45797a64490791ad8c5a8f192ca74e20aed908e94cf19d08fdc0ab88373868",
+    "arch.content": "8bcb2647738c29b40e142dbd3fbb245d49dc658af645fe33804252915b55c980",
     "scipy": "1.18.1",
-    "scipy.content": "d95b7aa2c03940de0bec301021a5753ff3577b5b7ce28e6342d59f9d8556258a",
+    "scipy.content": "20e7d6ab642f19198834168389a6ba4268e8bf5eacbb0d50738f6db585558f63",
     "pyarrow": "25.0.1",
-    "pyarrow.content": "0cdfa685a44039ca8ed79959783bae7c71c25dcd0447aed7bc8062ced14e4c93"
+    "pyarrow.content": "7a7b571f1bb0609691acfa8bc595e63294d2032ed6320667fd1241993d709a82",
+    "polars-runtime-32": "1.44.2",
+    "polars-runtime-32.content": "270d330552c48309047160bbf877a5f49494f354c30852ee49651d953d0aef22",
+    "more-itertools": "11.1.0",
+    "more-itertools.content": "04e7e4caaa0565715ecceca44220e20d07184c133dcd074f018765a26afdcb9f",
+    "numba": "0.67.0",
+    "numba.content": "980c3e0d7a8d852772addba4c25f0f107cee10f7b1dac2b331b328a0681cfcab",
+    "pandas": "3.0.5",
+    "pandas.content": "17d5a0d472e220344355a1284ce79d59ca5f11423ede27817645c1f31acf05be",
+    "polars-ols": "0.3.5",
+    "polars-ols.content": "7c9284c1e240b8fc1a9fd1a829c449475d2e003f7d1f41a15bd070e21274e6e0",
+    "statsmodels": "0.15.0",
+    "statsmodels.content": "7b7e259b43f8c03a3dde845afb5e12d52796cc6c6e923e3d5c13703c2c989f49",
+    "packaging": "26.3",
+    "packaging.content": "5e2e488e37074de5477d271ef6d217f65ed97bca2642b4889d8304dfbe330f6f",
+    "llvmlite": "0.49.0",
+    "llvmlite.content": "bb6f40cc23d3e86b3fba667305449890c6d41ec9ac2d41b8e06a902cd753ec93",
+    "python-dateutil": "2.9.0.post0",
+    "python-dateutil.content": "a60a650b5d274c66eb033dee1d7022c4e95ca520b77e3a8789b1140b7243dd01",
+    "patsy": "1.0.3",
+    "patsy.content": "70a781837f16bb42e3ebed8f0d3378548c9d62095081ed23bda94086cd3a57f0",
+    "formulaic": "1.2.2",
+    "formulaic.content": "18803d565ad38acedc219dc4d7b68c0d274710d9f8cb9a0ffc115cf6962035f6",
+    "six": "1.17.0",
+    "six.content": "1355d5a0fc15010dcdc0db199af2554df141f46f86c07b7dece6d4fac8463a58",
+    "interface-meta": "2.0.1",
+    "interface-meta.content": "af6e019ff24494f18748790b47896a3e5056327650b946a5ef1b3a3de6c0d5b3",
+    "narwhals": "2.26.0",
+    "narwhals.content": "77e0cbe7078b335921eeb867042dc9f7e4e14cf1e4b14d00ebfcdda3031477cc",
+    "typing-extensions": "4.16.0",
+    "typing-extensions.content": "343c09d7046db9849c1aadcd77b7678fbf35e7f838c210aa50705d03a7370812",
+    "wrapt": "2.4.0",
+    "wrapt.content": "317a9fb3b99f83f1304ff8af52969457e9b92385437ee4d65dc0f8fe08b2c58a"
    }
   },
-  "research_code_sha256": "e475ea4c3f91c6f39a6cae8539563d4ef58cce167459dfcdce3934463477a90c"
+  "job_receipts": [
+   {
+    "kind": "null",
+    "mechanism": "common_shock",
+    "config_sha256": "6d5ba9f2e394006fb182bd67f3635c93f5455ed6fc9cad55afd3f31ea4b0fbce",
+    "inputs_sha256": "fe9e7058d40a9ecb8b13ff0a4dffcd621d3978bb7dcb1492b0fb6b8dc80ac952",
+    "seed0": 1,
+    "n_rep": 1000,
+    "result_sha256": "ed32bf6644ca4a92985f7b853a3f4444e1473d70a5ac9eb3a6ce175534fd27de"
+   },
+   {
+    "kind": "null",
+    "mechanism": "cluster_heavy_tail",
+    "config_sha256": "6d5ba9f2e394006fb182bd67f3635c93f5455ed6fc9cad55afd3f31ea4b0fbce",
+    "inputs_sha256": "0956b99fe1a184f1e322336008a50102975880392ba64c8d34c72da063963810",
+    "seed0": 2,
+    "n_rep": 1000,
+    "result_sha256": "b88568a45002ae4edac61f4e44e406d58070f24ecb8f401d27e9eb7d60fb79f1"
+   },
+   {
+    "kind": "null",
+    "mechanism": "nonuniform_density",
+    "config_sha256": "6d5ba9f2e394006fb182bd67f3635c93f5455ed6fc9cad55afd3f31ea4b0fbce",
+    "inputs_sha256": "4a502d5ef5ead3ee58b23266ca3b8499b1e78f3b62b359c9352061c3645e7464",
+    "seed0": 3,
+    "n_rep": 1000,
+    "result_sha256": "f79d234dbb884400d0f3e8c782ffef8de120c8f123fee3d0e191774e9292045f"
+   },
+   {
+    "kind": "null",
+    "mechanism": "circular_shift",
+    "config_sha256": "6d5ba9f2e394006fb182bd67f3635c93f5455ed6fc9cad55afd3f31ea4b0fbce",
+    "inputs_sha256": "d10b0c0c4487f1df91bf6bc3bc63ec8c432b537f9cbcd72806d0e52ac7db1ab4",
+    "seed0": 4,
+    "n_rep": 1000,
+    "result_sha256": "72a3cd232fb03698df28db5fa76496b22121c53589c647796c1f6068011e35a4"
+   },
+   {
+    "kind": "power",
+    "mechanism": "common_shock",
+    "config_sha256": "6d5ba9f2e394006fb182bd67f3635c93f5455ed6fc9cad55afd3f31ea4b0fbce",
+    "inputs_sha256": "dd3f0e35f837cd8ff0ab4b28f99c19aed4ad5aad2a266d01e3dd6d59b0811ed2",
+    "seed0": 11,
+    "n_rep": 1000,
+    "result_sha256": "3615f15999d102a8b360bab6bac3659e8861d5cdef019fb3cad7d291f96cc2c4"
+   },
+   {
+    "kind": "power_sens",
+    "mechanism": "common_shock",
+    "config_sha256": "6d5ba9f2e394006fb182bd67f3635c93f5455ed6fc9cad55afd3f31ea4b0fbce",
+    "inputs_sha256": "9ded7c43faf32973d90cf58a7f8ff22c98535845dd42146567e59b808972d2a2",
+    "seed0": 41,
+    "n_rep": 200,
+    "result_sha256": "0df3f3b28d2455190a9b2ae61ecbbbcc309f5cf932414a77ea9ef006dcd78b18"
+   },
+   {
+    "kind": "power_sens",
+    "mechanism": "common_shock",
+    "config_sha256": "7791b018e4cfb47dd0b5adaadd6d251859f3a02e4adcc3828867ce0beba7f8ac",
+    "inputs_sha256": "9ded7c43faf32973d90cf58a7f8ff22c98535845dd42146567e59b808972d2a2",
+    "seed0": 41,
+    "n_rep": 200,
+    "result_sha256": "357617f0d613f92d5890a2fe9a8021b55b1163d672ed42d2bb673728004095e7"
+   },
+   {
+    "kind": "power_sens",
+    "mechanism": "common_shock",
+    "config_sha256": "f0b1ee90bfe959b74b8853a27afdebbb31c36562ef03895e14eb6e5733668842",
+    "inputs_sha256": "9ded7c43faf32973d90cf58a7f8ff22c98535845dd42146567e59b808972d2a2",
+    "seed0": 41,
+    "n_rep": 200,
+    "result_sha256": "d0c01aac4968f2a45b776ab7bbb364762cfa34983209ad3e29e13f91db0f504a"
+   },
+   {
+    "kind": "power_sens",
+    "mechanism": "common_shock",
+    "config_sha256": "53133e49ffb1269448fa20afeb069088dcbb53be180331e732b2c04dfb353a05",
+    "inputs_sha256": "9ded7c43faf32973d90cf58a7f8ff22c98535845dd42146567e59b808972d2a2",
+    "seed0": 41,
+    "n_rep": 200,
+    "result_sha256": "6d37b1fbf503fc0ddda6bd9abdc591b42eb12c28c87e38452833afecd48f8f31"
+   },
+   {
+    "kind": "power_sens",
+    "mechanism": "common_shock",
+    "config_sha256": "6d5ba9f2e394006fb182bd67f3635c93f5455ed6fc9cad55afd3f31ea4b0fbce",
+    "inputs_sha256": "fbb87d98d1f6eefbfc23e76262c7de56366954edca519b762bd3af89a0402dcb",
+    "seed0": 41,
+    "n_rep": 200,
+    "result_sha256": "e165661193ee082b83f76cf0416774592e1790e1cd952d0edfb932c30383245b"
+   },
+   {
+    "kind": "power_sens",
+    "mechanism": "common_shock",
+    "config_sha256": "7791b018e4cfb47dd0b5adaadd6d251859f3a02e4adcc3828867ce0beba7f8ac",
+    "inputs_sha256": "fbb87d98d1f6eefbfc23e76262c7de56366954edca519b762bd3af89a0402dcb",
+    "seed0": 41,
+    "n_rep": 200,
+    "result_sha256": "3b885fcc1933cffde0f441299024db42d96aebcda5c0d97227e4a2937b98b8aa"
+   },
+   {
+    "kind": "power_sens",
+    "mechanism": "common_shock",
+    "config_sha256": "f0b1ee90bfe959b74b8853a27afdebbb31c36562ef03895e14eb6e5733668842",
+    "inputs_sha256": "fbb87d98d1f6eefbfc23e76262c7de56366954edca519b762bd3af89a0402dcb",
+    "seed0": 41,
+    "n_rep": 200,
+    "result_sha256": "00ffa2c6229c5b6b3dec20196a653df26d079b3652283021fc6b40be43d1857f"
+   },
+   {
+    "kind": "power_sens",
+    "mechanism": "common_shock",
+    "config_sha256": "53133e49ffb1269448fa20afeb069088dcbb53be180331e732b2c04dfb353a05",
+    "inputs_sha256": "fbb87d98d1f6eefbfc23e76262c7de56366954edca519b762bd3af89a0402dcb",
+    "seed0": 41,
+    "n_rep": 200,
+    "result_sha256": "c4fccd3ccd09deaf6c32f7716c6fa384c13f177c5a6f306caa4d7628ac8404d4"
+   }
+  ],
+  "parent_started_with_fresh_pycache_prefix": true,
+  "research_code_sha256": "1c5e00f19ae961b4c81615b9ae0e907ed7b13932e3951291d4bb60e94df89370"
  },
  "results": [
   {
@@ -175,7 +327,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T0": 158,
     "T1": 842
    },
-   "wall_s": 2047.7,
+   "wall_s": 1721.4,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -395,7 +547,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 974,
     "T0": 26
    },
-   "wall_s": 2096.1,
+   "wall_s": 1794.4,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -615,7 +767,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 725,
     "T0": 275
    },
-   "wall_s": 2114.7,
+   "wall_s": 1846.4,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -835,7 +987,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 993,
     "T0": 7
    },
-   "wall_s": 2134.2,
+   "wall_s": 1794.2,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1055,7 +1207,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T0": 232,
     "T1": 768
    },
-   "wall_s": 2023.8,
+   "wall_s": 1723.3,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1275,7 +1427,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 173,
     "T0": 27
    },
-   "wall_s": 594.2,
+   "wall_s": 450.5,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1495,7 +1647,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 190,
     "T0": 10
    },
-   "wall_s": 926.5,
+   "wall_s": 797.6,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1715,7 +1867,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T0": 65,
     "T1": 135
    },
-   "wall_s": 518.3,
+   "wall_s": 416.1,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -1935,7 +2087,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 173,
     "T0": 27
    },
-   "wall_s": 896.1,
+   "wall_s": 798.5,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -2155,7 +2307,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T0": 93,
     "T1": 107
    },
-   "wall_s": 449.0,
+   "wall_s": 400.3,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -2375,7 +2527,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 145,
     "T0": 55
    },
-   "wall_s": 760.6,
+   "wall_s": 702.1,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -2595,7 +2747,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T0": 172,
     "T1": 28
    },
-   "wall_s": 324.9,
+   "wall_s": 319.1,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,
@@ -2814,7 +2966,7 @@ R-08 的机器判读（verify_report_text）用**同一套规则从原始诊断�
     "T1": 51,
     "T0": 149
    },
-   "wall_s": 596.8,
+   "wall_s": 617.9,
    "diagnostics": {
     "residual_model": {
      "train_days": 180,

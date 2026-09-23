@@ -28,6 +28,10 @@ class TimeUnitInvalid(ValueError):
     """时间列不是 tz=UTC 的 Datetime：原因码 TIME_UNIT_INVALID。"""
 
 
+class LatencyDomainInvalid(ValueError):
+    """公开入口 latency 必须非负（含 0）；负值会把查询时刻推到决策之后。"""
+
+
 def _utc_us(df: pl.DataFrame, col: str) -> pl.DataFrame:
     t = df.schema[col]
     if not isinstance(t, pl.Datetime) or t.time_zone != "UTC":
@@ -39,6 +43,14 @@ def _check_at(at: dt.datetime) -> dt.datetime:
     if at.tzinfo is None or at.utcoffset() is None:
         raise TimeUnitInvalid("at 必须是 tz-aware（UTC）")
     return at.astimezone(dt.UTC)
+
+
+def _require_non_negative_latency(latency: dt.timedelta) -> dt.timedelta:
+    if latency < dt.timedelta(0):
+        raise LatencyDomainInvalid(
+            f"latency 必须非负（含 0）：拒绝 {latency}（负延迟会把查询时刻推到决策之后）"
+        )
+    return latency
 
 
 def asof_join(
@@ -67,6 +79,8 @@ def asof_join(
         raise ValueError("le_with_sequence 需要 sequence_cols=(left_seq, right_seq)")
     left = _utc_us(left, left_on)
     right = _utc_us(right, right_on)
+    # 不可知行：right_on（available_at）为 null 不参与匹配，也不计入唯一键
+    right = right.filter(pl.col(right_on).is_not_null())
     lseq, rseq = sequence_cols if sequence_cols else (None, None)
     if rseq is not None:
         # S09：右序号列与左表撞名（含同名 sequence）时先改名，等号候选过滤必须比较 右seq < 左seq
@@ -141,12 +155,23 @@ def last_closed_bar(
     bars: pl.DataFrame, *, at: dt.datetime, instrument_id: str, interval: str,
     latency: dt.timedelta = dt.timedelta(0),
 ) -> pl.DataFrame | None:
-    """只取 close_time + latency <= at 的最后一根（等号成立：H0 收盘整点即闭合；latency>0 为模型假设）。"""
+    """最后一根已闭合且当时可知的 bar。
+
+    闭合：close_time <= at。显式 available_at 优先：非空且 available_at < at（无顺序证据不接纳等号），
+    不再叠加 H0 latency；无 available_at 列才用 H0：close_time + latency <= at（等号成立）。
+    """
+    latency = _require_non_negative_latency(latency)
     at = _check_at(at)
     bars = _utc_us(bars, "close_time")
-    cond = (pl.col("instrument_id") == instrument_id) & (pl.col("close_time") + latency <= pl.lit(at))
+    cond = pl.col("instrument_id") == instrument_id
     if "interval" in bars.columns:
         cond = cond & (pl.col("interval") == interval)
+    cond = cond & (pl.col("close_time") <= pl.lit(at))
+    if "available_at" in bars.columns:
+        bars = _utc_us(bars, "available_at")
+        cond = cond & pl.col("available_at").is_not_null() & (pl.col("available_at") < pl.lit(at))
+    else:
+        cond = cond & (pl.col("close_time") + latency <= pl.lit(at))
     vis = bars.filter(cond)
     if vis.height == 0:
         return None
@@ -171,6 +196,7 @@ def mark_bar_at(
     max_staleness_s: int = 120, tick_size: Decimal | None = None, latency: dt.timedelta = dt.timedelta(0),
 ) -> MarkAt:
     """as-of 标记价：最后一根已闭合 1m markPrice bar 的 close；陈旧 > max_staleness_s 或不存在 → MARK_STALE。"""
+    latency = _require_non_negative_latency(latency)
     at = _check_at(at)
     row = last_closed_bar(marks, at=at, instrument_id=instrument_id, interval="1m", latency=latency)
     if row is None:
@@ -194,5 +220,6 @@ def mark_price_at(
 
 __all__ = [
     "asof_join", "last_closed_bar", "mark_bar_at", "mark_price_at", "MarkAt", "quantize_price",
-    "AsOfKeyDuplicate", "TimeUnitInvalid", "REASON_MARK_STALE", "REASON_NO_PRIOR", "MATCHED_AT", "REASON_COL",
+    "AsOfKeyDuplicate", "TimeUnitInvalid", "LatencyDomainInvalid",
+    "REASON_MARK_STALE", "REASON_NO_PRIOR", "MATCHED_AT", "REASON_COL",
 ]

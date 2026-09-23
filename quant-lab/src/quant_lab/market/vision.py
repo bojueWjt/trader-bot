@@ -4,7 +4,7 @@
 分区 = 一个源包（月包；metrics 只有日包）。写入用临时文件 + os.replace 原子改名，同一
 (data_type, interval, symbol, period, source_sha256) 幂等：manifest 已存在且 sha256 相同则跳过。
 
-布局（相对 lake 根目录，默认 data/lake/market）：
+布局（相对 lake 根目录；LakePaths.default：QUANT_LAB_MARKET_LAKE → QUANT_LAB_DATA_ROOT/lake/market → 项目绝对 data/lake/market）：
     bronze/binance/um/<data_type>/<interval>/<symbol>/<period>.zip          原包 + 同名 .sha256
     silver/binance/um/<data_type>/<interval>/instrument=<X>/date=<yyyy-mm-dd>/part.parquet
     _manifest/<partition_id>.json
@@ -105,13 +105,27 @@ def source_path(data_type: str, interval: str, symbol: str, period: str) -> str:
     raise VisionError(f"未知 data_type {data_type}")
 
 
+# vision.py 位于 src/quant_lab/market/；parents[3] = quant-lab。缺省湖根必须是项目绝对路径，禁止 cwd 相对 data/。
+_PROJECT_MARKET_LAKE = Path(__file__).resolve().parents[3] / "data" / "lake" / "market"
+
+
 @dataclass
 class LakePaths:
     root: Path
 
     @classmethod
     def default(cls) -> "LakePaths":
-        return cls(Path(os.environ.get("QUANT_LAB_MARKET_LAKE", "data/lake/market")))
+        """QUANT_LAB_MARKET_LAKE 优先；否则 QUANT_LAB_DATA_ROOT/lake/market；缺省项目绝对路径。"""
+        override = os.environ.get("QUANT_LAB_MARKET_LAKE")
+        if override:
+            root = Path(override)
+        else:
+            data_root = os.environ.get("QUANT_LAB_DATA_ROOT")
+            if data_root:
+                root = Path(data_root) / "lake" / "market"
+            else:
+                root = _PROJECT_MARKET_LAKE
+        return cls(root.expanduser().resolve())
 
     def bronze(self, data_type, interval, symbol, period) -> Path:
         return self.root / "bronze" / VENUE / MARKET / data_type / interval / symbol / f"{period}.zip"

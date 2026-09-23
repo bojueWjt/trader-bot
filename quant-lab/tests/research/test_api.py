@@ -82,9 +82,9 @@ def test_pipeline_candidate_diffs_match_evaluate():
     ids = inp.ids()
     elig = pl.DataFrame({"episode_id": ids, "eligible": [True] * inp.n, "reason": [None] * inp.n}, schema_overrides={"reason": pl.Utf8})
     wdf = inp.anchors.select("episode_id", "cluster_id").with_columns(pl.Series("weight", inp.weights))
-    opp = OpportunitySet(ids, elig, wdf)
     eps = pl.DataFrame({"episode_id": ids, "graph_version": ["gv"] * inp.n, "decision_snapshot_hash": ["h"] * inp.n, "t_dec": inp.anchors["t_dec"],
                         "right_censored": inp.censored.tolist()})
+    opp = OpportunitySet(ids, elig, wdf, provenance=eps.select("episode_id", "graph_version", "decision_snapshot_hash", "t_dec"))
     ex = synthetic.fake_execution(eps, none_frac=0.0)
     vals = [None if not np.isfinite(r) else synthetic.Decimal(f"{r:.12f}") for r in inp.base_R]
     ex = ex.with_columns(pl.Series("net_R", vals, dtype=synthetic.DEC), pl.Series("net_pnl", vals, dtype=synthetic.DEC),

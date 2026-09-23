@@ -16,12 +16,17 @@ FPR = 任一允许主声明为阳性的比例；Clopper–Pearson 双侧 95% 精
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
+import hashlib
 import json
 import dataclasses
 import math
 import os
 import platform
+import shutil
+import sys
+import tempfile
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -808,6 +813,20 @@ def verify_report_text(text: str) -> dict:
     if meta["worker_artifact_identity"] != [meta["parent_artifact_identity"]]:
         raise ValueError(f"worker 制品身份 {meta['worker_artifact_identity']} 与父进程 "
                          f"{str(meta['parent_artifact_identity'])[:12]} 不一致：存在混版")
+    # 逐 job 绑定与 pyc 前缀：同 R6-H，删字段不得等于摘掉门
+    receipts = meta.get("job_receipts")
+    if not isinstance(receipts, list) or len(receipts) != len(data["results"]):
+        raise ValueError(f"逐 job 绑定回执缺失或条数与结果行数 {len(data['results'])} 不符（R-10 裁定 §6 第 1 条）")
+    for i, jr in enumerate(receipts):
+        for k in ("config_sha256", "inputs_sha256", "result_sha256"):
+            v = jr.get(k) if isinstance(jr, dict) else None
+            if not (isinstance(v, str) and len(v) == 64 and all(c in "0123456789abcdef" for c in v)):
+                raise ValueError(f"第 {i} 条逐 job 回执的 {k} 不是 64 位十六进制摘要")
+        if type(jr.get("seed0")) is not int or type(jr.get("n_rep")) is not int:
+            raise ValueError(f"第 {i} 条逐 job 回执缺 seed 分配（seed0 / n_rep）")
+    if meta.get("parent_started_with_fresh_pycache_prefix") is not True:
+        raise ValueError("父进程不是以本次新建的空 pyc 前缀启动的：不能排除它执行了陈旧 pyc，"
+                         "正式报告必须经 `python -m quant_lab.research.nullmodel` 生成")
     rows = data["results"]
     primary = [r for r in rows if r["kind"] in ("null", "power")]
     keys = [(r["kind"], r["mechanism"]) for r in primary]
@@ -1177,13 +1196,19 @@ def write_report(results: list[MCResult], out: Path, *, meta: dict, code_digest:
         f"{meta.get('worker_receipts_confirmed', '—')}，回执摘要集合：{meta.get('worker_code_sha256', '—')}。"
         f"**结构性隔离，不是事后检测**（G0 R-10 裁定 §2.2/§2.3）：本轮起**移除**对任意运行状态的通用反射，"
         f"改为让未申报的状态根本过不去进程边界——整组 worker 由**全新解释器**（显式 spawn）启动、"
-        f"配置以**纯数据**过界并在 worker 内重建、每个 job 回传**制品身份**（冻结源码摘要 + 声明依赖清单），"
-        f"父进程逐份核对。父进程制品身份：{str(meta.get('parent_artifact_identity', '—'))[:16]}…；"
+        f"配置以**纯数据**过界并在 worker 内重建、每个 job 回传**制品身份**（冻结源码摘要 + 依赖清单，"
+        f"依赖按已安装文件的实际字节取摘要），并回传**逐 job 绑定**（配置摘要、输入摘要、seed0/n_rep、"
+        f"本进程的 pyc 前缀）与**结果摘要**，父进程逐份核对。worker 一律以本次新建的空 pyc 前缀启动，"
+        f"读不到运行前就存在的 pyc；父进程由 CLI 以同样方式重启"
+        f"（本报告：{'是' if meta.get('parent_started_with_fresh_pycache_prefix') else '否'}），"
+        f"逐 job 回执 {len(meta.get('job_receipts') or [])} 条。"
+        f"父进程制品身份：{str(meta.get('parent_artifact_identity', '—'))[:16]}…；"
         f"worker 制品身份集合：{[str(x)[:16] + '…' for x in meta.get('worker_artifact_identity', [])]}；"
         f"依赖清单：{meta.get('artifact_manifest', {}).get('deps', '—')}。",
         "",
-        f"**能力边界**（A39，方法边界而非待办）：对支持域内的**事故类**混版——陈旧 `__pycache__`、"
-        f"fork 继承父进程模块对象、普通导入顺序——本系统以结构性隔离关闭。对**对抗类**"
+        f"**能力边界**（A39，方法边界而非待办）：对支持域内的**事故类**混版——陈旧 `__pycache__`（新建空前缀）、"
+        f"fork 继承父进程模块对象（spawn）、活对象随配置过界（纯数据）、结果与派发不对应（逐 job 绑定）"
+        f"——本系统以结构性隔离关闭。对**对抗类**"
         f"（复现必须在 worker 进程内执行代码去绑定 globals、改注册表项、改类属性或默认参数），"
         f"**本系统不声称防护**，且该防护对任意 callable 不可判定。判别一条反例属哪类只问一句："
         f"**能不能在不向 worker 进程内注入代码的前提下复现**。详见 docs/adr/capability-G3-execution-identity.md。",
@@ -1268,18 +1293,103 @@ def _config_to_data(cfg) -> dict:
                         f"<{type(cfg).__name__}>")
 
 
+def _canonical_sha256(value, *, allow_nan: bool = False) -> str:
+    """规范 JSON 摘要（键排序、紧凑分隔）。回执绑定的两端必须对同一份数据算出同一个值。"""
+    blob = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                      allow_nan=allow_nan, default=repr)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def result_digest(result: "MCResult") -> str:
+    """结果身份：worker 跑完即对 `to_dict()` 取摘要，父进程对收到的对象独立重算。
+
+    两边相等才说明发布的正是 worker 算出的那一份；父进程之后改 kind/label 属于排版，
+    必须发生在核对之后。结果里可能有 NaN 诊断量，这里放行 NaN（它在 JSON 里有确定写法）。
+    """
+    return _canonical_sha256(result.to_dict(), allow_nan=True)
+
+
+def _current_pycache_prefix() -> str | None:
+    """本解释器实际使用的 pyc 前缀（规范化为真实路径）；None 表示读写源码旁的 `__pycache__`。"""
+    p = sys.pycache_prefix
+    return os.path.realpath(p) if p else None
+
+
+def job_binding(world_cfg_data: dict, pipe_cfg_data: dict, job_inputs: dict, pycache_prefix: str | None) -> dict:
+    """逐 job 绑定（R-10 裁定 §6 第 1 条）：配置、输入、seed 分配、执行时的 pyc 前缀。
+
+    父进程按它**派发**的东西算一份，worker 按它**收到**的东西算一份，逐键比对。
+    输入也必须是纯数据：能跨进程的只有数据，活对象在这里具名拒绝。
+    """
+    return {"config_sha256": _canonical_sha256({"world": as_pure_data(world_cfg_data, "<WorldConfig>"),
+                                                "pipe": as_pure_data(pipe_cfg_data, "<PipelineConfig>")}),
+            "inputs_sha256": _canonical_sha256(as_pure_data(job_inputs, "<job inputs>")),
+            "seed0": job_inputs.get("seed0"), "n_rep": job_inputs.get("n_rep"),
+            "pycache_prefix": pycache_prefix}
+
+
+@contextlib.contextmanager
+def fresh_pycache_prefix():
+    """为本次 MC 新建一个空的 pyc 前缀目录，让此期间 spawn 出的 worker 都从它启动。
+
+    陈旧 `__pycache__` 的事故形态是：pyc 头里记的源码 mtime/size 恰与磁盘相符，内容却是旧版，
+    解释器照单全收——源码摘要相等，执行的却是另一份字节码。前缀指向本次新建的空目录后，
+    worker 读不到任何运行前就存在的 pyc，只能从当下的源码编译。这是结构性关闭，不是检测。
+    worker 在回执里报告自己的前缀，父进程逐 job 比对（见 `job_binding`）。
+    """
+    d = os.path.realpath(tempfile.mkdtemp(prefix="ql-pycache-"))
+    old = os.environ.get("PYTHONPYCACHEPREFIX")
+    os.environ["PYTHONPYCACHEPREFIX"] = d
+    try:
+        yield d
+    finally:
+        if old is None:
+            os.environ.pop("PYTHONPYCACHEPREFIX", None)
+        else:
+            os.environ["PYTHONPYCACHEPREFIX"] = old
+        shutil.rmtree(d, ignore_errors=True)
+
+
+#: CLI 父进程以新建前缀重启自己时的握手变量：值是那个前缀目录
+_FRESH_PARENT_ENV = "QUANT_LAB_FRESH_PYCACHE_PREFIX"
+
+
+def _parent_started_with_fresh_prefix() -> bool:
+    """当前进程是否经 `_reexec_with_fresh_pycache_prefix` 以本次新建的空前缀启动。"""
+    marker = os.environ.get(_FRESH_PARENT_ENV)
+    return bool(marker) and _current_pycache_prefix() == os.path.realpath(marker)
+
+
+def _reexec_with_fresh_pycache_prefix(argv: list[str], execve=os.execve) -> None:
+    """CLI 父进程自己也不得执行陈旧 pyc：它冻结身份、核对回执、写报告。
+
+    `-m` 启动时，本模块在进入 `_main` 之前就已经从某份 pyc 或源码加载完了，事后无从补救，
+    所以只能在最外层以新前缀原样重启一次。已在新前缀下则直接返回。
+    """
+    if _parent_started_with_fresh_prefix():
+        return
+    d = os.path.realpath(tempfile.mkdtemp(prefix="ql-pycache-parent-"))
+    env = dict(os.environ, PYTHONPYCACHEPREFIX=d, **{_FRESH_PARENT_ENV: d})
+    execve(sys.executable, [sys.executable, "-m", "quant_lab.research.nullmodel", *argv], env)
+
+
 def _run_mc_job(*, world_cfg_data: dict, pipe_cfg_data: dict, **kw) -> dict:
     """worker 侧从**纯数据**重建配置，再自报生成身份。
 
     配置以数据过界、在 worker 内构造，父进程的活对象不再跨进程传递（顾问建议的窄入口）；
     身份回执保留：起跑与收尾各取一次磁盘与执行摘要，父进程逐份核对。
+    另回传逐 job 绑定（按**收到**的配置与输入、本进程实际的 pyc 前缀算出）和结果摘要。
     """
+    binding = job_binding(world_cfg_data, pipe_cfg_data, kw, _current_pycache_prefix())
     wc = WorldConfig(**_checked_fields(as_pure_data(world_cfg_data, "<WorldConfig>"), WorldConfig))
     pd_ = _checked_fields(as_pure_data(pipe_cfg_data, "<PipelineConfig>"), PipelineConfig)
     if isinstance(pd_.get("block_len_sensitivity"), list):
         pd_["block_len_sensitivity"] = tuple(pd_["block_len_sensitivity"])
     pc = PipelineConfig(**pd_)
-    return _run_mc_job_impl(world_cfg=wc, pipe_cfg=pc, **kw)
+    payload = _run_mc_job_impl(world_cfg=wc, pipe_cfg=pc, **kw)
+    payload["binding"] = binding
+    payload["result_sha256"] = result_digest(payload["result"])
+    return payload
 
 
 def _run_mc_job_impl(**kw) -> dict:
@@ -1295,11 +1405,16 @@ def _run_mc_job_impl(**kw) -> dict:
             "pid": os.getpid(), "result": r}
 
 
-def check_worker_receipt(payload, frozen_digest: str, frozen_exec: str | None = None) -> "MCResult":
+def check_worker_receipt(payload, frozen_digest: str, frozen_exec: str | None = None,
+                         expected_binding: dict | None = None) -> "MCResult":
     """父进程侧核对 worker 回执：缺回执、磁盘摘要或**执行修订**摘要与冻结身份不等，一律拒绝发布。
 
     磁盘摘要（R5-H）查的是"文件长什么样"，执行摘要（R6-H）查的是"这个 worker 实际跑的是哪一版"——
     导入缓存 / 驻留修订能让两者背离：六审的反例正是首尾磁盘摘要全等、但两个 worker 执行了另一修订。
+
+    `expected_binding` 是父进程按派发内容算出的逐 job 绑定。给出时，worker 回传的绑定必须逐键相等，
+    结果摘要必须等于父进程对收到的结果独立重算的值，且派发方必须指定了本次新建的 pyc 前缀。
+    正式入口 `_main` 总会给出它。
     """
     if not isinstance(payload, dict) or "result" not in payload:
         raise SystemExit("worker 未回传生成身份回执：结果不得发布（R5-H）")
@@ -1316,6 +1431,18 @@ def check_worker_receipt(payload, frozen_digest: str, frozen_exec: str | None = 
             if got != frozen_exec:
                 raise SystemExit(f"worker 的 {key}={str(got)[:12]} 与父进程冻结制品身份 {frozen_exec[:12]} 不一致："
                                  f"该 worker 跑的不是被冻结的那一份制品，不得发布")
+    if expected_binding is not None:
+        if not expected_binding.get("pycache_prefix"):
+            raise SystemExit("父进程没有为 worker 指定本次新建的 pyc 前缀：陈旧 __pycache__ 未被结构性关闭，不得发布")
+        got = payload.get("binding")
+        if not isinstance(got, dict):
+            raise SystemExit("worker 未回传逐 job 绑定（配置 / 输入 / seed / pyc 前缀）：结果不得发布")
+        for key in sorted(set(expected_binding) | set(got)):
+            if got.get(key) != expected_binding.get(key):
+                raise SystemExit(f"worker 回执的 {key}={str(got.get(key))[:24]} 与父进程派发的 "
+                                 f"{str(expected_binding.get(key))[:24]} 不一致：该结果不对应本次派发的 job，不得发布")
+        if payload.get("result_sha256") != result_digest(payload["result"]):
+            raise SystemExit("worker 回传的结果摘要与父进程收到的结果不符：发布的不是 worker 算出的那一份，不得发布")
     return payload["result"]
 
 
@@ -1373,6 +1500,7 @@ def _main(argv=None):  # pragma: no cover - CLI
 
     worker_receipts: list[str] = []
     worker_execs: list[str] = []
+    job_receipts: list[dict] = []          # 逐 job 绑定（R-10 裁定 §6 第 1 条），随报告落盘供判读方核对
 
     def _as_job_kwargs(kw: dict) -> dict:
         """把活的配置对象换成纯数据后再过界——正式入口不传活对象。"""
@@ -1382,14 +1510,25 @@ def _main(argv=None):  # pragma: no cover - CLI
         return out
 
     def run_jobs(js):
-        # 显式 spawn：不依赖平台默认值，保证每个 worker 都是**全新解释器**、不继承父进程已加载的模块
-        with ProcessPoolExecutor(max_workers=max(1, a.jobs), mp_context=get_context("spawn")) as ex:
-            futs = [ex.submit(_run_mc_job, **_as_job_kwargs(kw)) for _, _, kw in js]
+        # 显式 spawn：不依赖平台默认值，保证每个 worker 都是**全新解释器**、不继承父进程已加载的模块；
+        # 新建空 pyc 前缀：worker 读不到任何运行前就存在的 pyc，只能从当下的源码编译
+        with fresh_pycache_prefix() as prefix, \
+                ProcessPoolExecutor(max_workers=max(1, a.jobs), mp_context=get_context("spawn")) as ex:
+            submitted = []
+            for kind_o, label, kw in js:
+                job_kw = _as_job_kwargs(kw)
+                inputs = {k: v for k, v in job_kw.items() if k not in ("world_cfg_data", "pipe_cfg_data")}
+                expected = job_binding(job_kw["world_cfg_data"], job_kw["pipe_cfg_data"], inputs, prefix)
+                submitted.append((kind_o, label, expected, ex.submit(_run_mc_job, **job_kw)))
             out = []
-            for (kind_o, label, _), fu in zip(js, futs):
+            for kind_o, label, expected, fu in submitted:
                 payload = fu.result()
-                r = check_worker_receipt(payload, frozen_digest, frozen_exec)   # 缺回执 / 身份不等 → 拒绝发布
+                # 缺回执 / 身份不等 / 绑定不等 / 结果摘要不等 → 拒绝发布
+                r = check_worker_receipt(payload, frozen_digest, frozen_exec, expected)
                 worker_receipts.append(payload["digest_end"]); worker_execs.append(payload["artifact_end"])
+                job_receipts.append({"kind": kind_o, "mechanism": r.mechanism,
+                                     **{k: v for k, v in expected.items() if k != "pycache_prefix"},
+                                     "result_sha256": payload["result_sha256"]})
                 r.kind = kind_o; r.label = label or r.label
                 print(r.to_dict(), flush=True)
                 out.append(r)
@@ -1425,7 +1564,9 @@ def _main(argv=None):  # pragma: no cover - CLI
         "pipeline_block_len_days": pc.block_len_days,          # R7-L：结构化冻结配置，判读侧据此核每条记录自报的 L 模式
         "worker_receipts_confirmed": len(worker_receipts), "worker_code_sha256": sorted(set(worker_receipts)),
         "worker_artifact_identity": sorted(set(worker_execs)), "parent_artifact_identity": frozen_exec,
-        "artifact_manifest": __import__("quant_lab.research.paths", fromlist=["x"]).artifact_identity()}
+        "artifact_manifest": __import__("quant_lab.research.paths", fromlist=["x"]).artifact_identity(),
+        "job_receipts": job_receipts,
+        "parent_started_with_fresh_pycache_prefix": _parent_started_with_fresh_prefix()}
     end_exec = artifact_identity_digest()
     if end_exec != frozen_exec:
         raise SystemExit(f"父进程的制品身份在 MC 运行期间发生变化（起 {frozen_exec[:12]} / 止 {end_exec[:12]}）：不得落盘")
@@ -1438,8 +1579,9 @@ def _main(argv=None):  # pragma: no cover - CLI
 
 
 if __name__ == "__main__":  # pragma: no cover
+    _reexec_with_fresh_pycache_prefix(sys.argv[1:])
     _main()
 
 
-__all__ = ["INSTRUMENTS", "MECHANISMS", "research_code_digest", "MCResult", "ResidualModel", "World", "WorldConfig", "assert_not_episode_shuffle", "artifact_identity_digest", "check_worker_receipt", "clopper_pearson",
+__all__ = ["INSTRUMENTS", "MECHANISMS", "research_code_digest", "MCResult", "ResidualModel", "World", "WorldConfig", "assert_not_episode_shuffle", "artifact_identity_digest", "check_worker_receipt", "clopper_pearson", "fresh_pycache_prefix", "job_binding", "result_digest",
            "default_candidates", "fit_residual_model", "resample_null", "run_mc", "synth_world", "write_report"]

@@ -95,21 +95,32 @@ def test_g3_evaluate_consumes_frozen_contract_output():
     """G3 EventEvaluator（R-06）直接消费 simulate_batch 输出：两臂同 policy → θ=0；删失样本排除并计损耗；契约不变量在 G3 侧校验通过。"""
     try:
         from quant_lab.research.ast import canonical_hash
-        from quant_lab.research.evaluator import OpportunitySet, evaluate, pair_arms
+        from quant_lab.research.evaluator import ESTIMANDS, EvalProtocolError, evaluate, freeze_opportunity_set, pair_arms
     except ImportError:
         pytest.skip("G3 evaluator / ast 不可导入（R-06 未落地）")
-    df = x.simulate_batch([f.request for f in FIX], markets=MARKETS).filter(pl.col("policy_version") == "fixture-zero-v1")   # G3 两臂按 policy 区分，冒烟用单臂
-    ids = sorted(df["episode_id"].to_list())
+    reqs = [f.request for f in FIX if f.request.policy_version == "fixture-zero-v1"]  # G3 两臂按 policy 区分，冒烟用单臂
+    by_id = {r.episode_id: r for r in reqs}
+    ids = sorted(by_id)
     clusters = {e: f"c{i % 5}" for i, e in enumerate(ids)}
-    # 直接构造冻结机会集（G3 freeze_opportunity_set 当前在 select 后引用 t_dec 会抛 ColumnNotFound，已在看板告知 G3）
-    opp = OpportunitySet(
-        episode_ids=ids,
-        eligibility=pl.DataFrame({"episode_id": ids, "eligible": [True] * len(ids), "reason": [None] * len(ids)}, schema_overrides={"reason": pl.Utf8}),
-        weights=pl.DataFrame({"episode_id": ids, "cluster_id": [clusters[e] for e in ids], "weight": [1.0 / sum(1 for k in ids if clusters[k] == clusters[e]) for e in ids]}),
-    )
+    elig = {k: True for k in ESTIMANDS}
+    view = pl.DataFrame({
+        "episode_id": ids,
+        "cluster_id": [clusters[e] for e in ids],
+        "graph_version": [by_id[e].graph_version for e in ids],
+        "decision_snapshot_hash": [by_id[e].decision_snapshot_hash for e in ids],
+        "t_dec": [by_id[e].t_dec for e in ids],
+        "eligibility_by_estimand": [elig] * len(ids),
+    }, schema_overrides={"t_dec": pl.Datetime("us", "UTC")})
+    opp = freeze_opportunity_set(view)  # 正式冻结机会集（身份取自 request，不从执行输出倒填）
+    df = x.simulate_batch(reqs, markets=MARKETS)
     ast = {"field": "close"}
     h = canonical_hash(ast)
-    feats = pl.DataFrame({"episode_id": list(df["episode_id"]), "t_dec": list(df["t_dec"]), f"f_{h}": [1.0] * df.height, f"validity_{h}": [True] * df.height})
+    feats = pl.DataFrame({
+        "episode_id": ids,
+        "t_dec": [by_id[e].t_dec for e in ids],
+        f"f_{h}": [1.0] * len(ids),
+        f"validity_{h}": [True] * len(ids),
+    }, schema_overrides={"t_dec": pl.Datetime("us", "UTC")})
     # G3 两臂配对 + 契约校验（EvalContractError/EvalProtocolError 任一抛出即 G2 输出不合格）
     paired = pair_arms(df, ids)
     n_cens = df.filter(pl.col("censor_reason").is_not_null()).height
@@ -123,6 +134,9 @@ def test_g3_evaluate_consumes_frozen_contract_output():
     losers = set(df.filter(pl.col("net_R").cast(pl.Float64) < 0)["episode_id"])
     res2 = evaluate(ast, opp, features=feats, rule=lambda d: pl.Series([e not in losers for e in d["episode_id"]]), execution=df, fold_id="f0", attempt_id="a1")
     assert res2.theta > 0 and res2.n_opportunities == df.height
+    wrong = df.with_columns(pl.lit("wrong-graph").alias("graph_version"))
+    with pytest.raises(EvalProtocolError):
+        evaluate(ast, opp, features=feats, rule=lambda d: pl.Series([True] * d.height), execution=wrong, fold_id="f0", attempt_id="a-wrong")
 
 
 # ---------------- 行情湖装载（真实分区存在时） ----------------

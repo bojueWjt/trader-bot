@@ -12,34 +12,52 @@
 
 | 项 | 值 |
 |---|---|
-| 制品身份（冻结源码 + 声明依赖） | `b4132dd0fb97bff25e0416a9ad7fc3fb0831d877d3df39380fff5d5035950e48` |
-| 冻结源码摘要 | `e475ea4c3f91c6f39a6cae8539563d4ef58cce167459dfcdce3934463477a90c` |
-| 依赖清单（版本 + **内容哈希**） | 见下表 |
-| 配置哈希（world + pipeline + B/alpha/L/delta/pi） | `5aa0933376c070fdc6aefacf89dbc5a7f06e76832791f0074e6ec45e19595697` |
-| 报告文件哈希 | `927d80c3b2145f57e5e0281871677b3c2126223a3fcc95d92d7317f03b5b1cb7` |
-| worker 回执数 / 结果行数 | 13 / 13 |
-| worker 制品身份集合 | `['b4132dd0fb97bff25e0416a9ad7fc3fb0831d877d3df39380fff5d5035950e48']` |
+| 制品身份（冻结源码 + 依赖清单） | `35e8c9b1089849a0622c73b1b31535ad77211fb949c1d9cb1a4eac06e86644b9` |
+| 冻结源码摘要 | `1c5e00f19ae961b4c81615b9ae0e907ed7b13932e3951291d4bb60e94df89370` |
+| 依赖清单（版本 + **按实际文件字节的内容哈希**） | 见下表 |
+| 配置哈希（规范 JSON：world + pipeline + B/alpha/L/delta/pi，取自报告 meta） | `4035193384091d61c4343e1c72bcc05fd095b1125b00175e56009d722c98c741` |
+| 报告文件哈希 | `d51568adc71adbeb87eac9d6a5fb10d6170018ac8a28c65bcc85420ba6ca67b8` |
+| worker 回执数 / 逐 job 绑定回执数 / 结果行数 | 13 / 13 / 13 |
+| worker 制品身份集合 | `['35e8c9b1089849a0622c73b1b31535ad77211fb949c1d9cb1a4eac06e86644b9']` |
+| 父进程以本次新建的空 pyc 前缀启动 | `True` |
 | 冻结流水线 block_len_days | `None` |
 
 ### 1.1 依赖内容身份（R-11）
 
 **只记版本号不够**：版本串相同而包内容不同，可经**换安装源、重打包 wheel、直改 `site-packages`、跨平台轮子**四条路径发生，而这四条**都不需要向 worker 进程注入任何代码**——按 §2 的判据属**事故类**，必须挡住。
-内容身份直接取每个已安装分发的 **`RECORD`** 摘要：装包时已对每个文件算好 sha256，不必自己遍历文件树。
-`RECORD` 不可读的分发**具名拒绝**，与「版本不可得即拒绝」同构。
+内容身份按**已安装文件的实际字节**计算：逐条读取每个分发的 **`RECORD`**，对其中带 sha256 的条目重读文件、按 wheel 规范重算摘要。缺失、不可读或与 `RECORD` 不符一律**具名拒绝**；`<dist>.content` 是全部 (相对路径, 实际摘要) 排序后的聚合摘要。不带哈希的条目（`RECORD` 自身、安装时生成的 pyc）不参与，陈旧 pyc 由执行侧的新建 pyc 前缀关闭（§2.1）。
+覆盖范围是六个声明根依赖，加上它们在当前环境下生效的非 extra 依赖（递归展开）。例如 polars 的编译运行时 `polars-runtime-32` 由此进入清单；生效却未安装的依赖具名拒绝。每次调用都重读文件，不按 mtime、size 缓存，本机单次约 0.5 秒。
+判别性证明见 `tests/research/test_dependency_content_identity.py`：等长改写文件字节、`RECORD` 与 mtime 都不变时拒绝，并附「只哈希 RECORD 文本」的突变对照；实际加载的编译扩展模块所属分发必须都在清单里，并附「只留六根」的突变对照。
 
-| 依赖 | 版本 | 内容哈希（RECORD sha256） |
+| 依赖 | 版本 | 内容哈希（实际文件字节） |
 |---|---|---|
-| arch | `8.0.0` | `9e45797a64490791ad8c5a8f192ca74e20aed908e94cf19d08fdc0ab88373868` |
-| numpy | `2.5.3` | `d6cd2ad35dd8b8bc0ec88549c333a512114d87e86d9b4f8d4841e84bca8e01af` |
-| polars | `1.44.2` | `dfa5912b550157894282a7811d5a8fb4d964aee377e837368a8b3bedee124665` |
-| polars-ta | `0.5.17` | `1cbaff9394c025530fcfdb9679d06e6d32b1f8508ae61f12afe5daf77a225848` |
-| pyarrow | `25.0.1` | `0cdfa685a44039ca8ed79959783bae7c71c25dcd0447aed7bc8062ced14e4c93` |
-| scipy | `1.18.1` | `d95b7aa2c03940de0bec301021a5753ff3577b5b7ce28e6342d59f9d8556258a` |
+| arch | `8.0.0` | `8bcb2647738c29b40e142dbd3fbb245d49dc658af645fe33804252915b55c980` |
+| formulaic | `1.2.2` | `18803d565ad38acedc219dc4d7b68c0d274710d9f8cb9a0ffc115cf6962035f6` |
+| interface-meta | `2.0.1` | `af6e019ff24494f18748790b47896a3e5056327650b946a5ef1b3a3de6c0d5b3` |
+| llvmlite | `0.49.0` | `bb6f40cc23d3e86b3fba667305449890c6d41ec9ac2d41b8e06a902cd753ec93` |
+| more-itertools | `11.1.0` | `04e7e4caaa0565715ecceca44220e20d07184c133dcd074f018765a26afdcb9f` |
+| narwhals | `2.26.0` | `77e0cbe7078b335921eeb867042dc9f7e4e14cf1e4b14d00ebfcdda3031477cc` |
+| numba | `0.67.0` | `980c3e0d7a8d852772addba4c25f0f107cee10f7b1dac2b331b328a0681cfcab` |
+| numpy | `2.5.3` | `fbc110c748def3cd3aae29affba71a5d650d1addde9d06d050244694431939ed` |
+| packaging | `26.3` | `5e2e488e37074de5477d271ef6d217f65ed97bca2642b4889d8304dfbe330f6f` |
+| pandas | `3.0.5` | `17d5a0d472e220344355a1284ce79d59ca5f11423ede27817645c1f31acf05be` |
+| patsy | `1.0.3` | `70a781837f16bb42e3ebed8f0d3378548c9d62095081ed23bda94086cd3a57f0` |
+| polars | `1.44.2` | `05d2ed8397688828941cebe66fd6a2bb5352406e8617c0bdd518b1a4bb955b08` |
+| polars-ols | `0.3.5` | `7c9284c1e240b8fc1a9fd1a829c449475d2e003f7d1f41a15bd070e21274e6e0` |
+| polars-runtime-32 | `1.44.2` | `270d330552c48309047160bbf877a5f49494f354c30852ee49651d953d0aef22` |
+| polars-ta | `0.5.17` | `3e800e015f2511108d4a310ce2842691ee1616996508095a8d04badd74ea644e` |
+| pyarrow | `25.0.1` | `7a7b571f1bb0609691acfa8bc595e63294d2032ed6320667fd1241993d709a82` |
+| python-dateutil | `2.9.0.post0` | `a60a650b5d274c66eb033dee1d7022c4e95ca520b77e3a8789b1140b7243dd01` |
+| scipy | `1.18.1` | `20e7d6ab642f19198834168389a6ba4268e8bf5eacbb0d50738f6db585558f63` |
+| six | `1.17.0` | `1355d5a0fc15010dcdc0db199af2554df141f46f86c07b7dece6d4fac8463a58` |
+| statsmodels | `0.15.0` | `7b7e259b43f8c03a3dde845afb5e12d52796cc6c6e923e3d5c13703c2c989f49` |
+| typing-extensions | `4.16.0` | `343c09d7046db9849c1aadcd77b7678fbf35e7f838c210aa50705d03a7370812` |
+| wrapt | `2.4.0` | `317a9fb3b99f83f1304ff8af52969457e9b92385437ee4d65dc0f8fe08b2c58a` |
 | （解释器） | `3.12.13` | — |
 
 #### 比较的适用域（必读）
 
-内容哈希并入制品身份后，**跨机器的制品身份必然不等**——平台轮子不同，内容本来就不同。**这是正确行为，不是污染**：它的含义就是「这是另一份制品」。因此——
+内容哈希并入制品身份后，**跨机器的制品身份可能不等**——平台轮子不同，内容就不同；相同的轮子也可能相等。**不等不自动意味着污染**：它的含义是「这可能是另一份制品」。因此——
 
 > **worker 回执的身份相等性只在同一次运行内有意义**（整组 worker 由同一台机器 spawn 启动）。跨机器**不比较身份摘要**；§5 的 P2 完成判据本来就按**结论层**比对（阳性计数与 Clopper–Pearson 区间落在同一判定侧），不要求逐位相等。
 
@@ -64,7 +82,9 @@ seed 分配（可供不生成本报告的一方独立重跑）：每机制 `seed
 | 事故类型 | 关闭方式 | 判别性证明（各带突变自证） |
 |---|---|---|
 | fork 继承父进程模块对象 | 整组 worker 由全新解释器显式 `spawn` 启动 | `test_proof1_undeclared_state_does_not_cross_the_process_boundary`；突变 `test_proof1_mutation_fork_would_let_it_cross` 证明换成 fork 就会跨界 |
-| 陈旧 `__pycache__` / 普通导入顺序导致的混版 | 每个 job 回传制品身份（冻结源码摘要 + 声明依赖清单），父进程逐份核对，任何不等或缺回执即拒绝落盘 | `test_proof2_worker_artifact_identity_must_equal_the_frozen_one`；突变 `test_proof2_mutation_without_the_check_it_would_publish` 证明去掉该门坏回执就放行 |
+| 普通导入顺序 / 源码或依赖在运行前后被改导致的混版 | 每个 job 起跑与收尾各回传一次制品身份（冻结源码摘要 + 依赖清单），父进程逐份核对，任何不等或缺回执即拒绝落盘。**它查的是磁盘上的字节，不是执行的字节码**，陈旧 pyc 另见下一行 | `test_proof2_worker_artifact_identity_must_equal_the_frozen_one`；突变 `test_proof2_mutation_without_the_check_it_would_publish` 证明去掉该门坏回执就放行 |
+| 陈旧 `__pycache__`（pyc 头的源码 mtime / size 与磁盘相符、字节码却是旧版） | 每次运行新建一个空的 pyc 前缀目录，整组 worker 在其下 spawn，读不到任何运行前就存在的 pyc；worker 在回执里报告自己实际的前缀，父进程逐 job 比对；CLI 父进程也以同样方式重启自己，报告记录 `parent_started_with_fresh_pycache_prefix`，判读侧要求为真 | 威胁实证 `test_mutation_without_a_fresh_prefix_the_stale_pyc_is_executed`（不设新前缀就执行陈旧字节码）；关闭 `test_a_fresh_prefix_executes_the_source_not_the_stale_pyc`、`test_workers_spawned_inside_the_context_run_under_the_fresh_prefix`、`test_cli_parent_reexecs_itself_under_a_fresh_prefix`；突变 `test_mutation_real_run_refuses_workers_that_did_not_get_the_fresh_prefix`（只建目录不交给 worker，正式入口拒绝落盘） |
+| 结果与派发的 job 不对应（配置、输入、seed 或结果在过界后不一致） | 逐 job 绑定：父进程按派发内容、worker 按收到内容各算一份配置摘要、输入摘要、seed0 / n_rep，逐键比对；worker 跑完即对结果取摘要，父进程对收到的对象独立重算；绑定随报告落盘为 `job_receipts`，判读侧要求条数与结果行数相等 | `test_any_binding_mismatch_is_refused`、`test_result_changed_after_the_worker_hashed_it_is_refused`、`test_worker_binds_what_it_received_not_what_the_parent_meant`、`test_real_run_binds_every_job`；突变 `test_mutation_without_expected_binding_the_forgery_would_publish` |
 | 活对象随配置跨进程带入 | 配置收窄为纯数据，worker 内重建；schema 外字段**拒绝而非忽略** | `test_proof3_undeclared_config_fields_are_refused_not_ignored` 与 `test_proof3_reaches_the_real_job_entry`；突变 `test_proof3_mutation_plain_construction_would_ignore_them` 证明绕开检查缺字段会被默认值悄悄补齐 |
 
 ### 2.2 已知可漏检（对抗类，**保持 open，不是闭合，也不是已豁免**）
@@ -128,12 +148,12 @@ seed 分配（可供不生成本报告的一方独立重跑）：每机制 `seed
 
 ## 5. 残余风险接受
 
-残余风险已由范围负责人正式接受，见 `ruling-G0-R10-scope-and-acceptance.md` §7。摘要：
+残余风险的接受人是用户。2026-09-24，用户把这项决定委托给用户会话 `0f23fe43`（原话「你自己决策就行」「你收尾吧」），该会话代为接受，理由与记录见 `ruling-G0-R10-scope-and-acceptance.md` §13。G0 在 §7 的自行接受已被 §12 撤销，不作依据。摘要：
 
 | 项 | 内容 |
 |---|---|
 | P2 负责人 | G3 |
-| 触发条件 | 任何 θ 声明进入资本配置或生产决策之前 |
+| 触发条件 | 研究层输出用于**内部研究以外的任何用途**时；具体地，任何 θ 声明进入资本配置或生产决策之前 |
 | 完成判据 | 在独立配置的机器上由冻结制品重跑，按**结论层**比对（阳性计数与 Clopper–Pearson 区间落在同一判定侧），非逐位相等 |
 | 不可用作 | 本接受书**不**授权把「机器检查通过」表述为「计算发生过」 |
 

@@ -129,12 +129,13 @@ def simulate_batch(reqs: Iterable[ExecutionRequest], *, kernel: Literal["A", "B"
 # ---------------------------------------------------------------------------
 # 从行情湖装载（P2 真实路径；M-09 提供最小实现）
 # ---------------------------------------------------------------------------
-def load_market_from_lake(req: ExecutionRequest, *, lake_root: str | Path = "data/lake/market", symbol: str | None = None,
+def load_market_from_lake(req: ExecutionRequest, *, lake_root: str | Path | None = None, symbol: str | None = None,
                           window_before_s: int = 0, snapshot_id: str | None = None) -> MarketView:
     """按 request 的 instrument 与 [t_dec, horizon_end] 从 silver 装 1m last/mark bars + funding + rules（S05/S12）。
     覆盖证据：每个涉及分区的 manifest 必须存在且 check_status ∈ {ok, gap}（体检过）；quarantine severity=error 的 bar 与
     ohlc_valid=false 的 bar 视为不可用（bars_complete=False）；网格覆盖按合法且唯一的 open_time 身份核对；
-    manifest_refs（partition_id, source_sha256, schema_hash, available_at_basis, check_rule_version）进入 manifest_hash。"""
+    manifest_refs（partition_id, source_sha256, schema_hash, available_at_basis, check_rule_version）进入 manifest_hash。
+    lake_root 缺省走 LakePaths.default()（I01：QUANT_LAB_MARKET_LAKE / QUANT_LAB_DATA_ROOT，禁止 cwd 相对回落）。"""
     import json as _json
 
     if snapshot_id is not None:
@@ -144,7 +145,7 @@ def load_market_from_lake(req: ExecutionRequest, *, lake_root: str | Path = "dat
     from quant_lab.market.partition_check import load_rules, rule_at
     from quant_lab.market.vision import INTERVAL_SECONDS, LakePaths, partition_id, symbol_of
 
-    lake = LakePaths(Path(lake_root))
+    lake = LakePaths(Path(lake_root)) if lake_root is not None else LakePaths.default()
     inst = req.order_plan.instrument_id
     sym = symbol or symbol_of(inst)
     # S27：启动时刻只有一个来源 —— req.resolved_t_start(policy)。此前 loader 自己用 (t_start or t_dec) 又推了一遍，

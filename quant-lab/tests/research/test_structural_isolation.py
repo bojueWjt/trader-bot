@@ -135,20 +135,55 @@ def test_r11_manifest_carries_content_hashes_not_just_versions():
         h = m[f"{name}.content"]
         assert len(h) == 64 and all(c in "0123456789abcdef" for c in h), (name, h)
     assert m["python"]                                   # 解释器版本也在
+    assert "polars-runtime-32" in m and len(m["polars-runtime-32.content"]) == 64
 
 
 def test_r11_content_hash_comes_from_the_installed_RECORD():
-    """内容身份取该分发 RECORD 的摘要——装包时已对每个文件算好 sha256，不必自己遍历文件树。"""
+    """内容身份必须等于独立重算的实际字节聚合，而不是 RECORD 文本自身的 sha256。"""
+    import base64
+    import csv
     import hashlib
     import importlib.metadata as md
+    import io
+    from pathlib import Path
 
     from quant_lab.research.paths import DECLARED_DEPENDENCIES, dependency_manifest
 
+    def independent_content_from_bytes(dist) -> str:
+        rec = dist.read_text("RECORD")
+        assert rec is not None
+        pairs = []
+        for row in csv.reader(io.StringIO(rec)):
+            if not row or not row[0]:
+                continue
+            rel = row[0]
+            field = (row[1] if len(row) > 1 else "").strip()
+            if not field:
+                continue
+            assert field.startswith("sha256="), rel
+            with Path(dist.locate_file(rel)).open("rb") as fh:
+                digest = hashlib.file_digest(fh, "sha256")
+            b64 = base64.urlsafe_b64encode(digest.digest()).rstrip(b"=").decode("ascii")
+            assert field == f"sha256={b64}", rel
+            pairs.append((rel.replace("\\", "/"), digest.hexdigest()))
+        pairs.sort()
+        h = hashlib.sha256()
+        for rel, digest_hex in pairs:
+            h.update(rel.encode("utf-8")); h.update(b"\0")
+            h.update(digest_hex.encode("ascii")); h.update(b"\0")
+        assert pairs
+        return h.hexdigest()
+
     m = dependency_manifest()
-    for name in DECLARED_DEPENDENCIES:
-        rec = md.distribution(name).read_text("RECORD")
+    names = list(DECLARED_DEPENDENCIES) + ["polars-runtime-32"]
+    for name in names:
+        dist = md.distribution(name)
+        rec = dist.read_text("RECORD")
         assert rec is not None, name
-        assert m[f"{name}.content"] == hashlib.sha256(rec.encode()).hexdigest(), name
+        rec_text_hash = hashlib.sha256(rec.encode()).hexdigest()
+        independent = independent_content_from_bytes(dist)
+        assert m[f"{name}.content"] == independent, name
+        assert m[f"{name}.content"] != rec_text_hash, name
         assert sum(1 for l in rec.splitlines() if ",sha256=" in l) > 0, name
 
 

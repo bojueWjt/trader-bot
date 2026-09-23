@@ -16,7 +16,8 @@ from quant_lab.research.evaluator import EvalProtocolError, OpportunitySet, eval
 def OpportunitySetSub(opp, ids):
     """测试用：把机会集裁到有真实执行结果的子集（G2 §5.10 落地前）。"""
     ids = list(ids)
-    return OpportunitySet(ids, opp.eligibility.filter(pl.col("episode_id").is_in(ids)), opp.weights.filter(pl.col("episode_id").is_in(ids)))
+    return OpportunitySet(ids, opp.eligibility.filter(pl.col("episode_id").is_in(ids)), opp.weights.filter(pl.col("episode_id").is_in(ids)),
+                          provenance=opp.provenance.filter(pl.col("episode_id").is_in(ids)))
 
 POLICY = "base-v1"
 MANIFEST = "mm-parity-0001"

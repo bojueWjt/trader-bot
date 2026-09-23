@@ -1,16 +1,20 @@
-"""OR-04 端到端合成冒烟（G0 集成，只读三个模块的公共 API，不改模块代码）。
+"""OR-04 端到端合成冒烟与 OR-05 I06 判别力验收（G0 集成，不改模块代码）。
 
 链路：G1 load_episodes（合成夹具湖） → G2 build_request + simulate_batch（合成行情）
       → G3 freeze_opportunity_set + feature_snapshot + evaluate。
 
-断言（GOAL-0 §5.1）：θ 非空、账本 ≥1 行、损耗表 ≥5 层、quarantine 可读。
-本文件是 OR-04 骨架：每个接缝独立成 test，失败即定位到具体接缝，
+保留 θ、账本、非退化门；加固逐值时钟、完整配对、本批 Q/MAP/LOSS 与突变拒绝证据。
+每个接缝独立成 test，失败即定位到具体接缝，
 G0 据此判 P1 缺项；**不得**为了让它变绿去改 src/quant_lab/*。
 """
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
+import time
 from decimal import ROUND_DOWN, Decimal
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -18,13 +22,66 @@ import pytest
 POLICY = "base-v1"
 RISK_BUDGET = Decimal("100")
 MANIFEST = "mm-e2e-0001"
+GRAPH = "or05-i06-fresh"
+T_BUILD = dt.datetime(2026, 9, 11, tzinfo=dt.UTC)
 
 
 # --------------------------------------------------------------- G1 接缝
 @pytest.fixture(scope="module")
-def episodes() -> pl.DataFrame:
+def fresh_lake(tmp_path_factory):
+    """每轮从空湖重建；记录原始输入、当前代码与本轮发布身份，不借用已发布 gold。"""
+    from quant_lab.data import api
+    from quant_lab.data.lake import Layout
+
+    project = Path(__file__).resolve().parents[2]
+    fixtures = project / "tests/data/fixtures"
+    root = tmp_path_factory.mktemp("or05-i06") / "data"
+    root.mkdir()
+    assert not list(root.iterdir())
+    inputs = sorted((fixtures / "tdesktop_sample").rglob("*")) + [
+        fixtures / "llm_recorded/extract_v1.json", fixtures / "llm_recorded/ocr_v1.json"]
+    sources = sorted((project / "src/quant_lab/data").glob("*.py"))
+    hashes = {str(p.relative_to(project)): hashlib.sha256(p.read_bytes()).hexdigest()
+              for p in inputs + sources if p.is_file()}
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("QUANT_LAB_DATA_ROOT", str(root))
+        layout = Layout.from_root(None)
+        started = time.perf_counter()
+        built = api.build(fixtures / "tdesktop_sample", layout, graph_version=GRAPH,
+                          llm_fixture=fixtures / "llm_recorded/extract_v1.json",
+                          ocr_fixture=fixtures / "llm_recorded/ocr_v1.json", ingested_at=T_BUILD)
+        elapsed = time.perf_counter() - started
+        trace = {"graph_version": GRAPH, "batch_id": built["normalize"]["batch_id"],
+                 "input_hash": built["lifecycle"]["input_hash"], "files": hashes,
+                 "build_seconds": elapsed}
+        (root / "integration-build.json").write_text(json.dumps(trace, indent=2), encoding="utf-8")
+        print(f"\nI06 fresh build: {elapsed:.3f}s; root={root}; batch={trace['batch_id']}")
+        yield {"layout": layout, "trace": trace, "project": project}
+
+
+@pytest.fixture(scope="module")
+def episodes(fresh_lake) -> pl.DataFrame:
     from quant_lab.data.api import load_episodes
-    return load_episodes("fixture-v1")
+    return load_episodes(GRAPH)
+
+
+def _assert_build_identity(fresh_lake, episodes):
+    from quant_lab.data.graph import verify_manifest
+    from quant_lab.data.lifecycle import input_hash_of
+    from quant_lab.data.lake import Layout
+
+    layout, trace = fresh_lake["layout"], fresh_lake["trace"]
+    assert Layout.from_root(None) == layout, "本轮数据根错配"
+    manifest = verify_manifest(layout, GRAPH)
+    assert set(episodes["graph_version"]) == {GRAPH}, "本轮图身份错配"
+    assert set(episodes["batch_id"]) == {trace["batch_id"]}, "本轮批次错配"
+    assert manifest["input_hash"] == trace["input_hash"] == input_hash_of(layout, ingested_at=T_BUILD)
+    for name, expected in trace["files"].items():
+        assert hashlib.sha256((fresh_lake["project"] / name).read_bytes()).hexdigest() == expected
+
+
+def test_seam_g1_fresh_build_identity(fresh_lake, episodes):
+    _assert_build_identity(fresh_lake, episodes)
 
 
 def test_seam_g1_decision_view(episodes):
@@ -75,6 +132,10 @@ def _resolver(req):
 
 @pytest.fixture(scope="module")
 def execution(episodes) -> pl.DataFrame:
+    return _execute(episodes)
+
+
+def _execute(episodes):
     from quant_lab.market.contract import build_request, resolve_policy
     from quant_lab.market.execution import simulate_batch
     ph = resolve_policy(POLICY).content_hash
@@ -88,9 +149,10 @@ def execution(episodes) -> pl.DataFrame:
     return simulate_batch(reqs, kernel="A", resolver=_resolver, strict=False)
 
 
-def test_seam_g2_build_request_is_sole_entrypoint(execution):
+def test_seam_g2_build_request_is_sole_entrypoint(execution, opportunity):
     """G2 侧：请求只经 build_request 构造（research-schema §9.4 裁定 A3），输出一行一 episode。"""
     assert execution.height > 0, "simulate_batch 返回空表"
+    _assert_complete_execution(execution, opportunity)
     assert "policy_hash" in execution.columns, "配对键缺 policy_hash（execution-interface §5.5）"
     assert execution["policy_hash"].n_unique() == 1
     if "error" in execution.columns:
@@ -135,41 +197,159 @@ def test_seam_g3_opportunity_set_frozen(opportunity):
 def test_seam_g3_pair_arms_consumes_g2_output(execution, opportunity):
     """G3 的两臂配对能直接消费 G2 simulate_batch 输出（不经 fake_execution）。"""
     from quant_lab.research.evaluator import pair_arms
-    ids = [i for i in opportunity.episode_ids if i in set(execution["episode_id"].to_list())]
-    pairs = pair_arms(execution.filter(pl.col("episode_id").is_in(ids)), ids)
+    ids = _assert_complete_execution(execution, opportunity)
+    pairs = pair_arms(execution, ids)
     assert pairs.height == len(ids)
+    assert set(pairs["episode_id"]) == set(ids)
     for c in ("base_R", "cand_R", "base_censor", "cand_censor"):
         assert c in pairs.columns
 
 
-def test_seam_g3_feature_snapshot_respects_t_dec(episodes):
-    """feature_snapshot 只用 close_time + latency <= t_dec 的 bar（feature-snapshot §3）。"""
-    from quant_lab.research import synthetic
-    from quant_lab.research.ast import canonical_hash
-    from quant_lab.research.features import feature_snapshot
+def _assert_complete_execution(execution, opportunity):
+    ids = opportunity.episode_ids
+    assert ids, "完整机会集为空"
+    assert set(execution["episode_id"]) == set(ids), "执行结果与完整机会集不相等"
+    assert execution.height == len(ids), "执行结果不是一行一 episode"
+    return ids
 
-    anchors = episodes.filter(pl.col("t_dec").is_not_null()).select("episode_id", "instrument_id", "t_dec")
-    insts = tuple(anchors["instrument_id"].unique().sort().to_list())
-    t0 = anchors["t_dec"].min() - dt.timedelta(days=30)
-    bars = synthetic.fake_bars(insts, start=t0, n_bars=4000, interval="15m", seed=7)
-    ast = {"op": "Ref", "args": [{"field": "close"}], "params": {"lag": 1}}
-    # contracts/feature-snapshot.md §3 签名：feature_snapshot(asts, anchors, *, bars, ...)；无 interval 参数
-    snap = feature_snapshot([ast], anchors, bars=bars)
+
+T0 = dt.datetime(2024, 1, 1, tzinfo=dt.UTC)
+MINUTE = dt.timedelta(minutes=1)
+US = dt.timedelta(microseconds=1)
+INST = "BTCUSDT-PERP.BINANCE-UM"
+CLOSE = {"field": "close"}
+REF = {"op": "Ref", "args": [CLOSE], "params": {"lag": 1}}
+
+
+def _clock_bars():
+    return pl.DataFrame({"instrument_id": [INST] * 6, "interval": ["1m"] * 6,
+                         "close_time": [T0 + i * MINUTE for i in range(6)],
+                         "close": [100., 200., 300., 400., 500., 600.]})
+
+
+def _anchors(times):
+    return pl.DataFrame({"episode_id": [f"clock-{i}" for i in range(len(times))],
+                         "instrument_id": [INST] * len(times), "t_dec": times})
+
+
+def _assert_snapshot(snap, anchors, ast, expected):
+    """逐 ID 检查身份、有效位与值，invalid 也必须是 None，不能靠列名蒙混过关。"""
+    from quant_lab.research.ast import canonical_hash
     assert snap.height == anchors.height, "feature_snapshot 行数与 anchors 不一致"
     h = canonical_hash(ast)
-    assert f"validity_{h}" in snap.columns or any(c.startswith("validity_") for c in snap.columns)
+    assert {f"f_{h}", f"validity_{h}"} <= set(snap.columns)
+    assert snap["episode_id"].n_unique() == anchors.height
+    rows = {r["episode_id"]: r for r in snap.iter_rows(named=True)}
+    assert set(rows) == set(anchors["episode_id"])
+    for anchor, value in zip(anchors.iter_rows(named=True), expected, strict=True):
+        row = rows[anchor["episode_id"]]
+        assert row["t_dec"] == anchor["t_dec"]
+        assert row[f"validity_{h}"] is (value is not None), "时钟有效性不符"
+        assert row[f"f_{h}"] == value, "时钟特征值不符"
 
 
-def test_e2e_theta_ledger_loss_quarantine(episodes, execution, opportunity, tmp_path):
+def _assert_feature_clock(bars, anchors, ast, expected, **kwargs):
+    from quant_lab.research import features
+    snap = features.feature_snapshot([ast], anchors, bars=bars, **kwargs)
+    _assert_snapshot(snap, anchors, ast, expected)
+    # 只改所有决策之后的价格；必须实际存在未来行，避免无效扰动。
+    future = pl.col("close_time") > anchors["t_dec"].max()
+    assert bars.filter(future).height > 0
+    changed = bars.with_columns(pl.when(future).then(999999.).otherwise(pl.col("close")).alias("close"))
+    after = features.feature_snapshot([ast], anchors, bars=changed, **kwargs)
+    _assert_snapshot(after, anchors, ast, expected)
+    assert after.equals(snap), "未来扰动改变了过去快照"
+
+
+def _time_kwargs(path, latency):
+    from quant_lab.research.features import SnapshotContext
+    if path == "context":
+        return {"ctx": SnapshotContext(latency=latency)}
+    return {"latency": latency}
+
+
+@pytest.mark.parametrize("path", ["convenience", "context"])
+@pytest.mark.parametrize("latency", [dt.timedelta(0), US, MINUTE])
+def test_seam_g3_feature_snapshot_respects_t_dec(path, latency):
+    """H0 等号可见；等号前 1us 的 Ref 尚无历史，不能伪造成任意有效值。"""
+    edge = T0 + MINUTE + latency
+    anchors = _anchors([edge - US, edge, edge + MINUTE])
+    _assert_feature_clock(_clock_bars(), anchors, REF, [None, 100., 200.], **_time_kwargs(path, latency))
+
+
+def test_seam_g3_unknown_dependency_clock():
+    """I03：当前 bar 已知不代表 Ref 所依赖的历史 bar 已知。"""
+    bars = _clock_bars().with_columns(pl.col("close_time").alias("available_at"))
+    anchors = _anchors([T0 + MINUTE, T0 + 2 * MINUTE, T0 + 3 * MINUTE])
+    for available, expected in [(None, None), (T0 + 2 * MINUTE, 200.), (T0 + 2 * MINUTE + US, None)]:
+        changed = bars.with_columns(pl.when(pl.col("close_time") == T0 + MINUTE)
+                                   .then(pl.lit(available, dtype=pl.Datetime("us", "UTC")))
+                                   .otherwise(pl.col("available_at")).alias("available_at"))
+        _assert_feature_clock(changed, anchors, REF, [100., expected, 300.])
+
+
+def _assert_market_clock():
+    from quant_lab.market import asof
+    bars = _clock_bars().head(3).with_columns(pl.Series("available_at", [
+        T0 + 2 * MINUTE, T0 + 4 * MINUTE, T0 + 8 * MINUTE]))
+    # 显式到达无顺序证据，等号仍不可见；晚到的已闭合 bar 不抢占旧值。
+    for at, expected in [(T0 + 2 * MINUTE, None), (T0 + 2 * MINUTE + US, 100.),
+                         (T0 + 4 * MINUTE, 100.), (T0 + 4 * MINUTE + US, 200.)]:
+        future = pl.col("available_at") > at
+        changed = bars.with_columns(pl.when(future).then(999999.).otherwise(pl.col("close")).alias("close"))
+        for data in (bars, changed):
+            mark = asof.mark_bar_at(data, at, INST, max_staleness_s=600)
+            row = asof.last_closed_bar(data, at=at, instrument_id=INST, interval="1m")
+            price = None if row is None else row["close"][0]
+            assert price == expected, "G2 晚到 bar 可见性不符"
+            assert mark.price == expected, "G2 标记价可见性不符"
+            assert mark.reason == ("MARK_STALE" if expected is None else None)
+    # H0 无显式到达时采用 close+latency，等号可见；前 1us 不可见。
+    for latency in (dt.timedelta(0), US, MINUTE):
+        data = _clock_bars().head(1)
+        for at, expected in [(T0 + latency - US, None), (T0 + latency, 100.)]:
+            result = asof.mark_bar_at(data, at, INST, latency=latency)
+            assert result.price == expected, "G2 H0 等号不符"
+
+
+def test_seam_g2_late_bar_clock():
+    _assert_market_clock()
+
+
+def _assert_negative_latency(path, latency):
+    from quant_lab.market import asof
+    from quant_lab.research import features
+    bars, anchors = _clock_bars(), _anchors([T0])
+    # 用显式 AssertionError 表达守域失败，使突变证据仅捕获测试自己的拒绝。
+    try:
+        features.feature_snapshot([CLOSE], anchors, bars=bars, **_time_kwargs(path, latency))
+    except features.SnapshotInvalid as exc:
+        assert "latency" in str(exc)
+    else:
+        raise AssertionError("G3 接受负 latency")
+    for call in (lambda: asof.mark_bar_at(bars, T0, INST, latency=latency),
+                 lambda: asof.last_closed_bar(bars, at=T0, instrument_id=INST, interval="1m", latency=latency)):
+        try:
+            call()
+        except asof.LatencyDomainInvalid:
+            pass
+        else:
+            raise AssertionError("G2 接受负 latency")
+
+
+@pytest.mark.parametrize("path", ["convenience", "context"])
+@pytest.mark.parametrize("latency", [-US, -MINUTE])
+def test_seam_negative_latency_clock(path, latency):
+    _assert_negative_latency(path, latency)
+
+
+def test_e2e_theta_ledger_loss_quarantine(episodes, execution, opportunity, tmp_path, fresh_lake):
     """OR-04 主断言：θ 非空、账本 ≥1 行（本次 run 有 completed）、损耗表 ≥5 层、quarantine 可读。
 
     真链路：G1 决策视图 → G2 build_request/simulate_batch（合成行情）→ G3 feature_snapshot + evaluate。
     账本用临时 lockbox（research-schema §9.8 A6 / G0 R7 裁定：测试不得读写持久 data/lockbox）。
     两臂同 policy（base-v1），θ 期望为 0 但必须非 None——"非空"是接缝断言，不是效应声明。
     """
-    import glob
-
-    from quant_lab.data.api import loss_table
     from quant_lab.research import synthetic
     from quant_lab.research.ast import canonical_hash
     from quant_lab.research.evaluator import evaluate
@@ -177,8 +357,7 @@ def test_e2e_theta_ledger_loss_quarantine(episodes, execution, opportunity, tmp_
     from quant_lab.research.ledger import Ledger
 
     # --- θ：特征快照 + 评估
-    ids = [i for i in opportunity.episode_ids if i in set(execution["episode_id"].to_list())]
-    assert ids, "机会集与执行结果无交集"
+    ids = _assert_complete_execution(execution, opportunity)
     anchors = episodes.filter(pl.col("episode_id").is_in(ids)).select("episode_id", "instrument_id", "t_dec")
     insts = tuple(anchors["instrument_id"].unique().sort().to_list())
     t0 = anchors["t_dec"].min() - dt.timedelta(days=30)
@@ -196,7 +375,7 @@ def test_e2e_theta_ledger_loss_quarantine(episodes, execution, opportunity, tmp_
                              data_manifest=str(episodes["graph_version"][0]), seed=11, stage="outer",
                              market_manifest=MANIFEST, graph_version=str(episodes["graph_version"][0]))
     res = evaluate(ast, opportunity, features=feats, rule=lambda f: pl.Series([True] * f.height),
-                   execution=execution.filter(pl.col("episode_id").is_in(ids)), fold_id="e2e-f0",
+                   execution=execution, fold_id="e2e-f0",
                    attempt_id=attempt, ledger=ledger)
     assert res.status == "ok", f"evaluate 非 ok：status={res.status} reason={res.reason}"
     assert res.theta is not None, "θ 为空 —— 静默为空算 fail"
@@ -210,29 +389,244 @@ def test_e2e_theta_ledger_loss_quarantine(episodes, execution, opportunity, tmp_
     assert led.height >= 1, "账本为空"
     assert (led["status"] == "completed").sum() >= 1, f"账本无 completed 行：{led['status'].to_list()}"
 
-    # --- 损耗表 ≥5 层
-    loss = loss_table("latest")
-    assert loss.height > 0 and len(loss["layer"].unique()) >= 5, "损耗表层数 < 5"
-
-    # --- quarantine 可读
-    qs = sorted(glob.glob("data/quarantine/*.parquet"))
-    assert qs and all(len(pl.read_parquet(q).columns) > 0 for q in qs), "quarantine 不可读"
+    # --- 本轮损耗与固定隔离对象（独立子测试也复用同一断言）
+    _assert_loss_quarantine(fresh_lake)
 
 
-def test_e2e_loss_table_and_quarantine_readable():
-    """OR-04 主断言的两项独立子条件（不经 G2 执行链，故不受 B8 阻断）：
-    损耗表 ≥5 层、quarantine 可读。θ 与账本两项仍在主断言里等 B8 闭合。"""
-    import glob
+def test_e2e_loss_table_and_quarantine_readable(fresh_lake):
+    """不经 G2 的独立子条件：本批六层损耗、隔离对象与逐 ID 映射均可对账。"""
+    _assert_loss_quarantine(fresh_lake)
 
-    from quant_lab.data.api import loss_table
 
-    loss = loss_table("latest")
+# 期望来自原始夹具 ANCHORS，不能从待检的 Q/MAP 反推，否则漏样本仍会绿。
+QUARANTINED = {9: "TIME_UNIT_INVALID", 10: "MEDIA_MISSING", 11: "SCHEMA_DRIFT"}
+QUARANTINE_PEER = -1002000000003
+
+
+def _read_mapping(layout, batch, layer):
+    return pl.read_parquet(layout.mapping(batch, layer))
+
+
+def _assert_loss_quarantine(fresh_lake):
+    from quant_lab.data import api
+    from quant_lab.data.lake import Layout
+
+    layout, trace = fresh_lake["layout"], fresh_lake["trace"]
+    assert Layout.from_root(None) == layout
+    batch = trace["batch_id"]
+    loss = api.loss_table(batch)
     assert loss.height > 0, "损耗表为空 —— 静默为空算 fail"
-    layers = sorted(loss["layer"].unique().to_list())
-    assert len(layers) >= 5, f"损耗表层数 {layers} < 5（research-schema §7）"
+    assert set(loss["batch_id"]) == {batch}, "损耗表批次错配"
+    assert set(loss["layer"]) == {1, 2, 3, 4, 5, 6}, "损耗表层数或层身份不符"
+    q = api.quarantine("telegram")
+    assert set(q["batch_id"]) == {batch}, "隔离表批次错配"
+    mv = pl.read_parquet(layout.message_version)
+    mapping = _read_mapping(layout, batch, 1)
+    for mid, reason in QUARANTINED.items():
+        object_id = f"{QUARANTINE_PEER}:{mid}"
+        original = mv.filter((pl.col("channel_id") == QUARANTINE_PEER)
+                             & (pl.col("source_id").struct.field("message_id") == mid))
+        assert original.height == 1, f"固定输入消失 {object_id}"
+        source = original.row(0, named=True)
+        assert source["quality_status"] == "quarantined"
+        isolated = q.filter((pl.col("object_id") == object_id) & (pl.col("reason_code") == reason))
+        assert isolated.height == 1, f"固定隔离对象消失 {object_id}"
+        assert isolated["object_version"][0] == source["source_version_id"]
+        assert isolated["status"][0] == "open"
+        input_ref = f"{object_id}:{source['raw_hash'][:8]}:{source['raw_index']}:{source['source_version_id']}"
+        mapped = mapping.filter(pl.col("input_ref") == input_ref)
+        assert mapped.height == 1, f"固定 MAP 对象消失 {object_id}"
+        assert mapped["output_ref"][0] == source["source_version_id"]
+        assert mapped["status"][0] == "quarantine" and reason in mapped["reason_codes"][0]
+        stratum = mapped["stratum"][0]
+        lost = loss.filter((pl.col("layer") == 1) & (pl.col("stratum") == stratum))
+        assert lost.height == 1, f"固定 LOSS 分层消失 {object_id}"
+        assert json.loads(lost["primary_reason_dist"][0]).get(reason, 0) >= 1
+    # LOSS 只有聚合数；以 MAP 的逐 ID 状态重算各层/分层，防止只保留空壳或伪造守恒。
+    cumulative = {}
+    for layer in range(1, 7):
+        mapping = _read_mapping(layout, batch, layer)
+        assert set(mapping["batch_id"]) == {batch}
+        assert set(mapping["layer"]) == {layer}
+        layer_loss = loss.filter(pl.col("layer") == layer)
+        assert set(layer_loss["stratum"]) == set(mapping["stratum"])
+        for row in layer_loss.iter_rows(named=True):
+            mapped = mapping.filter(pl.col("stratum") == row["stratum"])
+            inputs = mapped.select("input_ref", "status").unique()
+            assert inputs["input_ref"].n_unique() == inputs.height
+            assert row["input_n"] == inputs.height, "LOSS 输入计数与 MAP 不符"
+            for state in ("ok", "review", "quarantine", "dup_ref"):
+                assert row[f"n_{state}"] == inputs.filter(pl.col("status") == state).height, "LOSS 状态计数与 MAP 不符"
+            assert row["input_n"] == sum(row[f"n_{s}"] for s in ("ok", "review", "quarantine", "dup_ref"))
+            excluded = mapped.filter(pl.col("status").is_in(["review", "quarantine", "dup_ref"])
+                                     | (pl.col("relation") == "excluded"))
+            seen = cumulative.setdefault(row["stratum"], set())
+            seen.update(excluded["input_ref"])
+            assert row["cum_excluded_ids"] == len(seen), "LOSS 累计排除 ID 不符"
 
-    qs = sorted(glob.glob("data/quarantine/*.parquet"))
-    assert qs, "quarantine 目录无 parquet"
-    for q in qs:
-        d = pl.read_parquet(q)
-        assert d.height >= 0 and len(d.columns) > 0, f"{q} 不可读"
+
+# --------------------------------------------------------------- 突变证据
+# 只 patch 调用边界，不改源码；运行上面的同一断言，只有明确捕获到拒绝才算通过。
+@pytest.mark.parametrize("clock", ["h0", "unknown"])
+def test_mutation_feature_all_invalid(monkeypatch, clock):
+    from quant_lab.research import features
+    from quant_lab.research.ast import canonical_hash
+
+    def forged(asts, anchors, **kwargs):
+        h = canonical_hash(asts[0])
+        return anchors.select("episode_id", "t_dec").with_columns(
+            pl.lit(999999.).alias(f"f_{h}"), pl.lit(False).alias(f"validity_{h}"))
+
+    monkeypatch.setattr(features, "feature_snapshot", forged)
+    with pytest.raises(AssertionError, match="时钟"):
+        if clock == "h0":
+            test_seam_g3_feature_snapshot_respects_t_dec("convenience", dt.timedelta(0))
+        else:
+            test_seam_g3_unknown_dependency_clock()
+
+
+def test_mutation_feature_future_changes_past(monkeypatch):
+    from quant_lab.research import features
+    from quant_lab.research.ast import canonical_hash
+    real = features.feature_snapshot
+
+    def leaking(asts, anchors, *, bars, **kwargs):
+        snap = real(asts, anchors, bars=bars, **kwargs)
+        if bars["close"].max() == 999999.:
+            h = canonical_hash(asts[0])
+            snap = snap.with_columns((pl.col(f"f_{h}") + 1).alias(f"f_{h}"))
+        return snap
+
+    monkeypatch.setattr(features, "feature_snapshot", leaking)
+    with pytest.raises(AssertionError, match="时钟特征值"):
+        test_seam_g3_feature_snapshot_respects_t_dec("convenience", dt.timedelta(0))
+
+
+def test_mutation_unknown_dependency_assumed_known(monkeypatch):
+    from quant_lab.research import features
+    real = features.feature_snapshot
+
+    def unknown_is_close(asts, anchors, *, bars, **kwargs):
+        bars = bars.with_columns(pl.col("available_at").fill_null(pl.col("close_time")))
+        return real(asts, anchors, bars=bars, **kwargs)
+
+    monkeypatch.setattr(features, "feature_snapshot", unknown_is_close)
+    with pytest.raises(AssertionError, match="时钟有效性"):
+        test_seam_g3_unknown_dependency_clock()
+
+
+@pytest.mark.parametrize("entry", ["mark_bar_at", "last_closed_bar"])
+def test_mutation_late_bar_ignores_arrival(monkeypatch, entry):
+    from quant_lab.market import asof
+    real = getattr(asof, entry)
+
+    def close_only(bars, *args, **kwargs):
+        return real(bars.drop("available_at", strict=False), *args, **kwargs)
+
+    monkeypatch.setattr(asof, entry, close_only)
+    with pytest.raises(AssertionError, match="G2 .*可见性"):
+        test_seam_g2_late_bar_clock()
+
+
+@pytest.mark.parametrize("path", ["convenience", "context"])
+@pytest.mark.parametrize("latency", [-US, -MINUTE])
+def test_mutation_feature_accepts_negative_latency(monkeypatch, path, latency):
+    from dataclasses import replace
+    from quant_lab.research import features
+    real = features.feature_snapshot
+
+    def accepts(asts, anchors, **kwargs):
+        if "ctx" in kwargs:
+            kwargs["ctx"] = replace(kwargs["ctx"], latency=dt.timedelta(0))
+        else:
+            kwargs["latency"] = dt.timedelta(0)
+        return real(asts, anchors, **kwargs)
+
+    monkeypatch.setattr(features, "feature_snapshot", accepts)
+    with pytest.raises(AssertionError, match="G3 接受负 latency"):
+        test_seam_negative_latency_clock(path, latency)
+
+
+@pytest.mark.parametrize("entry", ["mark_bar_at", "last_closed_bar"])
+def test_mutation_market_accepts_negative_latency(monkeypatch, entry):
+    from quant_lab.market import asof
+    real = getattr(asof, entry)
+
+    def accepts(*args, **kwargs):
+        kwargs["latency"] = dt.timedelta(0)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(asof, entry, accepts)
+    with pytest.raises(AssertionError, match="G2 接受负 latency"):
+        test_seam_negative_latency_clock("convenience", -US)
+
+
+def test_mutation_execution_missing_episode(monkeypatch, episodes, execution, opportunity):
+    from quant_lab.market import execution as market_execution
+    assert execution.height > 1
+    monkeypatch.setattr(market_execution, "simulate_batch", lambda *args, **kwargs: execution.slice(1))
+    reduced = _execute(episodes)
+    for check in (test_seam_g2_build_request_is_sole_entrypoint, test_seam_g3_pair_arms_consumes_g2_output):
+        with pytest.raises(AssertionError, match="完整机会集不相等"):
+            check(reduced, opportunity)
+
+
+@pytest.mark.parametrize("mid", QUARANTINED)
+def test_mutation_quarantine_known_object_disappears(monkeypatch, fresh_lake, mid):
+    from quant_lab.data import api
+    real = api.quarantine
+
+    def missing(*args, **kwargs):
+        return real(*args, **kwargs).filter(pl.col("object_id") != f"{QUARANTINE_PEER}:{mid}")
+
+    monkeypatch.setattr(api, "quarantine", missing)
+    with pytest.raises(AssertionError, match="固定隔离对象消失"):
+        test_e2e_loss_table_and_quarantine_readable(fresh_lake)
+
+
+def test_mutation_mapping_known_object_disappears(monkeypatch, fresh_lake):
+    real = pl.read_parquet
+    target = fresh_lake["layout"].mapping(fresh_lake["trace"]["batch_id"], 1)
+
+    def missing(path, *args, **kwargs):
+        frame = real(path, *args, **kwargs)
+        if Path(path) == target:
+            frame = frame.filter(~pl.col("input_ref").str.starts_with(f"{QUARANTINE_PEER}:9:"))
+        return frame
+
+    monkeypatch.setattr(pl, "read_parquet", missing)
+    with pytest.raises(AssertionError, match="固定 MAP 对象消失"):
+        test_e2e_loss_table_and_quarantine_readable(fresh_lake)
+
+
+@pytest.mark.parametrize("kind", ["counts", "batch", "stratum"])
+def test_mutation_loss_fabricated(monkeypatch, fresh_lake, kind):
+    from quant_lab.data import api
+    real = api.loss_table
+
+    def forged(batch):
+        loss = real(batch)
+        if kind == "batch":
+            return loss.with_columns(pl.lit("foreign-batch").alias("batch_id"))
+        if kind == "stratum":
+            return loss.filter(~((pl.col("layer") == 1) & pl.col("stratum").str.contains("unknown")))
+        # 保持 input_n 的算术守恒，只有逐 ID 对账才能发现状态被转移。
+        return loss.with_columns((pl.col("n_quarantine") + 1).alias("n_quarantine"),
+                                 (pl.col("n_ok") - 1).alias("n_ok"))
+
+    monkeypatch.setattr(api, "loss_table", forged)
+    with pytest.raises(AssertionError, match="损耗表批次|LOSS"):
+        test_e2e_loss_table_and_quarantine_readable(fresh_lake)
+
+
+@pytest.mark.parametrize("column", ["graph_version", "batch_id"])
+def test_mutation_published_episodes_wrong_identity(monkeypatch, fresh_lake, column):
+    from quant_lab.data import api
+    real = api.load_episodes
+
+    def foreign(*args, **kwargs):
+        return real(*args, **kwargs).with_columns(pl.lit("foreign").alias(column))
+
+    monkeypatch.setattr(api, "load_episodes", foreign)
+    with pytest.raises(AssertionError, match="本轮.*错配"):
+        test_seam_g1_fresh_build_identity(fresh_lake, api.load_episodes(GRAPH))

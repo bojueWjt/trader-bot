@@ -56,6 +56,11 @@ class EvalProtocolWarning(UserWarning):
     """非阻塞协议告警（research-schema §9.10.9 A13）：非请求 estimand 键含 null 等，进 report 诊断不抛。"""
 
 
+#: 机会集逐 episode 冻结的来源身份（OR-05 I05）。两臂彼此一致不够：两臂可以同时来自错误的图版本或决策快照，
+#: 所以还要逐行对照机会集冻结时的身份。
+PROVENANCE_KEYS = ("graph_version", "decision_snapshot_hash", "t_dec")
+
+
 @dataclass(frozen=True)
 class OpportunitySet:
     episode_ids: list[str]
@@ -63,9 +68,11 @@ class OpportunitySet:
     weights: pl.DataFrame              # episode_id, cluster_id, weight（簇均权，每簇总权重 1）
     digest: str = ""
     diagnostics: dict = field(default_factory=dict)   # 非阻塞告警（A13：非请求键 null 计数等），进 report
+    #: episode_id + PROVENANCE_KEYS，合格机会逐行一条；freeze_opportunity_set 总会填，evaluate 要求非空
+    provenance: pl.DataFrame | None = None
 
     def verify(self) -> None:
-        if self.digest and _digest(self.episode_ids, self.eligibility, self.weights) != self.digest:
+        if self.digest and _digest(self.episode_ids, self.eligibility, self.weights, self.provenance) != self.digest:
             raise EvalProtocolError("OpportunitySet 内容与冻结摘要不一致（被改动）")
 
     @property
@@ -73,12 +80,29 @@ class OpportunitySet:
         return int(self.weights["cluster_id"].n_unique())
 
 
-def _digest(ids, elig: pl.DataFrame, w: pl.DataFrame) -> str:
+def _digest(ids, elig: pl.DataFrame, w: pl.DataFrame, provenance: pl.DataFrame | None = None) -> str:
     h = hashlib.sha256()
     h.update(json_dumps(list(ids)).encode())
     h.update(elig.sort("episode_id").write_json().encode())
     h.update(w.sort("episode_id").write_json().encode())
+    if provenance is not None:        # 来源身份并入摘要：冻结后把它换掉或去掉，verify 必然不等
+        h.update(b"\0provenance\0")
+        h.update(provenance.sort("episode_id").write_json().encode())
     return h.hexdigest()
+
+
+def _check_provenance(frame: pl.DataFrame, provenance: pl.DataFrame, label: str, keys=PROVENANCE_KEYS) -> None:
+    """frame 中每个机会的来源身份必须逐行等于机会集冻结时的身份；frame 缺某列即拒绝（除非 keys 已按列裁剪）。"""
+    missing = [k for k in keys if k not in frame.columns]
+    if missing:
+        raise EvalProtocolError(f"{label} 缺来源身份列 {missing}，无法核对是否来自冻结机会集")
+    j = provenance.select("episode_id", *keys).join(
+        frame.select("episode_id", *[pl.col(k).alias(f"__got_{k}") for k in keys]), on="episode_id", how="left")
+    for k in keys:
+        bad = j.filter(pl.col(k).cast(pl.Utf8).ne_missing(pl.col(f"__got_{k}").cast(pl.Utf8)))
+        if bad.height:
+            raise EvalProtocolError(f"{label} 的 {k} 与冻结机会集不一致（{bad.height} 行，例 {bad['episode_id'].head(3).to_list()}）："
+                                    f"结果不来自本机会集所冻结的图版本 / 决策快照，不得评估")
 
 
 def json_dumps(o):
@@ -121,7 +145,11 @@ def freeze_opportunity_set(episodes: pl.DataFrame, *, estimand: str = DEFAULT_ES
     est = pl.col("eligibility_by_estimand").struct.field(estimand)
     reason = pl.when(~est).then(pl.lit(f"NOT_ELIGIBLE:{estimand}")).otherwise(reason)
     elig = elig & est
-    tab = e.with_columns(elig.alias("eligible"), reason.alias("reason")).select("episode_id", "cluster_id", "eligible", "reason")
+    missing = [k for k in PROVENANCE_KEYS if k not in e.columns]
+    if missing:
+        raise EvalProtocolError(f"决策视图缺来源身份列 {missing}：机会集必须冻结每个机会的图版本与决策快照（OR-05 I05）")
+    tab = e.with_columns(elig.alias("eligible"), reason.alias("reason")).select(
+        "episode_id", "cluster_id", "eligible", "reason", *[pl.col(k) for k in PROVENANCE_KEYS if k != "t_dec"], "t_dec")
     ok = tab.filter(pl.col("eligible"))
     n_c = ok.group_by("cluster_id").len().rename({"len": "n_c"})
     w = ok.join(n_c, on="cluster_id").with_columns((1.0 / pl.col("n_c")).alias("weight")).select("episode_id", "cluster_id", "weight").sort("episode_id")
@@ -134,7 +162,11 @@ def freeze_opportunity_set(episodes: pl.DataFrame, *, estimand: str = DEFAULT_ES
         raise EvalProtocolError(f"机会集自相矛盾：episode_ids={len(ids)} 而 weights.height={w.height}")
     if ids and w["cluster_id"].n_unique() == 0:
         raise EvalProtocolError("episode_ids 非空但 n_clusters=0")
-    return OpportunitySet(ids, elig_df, w, _digest(ids, elig_df, w), diag)
+    prov = ok.select("episode_id", *PROVENANCE_KEYS).sort("episode_id")
+    for k in PROVENANCE_KEYS:
+        if prov[k].null_count():
+            raise EvalProtocolError(f"合格机会的 {k} 含 null（{prov[k].null_count()} 行）：来源身份不可空")
+    return OpportunitySet(ids, elig_df, w, _digest(ids, elig_df, w, prov), diag, prov)
 
 
 @dataclass(frozen=True)
@@ -212,8 +244,13 @@ def _validate_and_cast(x: pl.DataFrame, label: str) -> pl.DataFrame:
     return r
 
 
-def pair_arms(execution: pl.DataFrame, ids: list[str], *, baseline_policy: str | None = None, candidate_policy: str | None = None) -> pl.DataFrame:
-    """返回按 episode_id 配对的两臂表：episode_id, base_R, cand_R, base_censor, cand_censor, cand_fill, cand_open, cand_close。"""
+def pair_arms(execution: pl.DataFrame, ids: list[str], *, baseline_policy: str | None = None, candidate_policy: str | None = None,
+              provenance: pl.DataFrame | None = None) -> pl.DataFrame:
+    """返回按 episode_id 配对的两臂表：episode_id, base_R, cand_R, base_censor, cand_censor, cand_fill, cand_open, cand_close。
+
+    给出 provenance（机会集冻结的来源身份）时，每一臂都逐行对照它——两臂彼此一致而同时错配也会被拒。
+    evaluate 总会给出。
+    """
     pols = execution["policy_version"].unique().sort().to_list()
     if baseline_policy is None and candidate_policy is None:
         if len(pols) == 1:
@@ -224,6 +261,9 @@ def pair_arms(execution: pl.DataFrame, ids: list[str], *, baseline_policy: str |
     candidate_policy = candidate_policy or baseline_policy
     b = _validate_and_cast(_arm(execution, baseline_policy, ids, "baseline"), "baseline")
     c = _validate_and_cast(_arm(execution, candidate_policy, ids, "candidate"), "candidate")
+    if provenance is not None:
+        _check_provenance(b, provenance, "baseline 臂")
+        _check_provenance(c, provenance, "candidate 臂")
     missing = [k for k in _CTX_KEYS if k not in b.columns or k not in c.columns]
     if missing:
         raise EvalProtocolError(f"两臂缺共享上下文列 {missing}")
@@ -259,13 +299,16 @@ def evaluate(
 
 
 def _evaluate(ast, opp, *, features, rule, execution, fold_id, attempt_id, baseline_policy, candidate_policy, ledger, tail_alpha) -> EvalResult:
-    opp.verify()
     h = canonical_hash(ast)
     ids = list(opp.episode_ids)
     n0 = len(ids)
     if ledger is not None:
         ledger.mark(attempt_id, "running")
     try:
+        opp.verify()                  # 放进 try：账本已预留时，被改动的机会集也要留下 failed 终态，不停在 running
+        if opp.provenance is None:
+            raise EvalProtocolError("机会集未冻结来源身份（graph_version / decision_snapshot_hash / t_dec）："
+                                    "只能用 freeze_opportunity_set 构造，否则无法核对执行结果是否来自本机会集（OR-05 I05）")
         if n0 == 0:
             return EvalResult(None, None, 0, 0, 0.0, 0.0, None, None, 0.0, status="insufficient", reason="EMPTY_OPPORTUNITY_SET", canonical_hash=h, fold_id=fold_id, attempt_id=attempt_id)
         fcol, vcol = f"f_{h}", f"validity_{h}"
@@ -281,7 +324,8 @@ def _evaluate(ast, opp, *, features, rule, execution, fold_id, attempt_id, basel
             return EvalResult(None, None, n0, opp.n_clusters, 0.0, nan_rate, None, None, 0.0, n_nan_skip=n_nan, status="rejected",
                               reason=f"NAN_RATE {nan_rate:.4f} > {NAN_RATE_MAX}", canonical_hash=h, fold_id=fold_id, attempt_id=attempt_id)
         take = pl.Series(rule(feat)).cast(pl.Boolean).fill_null(False) & valid   # invalid 特征 → skip
-        pairs = pair_arms(execution, ids, baseline_policy=baseline_policy, candidate_policy=candidate_policy)
+        pairs = pair_arms(execution, ids, baseline_policy=baseline_policy, candidate_policy=candidate_policy,
+                          provenance=opp.provenance)
         tab = (pl.DataFrame({"episode_id": ids, "take": take})
                .join(pairs, on="episode_id", how="left")
                .join(opp.weights.select("episode_id", "cluster_id", "weight"), on="episode_id", how="left"))
@@ -292,6 +336,10 @@ def _evaluate(ast, opp, *, features, rule, execution, fold_id, attempt_id, basel
             pl.when(pl.col("take")).then(pl.col("cand_R")).otherwise(0.0).alias("R_cand"),
         ).with_columns(pl.col("__excl").is_null().alias("m")).with_columns((pl.col("R_cand") - pl.col("base_R")).alias("d"))
         n_cov = int((tab["__excl"] == "coverage").sum())
+        fkeys = [k for k in PROVENANCE_KEYS if k in features.columns]
+        if fkeys:                     # 特征带着来源列时，同样逐行对照冻结身份
+            _check_provenance(pl.DataFrame({"episode_id": ids}).join(features.select("episode_id", *fkeys), on="episode_id", how="left"),
+                              opp.provenance, "features", keys=fkeys)
         if "t_dec" in features.columns:
             ft = pl.DataFrame({"episode_id": ids}).join(features.select("episode_id", pl.col("t_dec").alias("__ft")), on="episode_id", how="left")
             chk = tab.select("episode_id", "t_dec").join(ft, on="episode_id", how="left")
@@ -325,4 +373,4 @@ def _evaluate(ast, opp, *, features, rule, execution, fold_id, attempt_id, basel
         raise
 
 
-__all__ = ["COVERAGE_CENSOR_REASONS", "DEFAULT_ESTIMAND", "ESTIMANDS", "NAN_RATE_MAX", "exclusion_kind", "EvalContractError", "EvalProtocolError", "EvalProtocolWarning", "EvalResult", "OpportunitySet", "evaluate", "freeze_opportunity_set", "pair_arms"]
+__all__ = ["COVERAGE_CENSOR_REASONS", "DEFAULT_ESTIMAND", "ESTIMANDS", "NAN_RATE_MAX", "PROVENANCE_KEYS", "exclusion_kind", "EvalContractError", "EvalProtocolError", "EvalProtocolWarning", "EvalResult", "OpportunitySet", "evaluate", "freeze_opportunity_set", "pair_arms"]

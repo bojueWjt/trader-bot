@@ -1,7 +1,7 @@
 """feature_snapshot（契约 feature-snapshot §3；ADR-G3 §5；review-G3-P1 S01–S03 闭合）。
 
 对齐规则：特征时间戳 = bar close_time（区间右端点），取 `close_time + latency <= t_dec` 的最后一根（H0 latency=0 时等号成立）；
-bars 若带 available_at（真实可知时刻），还须 `available_at <= t_dec`，晚到数据不得提前使用。最近计划槽位 bar 缺失或过旧
+bars 若带 available_at（真实可知时刻），每个必要依赖的时间须已知且 `available_at <= t_dec`，未知或晚到数据不得提前使用。最近计划槽位 bar 缺失或过旧
 （staleness >= max_staleness，默认 = interval）→ invalid，不无限向前找有效值。cutoff 是数据可见上限：close_time > cutoff 的 bar 不参与；
 t_dec > cutoff 的 anchor 拒评（validity False），不把 t_dec 偷换成 cutoff。t_dec 缺失 → invalid 并计损耗（不推导）。
 
@@ -17,7 +17,6 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
-import math
 import uuid
 import warnings
 from dataclasses import dataclass, replace
@@ -27,9 +26,12 @@ import polars as pl
 
 from quant_lab.research import paths
 from quant_lab.research.ast import CANONICALIZATION_VERSION, canonical_hash, lint
-from quant_lab.research.backends import assert_ast_supported, get_backend, interval_minutes
+from quant_lab.research.backends import (
+    PRESENT, assert_ast_supported, get_backend, interval_minutes, prepare_partition, to_grid, window_slots,
+)
 
 UTC_US = pl.Datetime("us", "UTC")
+AVAILABILITY_VERSION = 2             # OR-05：旧的回看区间聚合缓存不得热读
 
 
 class SnapshotInvalid(ValueError):
@@ -96,6 +98,7 @@ def snapshot_cache_key(ast: dict, *, backend: str, backend_version: str, interva
                        max_staleness: dt.timedelta | None = None, bars_hash: str = "") -> str:
     rep = lint(ast)
     payload = {
+        "availability_version": AVAILABILITY_VERSION,
         "bars_digest": bars_hash,
         "canonical_hash": canonical_hash(ast), "canonicalization_version": CANONICALIZATION_VERSION,
         "op_versions": rep.op_versions, "registry_digest": rep.registry_digest, "backend": backend, "backend_version": backend_version,
@@ -114,9 +117,19 @@ def anchor_hash(anchors: pl.DataFrame) -> str:
     return hashlib.sha256(rows.write_json().encode()).hexdigest()
 
 
+def _check_time_parameters(latency, max_staleness) -> None:
+    if not isinstance(latency, dt.timedelta) or latency < dt.timedelta(0):
+        raise SnapshotInvalid("latency 必须为非负 timedelta")
+    if max_staleness is not None:
+        if not isinstance(max_staleness, dt.timedelta) or max_staleness <= dt.timedelta(0):
+            raise SnapshotInvalid("max_staleness 必须为正 timedelta 或 None（默认 interval）")
+
+
 def _resolve_ctx(ctx: SnapshotContext | None, cutoff, latency, max_staleness, step: dt.timedelta) -> SnapshotContext:
     """唯一有效上下文：便捷参数只能与 ctx 一致或填补 ctx 的默认；冲突 → SnapshotInvalid。"""
     ctx = ctx or SnapshotContext()
+    _check_time_parameters(ctx.latency, ctx.max_staleness)
+    _check_time_parameters(latency, max_staleness)
     upd = {}
     if cutoff is not None:
         if ctx.cutoff is not None and ctx.cutoff != cutoff:
@@ -134,6 +147,70 @@ def _resolve_ctx(ctx: SnapshotContext | None, cutoff, latency, max_staleness, st
     if ctx.max_staleness is None:
         ctx = replace(ctx, max_staleness=step)
     return ctx
+
+
+def _dependency_availability(ast: dict, bars: pl.DataFrame, backend) -> pl.DataFrame:
+    """沿 AST 的必要槽位传播未知掩码与时间上界；不把整个回看区间误作依赖。"""
+    fields = lint(ast).fields
+    arrival_dtype = bars.schema["available_at"]
+    if not isinstance(arrival_dtype, pl.Datetime):
+        arrival_dtype = UTC_US         # 全 null 列仍可传播；已知时刻保留原精度
+    parts = []
+    for (inst,), part in bars.partition_by("instrument_id", as_dict=True).items():
+        part = prepare_partition(part, fields)
+        grid, step = to_grid(part, fields)
+        grid = grid.join(part.select("close_time", "available_at"), on="close_time", how="left")
+        # compute_series 的公开接口用于取得 EMA 子表达式的重置点；保留缺槽，不能压缩历史。
+        inputs = grid.with_columns(pl.lit(part["interval"][0]).alias("interval"))
+
+        def visit(node: dict) -> tuple[pl.Series, pl.Series]:
+            if "field" in node:
+                return grid["available_at"].is_null(), grid["available_at"].cast(arrival_dtype).cast(pl.Int64)
+            if "const" in node:
+                return pl.Series([False] * grid.height), pl.Series([None] * grid.height, dtype=pl.Int64)
+            children = [visit(child) for child in node["args"]]
+            unknown = pl.select(pl.any_horizontal([pl.lit(u) for u, _ in children])).to_series()
+            latest = pl.select(pl.max_horizontal([pl.lit(t) for _, t in children])).to_series()
+            name = node["op"]
+            if name in ("Ref", "Delta"):
+                lag = node["params"]["lag"]
+                shifted_unknown, shifted_latest = unknown.shift(lag), latest.shift(lag)
+                if name == "Ref":
+                    return shifted_unknown.fill_null(True), shifted_latest
+                return (unknown | shifted_unknown.fill_null(True),
+                        pl.select(pl.max_horizontal(pl.lit(latest), pl.lit(shifted_latest))).to_series())
+            if name == "EMA":
+                child = node["args"][0]
+                if "const" in child:
+                    child_values = pl.Series([float(child["const"])] * grid.height)
+                else:
+                    child_values = backend.compute_series(child, inputs)
+                # 数值无效才重置递推；时间未知不能重置后洗掉仍参与 EMA 的历史值。
+                groups = child_values.is_null().cast(pl.Int64).cum_sum()
+                state = pl.DataFrame({"unknown": unknown, "latest": latest, "group": groups})
+                # 重置行本身不参与新种子，故将其元数据清空后再累计。
+                state = state.with_columns(
+                    pl.when(pl.lit(child_values.is_null())).then(False).otherwise(unknown).alias("unknown"),
+                    pl.when(pl.lit(child_values.is_null())).then(None).otherwise(latest).alias("latest"),
+                ).with_columns(
+                    pl.col("unknown").cast(pl.UInt8).cum_max().over("group").cast(pl.Boolean),
+                    pl.col("latest").cum_max().forward_fill().over("group"),
+                )
+                return state["unknown"], state["latest"]
+            if "window" in node:
+                n = window_slots(node["window"], step)
+                return (unknown.cast(pl.UInt8).rolling_max(n, min_samples=1).cast(pl.Boolean),
+                        latest.rolling_max(n, min_samples=1))
+            return unknown, latest
+
+        unknown, latest = visit(ast)
+        parts.append(grid.select(pl.lit(inst).alias("instrument_id"), pl.col("close_time").alias("__bar_close"))
+                     .with_columns(unknown.alias("__avail_unknown"), latest.cast(arrival_dtype).alias("__avail_max"))
+                     .filter(grid[PRESENT]))
+    if not parts:
+        return pl.DataFrame(schema={"instrument_id": pl.Utf8, "__bar_close": UTC_US,
+                                    "__avail_unknown": pl.Boolean, "__avail_max": arrival_dtype})
+    return pl.concat(parts, how="vertical_relaxed")
 
 
 def feature_snapshot(
@@ -169,23 +246,15 @@ def feature_snapshot(
     out = a.select("__row", "episode_id", "t_dec")
     ah = anchor_hash(anchors)
     bh = bars_digest(vis_bars) if cache else ""
-    avail_base = vis_bars.select("instrument_id", "close_time", "available_at").sort("instrument_id", "close_time") if has_avail else None
     for ast in asts:
         h = canonical_hash(ast)
-        rep = lint(ast)
-        avail = None
-        if avail_base is not None:
-            # 依赖地平线（计划槽位数）：rows 回看 + wallclock 回看换算；EMA 递推无限记忆 → 累计 max
-            H = rep.lookback_rows + math.ceil(rep.lookback_minutes / interval_minutes(ivs[0]))
-            expr = (pl.col("available_at").cum_max().over("instrument_id") if "EMA" in rep.ops
-                    else pl.col("available_at").rolling_max(window_size=H + 1, min_samples=1).over("instrument_id"))
-            avail = avail_base.with_columns(expr.alias("__avail_max")).select("instrument_id", pl.col("close_time").alias("__bar_close"), "__avail_max")
         key = snapshot_cache_key(ast, backend=be.name, backend_version=be.version, interval=ivs[0], ctx=ctx, anchor_hash=ah, bars_hash=bh)
         col = _cache_read(key, a) if cache else None
         if col is not None and not ctx.check_identity(anchors):
             raise SnapshotInvalid("热读期间 graph 已撤销：丢弃缓存结果（fail closed）")
         if col is None:
             vals = be.compute(ast, vis_bars).rename({"close_time": "__bar_close"}).sort("__bar_close")
+            avail = _dependency_availability(ast, vis_bars, be) if has_avail else None
             q = a.filter(pl.col("__ok")).sort("__t_query")
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message="Sortedness of columns cannot be checked")
@@ -195,8 +264,10 @@ def feature_snapshot(
             valid = pl.col("__bar_close").is_not_null() & pl.col("value").is_not_null()
             if avail is not None:
                 j = j.join(avail, on=["instrument_id", "__bar_close"], how="left")
-                # 窗口内（回看地平线）任一依赖 bar 晚到（available_at > t_dec）→ 整个特征在该 anchor 不可见
-                valid = valid & pl.col("__avail_max").is_not_null() & (pl.col("__avail_max") <= pl.col("t_dec"))
+                # 未知与晚到分别守门；纯常量没有行情依赖，时间上界可空。
+                valid = valid & ~pl.col("__avail_unknown").fill_null(True)
+                decision_time = pl.col("t_dec").cast(j.schema["__avail_max"])
+                valid = valid & (pl.col("__avail_max").is_null() | (pl.col("__avail_max") <= decision_time))
             j = j.with_columns(valid.alias("__valid"))
             col = a.select("__row", "episode_id").join(j.select("__row", "value", "__valid"), on="__row", how="left").with_columns(
                 pl.col("__valid").fill_null(False)).sort("__row")
