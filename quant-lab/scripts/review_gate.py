@@ -1,90 +1,103 @@
 #!/usr/bin/env python3
-"""审查文件的终裁门（OR-05 verify 用）。
+"""审查终裁门（OR-05 verify 用）：终裁以**封存记录**为准，不从 Markdown 渲染里推断。
 
-只认**正文**里的正式终裁行：代码块（``` 或 ~~~ 围起来的部分）里出现的「终裁：pass」是示例，不是裁定。
-允许保留历史轮次；判定只看最后一轮：
-- 最后一条正式终裁必须是 pass；
-- 上一条正式终裁之后、最后一条之前，必须恰有一条「证据完整性：完成」。
-无终裁、fail、insufficient、只有 pass 没有证据完整性、证据完整性未完成，一律非零退出。
+为什么不再解析 Markdown：OR-05 三审到五审反复证明，「哪些行算正文」取决于完整的 CommonMark 渲染规则
+（围栏长度、Unicode 空白、HTML 块七类、列表容器……），在门控脚本里逐条追赶，每一轮都会有下一条。
+终裁是一个裁定，不该是渲染结果的推论。于是改成：
 
-用法：python3 scripts/review_gate.py <审查文件>
+- 审查者在每轮结束时**封存**：`review_gate.py --seal <审查.md> <记录.json> --round N --verdict V [--evidence-complete]`，
+  记录轮次、终裁、证据完整性，以及封存那一刻审查文件的 sha256；
+- 门只核三件事，都不需要理解 Markdown：
+  1. 记录的字段与类型严格合法（键集固定，verdict 取值封闭，evidence_complete 必须是布尔值）；
+  2. 审查文件当前字节的 sha256 等于记录里的值——封存后审查文件改动任何一个字节，门即失败；
+  3. 审查文件最后一个非空行恰为 `终裁：<记录中的 verdict>`——人读的结论与机读的记录一致。
+- 最后判定：verdict 为 pass 且 evidence_complete 为 true，才退出 0。
+
+用法：
+  python3 scripts/review_gate.py <审查.md> <记录.json>
+  python3 scripts/review_gate.py --seal <审查.md> <记录.json> --round N --verdict pass|fail|insufficient [--evidence-complete]
 """
 from __future__ import annotations
 
-import re
+import argparse
+import hashlib
+import json
 import sys
+from pathlib import Path
 
-_VERDICT = re.compile(r"^终裁：(\S+)\s*$")
-_EVIDENCE = re.compile(r"^证据完整性：(\S+)\s*$")
-#: 围栏行（CommonMark 0.31 §4.5）：至多 3 个 ASCII 空格缩进，3 个以上同种字符（` 或 ~），其后为信息串
-_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
-#: 渲染后不可见或原样输出的 HTML 块（CommonMark §4.6 第 1、2 类）：开头与各自的结束标记
-_HTML_RAW = (
-    (re.compile(r"^ {0,3}<(pre|script|style|textarea)(\s|>|$)", re.I), re.compile(r"</(pre|script|style|textarea)>", re.I)),
-    (re.compile(r"^ {0,3}<!--"), re.compile(r"-->")),
-)
+VERDICTS = ("pass", "fail", "insufficient")
+KEYS = {"review", "round", "verdict", "evidence_complete", "review_sha256"}
 
 
-def _only_spaces_or_tabs(rest: str) -> bool:
-    """关闭围栏之后只允许 ASCII 空格与制表符（§4.5）；str.strip() 会把 U+00A0、U+3000 也当空白，不能用。"""
-    return rest.strip(" \t") == ""
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def formal_lines(text: str) -> list[str]:
-    """去掉代码块与原样 HTML 块后的正文行。未闭合的块按「到文末都是非正文」处理。
-
-    围栏按 CommonMark 判：开围栏记下字符与长度；反引号围栏的信息串不得含反引号；
-    只有**同字符、长度不短于开围栏、其后只有 ASCII 空格或制表符**的行才关闭它。
-    HTML 注释与 <pre>/<script>/<style>/<textarea> 块里的内容渲染后不可见或原样输出，同样不算正文。
-    （OR-05 三审 §10.2、四审 §11）
-    """
-    out, fence, html_end = [], None, None
-    for line in text.splitlines():
-        if html_end is not None:
-            if html_end.search(line):
-                html_end = None
-            continue
-        m = _FENCE.match(line)
-        if fence is None:
-            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
-                fence = (m.group(1)[0], len(m.group(1)))
-                continue
-            opened = next(((start, end) for start, end in _HTML_RAW if start.match(line)), None)
-            if opened is not None:
-                if not opened[1].search(line[opened[0].match(line).end():]):
-                    html_end = opened[1]
-                continue
-            out.append(line)
-        elif m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1] and _only_spaces_or_tabs(m.group(2)):
-            fence = None
-    return out
+def _last_nonempty_line(path: Path) -> str:
+    lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
 
 
-def check(text: str) -> tuple[int, str]:
-    lines = formal_lines(text)
-    idx = [i for i, ln in enumerate(lines) if _VERDICT.match(ln)]
-    if not idx:
-        return 1, "没有正式终裁行"
-    last = _VERDICT.match(lines[idx[-1]]).group(1)
-    if last != "pass":
-        return 1, f"最后一轮终裁为 {last}"
-    start = idx[-2] + 1 if len(idx) > 1 else 0
-    marks = [m.group(1) for ln in lines[start:idx[-1]] if (m := _EVIDENCE.match(ln))]
-    if marks != ["完成"]:
-        return 1, f"最后一轮的证据完整性标记为 {marks}，须恰为一条「完成」"
-    return 0, f"最后一轮终裁 pass，证据完整性完成（共 {len(idx)} 轮）"
+def check(review: Path, record: Path) -> tuple[int, str]:
+    if not review.is_file():
+        return 1, f"审查文件不存在：{review}"
+    if not record.is_file():
+        return 1, f"没有封存记录：{record}（审查者须用 --seal 封存本轮终裁）"
+    try:
+        rec = json.loads(record.read_text(encoding="utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        return 1, f"封存记录不是合法 JSON：{exc}"
+    if not isinstance(rec, dict) or set(rec) != KEYS:
+        return 1, f"封存记录键集须恰为 {sorted(KEYS)}，得到 {sorted(rec) if isinstance(rec, dict) else type(rec).__name__}"
+    if rec["review"] != review.name:
+        return 1, f"封存记录指向 {rec['review']!r}，不是 {review.name!r}"
+    if type(rec["round"]) is not int or rec["round"] < 1:
+        return 1, f"round 须为正整数，得到 {rec['round']!r}"
+    if rec["verdict"] not in VERDICTS:
+        return 1, f"verdict 须为 {VERDICTS} 之一，得到 {rec['verdict']!r}"
+    if type(rec["evidence_complete"]) is not bool:
+        return 1, f"evidence_complete 须为布尔值，得到 {rec['evidence_complete']!r}"
+    if rec["review_sha256"] != _sha256(review):
+        return 1, "审查文件在封存之后被改动过（sha256 不符）：须重新审查并封存"
+    last = _last_nonempty_line(review)
+    if last != f"终裁：{rec['verdict']}":
+        return 1, f"审查文件最后一个非空行 {last!r} 与封存终裁 {rec['verdict']!r} 不一致"
+    if rec["verdict"] != "pass":
+        return 1, f"第 {rec['round']} 轮终裁为 {rec['verdict']}"
+    if rec["evidence_complete"] is not True:
+        return 1, f"第 {rec['round']} 轮证据完整性未完成"
+    return 0, f"第 {rec['round']} 轮终裁 pass，证据完整性完成，审查文件与封存一致"
+
+
+def seal(review: Path, record: Path, round_: int, verdict: str, evidence_complete: bool) -> None:
+    if verdict not in VERDICTS:
+        raise SystemExit(f"verdict 须为 {VERDICTS} 之一")
+    if round_ < 1:
+        raise SystemExit("round 须为正整数")
+    last = _last_nonempty_line(review)
+    if last != f"终裁：{verdict}":
+        raise SystemExit(f"封存前审查文件最后一个非空行须为「终裁：{verdict}」，现为 {last!r}")
+    rec = {"review": review.name, "round": round_, "verdict": verdict,
+           "evidence_complete": evidence_complete, "review_sha256": _sha256(review)}
+    record.write_text(json.dumps(rec, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print(__doc__.strip().splitlines()[-1], file=sys.stderr)
-        return 2
-    try:
-        text = open(argv[1], encoding="utf-8").read()
-    except OSError as exc:
-        print(f"读不到审查文件：{exc}", file=sys.stderr)
-        return 1
-    rc, why = check(text)
+    ap = argparse.ArgumentParser(prog="review_gate.py", description="审查终裁门")
+    ap.add_argument("--seal", action="store_true")
+    ap.add_argument("review", type=Path)
+    ap.add_argument("record", type=Path)
+    ap.add_argument("--round", type=int)
+    ap.add_argument("--verdict")
+    ap.add_argument("--evidence-complete", action="store_true")
+    a = ap.parse_args(argv[1:])
+    if a.seal:
+        if a.round is None or a.verdict is None:
+            ap.error("--seal 需要 --round 与 --verdict")
+        seal(a.review, a.record, a.round, a.verdict, a.evidence_complete)
+        print(f"已封存第 {a.round} 轮：{a.verdict}，证据完整性 {'完成' if a.evidence_complete else '未完成'}")
+        return 0
+    rc, why = check(a.review, a.record)
     print(why)
     return rc
 

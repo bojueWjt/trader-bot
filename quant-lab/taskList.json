@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-23T20:54:31Z",
+  "updatedAt": "2026-09-24T03:43:31Z",
   "phase": "P1",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -1925,7 +1925,7 @@
           "id": "OR-05",
           "title": "[Codex adversarial review] 集成 review：前视、幸存偏差、契约漂移、凭据边界、AGENTS.md 铁律",
           "status": "todo",
-          "verify": "python3 scripts/review_gate.py docs/adr/review-G0-integration.md",
+          "verify": "python3 scripts/review_gate.py docs/adr/review-G0-integration.md docs/adr/review-G0-integration.verdict.json",
           "verifyHistory": [
             {
               "at": "2026-09-23T19:59:41Z",
@@ -1938,6 +1938,12 @@
               "old": "python3 -c \"import re,sys;t=open('docs/adr/review-G0-integration.md',encoding='utf-8').read();v=re.findall(r'^终裁：(\\S+)\\s*$',t,re.M);print('verdicts',v);sys.exit(0 if v and v[-1]=='pass' else 1)\"",
               "by": "用户会话 0f23fe43（经用户授权）",
               "why": "OR-05 二审 §7.7：上一版正则把代码块里的示例终裁当成正式裁定，也不检查本轮证据完整性（bare_pass、incomplete_pass、codeblock_pass 均 rc=0）。改为 scripts/review_gate.py：去掉代码块后只认正文终裁，最后一轮须 pass，且该轮恰有一条「证据完整性：完成」。门控矩阵落为常驻测试 tests/integration/test_board_gates.py。"
+            },
+            {
+              "at": "2026-09-24T03:43:31Z",
+              "old": "python3 scripts/review_gate.py docs/adr/review-G0-integration.md",
+              "by": "用户会话 0f23fe43（经用户授权）",
+              "why": "OR-05 三审到五审：从 Markdown 渲染推断「正文终裁」每轮都有新边界（围栏长度、Unicode 空白、HTML 块七类、列表容器），五审一次报出 6 条。终裁是裁定，不是渲染推论。改为封存记录：审查者每轮用 review_gate.py --seal 写 verdict.json（轮次、终裁、证据完整性、审查文件 sha256）；门核字段类型、审查文件字节与封存一致、最后一个非空行与封存终裁一致，pass 且证据完整才通过。不再解析 Markdown。"
             }
           ]
         },

@@ -1004,3 +1004,237 @@ rc=0
 
 证据完整性：完成
 终裁：fail
+
+## 12. 五审（2026-09-24，提交 2747c9a）：I07
+
+五审结论：**fail；I07 未闭合**。四审 U+00A0、U+3000 的两个原输入与三审三个原输入均已正确拒绝，但“正文”识别仍有六类可实际放行示例终裁的问题，详见 F01–F06。六项均计为五审必修，沿 I07 归档，不另造 I08 等编号。新增应改 **0 条**；历史 A01–A04 保留 **4 条**，A05 沿用已修正结论。只发生误拒的样例不单独升级；这里每个根因另有 rc=0 的代码／不可见内容放行证据。
+
+### 12.1 对象、取证边界和判据
+
+核验 HEAD 为 `2747c9adcfed3e09e53fbdf808bc93ed95bab037`。实现增量确实限于 `scripts/review_gate.py` 与 `tests/integration/test_board_gates.py`；提交还携带四审报告追加。取证开始时 quant-lab 无工作树改动。I01–I06 沿用既有闭合结论，不重新审查；本次未发现增量破坏它们的证据。
+
+临时证据目录为 `/var/folders/js/d8w4bf351gvdk84fn820t3nw0000gn/T/or05-r5-cdyy7ki0`。原报告 `report-before.md` 为 **82128 字节**，SHA-256 为 `e3904342cbe21f27b9aac112c293e591813320a3313efbee8ab5775af7b2a654`。追加前断言文件与该备份逐字节相同，以二进制 append 追加本章；源码、测试、看板及既有报告内容均不改。关闭字节码与 pytest 缓存；integration 自身的 `fresh_lake` 把数据根设为 pytest 临时目录，无正式数据写入。
+
+Grok MCP 返回 `MCP tool call requires approval, but approval policy is never`；companion CLI 返回状态文件写入 `EPERM`。两条委派通道均不能启动，按仓库降级规则由 Codex 执行取证及追加；没有读取 Grok 历史 session。
+
+规范固定为 [CommonMark 0.31.2 §4.5](https://spec.commonmark.org/0.31.2/#fenced-code-blocks)、[§4.6](https://spec.commonmark.org/0.31.2/#html-blocks)，并核对它们依赖的 [§2.1–2.2 字符、分行、tab](https://spec.commonmark.org/0.31.2/#characters-and-lines) 及容器边界。下面“一致”是指**正文终裁识别所需语义**，不要求门生成 HTML、语言 class 或代码内容去缩进后的文本。未扩展为整个 §6 行内 Markdown 的审计。
+
+另用本机既有 `markdown-it-py 4.2.0` 的 commonmark 模式辅助检查代码块和容器结构；它在 HTML Unicode 空白和 Unicode 忽略大小写方面也存在宽匹配，不能用它给 F02/F03 作规范背书。这两项按规范原文判断，并核对官方 [cmark 扫描器](https://raw.githubusercontent.com/commonmark/cmark/0.31.1/src/scanners.re) 和 [commonmark.js 关闭标签匹配](https://raw.githubusercontent.com/commonmark/commonmark.js/0.31.2/lib/blocks.js)。第三方或参考实现的宽松行为不覆盖本轮明确指定的规则。
+
+### 12.2 三审、四审原样重跑
+
+从原报告按完整代码围栏行抽取 §10.2、§11.4 的 Python 代码块，不改代码、输入或命令，在 quant-lab/ 执行。两份复现脚本自身均 rc=0、stderr 为空；门控子进程结果如下：
+
+```text
+four_backticks rc= 1 最后一轮终裁为 fail
+trailing_text rc= 1 最后一轮终裁为 fail
+four_tildes rc= 1 最后一轮终裁为 fail
+U+00A0 rc= 1 最后一轮终裁为 fail
+U+3000 rc= 1 最后一轮终裁为 fail
+```
+
+§11.2 与 §11.3 的两个字典从原文用 AST 取值，保留字符串的全部字符与换行，逐份临时文件调用真实门。未用常驻矩阵里略有差别的输入代替。全部 stderr 为空。
+
+| 四审原用例 | 本轮 rc | stdout |
+|---|---:|---|
+| `matrix_inputs/none` | 1 | `没有正式终裁行` |
+| `matrix_inputs/fail` | 1 | `最后一轮终裁为 fail` |
+| `matrix_inputs/insufficient` | 1 | `最后一轮终裁为 insufficient` |
+| `matrix_inputs/pass_then_fail` | 1 | `最后一轮终裁为 fail` |
+| `matrix_inputs/complete_pass` | 0 | `最后一轮终裁 pass，证据完整性完成（共 1 轮）` |
+| `matrix_inputs/incomplete_pass` | 1 | `最后一轮的证据完整性标记为 ['未完成']，须恰为一条「完成」` |
+| `matrix_inputs/bare_pass` | 1 | `最后一轮的证据完整性标记为 []，须恰为一条「完成」` |
+| `matrix_inputs/codeblock_pass` | 1 | `最后一轮终裁为 fail` |
+| `boundary_inputs/indent1` | 1 | `最后一轮终裁为 fail` |
+| `boundary_inputs/indent2` | 1 | `最后一轮终裁为 fail` |
+| `boundary_inputs/indent3` | 1 | `最后一轮终裁为 fail` |
+| `boundary_inputs/indent4` | 0 | `最后一轮终裁 pass，证据完整性完成（共 1 轮）` |
+| `boundary_inputs/invalid_info` | 0 | `最后一轮终裁 pass，证据完整性完成（共 1 轮）` |
+| `boundary_inputs/close_space` | 0 | `最后一轮终裁 pass，证据完整性完成（共 1 轮）` |
+| `boundary_inputs/close_tab` | 0 | `最后一轮终裁 pass，证据完整性完成（共 1 轮）` |
+| `boundary_inputs/tilde_inner_backticks` | 1 | `最后一轮终裁为 fail` |
+| `boundary_inputs/close_nbsp` | 1 | `最后一轮终裁为 fail` |
+| `boundary_inputs/close_ideographic_space` | 1 | `最后一轮终裁为 fail` |
+| `OR01 frozen=True` | 0 | 空 |
+| `OR01 frozen=False` | 1 | 空 |
+| `OR01 frozen='true'` | 1 | 空 |
+| `OR01 forced failure` | 1 | 空 |
+| `OR05 old-gate mutant on fail` | 0 | 空 |
+| `OR01 corrected old gate frozen=False` | 0 | 空 |
+
+OR-01 对照及旧门突变仅为按要求原样复跑 §11，不重新打开 I01–I06。OR-01 从临时看板取原 verify；旧门取 `verifyHistory[0].old`，参数包装仍为 `python() { python3 "$@"; }; `。旧门两例 rc=0 是预期的错误放行对照。当前门所有上述旧用例符合预期。
+
+在 quant-lab/ 实际执行：
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 PYTEST_ADDOPTS='-p no:cacheprovider' .venv-g0/bin/python -m pytest tests/integration -q
+```
+
+```text
+........................................................................ [ 88%]
+.........                                                                [100%]
+81 passed in 4.06s
+rc=0
+```
+
+此外执行 124 个只读规则探针（输入、期望、实际 rc 保存于 `rules.json`），114 个符合相应期望，10 个暴露下文已归并的问题。另有 `probes.json` 保存定向探针与辅助解析输出。它们不是新增常驻测试；不会把“81 passed”解释为覆盖了本章反例。
+
+### 12.3 全部规则对照
+
+位置均指本提交 `scripts/review_gate.py`。表中 F 编号对应 §12.4 的独立根因；“局部一致”表示该分支自身正确，但仍受分行或容器状态影响。每条规则都已核对，包括没有直接影响终裁提取的渲染要求。
+
+| 规则 | 实现是否一致 | 反例或核验结果 |
+|---|---|---|
+| §2.1：只以 LF、CR、CRLF 分行；§4.5/4.6 的“行”继承此定义 | **否**，L42 使用 `str.splitlines()` | F01：额外八种字符会把非法关闭行切成合法关闭行，rc=0；合法三种行尾的正向探针均 rc=0 |
+| §4.5：围栏字符为反引号或波浪号，连续至少三个，同一围栏不能混用字符 | 顶层一致，L20、49–50 | 贪婪记录完整长度；反引号和波浪号互不关闭；信息串中的其他字符不算围栏本体 |
+| 开围栏缩进最多三个 ASCII 空格；tab 按四列 tab stop 算缩进 | 顶层一致；容器相对列未实现 | 0–3 格开栏排除示例，4 格及行首 tab 不开栏；容器见 F06 |
+| 信息串可省略，去掉首尾空格/tab 后解释 | 识别等价；不输出信息串，所以不需要实际 trim | 没有因不 trim 产生的正文差异；空信息串与带语言信息串均可开栏 |
+| 反引号信息串不得出现任何反引号 | 一致，L49 | §11 `invalid_info` rc=0，后续真正文保留 |
+| 波浪号信息串允许反引号及波浪号 | 一致，L49 只限制反引号围栏 | `~~~ aa ``` ~~~` 块内示例 rc=1 |
+| 关闭围栏必须同字符，长度至少等于开围栏 | 局部一致，L58 | §10.2 三例 rc=1；异字符拒绝，更长合法关闭接受 |
+| 关闭围栏独立允许 0–3 格缩进，不要求与开栏缩进相同 | 顶层一致，L20、58；容器不完整 | 常规缩进符合；F06 中列表关闭行却被当开栏 |
+| 关闭围栏后只允许 ASCII 空格/tab，不能有信息串 | 局部一致，L28–30、58；整体仍有 F01 | 空格/tab 正向 rc=0，NBSP/全角空格旧例 rc=1；非 CR/LF 分行字符仍可绕过 |
+| 无关闭行时延续至文档末尾，不回溯当正文 | 顶层一致 | 未闭合顶层围栏 rc=1 |
+| 无关闭行时也必须在所属容器结束处结束 | **否**，无容器栈 | F06；列表未闭合围栏会吞后续正文，也能与后续围栏组合成 rc=0 |
+| 开栏后所有内容为字面代码，不做行内或 HTML 解析 | 已正确进入围栏时一致 | 代码里的 `<pre>`、HTML 注释不改变状态；错误进入/退出状态仍见 F01–F06 |
+| 开栏缩进 N 时，内容最多移除 N 格；未缩进行保留 | 识别等价，不做渲染去缩进 | 整块被排除，内容是否去 N 格不影响正文判定；容器去前缀是另一问题，见 F06 |
+| 围栏可打断段落，前后不要求空行，也可直接邻接其他块 | 顶层一致，已有块状态除外 | §10.2/§11 无空行输入符合；HTML 3–7 的优先级缺失见 F05 |
+| 信息串首词常用作语言，但规范不强制具体渲染方式 | 不适用，无门控差异 | 门不生成 HTML/class，不列问题 |
+| §4.6：HTML 块有七类，内容原样输出，不能把内部类 Markdown 标记再解析成块 | **不完整**，L22–25 仅覆盖 1、2 类 | F05：其余五类内部反引号使随后真正代码块的示例 rc=0 |
+| HTML 块开头最多缩进三格，以容器内相对列计算 | 1、2 类顶层一致；容器及 3–7 类缺失 | 四种 type1 标签 0–4 格探针符合顶层预期；F05/F06 |
+| 第1类起始：四个指定标签名，大小写不敏感 | ASCII 大小写可；Unicode 匹配过宽 | F03：Python `re.I` 把 `ſ`、`İ`、`ı` 当 ASCII 标签字母；Unicode 不是这些 HTML 标签名 |
+| 第1类标签名后只许空格、tab、`>` 或行尾 | **否**，L23 的 `\s` 更宽 | F02：`<pre` 后 NBSP/全角空格/EM SPACE 错误开 HTML 状态 |
+| 第1类终止：任意一个指定完整结束标签出现在行中即可；不要求与开标签配对 | ASCII 情况一致；Unicode 大小写仍有 F03 | `<pre>` 用 `</TEXTAREA>` 结束的正向探针 rc=0；`</pre >` 不结束，rc=1；`</ſcript>` 却误结束 |
+| 第2类起始为 `<!--`；终止为行中 `-->`，不要求行内注释语法有效 | 起始一致；同一行检查不完整 | F04：`<!-->`、`<!--->` 同时满足起止，L54 切片漏掉重叠终止符 |
+| 第3类 `<?` 开始，至包含 `?>` 的行；无标签名要求 | **未实现** | F05_type3；直接内容及后续代码示例均可 rc=0 |
+| 第4类 `<!` 后紧跟 ASCII 字母，至包含 `>` 的行 | **未实现** | F05_type4；不应把它当正文或在其中开代码围栏 |
+| 第5类区分大小写的 `<![CDATA[` 开始，至 `]]>` 所在行 | **未实现** | F05_type5；代码示例 rc=0 |
+| 第6类使用规范所列块级标签，可为开或关标签，大小写不敏感 | **未实现** | F05_type6；另测 `</div>` 与 `<div/>` 均能造成后续代码示例 rc=0 |
+| 第6类标签名后可为 ASCII 空格/tab、行尾、`>` 或 `/>`；标签可不完整、不独占一行、属性可跨行 | **未实现** | `<div` 后换行的原样块也产生相同 rc=0；无需扩展至 CSS 或猜测可见性 |
+| 第7类须为完整开/关标签，尾部仅空格/tab；开标签名排除四个 type1 名称 | **未实现** | F05_type7；完整 `<x a="v">` 的对照也 rc=0；`</pre>` 作为 type7 的规则同样缺失 |
+| 第7类完整标签涵盖合法标签名、属性名、引号/无引号属性值及可选自闭合；不完整标签不能启动此类 | **未实现**；不是任意见 `<` 就可开 HTML 块 | 归 F05；修复需按完整语法识别，不能把一切 `<...` 当 type7 |
+| 第1–5类以各自终止条件结束，可以包含空行 | 1、2 类通常一致（F04 除外）；3–5 类缺失 | 四个 type1 含空行/伪围栏探针 rc=1；F05_type3–5 rc=0 |
+| 第6–7类以空行或文档/容器末尾结束；遇到对应关闭标签本身并不结束 | **未实现** | F05_type6–7 特意在结束标签后加空行，再开启真正代码块；排除边界歧义 |
+| 第1–6类可打断段落，不需前置空行；第7类不能打断段落 | 1、2 类一致；3–7 类缺状态/段落跟踪 | F05；`paragraph` 紧接 `<span>` 的真正文对照 rc=0，不能将其误归 type7 |
+| 首行若同时满足开始和结束条件，整块只有这一行 | 第1类常规及普通单行注释一致；重叠注释错误 | F04；`<!-- x -->` 后正文 rc=0，而 `<!-->` 后正文被误拒 |
+| 终止行整体属于 HTML 块，包括终止符后面的全部字符 | 在正确 HTML 状态下一致，L43–46、56 | `-->``` ` 一行不会再开围栏；后续正文 rc=0 |
+| 所有类型无终止条件时到文档末尾或所属容器末尾 | 1、2 类文末一致；容器末尾及其余类型不完整 | F05/F06；列表 raw HTML 状态漏过容器末尾，可隐藏下一开围栏 |
+| HTML 块内不嵌套启动新的 HTML 类型，也不解析围栏；已开启类型决定结束条件 | 对已识别 type1/2 一致，对 3–7 类**不一致** | F05；type6 中出现 `<pre>` 应继续沿 type6、在空行处结束，不能转为全局 type1 |
+| HTML 块之外的行恢复正常块解析；围栏与 HTML 谁已开启谁优先 | 局部一致；错误的边界会导致状态相位颠倒 | F02/F04/F05/F06 均有 HTML/代码交互的完整放行链 |
+
+第6类标签集合按规范全表核对，实现一个也没有专门处理；不存在“只漏 div”之类的部分覆盖。本轮 F05 用 3–7 每类各一个后续代码块反例证明影响，未因普通可见 HTML 文本被读取就直接定为必修。
+
+### 12.4 六类必修与可独立重跑证据
+
+以下计数按独立根因而非输入个数；每条都有代码或不可见内容里的示例 pass 被识别成正文且 **rc=0** 的证据。没有仅凭“解析器不完整”升级问题。
+
+| 编号 | 位置及根因 | 为什么本轮需要修正 | 与父提交对照 |
+|---|---|---|---|
+| F01 | L42：`splitlines()` 扩大换行集合 | 围栏后 U+000B、000C、001C、001D、001E、0085、2028、2029 被切走；代码块提前关闭，示例放行 | 既有残留，父版本也错误放行 |
+| F02 | L23：HTML1 分隔符 `\s` 过宽 | 非法 `<pre` 起始吞掉随后真实开围栏；代码中的 `</pre>` 被拿来退出 HTML，露出代码示例 | 三个 Unicode 分隔符组合均为父版本 rc=1 → 当前 rc=0，新回归 |
+| F03 | L23：Python Unicode `re.I` 扩大 HTML 标签名 | `</ſcript>`、`</scrİpt>`、`</scrıpt>`、`</ſtyle>` 不是指定 ASCII HTML 结束标签，却结束 raw 状态；`<ſcript>` 错开状态也能吞真实开围栏 | 结束标签示例旧版本因完全不识别 HTML 也 rc=0；非法开标签组合为父版本 rc=1 → 当前 rc=0 |
+| F04 | L54：只在开标记匹配末端之后查终止符 | `<!-->` / `<!--->` 本应本行结束，却吞下一真实围栏；代码内 `-->` 令门错误返回正文并放行示例 | 两种重叠注释组合均为父版本 rc=1 → 当前 rc=0，新回归 |
+| F05 | L22–25、47–57：缺 HTML3–7 的块状态与优先级 | 在 HTML 块内错误开围栏；HTML 结束后的真开围栏反而关闭门内状态，实际代码示例被放行 | 既有残留；五类共同根因为未跟踪这些 HTML 状态，合并一项 |
+| F06 | L41–59：不跟踪列表、块引用等所属容器 | 列表开围栏被忽略、缩进关闭围栏被当新开栏；或 HTML 状态越过列表末尾；随后顶层代码示例被放行 | 列表代码组合为既有残留；列表 HTML 组合为父版本 rc=1 → 当前 rc=0 |
+
+父版本只读载入 `git show 2747c9a^:quant-lab/scripts/review_gate.py` 后调用 `check` 作对照，不改任何项目文件。本提交反例全部用真实 `python3 scripts/review_gate.py <临时文件>` 取得进程退出码。
+
+以下是本轮实际执行的完整最小复现脚本；可在 quant-lab/ 原样重跑，只写系统临时文件：
+
+```python
+import pathlib, subprocess, tempfile
+F = '终裁：fail\n'
+P = '证据完整性：完成\n终裁：pass\n'
+cases = {}
+for cp in [0x0b, 0x0c, 0x1c, 0x1d, 0x1e, 0x85, 0x2028, 0x2029]:
+    cases[f'F01_U+{cp:04X}'] = F + '```\n```' + chr(cp) + '\n' + P + '```\n'
+for cp in [0xa0, 0x3000, 0x2003]:
+    cases[f'F02_U+{cp:04X}'] = F + '<pre' + chr(cp) + '\n```\n</pre>\n' + P + '```\n'
+for tag, close in [('script', 'ſcript'), ('script', 'scrİpt'), ('script', 'scrıpt'), ('style', 'ſtyle')]:
+    cases['F03_close_' + close] = F + '<' + tag + '>\n</' + close + '>\n' + P + '</' + tag + '>\n'
+cases['F03_open_ſcript'] = F + '<ſcript>\n```\n</script>\n' + P + '```\n'
+for opening in ['<!-->', '<!--->']:
+    cases['F04_' + opening] = F + opening + '\n```\n-->\n' + P + '```\n'
+for kind, opening, end in [(3, '<?pi', '?>'), (4, '<!DOCTYPE', '>'),
+                           (5, '<![CDATA[', ']]>'), (6, '<div>', '</div>'),
+                           (7, '<span>', '</span>')]:
+    cases[f'F05_type{kind}'] = F + '\n' + opening + '\n```\n' + end + '\n\n```\n' + P + '```\n'
+for name, opening, close, fence in [('bullet', '- ```', '  ```', '```'),
+                                   ('ordered', '1. ```', '   ```', '```'),
+                                   ('tilde', '- ~~~', '  ~~~', '~~~')]:
+    cases['F06_' + name] = F + '\n' + opening + '\n' + close + '\n\n' + fence + '\n' + P + fence + '\n'
+cases['F06_html_container'] = F + '\n- item\n\n  <pre>\n  text\n\n```\n</pre>\n' + P + '```\n'
+with tempfile.TemporaryDirectory() as tmp:
+    for i, (name, body) in enumerate(cases.items()):
+        path = pathlib.Path(tmp) / f'{i}.md'
+        path.write_text(body, encoding='utf-8')
+        r = subprocess.run(['python3', 'scripts/review_gate.py', str(path)], capture_output=True, text=True)
+        print(name, 'rc=', r.returncode, r.stdout.strip(), 'stderr=', repr(r.stderr))
+```
+
+实际输出如下；27 个输入的规范预期均为 rc=1，示例不应覆盖正文 fail。复现脚本自身 rc=0，不代表门控正确：
+
+```text
+F01_U+000B rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F01_U+000C rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F01_U+001C rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F01_U+001D rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F01_U+001E rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F01_U+0085 rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F01_U+2028 rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F01_U+2029 rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F02_U+00A0 rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F02_U+3000 rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F02_U+2003 rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F03_close_ſcript rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F03_close_scrİpt rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F03_close_scrıpt rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F03_close_ſtyle rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F03_open_ſcript rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F04_<!--> rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F04_<!---> rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F05_type3 rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F05_type4 rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F05_type5 rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F05_type6 rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F05_type7 rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F06_bullet rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F06_ordered rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F06_tilde rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+F06_html_container rc= 0 最后一轮终裁 pass，证据完整性完成（共 2 轮） stderr= ''
+
+runner_rc=0
+stderr=''
+```
+
+F02 的规范推导是：标签名后的 NBSP/全角空格/EM SPACE 不在 type1 允许集合，下一行才是真正开围栏；其后的结束标签及完整性/pass 全属于代码。F03 的 Unicode 名称同样不能替代四个 ASCII HTML 标签；尤其 `<script>` 里的伪结束标签不会关闭脚本。F04 不需要争论浏览器是否容忍错误注释：§4.6 第2类明确只看起止字符串，开行已经包含 `-->`，所以后面的围栏必然是独立代码块。
+
+F05_type6/7 使用普通 `<div>` / `<span>`，pass 放在**后续真正围栏代码块**中。结论不依赖 hidden 属性、CSS、脚本执行、HTML 消毒器或浏览器可见性猜测。另已测到处理指令、声明以及 hidden HTML 中直接放置示例的错误放行，但不重复计数。
+
+### 12.5 第0列与容器的专门判断；误拒的处理
+
+**第0列约束不能消除容器造成的状态错乱。** 容器内部的正常代码行有列表缩进或 `>` 前缀，的确不会直接匹配 `_VERDICT`。如果无前缀的第0列非空行紧随容器内围栏，它通常已经结束该容器，不能把真正正文误叫“容器内示例”。本轮对此做了正反对照：
+
+| 对照输入／结构 | 本轮 rc | 解释与分类 |
+|---|---:|---|
+| `- ```\n` 或 `1. ```\n` 后立即接无缩进的完整性/pass | 0 | 这些行已在容器外，是真正文，不能据此报漏洞 |
+| `> ```\n> code\n` 后接第0列完整性/pass | 0 | 块引用代码不能 lazy 延续到无 `>` 的这些行；放行正确 |
+| 闭合普通块引用围栏，再接顶层代码块中的示例 | 1 | 示例正确排除；`> - ``` ` 嵌套块引用对照也 rc=1 |
+| 闭合列表围栏，再接顶层代码块中的示例 | **0** | F06_bullet / ordered / tilde；列表的关闭行错误改变全局状态，第0列的代码示例真的被错认 |
+| 列表未闭合代码块后退出列表，接真正文 pass | 1 | 安全方向误拒：`- item\n\n  ```\n  code\n\n` 加完整性/pass；本例不独立升级 |
+| 列表 `<pre>` 后退出列表，接真正文 pass | 1 | 安全方向误拒；本例不独立升级；F06_html_container 才是同根因的放行证明 |
+| 非法 `<pre`+NBSP 后直接接真正文 pass | 1 | F02 的单独表现为误拒；只有加入后续真实围栏的已测组合才构成必修证据 |
+| `<!-->` 或 `<!--->` 后直接接真正文 pass | 1 | F04 的单独表现为误拒；加入真实代码块后产生已测错误放行 |
+
+因此本轮没有把安全方向的单例误拒直接升级。它们均已归入另有错误放行证据的 F02/F04/F06，不重复增加应改条数。仅漏掉内容去缩进或语言 class 渲染没有门控影响，也不虚增问题。历史应改四条保持原分类。
+
+### 12.6 修正范围与终裁
+
+建议一次修正物理分行、HTML ASCII 字符语义、注释首行终止检查、七类 HTML 优先级，以及容器边界；以本章六类反例和正向／误拒对照补充矩阵。可以使用经验证的块解析器并保留原始列位映射，也可以完整实现所需块状态；不能只把当前发现的字符逐个加入黑名单。无论选哪条路径，都要对依赖的 Unicode 宽匹配另作验证。
+
+本轮只追加报告，不修源码。三审及四审已知输入修正成立，但尚不足以关闭 I07。五审新增必修 **6 条**、新增应改 **0 条**（历史应改 **4 条**），I01–I06 保持闭合。证据完整，终裁 fail；不因套件全绿改判，也不因发现问题而标成证据不足。
+
+交付验证命令为 `python3 scripts/review_gate.py docs/adr/review-G0-integration.md`，追加后运行，并在回复中贴出真实退出码及完整输出。
+
+证据完整性：完成
+终裁：fail
