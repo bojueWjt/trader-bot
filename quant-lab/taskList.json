@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-24T07:46:51Z",
+  "updatedAt": "2026-09-24T07:49:57Z",
   "phase": "P2",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -644,10 +644,17 @@
         "file": "taskList.json integration.blockers",
         "summary": "用户决策：G-ACCOUNT-SCOPE 批准；G-RETENTION-CLOUD 批准本地存放于 home-mini 外挂硬盘（云上传仍未批准）；G-LICENSE-SEARCH 批准（AlphaGen 许可证据仍为前提）。G-OC-200-3、G-BUDGET-LABOR、G-STAT-CLAIM 待定。",
         "by": "用户会话 0f23fe43"
+      },
+      {
+        "n": 88,
+        "at": "2026-09-24T07:49:57Z",
+        "file": "taskList.json integration.blockers",
+        "summary": "用户决策：G-OC-200-3 接受（人工抽查启动后生效）；G-BUDGET-LABOR 部分：提取用本机 grok、人工暂不做；G-STAT-CLAIM 暂不定、只描述。",
+        "by": "用户会话 0f23fe43"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.64",
+    "version": "v1.65",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -2708,18 +2715,21 @@
       },
       {
         "gate": "G-OC-200-3",
-        "status": "pending",
+        "status": "approved",
         "affects": [
           "D-09",
           "D-11"
         ],
         "source": "合并稿 H.2 / contracts/README §6",
         "desc": "一般错误 200/3 放行门与约 14.72% RQL 误收风险接受（或另预注册 (n,c)）；致命零容忍不变。未批：放行工具可做，真实批次放行不得执行",
-        "addedAt": "2026-09-10T18:10:25Z"
+        "addedAt": "2026-09-10T18:10:25Z",
+        "decidedAt": "2026-09-24T07:49:57Z",
+        "decision": "用户选择「接受」：一般错误按 200/3 放行，接受 p=3% 时约 14.7% 的误收风险；致命错误零容忍、出现即停批不变。注意：人工抽查暂不做（见 G-BUDGET-LABOR），因此这道门目前没有可执行的批次，批准只在人工抽查启动后生效。",
+        "decidedBy": "用户（会话 0f23fe43）"
       },
       {
         "gate": "G-BUDGET-LABOR",
-        "status": "pending",
+        "status": "partial",
         "affects": [
           "D-05",
           "D-09",
@@ -2727,7 +2737,10 @@
         ],
         "source": "合并稿 H.2 / contracts/README §6",
         "desc": "真值人力与预算：主审核/独立复核、≤80 人时、API ≤300 美元、45 工程日为规划量。未批：不发起付费 API 批量调用与人工标注排产",
-        "addedAt": "2026-09-10T18:10:25Z"
+        "addedAt": "2026-09-10T18:10:25Z",
+        "decidedAt": "2026-09-24T07:49:57Z",
+        "decision": "用户选择：提取用的大模型改为「调用本机的 grok」（grok CLI，走用户自己的 grok 账号；消息原文会发给 grok 的服务商，这是用户对该处理路径的明确选择，服务商的留存与训练条款未核），API 花费上限仍按 300 美元规划；人工抽查「暂时不做」（0 人时）。后果：真实数据只做到提取与描述统计，不做金标、准确率验收和批次放行（D-09 放行、D-11 的 200/3 批验收不能执行），也就没有基于真实数据的准确率结论。",
+        "decidedBy": "用户（会话 0f23fe43）"
       },
       {
         "gate": "G-STAT-CLAIM",
@@ -2739,7 +2752,10 @@
         ],
         "source": "合并稿 H.2 / contracts/README §6",
         "desc": "统计声明与风险容忍：冻结 V 最终前瞻窗口、尾损/回撤上限、成本压力档（κ/τ 只作场景）。未批：只描述不声明",
-        "addedAt": "2026-09-10T18:10:25Z"
+        "addedAt": "2026-09-10T18:10:25Z",
+        "decidedAt": "2026-09-24T07:49:57Z",
+        "decision": "用户选择「现在不定」：结果只作描述，不作「能赚钱」类声明。真实数据跑到最终评估之前，须带着建议数字（最终考试窗口、回撤 / 尾损上限、成本加倍）再请用户决定，并在打开最终窗口之前冻结。",
+        "decidedBy": "用户（会话 0f23fe43）"
       },
       {
         "gate": "G-LICENSE-SEARCH",
