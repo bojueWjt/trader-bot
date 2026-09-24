@@ -1238,3 +1238,120 @@ F05_type6/7 使用普通 `<div>` / `<span>`，pass 放在**后续真正围栏代
 
 证据完整性：完成
 终裁：fail
+
+
+## 13. 六审（2026-09-24，提交 0a3f0d4）：I07
+
+### 13.1 范围、判定规则与结论
+
+本轮只复核 I07 的结构化封存门。读取当前提交的 `scripts/review_gate.py`、`tests/integration/test_board_gates.py`、OR-05 verify 和五审 §12；I01–I06 沿用已闭合结论，不重审。集成测试整体复跑只用于核验本次改动是否造成已有测试失败。
+
+裁决依据为用户指定的新协议：校验记录字段与类型、文件 sha256、最后一个非空行与记录 verdict 一致；仅 `pass` 且 `evidence_complete` 严格为布尔 `true` 才成功。审查者如实填写结论是前提，脚本不判断审查意见的真实性，也不从 Markdown 渲染或历史终裁推断当前裁定。
+
+**I07 已闭合。本轮新增必修 0 条，新增应改 1 条；历史应改 4 条保持原分类。** 35 个独立进程边界用例中，正常 pass 返回 0，34 个拒绝用例全部返回 1；集成套件 79 passed、rc=0。没有符合本轮必修判据的错误放行或已有测试失败。I01–I06 已闭合，I07 本轮闭合，故本轮终裁 pass。
+
+### 13.2 五审六条问题在新设计下的适用性
+
+| 五审编号 | 原问题 | 本轮判断与理由 |
+|---|---|---|
+| F01 | `splitlines()` 把额外 Unicode 字符当换行，错误关闭围栏 | 原 Markdown 解析问题不再适用。新脚本虽仍用 `splitlines()` 取最后非空行，但不据此开关围栏、抽取正文终裁或覆盖记录。记录为 fail/insufficient 时，即使尾行校验通过仍返回 1。行分隔定义若需进一步限定，可另行明确协议，不把 CommonMark 的分行要求重新带入本轮。 |
+| F02 | HTML1 起始分隔符 `\s` 过宽 | 不再适用。HTML 起始正则与 HTML 状态已移除；Unicode 空白不会吞掉围栏或改变结构化 verdict。 |
+| F03 | Unicode `re.I` 扩大 HTML 标签名集合 | 不再适用。不再匹配 HTML 标签名及其结束标签，无大小写映射引起的状态转换。 |
+| F04 | 重叠注释 `<!-->` / `<!--->` 未在开行终止 | 不再适用。不再解析注释开始或结束位置，注释不能改变已封存的 verdict 或证据布尔值。 |
+| F05 | 缺 HTML3–7 状态与块优先级 | 不再适用。全部 HTML 块语义均退出门控职责，不存在 HTML/围栏状态相位错误覆盖终裁的路径。 |
+| F06 | 未跟踪列表、块引用等容器 | 不再适用。不再根据容器边界提取正文；容器内外的示例不会覆写记录字段，封存后任何字节变化由 hash 校验拒绝。 |
+
+上述六项按原根因均已随解析流程移除而消除适用性，无需补齐 CommonMark 解析器。既有 `test_markdown_rendering_cannot_flip_a_sealed_fail` 覆盖七个代表性渲染输入，不宣称其逐一重现五审全部 27 个输入；本轮也不把旧版仅接受一个参数的调用改成参数错误来冒充回归证据。
+
+### 13.3 边界测试方法与逐项结果
+
+临时目录为 `/tmp/or05-sixth-0a3f0d4`，每个用例独立使用 `review.md` 和 `verdict.json`。执行器、输入及完整输出分别为该目录的 `runner.py`、各用例子目录、`results.json` / `run.log`。未修改项目测试或脚本。
+
+每例先执行真实 `--seal --round 6 --verdict <值>`；除 `evidence_false` 外加 `--evidence-complete`，35 次准备封存均 rc=0。随后只改变目标条件：fail/insufficient 的尾行与记录一致且 hash 正确；证据值用例保持 pass 尾行及正确 hash；`review_changed` 修改正文但保留 pass 尾行；`tail_mismatch` 使用 fail 尾行和 pass 记录，并更新记录 hash 使其匹配，从而独立验证尾行分支。缺字段、多字段及错误类型用例从合法 pass 记录逐项变更；非法 JSON 和非对象 JSON 用例替换记录文本。
+
+输入命名说明：`string` 分别为 `"true"`（证据）或 `"6"`（轮次），`one/zero` 为数字 1/0，`bool` 为 true，`float` 为 6.0，`negative` 为 -1，`number` 为数字（review=6，其余=1），`null` 为 null，`array` 为 []，`uppercase` 为 `"PASS"`；`extra_field` 新增 `extra: 1`，`invalid_json` 为 `{broken json`。下表每行均是实际执行命令及真实进程返回码。“未直接覆盖”指现有常驻单测没有该具体参数，本轮临时测试已覆盖。
+
+| 用例 | 实际命令 | rc | 现有单元测试覆盖 |
+|---|---|---:|---|
+| `pass` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/pass/review.md /tmp/or05-sixth-0a3f0d4/pass/verdict.json` | 0 | test_sealed_pass_with_complete_evidence_passes |
+| `fail` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/fail/review.md /tmp/or05-sixth-0a3f0d4/fail/verdict.json` | 1 | test_sealed_non_pass_fails |
+| `insufficient` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/insufficient/review.md /tmp/or05-sixth-0a3f0d4/insufficient/verdict.json` | 1 | test_sealed_non_pass_fails |
+| `evidence_false` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/evidence_false/review.md /tmp/or05-sixth-0a3f0d4/evidence_false/verdict.json` | 1 | test_sealed_pass_with_incomplete_evidence_fails |
+| `evidence_string` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/evidence_string/review.md /tmp/or05-sixth-0a3f0d4/evidence_string/verdict.json` | 1 | test_record_fields_are_strict |
+| `evidence_one` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/evidence_one/review.md /tmp/or05-sixth-0a3f0d4/evidence_one/verdict.json` | 1 | test_record_fields_are_strict |
+| `evidence_zero` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/evidence_zero/review.md /tmp/or05-sixth-0a3f0d4/evidence_zero/verdict.json` | 1 | 未直接覆盖 |
+| `evidence_null` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/evidence_null/review.md /tmp/or05-sixth-0a3f0d4/evidence_null/verdict.json` | 1 | 未直接覆盖 |
+| `evidence_array` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/evidence_array/review.md /tmp/or05-sixth-0a3f0d4/evidence_array/verdict.json` | 1 | 未直接覆盖 |
+| `review_changed` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/review_changed/review.md /tmp/or05-sixth-0a3f0d4/review_changed/verdict.json` | 1 | test_review_edited_after_sealing_fails；test_mutation_without_the_hash_check_an_edited_review_would_pass |
+| `tail_mismatch` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/tail_mismatch/review.md /tmp/or05-sixth-0a3f0d4/tail_mismatch/verdict.json` | 1 | test_record_verdict_tampered_without_touching_review_fails；test_mutation_without_the_last_line_check_a_tampered_record_would_pass |
+| `missing_review` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/missing_review/review.md /tmp/or05-sixth-0a3f0d4/missing_review/verdict.json` | 1 | 未直接覆盖 |
+| `missing_round` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/missing_round/review.md /tmp/or05-sixth-0a3f0d4/missing_round/verdict.json` | 1 | 未直接覆盖 |
+| `missing_verdict` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/missing_verdict/review.md /tmp/or05-sixth-0a3f0d4/missing_verdict/verdict.json` | 1 | 未直接覆盖 |
+| `missing_evidence_complete` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/missing_evidence_complete/review.md /tmp/or05-sixth-0a3f0d4/missing_evidence_complete/verdict.json` | 1 | test_record_fields_are_strict |
+| `missing_review_sha256` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/missing_review_sha256/review.md /tmp/or05-sixth-0a3f0d4/missing_review_sha256/verdict.json` | 1 | test_record_fields_are_strict |
+| `extra_field` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/extra_field/review.md /tmp/or05-sixth-0a3f0d4/extra_field/verdict.json` | 1 | test_record_fields_are_strict |
+| `review_number` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/review_number/review.md /tmp/or05-sixth-0a3f0d4/review_number/verdict.json` | 1 | 未直接覆盖 |
+| `review_null` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/review_null/review.md /tmp/or05-sixth-0a3f0d4/review_null/verdict.json` | 1 | 未直接覆盖 |
+| `review_array` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/review_array/review.md /tmp/or05-sixth-0a3f0d4/review_array/verdict.json` | 1 | 未直接覆盖 |
+| `round_string` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/round_string/review.md /tmp/or05-sixth-0a3f0d4/round_string/verdict.json` | 1 | test_record_fields_are_strict |
+| `round_bool` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/round_bool/review.md /tmp/or05-sixth-0a3f0d4/round_bool/verdict.json` | 1 | 未直接覆盖 |
+| `round_float` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/round_float/review.md /tmp/or05-sixth-0a3f0d4/round_float/verdict.json` | 1 | 未直接覆盖 |
+| `round_zero` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/round_zero/review.md /tmp/or05-sixth-0a3f0d4/round_zero/verdict.json` | 1 | test_record_fields_are_strict |
+| `round_negative` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/round_negative/review.md /tmp/or05-sixth-0a3f0d4/round_negative/verdict.json` | 1 | 未直接覆盖 |
+| `verdict_number` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/verdict_number/review.md /tmp/or05-sixth-0a3f0d4/verdict_number/verdict.json` | 1 | 未直接覆盖 |
+| `verdict_null` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/verdict_null/review.md /tmp/or05-sixth-0a3f0d4/verdict_null/verdict.json` | 1 | 未直接覆盖 |
+| `verdict_array` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/verdict_array/review.md /tmp/or05-sixth-0a3f0d4/verdict_array/verdict.json` | 1 | 未直接覆盖 |
+| `verdict_uppercase` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/verdict_uppercase/review.md /tmp/or05-sixth-0a3f0d4/verdict_uppercase/verdict.json` | 1 | test_record_fields_are_strict |
+| `review_sha256_number` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/review_sha256_number/review.md /tmp/or05-sixth-0a3f0d4/review_sha256_number/verdict.json` | 1 | 未直接覆盖 |
+| `review_sha256_null` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/review_sha256_null/review.md /tmp/or05-sixth-0a3f0d4/review_sha256_null/verdict.json` | 1 | 未直接覆盖 |
+| `review_sha256_array` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/review_sha256_array/review.md /tmp/or05-sixth-0a3f0d4/review_sha256_array/verdict.json` | 1 | 未直接覆盖 |
+| `invalid_json` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/invalid_json/review.md /tmp/or05-sixth-0a3f0d4/invalid_json/verdict.json` | 1 | test_record_that_is_not_json_fails |
+| `json_array` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/json_array/review.md /tmp/or05-sixth-0a3f0d4/json_array/verdict.json` | 1 | 未直接覆盖 |
+| `json_null` | `python3 /Users/balen/projects/trader-bot/quant-lab/scripts/review_gate.py /tmp/or05-sixth-0a3f0d4/json_null/review.md /tmp/or05-sixth-0a3f0d4/json_null/verdict.json` | 1 | 未直接覆盖 |
+
+上述 35 次检查 stderr 全为空。关键分支实际输出如下，拒绝不是由无关前置错误掩盖：
+
+```text
+pass: 第 6 轮终裁 pass，证据完整性完成，审查文件与封存一致
+fail: 第 6 轮终裁为 fail
+insufficient: 第 6 轮终裁为 insufficient
+evidence_false: 第 6 轮证据完整性未完成
+evidence_string: evidence_complete 须为布尔值，得到 'true'
+evidence_one: evidence_complete 须为布尔值，得到 1
+review_changed: 审查文件在封存之后被改动过（sha256 不符）：须重新审查并封存
+tail_mismatch: 审查文件最后一个非空行 '终裁：fail' 与封存终裁 'pass' 不一致
+invalid_json: 封存记录不是合法 JSON：Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+SUMMARY 35 cases; pass=0; 34 negative cases=1
+runner_rc=0
+```
+
+`review` 和 `review_sha256` 的错误类型由与实际文件名、真实 hash 的相等性检查拒绝，错误提示未必直接写“类型错误”，但没有错误放行。`round` 使用严格 `type(...) is int`，本轮 true 和 6.0 均被拒绝；`evidence_complete` 使用严格布尔类型，1/0 均不能冒充布尔值。
+
+### 13.4 集成测试、应改与收尾约束
+
+在 `quant-lab/` 执行下列授权命令，关闭字节码及 pytest 缓存写入：
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 PYTEST_ADDOPTS='-p no:cacheprovider' .venv-g0/bin/python -m pytest tests/integration -q
+```
+
+```text
+........................................................................ [ 91%]
+.......                                                                  [100%]
+79 passed in 4.42s
+rc=0
+```
+
+新增应改 1 条：将本轮临时矩阵中未直接覆盖的组合补入常驻参数化测试，特别是 review/round/verdict 缺失、round 布尔/浮点、各字段 null/数组、证据数字 0，以及 JSON 顶层数组/null。当前实现均已正确拒绝，故这是测试覆盖建议，不构成本轮必修；本轮遵守只读范围，不修改测试。
+
+五审六项无需继续修复 Markdown 解析；新增必修为 0。审查证据完整，不因历史 fail 文本或历史必修计数改变本轮结构化裁定。保留全部既有审查字节，仅追加本章；随后按顺序执行以下封存与 OR-05 verify，实际收尾输出在交付回复中记录，封存后不再修改本审查文件：
+
+```sh
+python3 scripts/review_gate.py --seal docs/adr/review-G0-integration.md docs/adr/review-G0-integration.verdict.json --round 6 --verdict pass --evidence-complete
+python3 scripts/review_gate.py docs/adr/review-G0-integration.md docs/adr/review-G0-integration.verdict.json
+```
+
+执行方式说明：按项目约定先尝试 Grok MCP，因当前审批策略禁止启动；companion CLI 随后因状态目录写入 EPERM 失败。满足双通道不可启动的降级条件后，由 Codex 直接执行本轮测试及受限文档写入，无代码修复、看板变更或范围外项目写入。
+
+证据完整性：完成
+终裁：pass

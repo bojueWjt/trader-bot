@@ -134,6 +134,34 @@ def test_record_fields_are_strict(sandbox, change):
     assert _run(_gate_cmd(), sandbox) != 0
 
 
+@pytest.mark.parametrize("key", ["review", "round", "verdict", "evidence_complete", "review_sha256"])
+def test_every_missing_field_fails(sandbox, key):
+    """六审应改：每个字段缺失都各自失败，不只抽样几个。"""
+    _write(sandbox, PASS_BODY)
+    assert _seal(sandbox, 6, "pass").returncode == 0
+    _rewrite_record(sandbox, **{key: _DROP})
+    assert _run(_gate_cmd(), sandbox) != 0
+
+
+@pytest.mark.parametrize("key,bad", [
+    ("review", None), ("review", 1), ("round", None), ("round", 6.0), ("round", True), ("round", -1),
+    ("verdict", None), ("verdict", True), ("verdict", ["pass"]), ("evidence_complete", None), ("evidence_complete", "完成"),
+    ("evidence_complete", [True]), ("review_sha256", None), ("review_sha256", 0), ("review_sha256", "0" * 64),
+])
+def test_every_field_rejects_wrong_types_and_values(sandbox, key, bad):
+    """六审应改：每个字段的错误类型或取值各自失败。round=True 虽是 int 子类也要拒（type is int）。"""
+    _write(sandbox, PASS_BODY)
+    assert _seal(sandbox, 6, "pass").returncode == 0
+    _rewrite_record(sandbox, **{key: bad})
+    assert _run(_gate_cmd(), sandbox) != 0
+
+
+def test_record_that_is_not_an_object_fails(sandbox):
+    _write(sandbox, PASS_BODY)
+    (sandbox / RECORD).write_text("[]", encoding="utf-8")
+    assert _run(_gate_cmd(), sandbox) != 0
+
+
 def test_record_that_is_not_json_fails(sandbox):
     _write(sandbox, PASS_BODY)
     (sandbox / RECORD).write_text("终裁：pass\n", encoding="utf-8")
