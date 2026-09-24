@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Iterator
@@ -13,6 +14,7 @@ from typing import Any, Iterator
 from .lake import sha256_file
 
 CHANNEL_PEER_BASE = 1_000_000_000_000  # Telegram peer_id 规范：channel → -100xxxxxxxxxx
+CHANNEL_CHAT_TYPES = frozenset({"public_channel", "private_channel"})
 
 #: TDesktop 单条消息已知顶层字段（其余视为 SCHEMA_DRIFT 候选）
 TDESKTOP_KNOWN_KEYS = frozenset(
@@ -36,6 +38,31 @@ def canonical_peer_id(raw_id: int, kind: str | None) -> int:
     if kind and ("channel" in kind or "supergroup" in kind):
         return -(CHANNEL_PEER_BASE + raw_id)
     return raw_id
+
+
+def canonical_channel_id(raw_id: int, chat_type: str | None) -> int:
+    return canonical_peer_id(raw_id, chat_type)
+
+
+def _skip_non_channel(chat_type: str | None) -> bool:
+    return chat_type not in CHANNEL_CHAT_TYPES
+
+
+def _whitelist_peer_id(raw_id: int) -> int:
+    return canonical_peer_id(raw_id, "channel")
+
+
+def load_channel_whitelist(path: pathlib.Path) -> frozenset[int] | None:
+    """None = 无名单文件（不过滤）。空 frozenset = 启用但无 id（不摄入任何消息）。"""
+    if not path.is_file():
+        return None
+    ids: list[int] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        ids.append(_whitelist_peer_id(int(s)))
+    return frozenset(ids)
 
 
 @dataclass
@@ -181,7 +208,248 @@ def _dt(v: Any) -> datetime | None:
     return d if d.tzinfo else d.replace(tzinfo=UTC)
 
 
-def read_tdesktop_export(chat_dir: pathlib.Path, *, root: pathlib.Path | None = None) -> Iterator[RawMessage]:
+@dataclass
+class ChannelListing:
+    """整号扫描得到的频道元信息（无消息正文）。"""
+
+    channel_id: int
+    name: str
+    chat_type: str
+    n_messages: int
+    start: datetime | None
+    end: datetime | None
+    ingested: bool = True
+    from_account: bool = False
+
+
+@dataclass
+class TDesktopScan:
+    messages: list[RawMessage]
+    skipped_by_type: dict[str, int]
+    listings: list[ChannelListing]
+    whole_account: bool
+
+
+def _account_sections() -> tuple[tuple[str, bool], ...]:
+    return (("chats", False), ("left_chats", True))
+
+
+def is_whole_account_export(doc: Any) -> bool:
+    """顶层含 chats 即为整号；值是否为 dict 在扫描时校验，不回退单聊天。"""
+    if hasattr(doc, "__contains__"):
+        return "chats" in doc
+    sentinel = object()
+    got = doc.get("chats", sentinel) if hasattr(doc, "get") else sentinel
+    return got is not sentinel
+
+
+def _section_chat_list(section: Any) -> list[Any]:
+    if not isinstance(section, dict):
+        raise TypeError("account_section_not_object")
+    lst = section.get("list") if hasattr(section, "get") else None
+    if lst is None:
+        return []
+    if not isinstance(lst, list):
+        raise TypeError("account_section_list_invalid")
+    return lst
+
+
+def iter_account_chats(doc: Any) -> Iterator[tuple[Any, bool]]:
+    """只读 chats / left_chats，不碰 personal_information / contacts。"""
+    for key, left in _account_sections():
+        if left and not (hasattr(doc, "__contains__") and key in doc):
+            continue
+        section = doc.get(key) if hasattr(doc, "get") else None
+        for chat in _section_chat_list(section):
+            yield chat, left
+
+
+def _raw_from_tdesktop_item(
+    m: dict[str, Any],
+    idx: int,
+    *,
+    peer: int,
+    name: str,
+    raw_uri: str,
+    raw_hash: str,
+    snapshot_at: datetime | None,
+    chat_dir: pathlib.Path,
+) -> RawMessage:
+    unix, prob = _parse_unix(m.get("date_unixtime"))
+    eunix, eprob = _parse_unix(m.get("edited_unixtime")) if m.get("edited_unixtime") is not None else (None, None)
+    funix, _ = _parse_unix(m.get("forwarded_date_unixtime")) if m.get("forwarded_date_unixtime") is not None else (None, None)
+    text, ents = flatten_text(m.get("text"))
+    if m.get("text_entities"):
+        ents = list(m["text_entities"])
+    return RawMessage(
+        channel_id=peer,
+        channel_name=name,
+        message_id=int(m["id"]),
+        message_type=str(m.get("type", "")),
+        date_unixtime=unix,
+        date_raw=m.get("date"),
+        edited_unixtime=eunix,
+        edited_raw=m.get("edited"),
+        text=text,
+        text_entities=ents,
+        reply_to_message_id=m.get("reply_to_message_id"),
+        forwarded_from=m.get("forwarded_from"),
+        forwarded_from_id=m.get("forwarded_from_id"),
+        forwarded_from_message_id=m.get("forwarded_from_message_id"),
+        forwarded_date_unixtime=funix,
+        grouped_id=m.get("grouped_id"),
+        media=_media_refs(m, chat_dir),
+        from_id=m.get("from_id") or m.get("actor_id"),
+        action=m.get("action"),
+        first_seen_at=_dt(m.get("first_seen_at")),
+        snapshot_at=_dt(m.get("snapshot_at")),
+        raw_uri=raw_uri,
+        raw_hash=raw_hash,
+        unknown_keys=sorted(set(m.keys()) - TDESKTOP_KNOWN_KEYS),
+        time_unit_problem=prob,
+        edit_time_problem=eprob,
+        raw_index=idx,
+        export_snapshot_at=snapshot_at,
+    )
+
+
+def _ingest_chat_messages(
+    items: Any,
+    *,
+    peer: int,
+    name: str,
+    chat_type: str,
+    chat_dir: pathlib.Path,
+    raw_uri: str,
+    raw_hash: str,
+    snapshot_at: datetime | None,
+    from_account: bool,
+) -> tuple[list[RawMessage], ChannelListing]:
+    messages: list[RawMessage] = []
+    dates: list[datetime] = []
+    n_ordinary = 0
+    for idx, m in enumerate(items or []):
+        rm = _raw_from_tdesktop_item(
+            m, idx, peer=peer, name=name, raw_uri=raw_uri, raw_hash=raw_hash, snapshot_at=snapshot_at, chat_dir=chat_dir,
+        )
+        messages.append(rm)
+        if rm.message_type == "message":
+            n_ordinary += 1
+        if rm.message_date is not None:
+            dates.append(rm.message_date)
+    listing = ChannelListing(
+        channel_id=peer,
+        name=name,
+        chat_type=chat_type,
+        n_messages=n_ordinary,
+        start=min(dates) if dates else None,
+        end=max(dates) if dates else None,
+        ingested=True,
+        from_account=from_account,
+    )
+    return messages, listing
+
+
+def _present_listing(peer: int, chat_type: str, *, from_account: bool) -> ChannelListing:
+    return ChannelListing(channel_id=peer, name="", chat_type=chat_type, n_messages=0, start=None, end=None, ingested=False, from_account=from_account)
+
+
+def _scan_whole_account(
+    doc: Any,
+    *,
+    chat_dir: pathlib.Path,
+    raw_uri: str,
+    raw_hash: str,
+    snapshot_at: datetime | None,
+    allowed_peer_ids: frozenset[int] | None,
+) -> TDesktopScan:
+    skipped: Counter[str] = Counter()
+    listings: list[ChannelListing] = []
+    messages: list[RawMessage] = []
+    for chat, _left in iter_account_chats(doc):
+        chat_type = chat.get("type") if hasattr(chat, "get") else None
+        type_key = chat_type if isinstance(chat_type, str) else None
+        if _skip_non_channel(type_key):
+            skipped[type_key or "unknown"] += 1
+            continue
+        peer = canonical_channel_id(int(chat["id"]), type_key)
+        ingest = allowed_peer_ids is None or peer in allowed_peer_ids
+        if not ingest:
+            listings.append(_present_listing(peer, type_key or "", from_account=True))
+            continue
+        name = chat.get("name") or str(chat["id"])
+        chunk, listing = _ingest_chat_messages(
+            chat.get("messages"),
+            peer=peer,
+            name=name,
+            chat_type=type_key or "",
+            chat_dir=chat_dir,
+            raw_uri=raw_uri,
+            raw_hash=raw_hash,
+            snapshot_at=snapshot_at,
+            from_account=True,
+        )
+        messages.extend(chunk)
+        listings.append(listing)
+    return TDesktopScan(messages, dict(skipped), listings, True)
+
+
+def _scan_single_chat(
+    doc: Any,
+    *,
+    chat_dir: pathlib.Path,
+    raw_uri: str,
+    raw_hash: str,
+    snapshot_at: datetime | None,
+    allowed_peer_ids: frozenset[int] | None,
+) -> TDesktopScan:
+    kind = doc.get("type")
+    peer = canonical_peer_id(int(doc["id"]), kind)
+    name = doc.get("name") or str(doc["id"])
+    type_key = kind if isinstance(kind, str) else None
+    is_channel = type_key is not None and not _skip_non_channel(type_key)
+    if allowed_peer_ids is not None and (not is_channel or peer not in allowed_peer_ids):
+        listings = [_present_listing(peer, type_key or "", from_account=False)] if is_channel else []
+        return TDesktopScan([], {}, listings, False)
+    chunk, listing = _ingest_chat_messages(
+        doc.get("messages"),
+        peer=peer,
+        name=name,
+        chat_type=type_key or "",
+        chat_dir=chat_dir,
+        raw_uri=raw_uri,
+        raw_hash=raw_hash,
+        snapshot_at=snapshot_at,
+        from_account=False,
+    )
+    return TDesktopScan(chunk, {}, [listing], False)
+
+
+def scan_tdesktop_document(
+    doc: Any,
+    chat_dir: pathlib.Path,
+    *,
+    raw_uri: str,
+    raw_hash: str,
+    snapshot_at: datetime | None = None,
+    allowed_peer_ids: frozenset[int] | None = None,
+) -> TDesktopScan:
+    """过滤+收集：整号只入频道；单聊天顶层 name/type/id/messages 默认行为不变。"""
+    if is_whole_account_export(doc):
+        return _scan_whole_account(
+            doc, chat_dir=chat_dir, raw_uri=raw_uri, raw_hash=raw_hash, snapshot_at=snapshot_at, allowed_peer_ids=allowed_peer_ids,
+        )
+    return _scan_single_chat(
+        doc, chat_dir=chat_dir, raw_uri=raw_uri, raw_hash=raw_hash, snapshot_at=snapshot_at, allowed_peer_ids=allowed_peer_ids,
+    )
+
+
+def scan_tdesktop_export(
+    chat_dir: pathlib.Path,
+    *,
+    root: pathlib.Path | None = None,
+    allowed_peer_ids: frozenset[int] | None = None,
+) -> TDesktopScan:
     """读取一个 TDesktop 导出目录（含 result.json）。"""
     result = chat_dir / "result.json"
     raw_hash = sha256_file(result)
@@ -189,9 +457,6 @@ def read_tdesktop_export(chat_dir: pathlib.Path, *, root: pathlib.Path | None = 
     raw_uri = str(result.relative_to(root))
     with open(result, encoding="utf-8") as f:
         doc = json.load(f)
-    kind = doc.get("type")
-    peer = canonical_peer_id(int(doc["id"]), kind)
-    name = doc.get("name") or str(doc["id"])
     snapshot_at = None
     mf = chat_dir / "export_manifest.json"
     if mf.is_file():
@@ -199,43 +464,36 @@ def read_tdesktop_export(chat_dir: pathlib.Path, *, root: pathlib.Path | None = 
             snapshot_at = _dt(json.loads(mf.read_text(encoding="utf-8")).get("exported_at"))
         except (ValueError, TypeError):
             snapshot_at = None
-    for idx, m in enumerate(doc.get("messages", [])):
-        unix, prob = _parse_unix(m.get("date_unixtime"))
-        eunix, eprob = _parse_unix(m.get("edited_unixtime")) if m.get("edited_unixtime") is not None else (None, None)
-        funix, _ = _parse_unix(m.get("forwarded_date_unixtime")) if m.get("forwarded_date_unixtime") is not None else (None, None)
-        text, ents = flatten_text(m.get("text"))
-        if m.get("text_entities"):
-            ents = list(m["text_entities"])
-        yield RawMessage(
-            channel_id=peer,
-            channel_name=name,
-            message_id=int(m["id"]),
-            message_type=str(m.get("type", "")),
-            date_unixtime=unix,
-            date_raw=m.get("date"),
-            edited_unixtime=eunix,
-            edited_raw=m.get("edited"),
-            text=text,
-            text_entities=ents,
-            reply_to_message_id=m.get("reply_to_message_id"),
-            forwarded_from=m.get("forwarded_from"),
-            forwarded_from_id=m.get("forwarded_from_id"),
-            forwarded_from_message_id=m.get("forwarded_from_message_id"),
-            forwarded_date_unixtime=funix,
-            grouped_id=m.get("grouped_id"),
-            media=_media_refs(m, chat_dir),
-            from_id=m.get("from_id") or m.get("actor_id"),
-            action=m.get("action"),
-            first_seen_at=_dt(m.get("first_seen_at")),
-            snapshot_at=_dt(m.get("snapshot_at")),
-            raw_uri=raw_uri,
-            raw_hash=raw_hash,
-            unknown_keys=sorted(set(m.keys()) - TDESKTOP_KNOWN_KEYS),
-            time_unit_problem=prob,
-            edit_time_problem=eprob,
-            raw_index=idx,
-            export_snapshot_at=snapshot_at,
-        )
+    return scan_tdesktop_document(
+        doc, chat_dir, raw_uri=raw_uri, raw_hash=raw_hash, snapshot_at=snapshot_at, allowed_peer_ids=allowed_peer_ids,
+    )
+
+
+def read_tdesktop_export(
+    chat_dir: pathlib.Path,
+    *,
+    root: pathlib.Path | None = None,
+    allowed_peer_ids: frozenset[int] | None = None,
+) -> Iterator[RawMessage]:
+    yield from scan_tdesktop_export(chat_dir, root=root, allowed_peer_ids=allowed_peer_ids).messages
+
+
+def ingest_tdesktop_dir(
+    fixture_dir: pathlib.Path,
+    *,
+    allowed_peer_ids: frozenset[int] | None = None,
+) -> TDesktopScan:
+    messages: list[RawMessage] = []
+    skipped: Counter[str] = Counter()
+    listings: list[ChannelListing] = []
+    whole = False
+    for kind, p in discover(fixture_dir, tdesktop_only=True):
+        scan = scan_tdesktop_export(p, root=fixture_dir, allowed_peer_ids=allowed_peer_ids)
+        messages.extend(scan.messages)
+        skipped.update(scan.skipped_by_type)
+        listings.extend(scan.listings)
+        whole = whole or scan.whole_account
+    return TDesktopScan(messages, dict(sorted(skipped.items())), listings, whole)
 
 
 def read_telethon_jsonl(path: pathlib.Path, *, root: pathlib.Path | None = None) -> Iterator[RawMessage]:
@@ -310,9 +568,14 @@ def discover(fixture_dir: pathlib.Path, *, tdesktop_only: bool = False) -> list[
     return items
 
 
-def read_all(fixture_dir: pathlib.Path, *, tdesktop_only: bool = False) -> Iterator[RawMessage]:
+def read_all(
+    fixture_dir: pathlib.Path,
+    *,
+    tdesktop_only: bool = False,
+    allowed_peer_ids: frozenset[int] | None = None,
+) -> Iterator[RawMessage]:
     for kind, p in discover(fixture_dir, tdesktop_only=tdesktop_only):
         if kind == "tdesktop":
-            yield from read_tdesktop_export(p, root=fixture_dir)
+            yield from read_tdesktop_export(p, root=fixture_dir, allowed_peer_ids=allowed_peer_ids)
         else:
             yield from read_telethon_jsonl(p, root=fixture_dir)

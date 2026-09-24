@@ -313,11 +313,11 @@ def normalize_messages(
     return df, qrows, ledgers, batch_id
 
 
-def run(fixture_dir: pathlib.Path, layout: Layout, *, freeze_delay_s: int = DEFAULT_FREEZE_DELAY_S, ingested_at: datetime | None = None, tdesktop_only: bool = False) -> dict[str, Any]:
+def run(fixture_dir: pathlib.Path, layout: Layout, *, freeze_delay_s: int = DEFAULT_FREEZE_DELAY_S, ingested_at: datetime | None = None, tdesktop_only: bool = False, allowed_peer_ids: frozenset[int] | None = None) -> dict[str, Any]:
     """读导出 → 归一 → 落盘（追加去重、不重编号、保留首次 ingested_at）→ 损耗/映射 → manifest。"""
     layout.ensure()
     ingested_at = ingested_at or now_utc()
-    msgs = list(read_all(fixture_dir, tdesktop_only=tdesktop_only))
+    msgs = list(read_all(fixture_dir, tdesktop_only=tdesktop_only, allowed_peer_ids=allowed_peer_ids))
     df, qrows, ledgers, batch_id = normalize_messages(msgs, layout, freeze_delay_s=freeze_delay_s, ingested_at=ingested_at)
     added = df.height
     if layout.message_version.exists():
