@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-24T08:06:26Z",
+  "updatedAt": "2026-09-24T08:13:37Z",
   "phase": "P2",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -651,10 +651,17 @@
         "file": "taskList.json integration.blockers",
         "summary": "用户决策：G-OC-200-3 接受（人工抽查启动后生效）；G-BUDGET-LABOR 部分：提取用本机 grok、人工暂不做；G-STAT-CLAIM 暂不定、只描述。",
         "by": "用户会话 0f23fe43"
+      },
+      {
+        "n": 89,
+        "at": "2026-09-24T08:13:37Z",
+        "file": "taskList.json integration.blockers G-ACCOUNT-SCOPE",
+        "summary": "用户没有研究小号：改为用户本人账号经 Telegram Desktop 官方导出；仍禁用 watcher 会话和脚本批量拉取。",
+        "by": "用户会话 0f23fe43"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.65",
+    "version": "v1.66",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -2698,9 +2705,15 @@
         "source": "合并稿 H.2 / contracts/README §6",
         "desc": "独立研究账号与频道范围（TDesktop 导出授权；单频道先行→五频道）。未批：仅合成夹具；禁止用生产 watcher 会话/凭据代替独立研究账号",
         "addedAt": "2026-09-10T18:10:25Z",
-        "decidedAt": "2026-09-24T07:46:51Z",
-        "decision": "用户原话「1. 批准」。按提案执行：单频道先行，再扩到五频道；只用独立研究账号导出（TDesktop JSON），不得用生产 watcher 会话或凭据代替。导出本身由用户操作。",
-        "decidedBy": "用户（会话 0f23fe43）"
+        "decidedAt": "2026-09-24T08:13:37Z",
+        "decision": "用户原话「1. 批准」，后补「我没有研究小号」。修订：导出账号改为用户本人的 Telegram 账号，只经官方 Telegram Desktop 的「导出聊天记录」（JSON 加图片）导出，节奏由 Telegram 官方控制。仍然禁止：使用线上 watcher 的会话文件或凭据，以及用脚本（Telethon 等）批量拉取历史。单频道先行，再扩到五频道。",
+        "decidedBy": "用户（会话 0f23fe43）",
+        "history": [
+          {
+            "at": "2026-09-24T07:46:51Z",
+            "decision": "用户原话「1. 批准」。按提案执行：单频道先行，再扩到五频道；只用独立研究账号导出（TDesktop JSON），不得用生产 watcher 会话或凭据代替。导出本身由用户操作。"
+          }
+        ]
       },
       {
         "gate": "G-RETENTION-CLOUD",
