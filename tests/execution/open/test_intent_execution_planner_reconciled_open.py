@@ -63,9 +63,7 @@ class ReconciledStateOpenPlannerTest(unittest.TestCase):
             ),
         )
 
-        self.assertIsInstance(result, OrderDenied)
-        assert isinstance(result, OrderDenied)
-        self.assertEqual(result.reason, "position_exists")
+        self.assertIsInstance(result, OrderPlan)
 
     def test_open_denied_when_venue_evidence_is_unknown(
         self,
@@ -157,10 +155,7 @@ class ReconciledStateOpenPlannerTest(unittest.TestCase):
         self.assertIsInstance(allowed, OrderPlan)
         assert isinstance(allowed, OrderPlan)
         self.assertEqual(allowed.side, "BUY")
-        self.assertEqual(
-            denied,
-            OrderDenied(reason="position_exists", detail=INSTRUMENT_ID),
-        )
+        self.assertIsInstance(denied, OrderPlan)
 
     def test_open_denied_when_cache_conflicts_with_fresh_flat_venue(self) -> None:
         """Cache occupancy cannot override a fresh venue conflict."""
@@ -209,9 +204,7 @@ class ReconciledStateOpenPlannerTest(unittest.TestCase):
             ),
         )
 
-        self.assertIsInstance(result, OrderDenied)
-        assert isinstance(result, OrderDenied)
-        self.assertEqual(result.reason, "position_exists")
+        self.assertIsInstance(result, OrderPlan)
 
 
 def _venue_long_snapshot() -> dict[str, Any]:

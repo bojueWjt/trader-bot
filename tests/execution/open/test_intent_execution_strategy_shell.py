@@ -14,6 +14,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from uuid import UUID, uuid4
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SERVICE_ROOT = REPO_ROOT / "services" / "nautilus-node"
@@ -58,6 +60,14 @@ from risk.config import (  # noqa: E402
     RiskLimitConfig,
     build_live_risk_engine_kwargs,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_node_state_dir(tmp_path, monkeypatch):
+    # A plan ledger is now persisted for every new open. Helpers which set only
+    # the inbox path must not write protection_stash.json to the default /state.
+    # Scope this to each test, including durable workers stopped in test finallys.
+    monkeypatch.setenv("NODE_STATE_DIR", str(tmp_path))
 
 
 class StrategyShellTest(unittest.TestCase):
@@ -1247,11 +1257,11 @@ class StrategyShellTest(unittest.TestCase):
                     instrument_id="SOLUSDT-PERP.BINANCE", side="BUY", intent_id=new_id,
                     tags=(f"intent_id={new_id}", "authorized_by_type=user", "authorized_by_id=test", "source_message_id=new-batch"),
                 )
-                intent = SimpleNamespace(action="open_position", order_plan={"type": "entry_batch", "stop_loss": "90"})
+                intent = SimpleNamespace(action="open_position", order_plan={"type": "entry_batch", "stop_loss": "90", "tranches": [{"seq": 1}, {"seq": 2}]})
                 with patch.object(strategy, "_cache_orders_all", return_value=orders), patch.object(strategy, "_cancel_order_object") as cancel:
-                    self.assertEqual(strategy._stage_entry_protection(intent, plan), terminal)
+                    self.assertTrue(strategy._stage_entry_protection(intent, plan))
                 self.assertEqual(old_key in strategy._entry_protection_stash, not terminal)
-                self.assertEqual(str(new_id) in strategy._entry_protection_stash, terminal)
+                self.assertIn(str(new_id), strategy._entry_protection_stash)
                 cancel.assert_not_called()
 
     def test_flat_venue_retires_terminal_legacy_stash_without_order_actions(self) -> None:
@@ -5107,17 +5117,11 @@ class StrategyShellTest(unittest.TestCase):
                     SimpleNamespace(client_order_id=client_order_id)
                 )
                 self.assertTrue(started.wait(timeout=1.0))
-                self.assertTrue(
-                    _wait_until(
-                        lambda: bool(halt_reasons),
-                        timeout=1.0,
-                    )
-                )
-                time.sleep(0.03)
-
-                self.assertEqual(len(halt_reasons), 1)
-                self.assertIn("task timeout", halt_reasons[0])
-                self.assertEqual(strategy._trading_state(), "HALTED")
+                time.sleep(0.08)
+                self.assertEqual(halt_reasons, [])
+                self.assertNotEqual(strategy._trading_state(), "HALTED")
+                release.set()
+                self.assertTrue(strategy._durable_io_worker.wait_empty(timeout_seconds=1.0))
             finally:
                 release.set()
                 strategy.on_stop()

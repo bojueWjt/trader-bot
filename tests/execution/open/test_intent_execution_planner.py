@@ -255,9 +255,9 @@ class IntentExecutionPlannerTest(unittest.TestCase):
             plan_intent_execution(_intent(), _context(instrument=None)),
             OrderDenied(reason="instrument_not_found", detail=INSTRUMENT_ID),
         )
-        self.assertEqual(
+        self.assertIsInstance(
             plan_intent_execution(open_with_position, _context(position=_position("LONG"))),
-            OrderDenied(reason="position_exists", detail=INSTRUMENT_ID),
+            OrderPlan,
         )
         self.assertEqual(
             plan_intent_execution(add_without_position, _context(position=None)),

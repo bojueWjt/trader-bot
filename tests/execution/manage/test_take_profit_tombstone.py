@@ -616,7 +616,7 @@ class TakeProfitTombstoneTest(unittest.TestCase):
                 },
                 target_position_id=None,
             )
-            strategy._submit_order_plan = lambda _plan: False
+            strategy._submit_order_plan = lambda _plan, **_kwargs: False
 
             try:
                 strategy._handle_intent(new_entry)
@@ -827,7 +827,7 @@ class TakeProfitTombstoneTest(unittest.TestCase):
 
             strategy._stash_entry_protection(new_entry, plan)
 
-            self.assertNotIn(
+            self.assertIn(
                 str(legacy_intent_id),
                 strategy._entry_protection_stash,
             )

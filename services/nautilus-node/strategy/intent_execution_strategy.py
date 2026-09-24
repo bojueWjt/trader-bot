@@ -73,6 +73,7 @@ _TERMINAL_EXCHANGE_PENDING = object()
 class _DurableIoTaskKind(str, Enum):
     INTENT_EXCHANGE_CONFIRMED = "intent_exchange_confirmed"
     CLOSE_ORDER_TERMINAL = "close_order_terminal"
+    ENTRY_LIFECYCLE_SCAN = "entry_lifecycle_scan"
     INTENT_RECEIVE = "intent_receive"
     PREPARE_SUBMIT = "prepare_submit"
     PREPARE_ROLLBACK = "prepare_rollback"
@@ -732,8 +733,151 @@ class IntentExecutionStrategy(Strategy):
         *_args: Any,
         **_kwargs: Any,
     ) -> None:
+        self._check_entry_expiry()
+        self._cleanup_orphan_protections()
         for intent_key in tuple(self._entry_protection_stash):
             self._check_protection_watchdog(intent_key)
+
+    def _check_entry_expiry(self, records=None) -> None:
+        # Independent of protection repair: a flat/frozen/missing stash must
+        # never disable the lifetime of a durable resting entry.
+        if self._trading_state().upper() != "ACTIVE":
+            return
+        if records is None:
+            if getattr(self, "_entry_lifecycle_scan_pending", False):
+                return
+            self._entry_lifecycle_scan_pending = True
+            if not self._submit_durable_io_task(_DurableIoTask(
+                kind=_DurableIoTaskKind.ENTRY_LIFECYCLE_SCAN,
+                continuation={"kind": "entry_lifecycle_scan"},
+            )):
+                self._entry_lifecycle_scan_pending = False
+            return
+        for record in records:
+            if record.account_id != str(self.config.account_id) or record.action not in {"open_position", "add_position"}:
+                continue
+            order_plan = record.intent_payload.get("order_plan") or {}
+            expiry = order_plan.get("entry_expires_at")
+            stash = self._entry_protection_stash.get(record.intent_id)
+            rejected = record.state is IntentExecutionState.REJECTED
+            closing = bool(stash and stash.get("batch_closing"))
+            expired = False
+            if expiry:
+                try:
+                    expires_at = datetime.fromisoformat(str(expiry))
+                    expired = expires_at.tzinfo is not None and self._now() >= expires_at
+                except (TypeError, ValueError):
+                    self._record_denial(OrderDenied("entry_expiry_invalid", record.intent_id))
+                    continue
+            if not (expired or rejected or closing):
+                continue
+            ids = tuple(cid for cid in record.client_order_ids
+                        if is_robot_client_order_id(cid)
+                        and str(decode_client_order_id(cid).intent_id) == record.intent_id
+                        and 1 <= decode_client_order_id(cid).sequence <= 9)
+            if not ids:
+                continue
+            if stash is not None:
+                stash["batch_closing"] = True
+                self._queue_entry_protection_stash_persist()
+            self._cancel_scoped_venue_orders(record.instrument_id, ids, "entry_expiry", entry=True)
+        # Covers in-memory/durable protection books before inbox recovery completes.
+        for key, stash in tuple(self._entry_protection_stash.items()):
+            if not stash.get("batch_entry_ids"):
+                continue
+            expiry = stash.get("batch_expires_at")
+            if expiry:
+                try:
+                    expires_at = datetime.fromisoformat(str(expiry))
+                    if expires_at.tzinfo is not None and self._now() >= expires_at:
+                        stash["batch_closing"] = True
+                except (TypeError, ValueError):
+                    continue
+            if stash.get("batch_closing"):
+                self._cancel_batch_entries(stash)
+
+    def _cancel_scoped_venue_orders(self, instrument_id, ids, purpose, *, entry=False):
+        if self._trading_state().upper() != "ACTIVE":
+            return
+        ids = tuple(cid for cid in ids if is_robot_client_order_id(cid))
+        mirror = self._exchange_state_mirror
+        if not ids or not mirror:
+            return
+        try:
+            orders = mirror.orders_for_instrument(instrument_id)
+        except Exception:
+            return
+        selected = tuple(order for order in orders if object_client_order_id(order) in ids
+                         and (not entry or (getattr(order, "reduce_only", None) is False
+                                            and str(getattr(order, "order_kind", "")) == "regular")))
+        selected_ids = tuple(object_client_order_id(order) for order in selected)
+        if not selected_ids:
+            return
+        if not self._terminal_exchange_worker:
+            if str(getattr(self.config, "environment", "")).lower() == "live":
+                self._record_denial(OrderDenied("terminal_exchange_worker_required", purpose))
+                return
+            for cid in selected_ids:
+                self._cancel_via_exchange_adapter(instrument_id, cid)
+            return
+        if any(p.get("kind") == "scoped_cleanup" and p.get("cancel_ids") == selected_ids
+               for p in self._pending_terminal_exchange.values()):
+            return
+        requests = self._management_cancel_requests(instrument_id, selected_ids)
+        if requests is False:
+            return
+        from runtime.exchange_cancel_adapter import TerminalExchangeRequest
+        request_id = f"{purpose}:{uuid4().hex}"
+        self._pending_terminal_exchange[request_id] = {"kind": "scoped_cleanup", "cancel_ids": selected_ids}
+        request = TerminalExchangeRequest(
+            request_id=request_id, account_id=str(self.config.account_id), operation="cancel_batch",
+            purpose=purpose, deadline_monotonic=self._terminal_exchange_worker.new_deadline(),
+            cancel_requests=tuple(requests),
+        )
+        if not self._terminal_exchange_worker.submit(request):
+            self._pending_terminal_exchange.pop(request_id, None)
+            self._record_denial(OrderDenied("terminal_exchange_queue_rejected", purpose))
+
+    def _cleanup_orphan_protections(self) -> None:
+        if self._trading_state().upper() != "ACTIVE":
+            return
+        snapshot = self._cached_venue_evidence()
+        if snapshot is None:
+            return
+        for row in (*snapshot["regular_orders"], *snapshot["algo_orders"]):
+            cid = str(row.get("client_order_id") or "")
+            if not is_robot_client_order_id(cid) or row.get("reduce_only") is not True:
+                continue
+            kind = str(row.get("order_type") or row.get("type") or "").upper()
+            if not any(word in kind for word in ("STOP", "TAKE_PROFIT")):
+                continue
+            book = row.get("position_side")
+            if book not in {"LONG", "SHORT"}:
+                continue
+            symbol = _canonical_symbol(str(row.get("symbol") or ""))
+            positions = [p for p in snapshot["positions"]
+                         if _canonical_symbol(str(p["symbol"])) == symbol
+                         and p["position_side"] in {book, "BOTH"}]
+            # positionRisk is a validated full-account snapshot. Its parser
+            # drops zero rows, so absence means flat; a nonzero BOTH row still
+            # occupies either hedge direction and must prevent cleanup.
+            if any(Decimal(str(p["quantity"])) != 0 for p in positions):
+                continue
+            instrument_id = f"{symbol}-PERP.BINANCE"
+            # A newer local entry fill invalidates an older flat snapshot.
+            fetched_at = snapshot.get("positions_fetched_at", snapshot["fetched_at"])
+            stale_flat = False
+            for order in self._cache_orders_all(instrument_id):
+                if self._order_status_name(order) not in {"FILLED", "PARTIALLY_FILLED"}:
+                    continue
+                try:
+                    filled_at = datetime.fromtimestamp(int(getattr(order, "ts_last", 0)) / 1e9, tz=timezone.utc)
+                    if filled_at > fetched_at:
+                        stale_flat = True
+                except (TypeError, ValueError, OverflowError):
+                    stale_flat = True
+            if not stale_flat:
+                self._cancel_scoped_venue_orders(instrument_id, (cid,), "orphan_protection")
 
     def _check_protection_watchdog(self, intent_key: str) -> None:
         stash = self._entry_protection_stash.get(intent_key)
@@ -749,6 +893,11 @@ class IntentExecutionStrategy(Strategy):
             return
         if self._has_pending_tp_market_fallback(stash):
             return
+        if stash.get("batch_entry_ids"):
+            position = self._protection_position(instrument_id, str(stash.get("entry_side") or ""))
+            if Decimal(self._protection_quantity(stash, position)) == 0:
+                self._sync_protection(intent_key)
+                return
         expected_keys = self._expected_protection_keys(stash)
         if not expected_keys:
             return
@@ -2121,6 +2270,10 @@ class IntentExecutionStrategy(Strategy):
         if kind == "take_profit_retry":
             self._complete_take_profit_retry(result, pending)
             return
+        if kind == "scoped_cleanup":
+            if self._terminal_exchange_result_failed(result):
+                self._record_terminal_exchange_failure(result, purpose="scoped_cleanup")
+            return
         if kind == "reconcile":
             if self._terminal_exchange_result_failed(result):
                 self._record_terminal_exchange_failure(
@@ -2129,6 +2282,8 @@ class IntentExecutionStrategy(Strategy):
                 )
                 return
             self._retry_pending_take_profit_disables()
+            self._check_entry_expiry()
+            self._cleanup_orphan_protections()
 
     def _complete_terminal_command(
         self,
@@ -3664,60 +3819,26 @@ class IntentExecutionStrategy(Strategy):
                 )
             )
             return False
-        source_message_id = authorization["source_message_id"]
         parent_intent_id = authorization["parent_intent_id"]
         raw_action = getattr(intent, "action", "")
         action = str(getattr(raw_action, "value", raw_action) or "")
-        isolate_existing = action == "add_position"
         protection_policy = str(order_plan.get("protection_policy") or "").strip().lower()
-        same_source_owner: Optional[tuple[str, dict[str, Any]]] = None
-        for key, other in tuple(self._entry_protection_stash.items()):
-            if str(other.get("instrument_id")) != plan.instrument_id:
-                continue
-            if str(other.get("entry_side")) != plan.side:
-                continue
-            if key != str(plan.intent_id) and self._retire_flat_legacy_protection(key, other):
-                continue
-            if order_plan.get('type') == 'entry_batch' and not other.get('batch_entry_ids'):
-                self._record_denial(OrderDenied('entry_batch_conflicting_owner', key))
-                return False
-            if other.get('batch_entry_ids'):
-                if key == str(plan.intent_id):
-                    return True
-                if (
-                    not other.get('batch_closing')
-                    or owned_quantity(other['batch_fills']) > 0
-                    or self._batch_entries_pending(other)
-                ):
-                    self._record_denial(OrderDenied('entry_batch_active', key))
-                    return False
-                # Retain the zero-owned tombstone for late exchange fills.
-                continue
-            other_authorization = _stash_protection_authorization(other)
-            other_source_message_id = other_authorization.get("source_message_id")
-            if other_source_message_id == source_message_id:
-                same_source_owner = (key, other)
-                continue
-            if isolate_existing or action == "open_position":
-                # A new same-side plan must not delete another plan's book.
-                # Legacy non-batch evidence cannot prove exits, so leave its
-                # live protection orders alone and stop aggregate shrinking.
-                if action == "open_position" and not other.get("batch_entry_ids"):
-                    other["legacy_fill_evidence_unresolved"] = True
-                    if not other.get("protection_frozen"):
-                        other["protection_frozen"] = True
-                continue
-            self._entry_protection_stash.pop(key, None)
-            self._cancel_clock_timer(self._PROTECTION_TIMER_PREFIX + key)
-
-        if stop_loss is None and not take_profits:
+        intent_key = str(plan.intent_id)
+        if action == "add_position" and stop_loss is None and not take_profits:
             return True
-
-        if same_source_owner is not None:
-            key, _other = same_source_owner
-            if key != str(plan.intent_id):
-                self._entry_protection_stash.pop(key, None)
-                self._cancel_clock_timer(self._PROTECTION_TIMER_PREFIX + key)
+        if intent_key in self._entry_protection_stash:
+            return True
+        for key, other in tuple(self._entry_protection_stash.items()):
+            if (str(other.get("instrument_id")) != plan.instrument_id
+                    or str(other.get("entry_side")) != plan.side
+                    or other.get("batch_entry_ids")):
+                continue
+            if self._retire_flat_legacy_protection(key, other):
+                continue
+            # Historical entry fills do not prove historical exits. Preserve
+            # existing protection and prohibit aggregate resizing/management.
+            other["legacy_fill_evidence_unresolved"] = True
+            other["protection_frozen"] = True
         # protection_sequence_start=11 for all paths: revisioned protection ids live
         # in the 11..99 space (see _protection_order_plans), entries stay in 1..9.
         stash_payload: dict[str, Any] = {
@@ -3739,22 +3860,25 @@ class IntentExecutionStrategy(Strategy):
             "tp_consumed": {},
             "pending_cancel_ids": (),
         }
-        if isolate_existing:
-            stash_payload["batch_fills"] = {}
-        self._entry_protection_stash[str(plan.intent_id)] = stash_payload
-        if order_plan.get('type') == 'entry_batch':
-            stash = self._entry_protection_stash[str(plan.intent_id)]
-            tranches = order_plan.get('tranches') or ()
+        tranches = order_plan.get("tranches") or ()
+        sequences = (1,)
+        if order_plan.get("type") in {"zone_ladder", "entry_batch"}:
             if not isinstance(tranches, (list, tuple)) or len(tranches) not in (2, 3):
-                self._entry_protection_stash.pop(str(plan.intent_id), None)
-                self._record_denial(OrderDenied('unsupported_order_spec', 'entry_batch.tranches'))
+                self._record_denial(OrderDenied("unsupported_order_spec", "entry.tranches"))
                 return False
             sequences = tuple(range(1, len(tranches) + 1))
-            stash['batch_entry_ids'] = [encode_client_order_id(plan.intent_id, seq) for seq in sequences]
-            stash['batch_fills'] = {}
-            stash['batch_exit_ids'] = []
-            stash['entry_sequence_max'] = sequences[-1]
-            stash['batch_expires_at'] = order_plan.get('entry_expires_at', '')
+        if action == "add_position":
+            stash_payload["batch_fills"] = {}
+            self._entry_protection_stash[intent_key] = stash_payload
+            return True
+        stash_payload["batch_entry_ids"] = [
+            encode_client_order_id(plan.intent_id, seq) for seq in sequences
+        ]
+        stash_payload["batch_fills"] = {}
+        stash_payload["batch_exit_ids"] = []
+        stash_payload["entry_sequence_max"] = sequences[-1]
+        stash_payload["batch_expires_at"] = order_plan.get("entry_expires_at", "")
+        self._entry_protection_stash[intent_key] = stash_payload
         return True
 
     def _queue_single_intent_submit(
@@ -3985,6 +4109,9 @@ class IntentExecutionStrategy(Strategy):
         submitted = True
         submitted_plans: list[OrderPlan] = []
         for plan, order in zip(plans, prepared_orders):
+            if stash is not None and stash.get("batch_closing"):
+                submitted = False
+                break
             if not self._submit_order_plan(
                 plan,
                 prepared_order=order,
@@ -4001,6 +4128,10 @@ class IntentExecutionStrategy(Strategy):
             # Best-effort rollback of rungs already sent; KEEP the stash either way:
             # a rung that survives the cancel attempt and fills later must still get
             # protections (an orphan stash is harmless, a naked fill is not).
+            if stash is not None:
+                stash["batch_closing"] = True
+                self._queue_entry_protection_stash_persist()
+                self._cancel_batch_entries(stash)
             for plan in submitted_plans:
                 self._cancel_order_by_client_order_id(plan.instrument_id, plan.client_order_id)
             denial = self.denials[-1] if self.denials else OrderDenied(
@@ -4172,6 +4303,7 @@ class IntentExecutionStrategy(Strategy):
         del event
 
     def on_order_accepted(self, event: Any) -> None:
+        self._rollback_rejected_entry(event, rejected=False)
         self._confirm_terminal_order_event(event)
         self._confirm_durable_intent_order_event(event)
         self._confirm_live_canary_order_event(event)
@@ -4418,10 +4550,11 @@ class IntentExecutionStrategy(Strategy):
         return not set(stash['batch_entry_ids']).issubset(terminal)
 
     def _cancel_batch_entries(self, stash):
-        expected = set(stash['batch_entry_ids'])
+        expected = {cid for cid in stash['batch_entry_ids'] if is_robot_client_order_id(cid)}
+        self._cancel_scoped_venue_orders(stash['instrument_id'], tuple(sorted(expected)), 'entry_rollback', entry=True)
         for order in self._cache_orders_all(stash['instrument_id']):
             client_id = str(getattr(order, 'client_order_id', ''))
-            if client_id not in expected:
+            if client_id not in expected or client_id in stash.get("batch_terminal_ids", ()):
                 continue
             status = self._order_status_name(order)
             if status in self._PROTECTION_TERMINAL_STATUSES or status in self._PROTECTION_INFLIGHT_STATUSES:
@@ -4440,7 +4573,11 @@ class IntentExecutionStrategy(Strategy):
         if isinstance(authorization, OrderDenied):
             return context
         stash = self._entry_protection_stash.get(authorization['parent_intent_id'])
-        if not stash or not stash.get('batch_entry_ids'):
+        if not stash:
+            return context
+        if stash.get('legacy_fill_evidence_unresolved'):
+            return replace(context, position=None, positions=(), existing_orders=(), reconciled_state=None)
+        if not stash.get('batch_entry_ids'):
             return context
         positions = []
         candidates = context.positions
@@ -4459,7 +4596,7 @@ class IntentExecutionStrategy(Strategy):
             first = positions[0]
         orders = tuple(order for order in context.existing_orders
                        if self._batch_order_role(stash, order.client_order_id))
-        return replace(context, position=first, positions=tuple(positions), existing_orders=orders)
+        return replace(context, position=first, positions=tuple(positions), existing_orders=orders, reconciled_state=None)
 
     def _protection_role_for_order(
         self,
@@ -4679,13 +4816,33 @@ class IntentExecutionStrategy(Strategy):
     # path — without these hooks a venue rejection (e.g. Binance -2021 "would
     # immediately trigger") leaves the position naked exactly when price is
     # attacking the stop. Any terminal event on a protection id re-arms the sync.
+    def _rollback_rejected_entry(self, event: Any, *, rejected: bool) -> None:
+        client_id = _event_client_order_id(event)
+        if not client_id or not is_robot_client_order_id(client_id):
+            return
+        key = str(decode_client_order_id(client_id).intent_id)
+        stash = self._entry_protection_stash.get(key)
+        if not stash or client_id not in stash.get("batch_entry_ids", ()):
+            return
+        if rejected:
+            stash["batch_closing"] = True
+            terminal = set(stash.get("batch_terminal_ids", ()))
+            terminal.add(client_id)
+            stash["batch_terminal_ids"] = sorted(terminal)
+            self._queue_entry_protection_stash_persist()
+        if stash.get("batch_closing"):
+            self._cancel_batch_entries(stash)
+            self._schedule_protection_sync(key)
+
     def on_order_rejected(self, event: Any) -> None:
+        self._rollback_rejected_entry(event, rejected=True)
         self._queue_order_event_rejection(event, default_reason="order_rejected")
         self._confirm_terminal_order_event(event)
         self._confirm_live_canary_order_event(event)
         self._on_protection_order_terminal(event, count_retry=True)
 
     def on_order_denied(self, event: Any) -> None:
+        self._rollback_rejected_entry(event, rejected=True)
         self._queue_order_event_rejection(event, default_reason="order_denied")
         self._confirm_terminal_order_event(event)
         self._on_protection_order_terminal(event, count_retry=True)
@@ -4751,7 +4908,7 @@ class IntentExecutionStrategy(Strategy):
         for key, stash in tuple(self._entry_protection_stash.items()):
             if client_order_id not in stash.get('batch_entry_ids', ()):
                 continue
-            if _event_type_name(event) in {'OrderCanceled', 'OrderCancelled', 'OrderExpired', 'OrderRejected'}:
+            if _event_type_name(event) in {'OrderCanceled', 'OrderCancelled', 'OrderExpired', 'OrderRejected', 'OrderDenied'}:
                 terminal = set(stash.get('batch_terminal_ids', ()))
                 terminal.add(client_order_id)
                 stash['batch_terminal_ids'] = sorted(terminal)
@@ -4838,7 +4995,9 @@ class IntentExecutionStrategy(Strategy):
             self._process_intent_reject_task(task)
             return
         outcome: Any = False
-        if task.kind is _DurableIoTaskKind.INTENT_RECEIVE:
+        if task.kind is _DurableIoTaskKind.ENTRY_LIFECYCLE_SCAN:
+            outcome = self._intent_execution_inbox.records()
+        elif task.kind is _DurableIoTaskKind.INTENT_RECEIVE:
             outcome = self._process_intent_receive_task(task)
         elif task.kind is _DurableIoTaskKind.PREPARE_SUBMIT:
             outcome = self._process_prepare_submit_task(task)
@@ -5013,6 +5172,10 @@ class IntentExecutionStrategy(Strategy):
         if not isinstance(continuation, Mapping):
             return
         kind = str(continuation.get("kind") or "")
+        if kind == "entry_lifecycle_scan":
+            self._entry_lifecycle_scan_pending = False
+            self._check_entry_expiry(result.outcome)
+            return
         if kind == "intent_received":
             self._on_intent_received_result(result)
             return
@@ -5377,6 +5540,9 @@ class IntentExecutionStrategy(Strategy):
 
             submitted_plans: list[OrderPlan] = []
             for index, plan in enumerate(task.plans):
+                owner = self._entry_protection_stash.get(str(plan.intent_id))
+                if owner is not None and owner.get("batch_closing"):
+                    break
                 prepared_order: Any | bool = False
                 if prepared_orders is not False:
                     prepared_order = prepared_orders[index]
@@ -5675,6 +5841,13 @@ class IntentExecutionStrategy(Strategy):
             mode = str(continuation.get("mode") or "")
         if mode != "zone_ladder":
             return
+        if task.plans:
+            key = str(task.plans[0].intent_id)
+            stash = self._entry_protection_stash.get(key)
+            if stash is not None:
+                stash["batch_closing"] = True
+                self._queue_entry_protection_stash_persist()
+                self._cancel_batch_entries(stash)
         for plan in submitted_plans:
             self._cancel_order_by_client_order_id(
                 plan.instrument_id,
@@ -6952,6 +7125,16 @@ class IntentExecutionStrategy(Strategy):
                 # Keep the ownership/SL tombstone: terminal notifications and
                 # fill notifications can race, and the other leg may be unknown.
                 if owned == 0:
+                    mirror = self._exchange_state_mirror
+                    if mirror:
+                        try:
+                            venue_orders = mirror.orders_for_instrument(instrument_id)
+                            ids = tuple(object_client_order_id(order) for order in venue_orders
+                                        if self._batch_order_role(stash, object_client_order_id(order)) == "exit"
+                                        and getattr(order, "reduce_only", None) is True)
+                            self._cancel_scoped_venue_orders(instrument_id, ids, "plan_flat")
+                        except Exception as exc:
+                            self._record_denial(OrderDenied("exchange_state_refresh_failed", repr(exc)))
                     for order in self._live_protection_orders(instrument_id, intent_key, sequence_start):
                         if self._order_status_name(order) not in self._PROTECTION_INFLIGHT_STATUSES:
                             self._cancel_order_object(order)
@@ -7120,6 +7303,14 @@ class IntentExecutionStrategy(Strategy):
             return
         if self._defer_flat_or_unknown_protection(intent_key, stash):
             return
+        if stash.get("batch_entry_ids"):
+            position = self._protection_position(str(stash["instrument_id"]), str(stash["entry_side"]))
+            current_quantity = Decimal(self._protection_quantity(stash, position))
+            prepared_quantity = Decimal(str(continuation.get("quantity") or "0"))
+            if current_quantity <= 0 or prepared_quantity > current_quantity:
+                stash.pop("pending_protection_revision", None)
+                self._schedule_protection_sync(intent_key)
+                return
         expected_ids = tuple(
             str(value)
             for value in pending.get("client_order_ids", ())
@@ -7641,10 +7832,10 @@ class IntentExecutionStrategy(Strategy):
                 continue
             if self._order_status_name(order) in self._PROTECTION_TERMINAL_STATUSES:
                 continue
-            mine = False
+            mine = oid in stash.get("batch_exit_ids", ())
             try:
                 trace = decode_client_order_id(oid)
-                mine = str(trace.intent_id) == intent_key and trace.sequence >= sequence_start
+                mine = mine or (str(trace.intent_id) == intent_key and trace.sequence >= sequence_start)
             except ValueError:
                 pass
             if not mine and position_id is not None:
@@ -9559,7 +9750,7 @@ class IntentExecutionStrategy(Strategy):
             book = "LONG" if is_buy else "SHORT"
         return PositionId(f"{order.instrument_id}-{book}")
 
-    def _close_entry_ids(self, instrument_id: str, side: str, resolved: set[str]) -> set[str]:
+    def _close_entry_ids(self, instrument_id: str, side: str, resolved: set[str], parent: str = "") -> set[str]:
         """Absence from openOrders is not proof that a dispatched entry is terminal."""
         entry_side = "BUY" if side.upper() == "LONG" else "SELL"
         cache = tuple(self._cache_orders_all(instrument_id))
@@ -9599,6 +9790,9 @@ class IntentExecutionStrategy(Strategy):
             for client_id in record.client_order_ids:
                 if client_id not in resolved and client_id not in terminal:
                     unresolved.add(client_id)
+        owner = self._entry_protection_stash.get(parent)
+        if owner and owner.get("batch_entry_ids"):
+            unresolved.intersection_update(owner["batch_entry_ids"])
         return unresolved
 
     def _close_entry_submit_allowed(self, plan: ManagementPlan) -> bool:
@@ -9615,6 +9809,7 @@ class IntentExecutionStrategy(Strategy):
         try:
             unresolved = self._close_entry_ids(
                 plan.instrument_id, plan.target_position_side, set(proof.get("resolved_ids", ())),
+                _management_parent_intent_id(plan),
             )
         except Exception as exc:
             self._record_denial(OrderDenied("close_entries_reconciling", repr(exc)))
@@ -9628,7 +9823,7 @@ class IntentExecutionStrategy(Strategy):
         if not self._invalidate_close_plan(plan):
             return True
         try:
-            ids = self._close_entry_ids(plan.instrument_id, plan.target_position_side, set())
+            ids = self._close_entry_ids(plan.instrument_id, plan.target_position_side, set(), _management_parent_intent_id(plan))
         except Exception as exc:
             self._record_denial(OrderDenied("close_entries_reconciling", repr(exc)))
             return True
@@ -9791,6 +9986,13 @@ class IntentExecutionStrategy(Strategy):
         protection_preimage = copy.deepcopy(
             self._entry_protection_stash
         )
+        owner = self._entry_protection_stash.get(parent_intent_id)
+        if owner and owner.get("batch_entry_ids"):
+            owner["batch_exit_ids"] = sorted(set(owner.get("batch_exit_ids", ())) | {
+                str(order.client_order_id) for order in plan.orders
+            })
+            if plan.action == "close_position":
+                owner["batch_closing"] = True
         tombstone_state = "disabled"
         if disabling_take_profits:
             tombstone_state = "cancel_pending"
@@ -9799,6 +10001,7 @@ class IntentExecutionStrategy(Strategy):
             take_profit_tombstone_state=tombstone_state,
             persist=False,
         ):
+            self._entry_protection_stash = protection_preimage
             denial = self.denials[-1]
             self._report_denial(source_intent, denial)
             return False
@@ -10056,12 +10259,15 @@ class IntentExecutionStrategy(Strategy):
             return False
         stash = self._entry_protection_stash.get(parent_intent_id)
         if stash and stash.get('batch_entry_ids'):
+            ledger_preimage = copy.deepcopy(stash)
             stash['batch_exit_ids'] = sorted(set(stash['batch_exit_ids']) | {
                 str(order.client_order_id) for order in plan.orders
             })
             if plan.action == 'close_position':
                 stash['batch_closing'] = True
             if not self._persist_entry_protection_stash():
+                stash.clear()
+                stash.update(ledger_preimage)
                 return False
             if stash.get('batch_closing'):
                 self._cancel_batch_entries(stash)

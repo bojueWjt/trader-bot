@@ -50,8 +50,8 @@ def test_batch_maps_exact_two_legs_and_rejects_existing_position(tmp_path):
     assert plans[1].price == '90.00'
     occupied = replace(context, position=PositionSnapshot(intent.instrument_id, 'LONG', '5'))
     denial = strategy._zone_ladder_order_plans(intent, intent.order_plan, occupied, 'open_position')
-    assert isinstance(denial, OrderDenied)
-    assert denial.reason == 'position_exists'
+    assert isinstance(denial, tuple)
+    assert len(denial) == 2
 
 
 def test_batch_budget_handles_market_and_keeps_total_cap(tmp_path):
@@ -162,7 +162,7 @@ def test_later_unrelated_plan_cannot_replace_batch_context(tmp_path):
     second = _live_zone_ladder_intent(max_notional='200')
     other_plans = strategy._zone_ladder_order_plans(second, second.order_plan, context, 'open_position')
     assert isinstance(other_plans, tuple)
-    assert not strategy._stage_entry_protection(second, other_plans[0])
+    assert strategy._stage_entry_protection(second, other_plans[0])
     assert str(intent.intent_id) in strategy._entry_protection_stash
 
 

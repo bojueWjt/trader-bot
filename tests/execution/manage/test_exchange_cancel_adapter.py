@@ -177,7 +177,7 @@ class ExchangeCancelAdapterTest(unittest.TestCase):
             )
 
     def test_algo_disappearance_is_not_terminal_or_filled_evidence(self) -> None:
-        for status in ("NEW", "TRIGGERED", "EXECUTED", "FINISHED", "UNKNOWN"):
+        for status in ("TRIGGERED", "EXECUTED", "FINISHED"):
             with self.subTest(status=status):
                 terminal = {"algoId": 9001, "algoStatus": status}
                 if status == "UNKNOWN":
@@ -198,6 +198,62 @@ class ExchangeCancelAdapterTest(unittest.TestCase):
                     ("GET", "/fapi/v1/openAlgoOrders"),
                     ("GET", "/fapi/v1/algoOrder"),
                 ])
+
+    def test_algo_success_and_validated_absence_confirm_stale_read_after_retry(self) -> None:
+        for status in ("NEW", "UNKNOWN"):
+            with self.subTest(status=status):
+                transport = _ScriptedTransport({
+                    ("DELETE", "/fapi/v1/algoOrder"): [{"code": 200}],
+                    ("GET", "/fapi/v1/openAlgoOrders"): [{"orders": []}, {"orders": []}],
+                    ("GET", "/fapi/v1/algoOrder"): [{"algoStatus": status}] * 3,
+                })
+                result = _adapter(transport).cancel("cancel_order", _request(order_kind="algo", venue_order_id="9001"))
+                self.assertEqual(result.terminal_status, "CANCELED")
+                self.assertEqual(result.outcome, "canceled")
+                self.assertEqual(sum(path == "/fapi/v1/algoOrder" and method == "GET"
+                                     for method, path, _ in transport.calls), 3)
+
+    def test_algo_retry_observes_terminal_cancel_without_absence_fallback(self) -> None:
+        transport = _ScriptedTransport({
+            ("DELETE", "/fapi/v1/algoOrder"): [{"code": 200}],
+            ("GET", "/fapi/v1/openAlgoOrders"): [[]],
+            ("GET", "/fapi/v1/algoOrder"): [{"algoStatus": "NEW"}, {"algoStatus": "CANCELED"}],
+        })
+        result = _adapter(transport).cancel("cancel_order", _request(order_kind="algo", venue_order_id="9001"))
+        self.assertEqual(result.terminal_status, "CANCELED")
+
+    def test_algo_failed_delete_cannot_use_absence_as_confirmation(self) -> None:
+        for response in (BinanceApiError(-2011, "Unknown"), {"code": -2011, "msg": "Unknown"}):
+            transport = _ScriptedTransport({
+                ("DELETE", "/fapi/v1/algoOrder"): [response],
+                ("GET", "/fapi/v1/openAlgoOrders"): [[]],
+                ("GET", "/fapi/v1/algoOrder"): [{"algoStatus": "NEW"}],
+            })
+            with self.assertRaises(CancelConfirmationUnknownError):
+                _adapter(transport).cancel("cancel_order", _request(order_kind="algo", venue_order_id="9001"))
+
+    def test_algo_invalid_listing_is_not_absence_evidence(self) -> None:
+        for payload in ({}, {"orders": [None]}, {"code": -1000}):
+            transport = _ScriptedTransport({
+                ("DELETE", "/fapi/v1/algoOrder"): [{"code": 200}],
+                ("GET", "/fapi/v1/openAlgoOrders"): [payload],
+            })
+            with self.assertRaises(CancelStateError):
+                _adapter(transport).cancel("cancel_order", _request(order_kind="algo", venue_order_id="9001"))
+
+    def test_algo_still_present_cannot_confirm_cancel(self) -> None:
+        transport = _ScriptedTransport({
+            ("DELETE", "/fapi/v1/algoOrder"): [{"code": 200}],
+            ("GET", "/fapi/v1/openAlgoOrders"): [[{"algoId": 9001}]],
+        })
+        clock = iter((0.0, 0.0, 0.0, 0.02))
+        adapter = BinanceExchangeCancelAdapter(
+            account_id=ACCOUNT_ID, transport=transport,
+            confirmation_timeout_seconds=0.01, poll_interval_seconds=0,
+            sleep=lambda _seconds: None, monotonic=lambda: next(clock),
+        )
+        with self.assertRaises(CancelConfirmationTimeoutError):
+            adapter.cancel("cancel_order", _request(order_kind="algo", venue_order_id="9001"))
 
     def test_regular_new_after_disappearance_remains_unknown(self) -> None:
         transport = _ScriptedTransport({
@@ -266,7 +322,7 @@ class TerminalExchangeWorkerTest(unittest.TestCase):
         transport = _ScriptedTransport({
             ("DELETE", "/fapi/v1/algoOrder"): [{"code": 200}],
             ("GET", "/fapi/v1/openAlgoOrders"): [{"orders": []}],
-            ("GET", "/fapi/v1/algoOrder"): [{"algoStatus": "NEW"}],
+            ("GET", "/fapi/v1/algoOrder"): [{"algoStatus": "TRIGGERED"}],
         })
         worker = TerminalExchangeWorker(
             account_id=ACCOUNT_ID, mirror=_CountingMirror(), adapter=_adapter(transport),
@@ -279,7 +335,7 @@ class TerminalExchangeWorkerTest(unittest.TestCase):
         self.assertEqual(outcomes[0].terminal_status, "")
         self.assertEqual(outcomes[0].outcome, "")
         self.assertIn("CancelConfirmationUnknownError", outcomes[0].error)
-        self.assertIn("observed status NEW", outcomes[0].error)
+        self.assertIn("observed status TRIGGERED", outcomes[0].error)
 
     def test_duplicate_id_reuses_immutable_result_without_reexecution(
         self,

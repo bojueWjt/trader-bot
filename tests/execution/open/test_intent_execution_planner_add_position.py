@@ -54,9 +54,7 @@ class AddPositionPlannerTest(unittest.TestCase):
             ),
         )
 
-        self.assertIsInstance(result, OrderDenied)
-        assert isinstance(result, OrderDenied)
-        self.assertEqual(result.reason, "position_exists")
+        self.assertIsInstance(result, OrderPlan)
 
     def test_add_allowed_when_cache_empty_and_fresh_venue_same_side(self) -> None:
         result = plan_intent_execution(

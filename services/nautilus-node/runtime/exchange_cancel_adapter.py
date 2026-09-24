@@ -862,6 +862,8 @@ class BinanceExchangeCancelAdapter:
             )
 
         operation_deadline = deadline_monotonic
+        if request.order_kind == ALGO_ORDER and operation_deadline is None:
+            operation_deadline = self._monotonic() + self._confirmation_timeout_seconds
         if deadline_monotonic is not None:
             confirmation_deadline = (
                 self._monotonic()
@@ -872,8 +874,9 @@ class BinanceExchangeCancelAdapter:
                 confirmation_deadline,
             )
         delete_succeeded = False
+        delete_payload = None
         try:
-            self._transport.request(
+            delete_payload = self._transport.request(
                 "DELETE",
                 self._cancel_path(request.order_kind),
                 self._identity_params(request),
@@ -881,6 +884,12 @@ class BinanceExchangeCancelAdapter:
                     operation_deadline
                 ),
             )
+            if request.order_kind == ALGO_ORDER:
+                if not isinstance(delete_payload, Mapping):
+                    raise CancelStateError("algo DELETE returned invalid acknowledgement")
+                code = delete_payload.get("code")
+                if code is not None and str(code) not in {"0", "200"}:
+                    raise BinanceApiError(int(code), str(delete_payload.get("msg") or "DELETE failed"))
             delete_succeeded = True
         except BinanceApiError as exc:
             if exc.code not in _ABSENT_ORDER_CODES:
@@ -894,6 +903,29 @@ class BinanceExchangeCancelAdapter:
             request,
             deadline_monotonic=operation_deadline,
         )
+        if request.order_kind == ALGO_ORDER and delete_succeeded and status in {"NEW", "UNKNOWN"}:
+            # DELETE plus a validated absent openAlgoOrders listing is evidence
+            # of cancellation despite a stale point lookup. Triggered/finished
+            # states are deliberately excluded: a live child can still exist.
+            delete_status = ""
+            if isinstance(delete_payload, Mapping):
+                delete_status = str(delete_payload.get("algoStatus") or delete_payload.get("status") or "").upper()
+            if delete_status in _FILLED_STATUSES | _OTHER_TERMINAL_STATUSES:
+                status = delete_status
+            elif delete_status in {"TRIGGERED", "EXECUTED", "FINISHED"}:
+                status = delete_status
+            else:
+                for _ in range(2):
+                    delay = self._poll_interval_seconds
+                    if operation_deadline is not None:
+                        delay = min(delay, self._remaining_timeout(operation_deadline))
+                    self._sleep(delay)
+                    status = self._read_terminal_status(request, deadline_monotonic=operation_deadline)
+                    if status not in {"NEW", "UNKNOWN"}:
+                        break
+                if status in {"NEW", "UNKNOWN"}:
+                    self._wait_until_absent(request, deadline_monotonic=operation_deadline)
+                    status = "CANCELED"
         if status in _FILLED_STATUSES:
             raise OrderAlreadyFilledError(
                 f"{request.order_kind} order was already {status}: "
@@ -918,7 +950,7 @@ class BinanceExchangeCancelAdapter:
                 f"account={request.account_id} symbol={request.symbol} "
                 f"position_side={request.position_side}"
             )
-        # Absence from an open-order listing is not cancellation evidence.
+        # Outside the successful algo DELETE path, absence alone is insufficient.
         # In particular, an algo trigger can create a live child order: neither
         # TRIGGERED nor FINISHED/EXECUTED proves that the child filled or canceled.
         raise CancelConfirmationUnknownError(status, request)
@@ -972,8 +1004,14 @@ class BinanceExchangeCancelAdapter:
         rows: Any = payload
         if isinstance(payload, Mapping):
             rows = payload.get("orders", [])
+            if request.order_kind == ALGO_ORDER:
+                rows = payload.get("orders")
         if not isinstance(rows, list):
             raise CancelStateError(f"{path} returned invalid order collection")
+        if request.order_kind == ALGO_ORDER:
+            for row in rows:
+                if not isinstance(row, Mapping) or not row.get("algoId"):
+                    raise CancelStateError(f"{path} returned invalid order entry")
         return [row for row in rows if isinstance(row, Mapping)]
 
     def _read_terminal_status(
