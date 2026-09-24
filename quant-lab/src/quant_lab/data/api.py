@@ -106,17 +106,19 @@ def quarantine(flow: str, *, status: str | None = None) -> pl.DataFrame:
 
 
 def build(fixture_dir: str | os.PathLike, layout: Layout, *, graph_version: str, llm_fixture: str | os.PathLike | None = None, ocr_fixture: str | os.PathLike | None = None,
-          adjudicator_fixture: str | os.PathLike | None = None, ingested_at: datetime | None = None, alias: bool = False) -> dict[str, Any]:
+          adjudicator_fixture: str | os.PathLike | None = None, ingested_at: datetime | None = None, alias: bool = False, llm: str | None = None) -> dict[str, Any]:
     """端到端（夹具模式）：归一 → 去重 → 抽取 → 规范化/行情校验（合成桩）→ 链接 → 生命周期 + 发布。
     alias=True：把 graph_version 当别名，实际发布不可变版本 `<alias>@<input_hash[:8]>` 并把别名指过去；旧版本原样保留，不删除（T04）。"""
     from . import dedup, extract, lifecycle, linker, normalize, validate
     from .graph import set_alias
-    from .llm import RecordedClient
+    from .llm import RecordedClient, extraction_client
 
+    if llm is not None:
+        extraction_client(llm=llm, llm_fixture=llm_fixture)  # 闸门先于归一写盘。
     out: dict[str, Any] = {}
     out["normalize"] = normalize.run(pathlib.Path(fixture_dir), layout, ingested_at=ingested_at)
     out["dedup"] = dedup.run(layout, ingested_at=ingested_at)
-    out["extract"] = extract.run(layout, llm_fixture=llm_fixture, ocr_fixture=ocr_fixture, ingested_at=ingested_at)
+    out["extract"] = extract.run(layout, llm_fixture=llm_fixture, ocr_fixture=ocr_fixture, ingested_at=ingested_at, llm=llm)
     out["validate"] = validate.run(layout, ingested_at=ingested_at, synthetic=True)
     out["linker"] = linker.run(layout, adjudicator=RecordedClient.from_file(adjudicator_fixture) if adjudicator_fixture else None, ingested_at=ingested_at)
     if alias:
@@ -135,7 +137,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--build", action="store_true")
     ap.add_argument("--fixture")
     ap.add_argument("--graph-version", default="fixture-v1")
-    ap.add_argument("--llm-fixture")
+    providers = ap.add_mutually_exclusive_group()
+    providers.add_argument("--llm-fixture")
+    providers.add_argument("--llm", choices=["grok"], help="显式使用本机 grok；另需 QUANT_LAB_ALLOW_LLM=1")
     ap.add_argument("--ocr-fixture")
     ap.add_argument("--adjudicator-fixture")
     ap.add_argument("--alias", action="store_true", help="graph-version 作别名：发布不可变版本 <alias>@<hash8> 并移动别名，不删旧版本")
@@ -150,7 +154,10 @@ def main(argv: list[str] | None = None) -> int:
     if a.build:
         if not a.fixture:
             ap.error("--build 需要 --fixture")
-        res = build(a.fixture, layout, graph_version=a.graph_version, llm_fixture=a.llm_fixture, ocr_fixture=a.ocr_fixture, adjudicator_fixture=a.adjudicator_fixture, alias=a.alias)
+        try:
+            res = build(a.fixture, layout, graph_version=a.graph_version, llm_fixture=a.llm_fixture, ocr_fixture=a.ocr_fixture, adjudicator_fixture=a.adjudicator_fixture, alias=a.alias, llm=a.llm)
+        except PermissionError as exc:
+            ap.error(str(exc))
         print(json.dumps({k: {kk: vv for kk, vv in v.items() if kk not in ("paths", "inputs", "raw_hashes", "items")} for k, v in res.items()}, ensure_ascii=False, indent=2, default=str))
         return 0
     if a.loss:

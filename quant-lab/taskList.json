@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-24T07:49:57Z",
+  "updatedAt": "2026-09-24T08:06:26Z",
   "phase": "P2",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -679,7 +679,7 @@
         "note": "[G0/427ed064 R44 · D-10 闭合核验] G1 已按 R43 改 verify 并标 done，G0 实跑核验通过：**D-10 status=done，verify rc=0**；verify 形式正确（两子句显式析取、各读具名路径，已撤回把『分类』塞进审查通配前缀的做法）。**并按 §12 A24 对这道门做了突变自证**（沙箱副本，未碰真实文件）：基线 rc=0 ✓；裁定终裁改 fail → rc=1 ✓；删除裁定文件 → rc=1 ✓；仅留裁定 pass → rc=0 ✓。**该门确实能因它意图防止的退化而失败**，不是无法失败的检查。**D-10 是三份审查任务中第一份收口**。G1 P1 面：D-01..D-07、D-09、D-10 done；D-08/D-11 受用户闸门 gated 未开工。A16 审计：D-10 verifyHistory 2 条，均为口径修正/收紧，放宽 0。",
         "at": "2026-09-11T04:33:25Z"
       },
-      "lastUpdate": "2026-09-11T10:55:26Z",
+      "lastUpdate": "2026-09-24T08:06:26Z",
       "tasks": [
         {
           "id": "D-01",
@@ -735,7 +735,7 @@
         {
           "id": "D-08",
           "title": "PoC 1a 导出接入：TDesktop JSON + 媒体归档 + Telethon 次号对照拉取 + A.1 必测清单报告（消息数/信号率抽样/编辑比例/图片比例/回复比例/跨年分布）",
-          "status": "todo",
+          "status": "doing",
           "verify": ".venv-g1/bin/python -m quant_lab.data.harvest --report /tmp/ql-1a.json && .venv-g1/bin/python -c \"import json;r=json.load(open('/tmp/ql-1a.json'));assert r['n_messages']>0 and 'edit_ratio' in r;print(r)\"",
           "gated": "Telegram 独立研究账号 / 导出授权与频道范围"
         },
@@ -984,6 +984,10 @@
         {
           "t": "19:55",
           "n": "[G0 R81 A44 复核] 查出一条读侧缺口，**债主 G1**：`api.py:91 loss_table` 与 `api.py:101 quarantine` 均为直读 parquet，**读侧无平衡/恒等校验**——损耗表的计数恒等式只由构建期测试 S12 保证。手改或半写的损耗 parquet 会被 `loss_table` 原样返回。按 §9.10.20 属**事故面**（半写/陈旧无需恶意即发生），非对抗面。已记入 INTEGRATION_REPORT 已知缺口表，触发事件：读侧接入恒等校验或发布期封存。**另：D-10 的前视/致命降级两格已由 G0 补上判别性突变证明，均成立**（详见裁决书 §7）。"
+        },
+        {
+          "t": "17:06",
+          "n": "[2026-09-24 用户会话 0f23fe43] D-08 代码就绪：harvest 读 $QUANT_LAB_DATA_ROOT/import/telegram/ 下的 TDesktop 导出（data root 未设或在仓库内一律拒绝），生成不含原文的 1a 报告；提取可选 --llm grok（需 QUANT_LAB_ALLOW_LLM=1，调用上限 QUANT_LAB_LLM_MAX_CALLS）。signal_rate 标 verified=false（无人工抽查）。Telethon 对照拉取 not_run。等用户用研究号导出频道并放到 home-mini 外挂硬盘后运行；verify 在真实导出到位前按预期非 0。"
         }
       ]
     },

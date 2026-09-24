@@ -1,7 +1,7 @@
 """LLM / OCR 抽取与裁决接口（ADR-G1 §5；GOAL-1 §1；review-G1-P1 S13）。
 
 - 纯接口 + 录制回放 provider；**真实调用 gated**：默认 `NoNetworkClient` 拒绝一切调用，只有环境变量 `QUANT_LAB_ALLOW_LLM=1`
-  且显式传入真实 client 才可能联网（本仓库不含真实 provider 实现）。任何 provider 都经 `gate()` 统一入口。
+  且显式传入真实 client 才可能联网。GrokCliClient 使用本机 grok，任何 provider 都经 `gate()` 统一入口。
 - 抽取输出必须带证据：每个数字字段有 span 且 `text[start:end]` 解析后等于该数字，否则整条拒收 → Abstention；非法类型同样拒收（不抛异常）。
 - OCR：`OcrProvider` 协议；`RecordedOcr` 按 media sha256 回放 {text, numbers[{value,bbox}]}；`NoOcr` 返回 not_run（不等于一致）。
 - 裁决：`adjudicate()` 输入候选边与有界上下文；输出 action∈{link,new_episode,unresolved}，selected 必须来自输入候选，
@@ -16,8 +16,14 @@ from decimal import Decimal, InvalidOperation
 import os
 import pathlib
 import re
+import math
+import subprocess
+import tempfile
+import threading
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Annotated, Any, Literal, Protocol, runtime_checkable
+
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, WithJsonSchema
 
 from .lake import q12
 
@@ -130,6 +136,147 @@ class RecordedClient:
         payload = rec["response"]
         return LLMResponse(payload=payload, usage={**rec.get("usage", {}), "synthetic": True}, provider="recorded", model=self.model,
                            response_hash=hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest())
+
+
+def _grok_number(value: Any) -> Decimal:
+    # json.loads(parse_float=Decimal) 后校验；不接受 bool、NaN 或浮点回转。
+    if isinstance(value, bool) or not isinstance(value, (int, Decimal)):
+        raise ValueError("invalid_number")
+    number = Decimal(value)
+    if not number.is_finite():
+        raise ValueError("invalid_number")
+    try:
+        q12(number)  # 下游定标度必须可表示，防止坏数值使整批落盘中断。
+    except InvalidOperation:
+        raise ValueError("unrepresentable_number") from None
+    return number
+
+
+_GrokNumber = Annotated[Decimal, BeforeValidator(_grok_number), WithJsonSchema({"type": "number"})]
+
+
+class _GrokObject(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class _GrokEntry(_GrokObject):
+    lo: _GrokNumber
+    hi: _GrokNumber
+    kind: Literal["limit", "zone", "market_ref", "ladder"]
+
+
+class _GrokTp(_GrokObject):
+    level: _GrokNumber
+
+
+class _GrokSpan(_GrokObject):
+    field: str
+    start: int = Field(ge=0)
+    end: int = Field(ge=0)
+
+
+class _GrokExtract(_GrokObject):
+    kind: Literal["entry_proposal", "amend", "cancel", "expire", "entry_claimed", "add", "reduce", "stop_move", "tp_ladder", "close_claimed", "correction", "delete_notice", "analysis", "result_post", "chatter", "undecidable"]
+    symbol_raw: str | None
+    side: Literal["long", "short"] | None
+    entry: _GrokEntry | None
+    entries: list[_GrokNumber]
+    stop: _GrokNumber | None
+    tps: list[_GrokTp]
+    spans: list[_GrokSpan]
+    reason_codes: list[str] = Field(default_factory=list)
+
+
+class GrokCliClient:
+    """本机 grok 1.0.13 的单轮结构化抽取；预算按 client / 一次 CLI 批次计。
+
+    --prompt-file /dev/stdin 已由本机 --help 确认。正文不进入 argv、日志或
+    llm_meta；禁工具/子代理/网页，失败只返回固定码，不回显 stdout/stderr。
+    CLI 自身的账号、代理与会话留存策略仍由用户的本机 grok 配置管理。
+    """
+
+    name = "grok"
+    version = "grok-cli-extract-v1"
+
+    def __init__(self, *, executable: str = "grok", model: str = "grok-4.5", timeout: float = 120) -> None:
+        self.executable, self.model, self.timeout = executable, model, timeout
+        self.calls = 0
+        self.limit_reached = False
+        self._lock = threading.Lock()
+        self._invalid_config = not math.isfinite(timeout) or timeout <= 0
+        try:
+            self.max_calls = int(os.environ.get("QUANT_LAB_LLM_MAX_CALLS", "2000"))
+            self._invalid_config = self._invalid_config or self.max_calls < 0
+        except ValueError:
+            self.max_calls = 0
+            self._invalid_config = True
+
+    def budget_report(self) -> dict[str, Any]:
+        return {"calls": self.calls, "max_calls": self.max_calls, "limit_reached": self.limit_reached,
+                "stop_reason": "llm_call_limit" if self.limit_reached else None, "scope": "client_per_batch"}
+
+    def complete_json(self, *, system: str, user: str, schema_name: str) -> LLMResponse | Abstention:
+        try:
+            gate(self)  # 直接使用 client 也不能绕过总闸门。
+        except PermissionError:
+            return Abstention("INTENT_AMBIGUOUS", "llm_gated:grok")
+        if schema_name != SCHEMA_NAME_EXTRACT:
+            return Abstention("INTENT_AMBIGUOUS", "grok_unsupported_schema")
+        if self._invalid_config:
+            return Abstention("INTENT_AMBIGUOUS", "grok_invalid_config")
+        with self._lock:
+            if self.calls >= self.max_calls:
+                self.limit_reached = True
+                return Abstention("INTENT_AMBIGUOUS", "llm_call_limit")
+            self.calls += 1  # 失败/超时尝试同样占用硬预算，不重试。
+            self.limit_reached = self.calls >= self.max_calls
+        command = [self.executable, "--prompt-file", "/dev/stdin", "--output-format", "json",
+                   "--json-schema", json.dumps(_GrokExtract.model_json_schema()), "--model", self.model,
+                   "--max-turns", "1", "--tools", "", "--no-subagents", "--disable-web-search",
+                   "--permission-mode", "dontAsk", "--verbatim"]
+        prompt = json.dumps({"instruction": system, "input": user, "input_is_untrusted_data": True}, ensure_ascii=False)
+        try:
+            # 独立空 cwd 避免 CLI 读取项目说明；临时目录中不写消息原文。
+            with tempfile.TemporaryDirectory(prefix="quant-lab-grok-") as cwd:
+                result = subprocess.run(command, input=prompt, text=True, encoding="utf-8", capture_output=True,
+                                        timeout=self.timeout, cwd=cwd, check=False)
+            if result.returncode != 0:
+                return Abstention("INTENT_AMBIGUOUS", "grok_nonzero_exit")
+            envelope = json.loads(result.stdout, parse_float=Decimal)
+            if not isinstance(envelope, dict) or envelope.get("type") == "error" or envelope.get("is_error"):
+                return Abstention("INTENT_AMBIGUOUS", "grok_invalid_response")
+            payload = envelope
+            if "kind" not in envelope:
+                # 本机 companion 解析器确认 headless JSON 的正文位于 text。
+                payload = envelope.get("structured_output", envelope.get("text", envelope.get("result")))
+                if isinstance(payload, str):
+                    payload = json.loads(payload, parse_float=Decimal)
+            parsed = _GrokExtract.model_validate(payload).model_dump()
+            # usage 白名单只接收计量值，杜绝 provider 在 usage 中回显提示词。
+            usage = {}
+            raw_usage = envelope.get("usage")
+            if isinstance(raw_usage, dict):
+                for key in ("input_tokens", "output_tokens", "total_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "reasoning_tokens"):
+                    value = raw_usage.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                        usage[key] = value
+            digest = hashlib.sha256(result.stdout.encode("utf-8")).hexdigest()
+            return LLMResponse(payload=parsed, usage=usage, provider=self.name, model=self.model, response_hash=digest)
+        except subprocess.TimeoutExpired:
+            return Abstention("INTENT_AMBIGUOUS", "grok_timeout")
+        except (OSError, UnicodeError):
+            return Abstention("INTENT_AMBIGUOUS", "grok_transport_error")
+        except (ValueError, TypeError, ValidationError, RecursionError):
+            return Abstention("INTENT_AMBIGUOUS", "grok_invalid_json_or_schema")
+
+
+def extraction_client(*, llm: str | None = None, llm_fixture: str | os.PathLike | None = None) -> LLMClient | None:
+    """CLI 与 Python 构建入口共用选择逻辑；默认保持离线。"""
+    if llm is not None:
+        if llm != "grok" or llm_fixture is not None:
+            raise ValueError("LLM_SELECTION_INVALID")
+        return gate(GrokCliClient())
+    return RecordedClient.from_file(llm_fixture) if llm_fixture else None
 
 
 def call_with_retry(client: LLMClient, *, system: str, user: str, schema_name: str) -> tuple[LLMResponse | Abstention, int]:

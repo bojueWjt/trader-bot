@@ -313,11 +313,11 @@ def normalize_messages(
     return df, qrows, ledgers, batch_id
 
 
-def run(fixture_dir: pathlib.Path, layout: Layout, *, freeze_delay_s: int = DEFAULT_FREEZE_DELAY_S, ingested_at: datetime | None = None) -> dict[str, Any]:
+def run(fixture_dir: pathlib.Path, layout: Layout, *, freeze_delay_s: int = DEFAULT_FREEZE_DELAY_S, ingested_at: datetime | None = None, tdesktop_only: bool = False) -> dict[str, Any]:
     """读导出 → 归一 → 落盘（追加去重、不重编号、保留首次 ingested_at）→ 损耗/映射 → manifest。"""
     layout.ensure()
     ingested_at = ingested_at or now_utc()
-    msgs = list(read_all(fixture_dir))
+    msgs = list(read_all(fixture_dir, tdesktop_only=tdesktop_only))
     df, qrows, ledgers, batch_id = normalize_messages(msgs, layout, freeze_delay_s=freeze_delay_s, ingested_at=ingested_at)
     added = df.height
     if layout.message_version.exists():
@@ -355,7 +355,7 @@ def run(fixture_dir: pathlib.Path, layout: Layout, *, freeze_delay_s: int = DEFA
     write_mapping(layout.mapping(batch_id, 1), maps)
     manifest = {
         "batch_id": batch_id, "rule_version": RULE_VERSION, "schema_hash": SCHEMA_HASH, "freeze_delay_s": freeze_delay_s,
-        "inputs": [{"kind": k, "path": str(p.relative_to(fixture_dir))} for k, p in discover(fixture_dir)], "raw_hashes": sorted({m.raw_hash for m in msgs}),
+        "inputs": [{"kind": k, "path": str(p.relative_to(fixture_dir))} for k, p in discover(fixture_dir, tdesktop_only=tdesktop_only)], "raw_hashes": sorted({m.raw_hash for m in msgs}),
         "n_messages": len(msgs), "n_versions": df.height, "n_versions_added": added, "n_quarantine_rows": len(qrows),
         "time_grade_dist": {k: v for k, v in sorted(df.group_by("time_grade").len().iter_rows())} if df.height else {}, "ingested_at": ingested_at.isoformat(),
     }

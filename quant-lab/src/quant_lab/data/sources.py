@@ -299,18 +299,19 @@ def read_telethon_jsonl(path: pathlib.Path, *, root: pathlib.Path | None = None)
             )
 
 
-def discover(fixture_dir: pathlib.Path) -> list[tuple[str, pathlib.Path]]:
+def discover(fixture_dir: pathlib.Path, *, tdesktop_only: bool = False) -> list[tuple[str, pathlib.Path]]:
     """枚举导出：每个含 result.json 的子目录（tdesktop）与 *.jsonl（telethon）。"""
     items: list[tuple[str, pathlib.Path]] = []
     for p in sorted(fixture_dir.rglob("result.json")):
         items.append(("tdesktop", p.parent))
-    for p in sorted(fixture_dir.rglob("*.jsonl")):
-        items.append(("telethon", p))
+    if not tdesktop_only:
+        for p in sorted(fixture_dir.rglob("*.jsonl")):
+            items.append(("telethon", p))
     return items
 
 
-def read_all(fixture_dir: pathlib.Path) -> Iterator[RawMessage]:
-    for kind, p in discover(fixture_dir):
+def read_all(fixture_dir: pathlib.Path, *, tdesktop_only: bool = False) -> Iterator[RawMessage]:
+    for kind, p in discover(fixture_dir, tdesktop_only=tdesktop_only):
         if kind == "tdesktop":
             yield from read_tdesktop_export(p, root=fixture_dir)
         else:

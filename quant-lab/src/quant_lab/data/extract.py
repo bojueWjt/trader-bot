@@ -24,7 +24,7 @@ from typing import Any
 import polars as pl
 
 from .lake import D12, LayerLedger, Layout, append_quarantine, cum_prev, loss_row_from_ledger, mapping_rows, now_utc, preserve_ingested_at, q12, quarantine_row, schema_hash, stable_id, write_loss, write_mapping, write_parquet_atomic
-from .llm import SCHEMA_NAME_EXTRACT, Abstention, LLMClient, NoOcr, OcrProvider, RecordedClient, RecordedOcr, build_extract_prompt, call_with_retry, gate, validate_evidence
+from .llm import SCHEMA_NAME_EXTRACT, Abstention, GrokCliClient, LLMClient, NoOcr, OcrProvider, RecordedClient, RecordedOcr, build_extract_prompt, call_with_retry, extraction_client, gate, validate_evidence
 from .reasons import Reason
 
 RULE_VERSION = "tg3-extract-v0.6"  # W01/W02: LLM numeric evidence Decimal end-to-end
@@ -681,6 +681,9 @@ def llm_extract(text: str, *, client: LLMClient, channel_name: str, message_date
         return None, out, {"usage": {}, "attempts": attempts}
     errs = validate_evidence(out.payload, text)
     if errs:
+        if isinstance(client, GrokCliClient):
+            # 证据错误可能含原文切片；真实 provider 只保留固定码及哈希。
+            return None, Abstention(Reason.INTENT_AMBIGUOUS, "evidence_rejected"), {"usage": out.usage, "model": out.model, "response_hash": out.response_hash}
         return None, Abstention(Reason.INTENT_AMBIGUOUS, "evidence_rejected:" + ";".join(errs)[:200]), {"usage": out.usage, "rejected": errs}
     p = out.payload
     e = p.get("entry")
@@ -731,7 +734,7 @@ def _row(base: dict[str, Any], res: ParseResult, extractor: dict[str, Any], inge
         "reason_codes": codes,
         "entry_mode": res.entry_mode,
         "ocr": json.dumps(res.ocr, ensure_ascii=False) if res.ocr else None,
-        "llm_meta": json.dumps({k: v for k, v in (meta or {}).items() if k in ("usage", "model", "response_hash", "attempts", "rejected")}, ensure_ascii=False, default=str) if meta else None,
+        "llm_meta": json.dumps({k: v for k, v in (meta or {}).items() if k in ("usage", "model", "response_hash")}, ensure_ascii=False, default=str) if meta else None,
         "text_hash": base["content_hash"],
         "rule_version": RULE_VERSION,
         "batch_id": base["batch_id"],
@@ -779,6 +782,10 @@ def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClien
         if any(c in inherited for c in ("TIME_UNIT_INVALID", "VERSION_TIME_UNKNOWN", "RAW_HASH_MISMATCH", "SCHEMA_DRIFT")):
             state = "quarantine"
         led.mark(r["source_version_id"], state, sorted(all_reasons))
+        if isinstance(client, GrokCliClient) and client.calls >= client.max_calls:
+            client.limit_reached = True
+            llm_stats["skipped"] += 1
+            continue
         if client is not None:
             pr, ab, meta = llm_extract(r["text"], client=client, channel_name=r["channel_name"], message_date=r["message_date"].isoformat() if r["message_date"] else None)
             llm_ex = {"name": "llm", "version": getattr(client, "version", "?"), "model": getattr(client, "model", getattr(client, "name", "?"))}
@@ -825,6 +832,8 @@ def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClien
         "kind_dist": {k: v for k, v in sorted(df.filter(pl.col("extractor").struct.field("name") == "parser").group_by("kind").len().iter_rows())} if df.height else {},
         "llm": llm_stats, "ocr_provider": ocr.name, "rule_version": RULE_VERSION,
     }
+    if isinstance(client, GrokCliClient):
+        summary["llm"].update(client.budget_report())
     if client is not None and df.height:
         summary["co_error"] = co_error_report(df)
     return df, qrows, ledgers, summary
@@ -846,11 +855,11 @@ def co_error_report(df: pl.DataFrame) -> dict[str, Any]:
     return out
 
 
-def run(layout: Layout, *, llm_fixture: str | os.PathLike | None = None, ocr_fixture: str | os.PathLike | None = None, ingested_at: datetime | None = None) -> dict[str, Any]:
+def run(layout: Layout, *, llm_fixture: str | os.PathLike | None = None, ocr_fixture: str | os.PathLike | None = None, ingested_at: datetime | None = None, llm: str | None = None) -> dict[str, Any]:
     ingested_at = ingested_at or now_utc()
+    client = extraction_client(llm=llm, llm_fixture=llm_fixture)
     mv = pl.read_parquet(layout.message_version)
     dg = pl.read_parquet(layout.duplicate_group) if layout.duplicate_group.exists() else None
-    client = RecordedClient.from_file(llm_fixture) if llm_fixture else None
     ocr = RecordedOcr.from_file(ocr_fixture) if ocr_fixture else None
     df, qrows, ledgers, summary = extract_frame(mv, dg, client=client, ocr=ocr, ingested_at=ingested_at)
     layout.ensure()
@@ -999,7 +1008,9 @@ def main(argv: list[str] | None = None) -> int:
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--out")
     g.add_argument("--lake-root")
-    ap.add_argument("--llm-fixture", help="录制 LLM 夹具 json（不给则不产生 LLM 行）")
+    providers = ap.add_mutually_exclusive_group()
+    providers.add_argument("--llm-fixture", help="录制 LLM 夹具 json（不给则不产生 LLM 行）")
+    providers.add_argument("--llm", choices=["grok"], help="显式使用本机 grok；另需 QUANT_LAB_ALLOW_LLM=1")
     ap.add_argument("--ocr-fixture", help="录制 OCR 夹具 json（不给则 OCR not_run）")
     a = ap.parse_args(argv)
     if a.bench:
@@ -1009,7 +1020,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({k: v for k, v in rep.items() if k != "items"}, ensure_ascii=False, indent=2))
         return 0
     layout = Layout.flat(a.out) if a.out else Layout.from_root(a.lake_root)
-    print(json.dumps(run(layout, llm_fixture=a.llm_fixture, ocr_fixture=a.ocr_fixture), ensure_ascii=False, indent=2, default=str))
+    try:
+        summary = run(layout, llm_fixture=a.llm_fixture, ocr_fixture=a.ocr_fixture, llm=a.llm)
+    except PermissionError as exc:
+        ap.error(str(exc))
+    print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
     return 0
 
 
