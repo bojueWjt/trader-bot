@@ -1141,13 +1141,11 @@ def _validate_position(
     assessment = _reconciled_assessment(context, instrument_id, expected_side)
 
     if action == OPEN_POSITION:
+        # An independent signal may open beside an existing same-side book.
+        # Opposite-book and untrusted venue evidence keep their original denials.
         untrusted = _risk_increase_state_denial(context, assessment)
         if untrusted is not None:
             return untrusted
-        if cache_position is not None:
-            return OrderDenied("position_exists", instrument_id)
-        if assessment is not None and assessment.state == "known_open":
-            return OrderDenied("position_exists", assessment.detail)
         return None
 
     if action == ADD_POSITION:

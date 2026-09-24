@@ -4261,7 +4261,6 @@ class CommandPollerActor(Actor):
                     continue
             if restored.phase not in {"applied", "acked"}:
                 continue
-            restored = self._refresh_restored_resume(restored)
             self._queue_journal_ack(restored)
 
     def _queue_journal_ack(
@@ -4390,24 +4389,6 @@ class CommandPollerActor(Actor):
             "resume_command_rejected",
         )
         return CommandAckStatus.FAILED, reason
-
-    def _refresh_restored_resume(
-        self,
-        entry: _CommandJournalEntry,
-    ) -> _CommandJournalEntry:
-        if entry.command_type != "resume":
-            return entry
-        if entry.status != "completed":
-            return entry
-        reason = self._resume_issued_at_rejection(entry.issued_at)
-        if reason is None:
-            return entry
-        status, error = self._reject_resume_command(reason)
-        return self._command_journal.record_applied(
-            entry.command_id,
-            status,
-            error,
-        )
 
     @staticmethod
     def _failed_command_result(exc: Exception) -> tuple[Any, str]:
