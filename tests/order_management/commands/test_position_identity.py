@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from commands.close_all import CloseAllSettings, close_all
-from commands.position_identity import (
+from _ledger_test_nautilus_commands.close_all import CloseAllSettings, close_all
+from _ledger_test_nautilus_commands.position_identity import (
     close_boundary_flat,
     merge_position_snapshots,
     position_key_for_snapshot,

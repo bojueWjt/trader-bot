@@ -34,6 +34,11 @@ def hedge_book(side: Any, quantity: Any = None) -> str | None:
     return None
 
 
+def book_from_position_id(position_id: str | None, side: Any = None) -> str | None:
+    """LONG/SHORT suffix on a canonical position_id wins over FLAT/empty side."""
+    return _book_from_position_id(position_id, side)
+
+
 def nautilus_instrument_id(raw: str | None) -> str | None:
     text = str(raw or "").strip()
     if not text:

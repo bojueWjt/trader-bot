@@ -116,6 +116,16 @@ class ProjectionWriter:
                     unrealized_pnl=EXCLUDED.unrealized_pnl, status=EXCLUDED.status,
                     updated_from_event_id=EXCLUDED.updated_from_event_id, ts_event=EXCLUDED.ts_event,
                     updated_at=now(), payload=EXCLUDED.payload
+                WHERE CASE
+                    WHEN EXCLUDED.ts_event IS NULL
+                         AND positions_projection.ts_event IS NOT NULL THEN FALSE
+                    WHEN positions_projection.ts_event IS NULL THEN TRUE
+                    WHEN EXCLUDED.ts_event > positions_projection.ts_event THEN TRUE
+                    WHEN EXCLUDED.ts_event = positions_projection.ts_event
+                         AND EXCLUDED.status = 'closed'
+                         AND positions_projection.status IS DISTINCT FROM 'closed' THEN TRUE
+                    ELSE FALSE
+                END
                 """,
                 (payload["account_id"], payload["position_id"], payload["instrument_id"],
                  payload.get("side", "long"), payload.get("quantity", 0), payload.get("avg_entry_price"),

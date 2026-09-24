@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-import runpy
+from __future__ import annotations
+
 import sys
 from pathlib import Path
 
-sys.argv = ["report_data.py", "7"]
-runpy.run_path(str(Path(__file__).with_name("report_data.py")), run_name="__main__")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from report_data import main
+
+if __name__ == "__main__":
+    raise SystemExit(main(["7"]))

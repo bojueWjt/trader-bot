@@ -95,6 +95,111 @@ def test_position_close_merges_to_single_closed_record_and_clears_protection(db_
     assert active is False
 
 
+def test_position_close_flat_suffix_isolates_hedge_and_forces_qty_zero(db_conn) -> None:
+    reducer = PositionProjectionReducer()
+    reducer.apply_event(
+        db_conn,
+        _position_event(
+            "hedge-open-long",
+            "PositionOpened",
+            0,
+            payload={
+                "quantity": "2",
+                "position_mode": "HEDGE",
+                "position_side": "LONG",
+                "position_id": "BTCUSDT-PERP.BINANCE-LONG",
+            },
+        ),
+    )
+    reducer.apply_event(
+        db_conn,
+        _position_event(
+            "hedge-open-short",
+            "PositionOpened",
+            1,
+            payload={
+                "quantity": "3",
+                "position_mode": "HEDGE",
+                "position_side": "SHORT",
+                "position_id": "BTCUSDT-PERP.BINANCE-SHORT",
+                "side": "short",
+            },
+        ),
+    )
+    reducer.apply_event(
+        db_conn,
+        _position_event(
+            "hedge-close-short",
+            "PositionClosed",
+            2,
+            payload={
+                "quantity": "3",
+                "side": "FLAT",
+                "position_id": "BTCUSDT-PERP.BINANCE-SHORT",
+                "position_mode": "HEDGE",
+            },
+        ),
+    )
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT position_id, quantity, status FROM positions_projection "
+            "WHERE account_id='acct-om2' ORDER BY position_id"
+        )
+        rows = cur.fetchall()
+    assert ("acct-om2:BTCUSDT:long", Decimal("2"), "open") in rows
+    assert ("acct-om2:BTCUSDT:short", Decimal("0"), "closed") in rows
+
+
+def test_stale_close_after_new_open_does_not_clear_protection(db_conn) -> None:
+    reducer = PositionProjectionReducer()
+    reducer.apply_event(db_conn, _position_event("pos-open", "PositionOpened", 0))
+    close_result = reducer.apply_event(
+        db_conn,
+        _position_event("pos-close", "PositionClosed", 3, payload={"quantity": "0"}),
+    )
+    assert close_result.applied is True
+    reopen = reducer.apply_event(
+        db_conn,
+        _position_event("pos-reopen", "PositionOpened", 10, payload={"quantity": "2"}),
+    )
+    assert reopen.applied is True
+    with db_conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO protective_orders_projection (
+                protective_order_projection_id, account_id, position_key, venue_symbol,
+                lifecycle_role, client_order_id, status, active, quantity, payload
+            )
+            VALUES (
+                '00000000-0000-0000-0000-000000000002',
+                'acct-om2', 'acct-om2:BTCUSDT', 'BTCUSDT',
+                'stop_loss', 'stop-2', 'working', true, 2, %s
+            )
+            """,
+            (Json({}),),
+        )
+    db_conn.commit()
+    stale = reducer.apply_event(
+        db_conn,
+        _position_event("pos-stale-close", "PositionClosed", 3, payload={"quantity": "0"}),
+    )
+    assert stale.applied is False
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT quantity, status FROM positions_projection "
+            "WHERE account_id='acct-om2' AND position_id='acct-om2:BTCUSDT'"
+        )
+        quantity, status = cur.fetchone()
+        cur.execute(
+            "SELECT active FROM protective_orders_projection "
+            "WHERE client_order_id='stop-2'"
+        )
+        active = cur.fetchone()[0]
+    assert quantity == Decimal("2")
+    assert status == "open"
+    assert active is True
+
+
 def test_account_reducer_persists_queryable_balances(db_conn) -> None:
     reducer = AccountProjectionReducer()
     reducer.apply_event(

@@ -1,0 +1,10 @@
+[Unit]
+Description=Trader v3: hourly Binance income collector (completed UTC day)
+
+[Timer]
+OnCalendar=*-*-* *:15:00 UTC
+Persistent=true
+Unit=trader-v3-exchange-income.service
+
+[Install]
+WantedBy=timers.target

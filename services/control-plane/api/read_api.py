@@ -83,6 +83,7 @@ from snapshot import (  # noqa: E402
 from position_protection import protection_status  # noqa: E402
 from position_mapping import (  # noqa: E402
     annotate_with_projection,
+    book_from_position_id,
     canonical_position_id,
     open_books_from_mirror_payload,
     position_ids_equivalent,
@@ -2654,9 +2655,20 @@ def _num(value):
     if value is None:
         return None
     try:
-        return float(str(value).split()[0])  # tolerates '−0.02 USDT' style suffixes
-    except (ValueError, IndexError):
+        number = float(str(value).split()[0])  # tolerates '−0.02 USDT' style suffixes
+    except (ValueError, IndexError, TypeError):
         return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _first_defined_num(*values) -> float | None:
+    for value in values:
+        number = _num(value)
+        if number is not None:
+            return number
+    return None
 
 
 def _enum_key(value):
@@ -2703,21 +2715,38 @@ def _canonical_position_id(instrument_id: str | None, side: str | None,
 def _normalize_position_hint(hint: dict, event_type: str | None = None) -> dict | None:
     out = dict(hint or {})
     instrument_id = out.get("instrument_id")
-    side = _position_side(out.get("side") or out.get("position_side")) or out.get("side")
-    if side not in ("long", "short", "flat"):
-        side = "long"
     original_position_id = out.get("position_id")
+    raw_side = out.get("side")
+    if raw_side in (None, ""):
+        raw_side = out.get("position_side")
+    mapped = _position_side(raw_side)
+    closed_event = str(event_type or "") == "PositionClosed" or mapped == "flat"
+    id_side = book_from_position_id(original_position_id, None)
+    if (
+        id_side in ("long", "short")
+        and mapped in ("long", "short")
+        and id_side != mapped
+    ):
+        return None
+    side = mapped if mapped in ("long", "short") else None
+    if side not in ("long", "short"):
+        side = id_side if id_side in ("long", "short") else None
+    if side not in ("long", "short"):
+        return None
     canonical_id = _canonical_position_id(instrument_id, side, original_position_id)
     if canonical_id is None:
         return None
-    qty = abs(_num(out.get("quantity")) or 0.0)
-    status = out.get("status")
-    if event_type == "PositionClosed" or qty == 0 or side == "flat":
+    qty_raw = _num(out.get("quantity"))
+    if closed_event:
+        qty = 0.0
         status = "closed"
     else:
-        status = status or "open"
+        if qty_raw is None:
+            return None
+        qty = abs(qty_raw)
+        status = "closed" if qty == 0 else (out.get("status") or "open")
     out["position_id"] = canonical_id
-    out["side"] = "long" if side == "flat" else side
+    out["side"] = side
     out["quantity"] = qty
     out["status"] = status
     if original_position_id and original_position_id != canonical_id:
@@ -2730,21 +2759,27 @@ def _normalize_position_hint(hint: dict, event_type: str | None = None) -> dict 
 def _position_projection_from_event(ev: dict) -> dict | None:
     et = str(ev.get("event_type") or "")
     p = ev.get("payload") or {}
-    acct = ev.get("account_id")
-    instrument_id = p.get("instrument_id")
+    nested = p.get("position") if isinstance(p.get("position"), dict) else {}
+    acct = ev.get("account_id") or nested.get("account_id")
+    instrument_id = p.get("instrument_id") or nested.get("instrument_id")
     if not acct or not et.startswith("Position") or not instrument_id:
         return None
-    qty = abs(_num(p.get("quantity")) or 0.0)
+    quantity = p.get("quantity") if p.get("quantity") is not None else nested.get("quantity")
     hint = {
         "account_id": acct,
-        "position_id": p.get("position_id"),
+        "position_id": p.get("position_id") or nested.get("position_id"),
         "instrument_id": instrument_id,
-        "side": p.get("side") or p.get("position_side"),
-        "quantity": qty,
-        "avg_entry_price": _num(p.get("avg_entry_price")) or _num(p.get("last_px")),
-        "mark_price": _num(p.get("mark_price")),
-        "unrealized_pnl": _num(p.get("unrealized_pnl")),
-        "status": "closed" if (et == "PositionClosed" or qty == 0) else "open",
+        "side": p.get("side") or p.get("position_side") or nested.get("side") or nested.get("position_side"),
+        "quantity": quantity,
+        "avg_entry_price": (
+            _num(p.get("avg_entry_price"))
+            or _num(p.get("last_px"))
+            or _num(nested.get("avg_entry_price"))
+            or _num(nested.get("last_px"))
+        ),
+        "mark_price": _first_defined_num(p.get("mark_price"), nested.get("mark_price")),
+        "unrealized_pnl": _first_defined_num(p.get("unrealized_pnl"), nested.get("unrealized_pnl")),
+        "status": "closed" if et == "PositionClosed" else "open",
         "event_id": ev.get("event_id"),
         "ts_event": ev.get("ts_event"),
         "payload": p,
@@ -2778,8 +2813,16 @@ def _derive_projection_from_event(writer, ev: dict) -> set[str]:
     payload = ev.get("payload") or {}
     if not ev.get("account_id"):
         return derived
-    position_hint = _position_projection_from_event(ev)
-    if position_hint is not None:
+    if et.startswith("Position"):
+        position_hint = _position_projection_from_event(ev)
+        if position_hint is None:
+            writer.record_projection_failure(
+                event_id=str(ev.get("event_id") or ""),
+                account_id=str(ev.get("account_id") or ""),
+                projector="positions",
+                error="invalid_position_hint",
+            )
+            return derived
         writer.upsert_position_projection(position_hint)
         derived.add("positions")
         _advance_projection_watermarks(writer, ev, derived)

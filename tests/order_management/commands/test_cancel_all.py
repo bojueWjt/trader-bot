@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from commands.cancel_all import CancelAllSettings, cancel_all
+from _ledger_test_nautilus_commands.cancel_all import CancelAllSettings, cancel_all
 
 
 class FakeVenue:

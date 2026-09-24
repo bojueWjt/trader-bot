@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from commands.close_all import CloseAllSettings, close_all
+from _ledger_test_nautilus_commands.close_all import CloseAllSettings, close_all
 
 
 class FakeVenue:

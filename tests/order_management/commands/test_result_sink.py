@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from commands.result_sink import CommandResultSink
+from _ledger_test_nautilus_commands.result_sink import CommandResultSink
 
 
 class FlakyControlPlane:

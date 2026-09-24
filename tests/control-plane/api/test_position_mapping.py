@@ -12,6 +12,7 @@ sys.path[:0] = [
 
 from position_mapping import (
     annotate_with_projection,
+    book_from_position_id,
     canonical_position_id,
     hedge_book,
     open_books_from_mirror_payload,
@@ -26,6 +27,16 @@ class PositionMappingTest(unittest.TestCase):
         self.assertEqual(hedge_book("BOTH", "1.25"), "long")
         self.assertEqual(hedge_book("BOTH", "-0.027"), "short")
         self.assertIsNone(hedge_book("BOTH", "0"))
+
+    def test_book_from_position_id_suffix_wins_over_flat(self) -> None:
+        self.assertEqual(
+            book_from_position_id("BTCUSDT-PERP.BINANCE-LONG", "FLAT"),
+            "long",
+        )
+        self.assertEqual(
+            book_from_position_id("ASTERUSDT-PERP.BINANCE-SHORT", 1),
+            "short",
+        )
 
     def test_canonical_id_is_nautilus_instrument_plus_book(self) -> None:
         self.assertEqual(

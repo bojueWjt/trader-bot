@@ -18,6 +18,7 @@ class PositionApplyResult:
     event_id: str
     position_key: str
     status: str
+    applied: bool = True
 
 
 class PositionProjectionReducer:
@@ -39,15 +40,17 @@ class PositionProjectionReducer:
             if target is None or target == "self":
                 target = "open"
             quantity = _event_quantity(normalized["payload"])
-            if target == "closed":
+            if target == "closed" or str(normalized["event_type"]) == "PositionClosed":
                 quantity = Decimal("0")
-            _upsert_position(conn, normalized, status=target, quantity=quantity)
-            if target == "closed":
+                target = "closed"
+            applied = _upsert_position(conn, normalized, status=target, quantity=quantity)
+            if target == "closed" and applied:
                 _clear_protective_orders(conn, normalized["account_id"], normalized["position_key"])
             return PositionApplyResult(
                 event_id=normalized["event_id"],
                 position_key=normalized["position_key"],
                 status=target,
+                applied=applied,
             )
 
 
@@ -67,9 +70,21 @@ def _normalize_event(event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _side_from_position_id(position_id: str | None) -> str | None:
+    suffix = str(position_id or "").rsplit("-", 1)[-1].strip().upper()
+    if suffix in {"LONG", "BUY"}:
+        return "long"
+    if suffix in {"SHORT", "SELL"}:
+        return "short"
+    return None
+
+
 def _key_side(payload: dict[str, Any]) -> str | None:
     mode = str(payload.get("position_mode") or "").upper()
     raw_side = str(payload.get("position_side") or payload.get("side") or "").lower()
+    suffix = _side_from_position_id(payload.get("position_id"))
+    if suffix in {"long", "short"}:
+        return suffix
     if mode == "HEDGE" and raw_side in {"long", "short"}:
         return raw_side
     return None
@@ -104,7 +119,7 @@ def _upsert_position(
     *,
     status: str,
     quantity: Decimal,
-) -> None:
+) -> bool:
     payload = event["payload"]
     with conn.cursor() as cur:
         cur.execute(
@@ -127,6 +142,16 @@ def _upsert_position(
                 ts_event=EXCLUDED.ts_event,
                 updated_at=now(),
                 payload=positions_projection.payload || EXCLUDED.payload
+            WHERE CASE
+                WHEN EXCLUDED.ts_event IS NULL
+                     AND positions_projection.ts_event IS NOT NULL THEN FALSE
+                WHEN positions_projection.ts_event IS NULL THEN TRUE
+                WHEN EXCLUDED.ts_event > positions_projection.ts_event THEN TRUE
+                WHEN EXCLUDED.ts_event = positions_projection.ts_event
+                     AND EXCLUDED.status = 'closed'
+                     AND positions_projection.status IS DISTINCT FROM 'closed' THEN TRUE
+                ELSE FALSE
+            END
             """,
             (
                 event["account_id"],
@@ -143,12 +168,18 @@ def _upsert_position(
                 Json(payload),
             ),
         )
+        return int(cur.rowcount or 0) > 0
 
 
 def _position_side(payload: dict[str, Any]) -> str:
     raw = str(payload.get("side") or payload.get("position_side") or "").lower()
     if raw in {"short", "sell"}:
         return "short"
+    if raw in {"long", "buy"}:
+        return "long"
+    suffix = _side_from_position_id(payload.get("position_id"))
+    if suffix in {"long", "short"}:
+        return suffix
     quantity = decimal_or_none(payload.get("quantity") or payload.get("qty"))
     if quantity is not None and quantity < 0:
         return "short"

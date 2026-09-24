@@ -1,0 +1,179 @@
+{
+  "account_id": "account-d",
+  "instrument_id": "BTCUSDT-PERP.BINANCE",
+  "note": "Sanitized production fills 2026-09-21..09-23. PositionOpened at 14:10 is not a fill and must not cut the old 0.117 lot. Last close is exchange_reconciliation only; no PositionClosed.",
+  "fills": [
+    {
+      "account_id": "account-d",
+      "intent_id": "0940adaa-5659-4dc3-a62a-e05851f86587",
+      "event_type": "OrderFilled",
+      "ts_event": "2026-09-21T01:51:41.273+00:00",
+      "instrument_id": "BTCUSDT-PERP.BINANCE",
+      "client_order_id": "B0940adaa56594dc3a62ae05851f8658701",
+      "trade_id": "8099219968",
+      "payload": {
+        "order_side": 1,
+        "last_qty": "0.156",
+        "last_px": "80880.80",
+        "commission": "2.52348096 USDT",
+        "position_id": "BTCUSDT-PERP.BINANCE-LONG",
+        "reduce_only": "False",
+        "instrument_id": "BTCUSDT-PERP.BINANCE"
+      }
+    },
+    {
+      "account_id": "account-d",
+      "intent_id": "3a63736a-0ad6-4b4c-ba87-4b6df04ccfb7",
+      "event_type": "OrderFilled",
+      "ts_event": "2026-09-21T09:40:21.434+00:00",
+      "instrument_id": "BTCUSDT-PERP.BINANCE",
+      "client_order_id": "B3a63736a0ad64b4cba874b6df04ccfb701",
+      "trade_id": "8101136386",
+      "payload": {
+        "order_side": 2,
+        "last_qty": "0.039",
+        "last_px": "84903.60",
+        "commission": "1.65562020 USDT",
+        "position_id": "BTCUSDT-PERP.BINANCE-LONG",
+        "reduce_only": "True",
+        "instrument_id": "BTCUSDT-PERP.BINANCE"
+      }
+    },
+    {
+      "account_id": "account-d",
+      "intent_id": "7a9bc2d3-fcf8-4a02-ad0d-7d4764dc386e",
+      "event_type": "OrderFilled",
+      "ts_event": "2026-09-23T14:10:46.926+00:00",
+      "instrument_id": "BTCUSDT-PERP.BINANCE",
+      "client_order_id": "B7a9bc2d3fcf84a02ad0d7d4764dc386e01",
+      "trade_id": "f61462f9-878d-558c-b353-0cd1c7ba3e30",
+      "payload": {
+        "order_side": 1,
+        "last_qty": "0.087",
+        "last_px": "85000.00",
+        "commission": "0.00000000 USDT",
+        "position_id": "BTCUSDT-PERP.BINANCE-LONG",
+        "reduce_only": "False",
+        "instrument_id": "BTCUSDT-PERP.BINANCE"
+      }
+    },
+    {
+      "account_id": "account-d",
+      "intent_id": "7a9bc2d3-fcf8-4a02-ad0d-7d4764dc386e",
+      "event_type": "OrderFilled",
+      "ts_event": "2026-09-23T14:13:05.130+00:00",
+      "instrument_id": "BTCUSDT-PERP.BINANCE",
+      "client_order_id": "B7a9bc2d3fcf84a02ad0d7d4764dc386e03",
+      "trade_id": "42ad9257-eb41-58b6-981a-37168f63aec2",
+      "payload": {
+        "order_side": 1,
+        "last_qty": "0.031",
+        "last_px": "84660.00",
+        "commission": "0.00000000 USDT",
+        "position_id": "BTCUSDT-PERP.BINANCE-LONG",
+        "reduce_only": "False",
+        "instrument_id": "BTCUSDT-PERP.BINANCE"
+      }
+    },
+    {
+      "account_id": "account-d",
+      "intent_id": "7a9bc2d3-fcf8-4a02-ad0d-7d4764dc386e",
+      "event_type": "OrderFilled",
+      "ts_event": "2026-09-23T16:02:09.060+00:00",
+      "instrument_id": "BTCUSDT-PERP.BINANCE",
+      "client_order_id": "B7a9bc2d3fcf84a02ad0d7d4764dc386e31",
+      "trade_id": "8112627135",
+      "payload": {
+        "side": "SELL",
+        "order_side": "SELL",
+        "position_side": "LONG",
+        "last_qty": "0.235",
+        "last_px": "83600",
+        "avg_px": "83600.00000",
+        "commission": "9.82300000",
+        "commission_asset": "USDT",
+        "realized_pnl": "163.48640000",
+        "reduce_only": true,
+        "source": "exchange_reconciliation",
+        "recovered": true,
+        "instrument_id": "BTCUSDT-PERP.BINANCE",
+        "tags": [
+          "intent_id=7a9bc2d3-fcf8-4a02-ad0d-7d4764dc386e",
+          "position_id=BTCUSDT-PERP.BINANCE-LONG"
+        ]
+      }
+    }
+  ],
+  "position_events": [
+    {
+      "account_id": "account-d",
+      "event_type": "PositionOpened",
+      "ts_event": "2026-09-21T01:51:41.273+00:00",
+      "instrument_id": "BTCUSDT-PERP.BINANCE",
+      "payload": {
+        "side": 2,
+        "last_px": "80880.80",
+        "last_qty": "0.156",
+        "quantity": "0.156",
+        "position_id": "BTCUSDT-PERP.BINANCE-LONG",
+        "instrument_id": "BTCUSDT-PERP.BINANCE"
+      }
+    },
+    {
+      "account_id": "account-d",
+      "event_type": "PositionChanged",
+      "ts_event": "2026-09-21T09:40:21.434+00:00",
+      "instrument_id": "BTCUSDT-PERP.BINANCE",
+      "payload": {
+        "side": 2,
+        "last_px": "84903.60",
+        "last_qty": "0.039",
+        "quantity": "0.117",
+        "position_id": "BTCUSDT-PERP.BINANCE-LONG",
+        "instrument_id": "BTCUSDT-PERP.BINANCE"
+      }
+    },
+    {
+      "account_id": "account-d",
+      "event_type": "PositionOpened",
+      "ts_event": "2026-09-23T14:10:46.926+00:00",
+      "instrument_id": "BTCUSDT-PERP.BINANCE",
+      "payload": {
+        "side": 2,
+        "last_px": "85000.00",
+        "last_qty": "0.087",
+        "quantity": "0.087",
+        "position_id": "BTCUSDT-PERP.BINANCE-LONG",
+        "instrument_id": "BTCUSDT-PERP.BINANCE"
+      }
+    },
+    {
+      "account_id": "account-d",
+      "event_type": "PositionChanged",
+      "ts_event": "2026-09-23T14:13:05.130+00:00",
+      "instrument_id": "BTCUSDT-PERP.BINANCE",
+      "payload": {
+        "side": 2,
+        "last_px": "84660.00",
+        "last_qty": "0.031",
+        "quantity": "0.118",
+        "position_id": "BTCUSDT-PERP.BINANCE-LONG",
+        "instrument_id": "BTCUSDT-PERP.BINANCE"
+      }
+    },
+    {
+      "account_id": "account-d",
+      "event_type": "PositionChanged",
+      "ts_event": "2026-09-23T14:13:39.108132+00:00",
+      "instrument_id": "BTCUSDT-PERP.BINANCE",
+      "payload": {
+        "side": 2,
+        "last_px": "80880.80",
+        "last_qty": "0.117",
+        "quantity": "0.235",
+        "position_id": "BTCUSDT-PERP.BINANCE-LONG",
+        "instrument_id": "BTCUSDT-PERP.BINANCE"
+      }
+    }
+  ]
+}
