@@ -172,7 +172,6 @@ class IntentExecutionStrategy(Strategy):
     """
 
     _DURABLE_IO_QUEUE_CAPACITY = 128
-    _DURABLE_IO_TASK_TIMEOUT_SECONDS = 1.0
     _DURABLE_IO_SHUTDOWN_TIMEOUT_SECONDS = 2.0
     _LIVE_ENTRY_MARK_SNAPSHOT_LIMIT = 256
     _LIVE_ENTRY_MARK_FALLBACK_MAX_AGE_NS = 1_000_000_000
@@ -318,9 +317,8 @@ class IntentExecutionStrategy(Strategy):
             f"{worker_name}.intent-durable-io",
             self._process_durable_io_task,
             capacity=self._DURABLE_IO_QUEUE_CAPACITY,
-            task_timeout_seconds=(
-                self._DURABLE_IO_TASK_TIMEOUT_SECONDS
-            ),
+            # Slow fsync must not task-timeout; shutdown still uses the fatal handler.
+            task_timeout_seconds=False,
             on_overflow=self._halt_durable_io,
             on_error=self._halt_durable_io,
         )
@@ -779,19 +777,24 @@ class IntentExecutionStrategy(Strategy):
             missing_keys,
         )
         if repaired:
-            stash.pop("watchdog_repair_failure_count", None)
+            if stash.pop("watchdog_repair_failure_count", None) is not None:
+                self._queue_entry_protection_stash_persist()
             return
-        count = int(
+        previous_count = int(
             stash.get("watchdog_repair_failure_count", 0)
-        ) + 1
-        stash["watchdog_repair_failure_count"] = count
-        if count < 2:
-            self._queue_entry_protection_stash_persist()
-            return
-        self._freeze_symbol_new_opens(
-            instrument_id,
-            "protection order repair failed twice",
         )
+        count = min(previous_count + 1, 2)
+        if count != previous_count:
+            stash["watchdog_repair_failure_count"] = count
+            self._queue_entry_protection_stash_persist()
+        if count < 2:
+            return
+        freeze_reason = "protection order repair failed twice"
+        key = _canonical_symbol(instrument_id)
+        if self._symbol_open_freezes.get(key) != freeze_reason:
+            self._freeze_symbol_new_opens(instrument_id, freeze_reason)
+        if previous_count >= 2:
+            return
         missing_labels = tuple(
             _protection_key_label(key)
             for key in missing_keys
@@ -811,7 +814,6 @@ class IntentExecutionStrategy(Strategy):
                 "action": "symbol_new_open_frozen",
             },
         )
-        self._queue_entry_protection_stash_persist()
 
     def _defer_flat_or_unknown_protection(self, intent_key: str, stash: dict[str, Any]) -> bool:
         snapshot = self._cached_venue_evidence()
@@ -3696,8 +3698,14 @@ class IntentExecutionStrategy(Strategy):
             if other_source_message_id == source_message_id:
                 same_source_owner = (key, other)
                 continue
-            if isolate_existing:
-                # Add must not steal another intent's protection stash.
+            if isolate_existing or action == "open_position":
+                # A new same-side plan must not delete another plan's book.
+                # Legacy non-batch evidence cannot prove exits, so leave its
+                # live protection orders alone and stop aggregate shrinking.
+                if action == "open_position" and not other.get("batch_entry_ids"):
+                    other["legacy_fill_evidence_unresolved"] = True
+                    if not other.get("protection_frozen"):
+                        other["protection_frozen"] = True
                 continue
             self._entry_protection_stash.pop(key, None)
             self._cancel_clock_timer(self._PROTECTION_TIMER_PREFIX + key)
@@ -3736,10 +3744,16 @@ class IntentExecutionStrategy(Strategy):
         self._entry_protection_stash[str(plan.intent_id)] = stash_payload
         if order_plan.get('type') == 'entry_batch':
             stash = self._entry_protection_stash[str(plan.intent_id)]
-            stash['batch_entry_ids'] = [encode_client_order_id(plan.intent_id, seq) for seq in (1, 2)]
+            tranches = order_plan.get('tranches') or ()
+            if not isinstance(tranches, (list, tuple)) or len(tranches) not in (2, 3):
+                self._entry_protection_stash.pop(str(plan.intent_id), None)
+                self._record_denial(OrderDenied('unsupported_order_spec', 'entry_batch.tranches'))
+                return False
+            sequences = tuple(range(1, len(tranches) + 1))
+            stash['batch_entry_ids'] = [encode_client_order_id(plan.intent_id, seq) for seq in sequences]
             stash['batch_fills'] = {}
             stash['batch_exit_ids'] = []
-            stash['entry_sequence_max'] = 2
+            stash['entry_sequence_max'] = sequences[-1]
             stash['batch_expires_at'] = order_plan.get('entry_expires_at', '')
         return True
 
@@ -4048,15 +4062,17 @@ class IntentExecutionStrategy(Strategy):
         tranches = order_plan.get("tranches")
         tranche_count = 3
         if is_batch:
-            tranche_count = 2
-        if not isinstance(tranches, (list, tuple)) or len(tranches) != tranche_count:
+            if not isinstance(tranches, (list, tuple)) or len(tranches) not in (2, 3):
+                return OrderDenied("unsupported_order_spec", "entry_batch.tranches")
+        elif not isinstance(tranches, (list, tuple)) or len(tranches) != tranche_count:
             return OrderDenied("unsupported_order_spec", "zone_ladder.tranches")
         if is_batch:
             try:
-                first, second = tranches
+                prices = [tranche['sizing_price'] for tranche in tranches]
                 batch_reference_price(
-                    first['sizing_price'], second['sizing_price'],
+                    prices[0], prices[1],
                     order_plan['stop_loss'], 'long' if side == 'BUY' else 'short',
+                    prices[2] if len(prices) == 3 else None,
                 )
                 if order_plan.get('entry_expires_at'):
                     expiry = datetime.fromisoformat(order_plan['entry_expires_at'])
@@ -4092,7 +4108,7 @@ class IntentExecutionStrategy(Strategy):
             price = None
             if is_batch:
                 kind = tranche.get('type')
-                if kind not in ('market', 'limit') or (index == 1 and kind != 'limit'):
+                if kind not in ('market', 'limit') or (index > 0 and kind != 'limit'):
                     return OrderDenied('unsupported_order_spec', 'entry_batch.type')
                 if kind == 'market':
                     order_type = 'MARKET'
