@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-24T04:28:52Z",
+  "updatedAt": "2026-09-24T07:46:51Z",
   "phase": "P2",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -637,10 +637,17 @@
         "file": "taskList.json integration.readyForStitch + OR-06 + modules.orchestrator.review",
         "summary": "OR-06 交付 INTEGRATION_REPORT.md，readyForStitch=true（适用范围见报告 §9）；草稿并入后删除。",
         "by": "用户会话 0f23fe43（经用户授权）"
+      },
+      {
+        "n": 87,
+        "at": "2026-09-24T07:46:51Z",
+        "file": "taskList.json integration.blockers",
+        "summary": "用户决策：G-ACCOUNT-SCOPE 批准；G-RETENTION-CLOUD 批准本地存放于 home-mini 外挂硬盘（云上传仍未批准）；G-LICENSE-SEARCH 批准（AlphaGen 许可证据仍为前提）。G-OC-200-3、G-BUDGET-LABOR、G-STAT-CLAIM 待定。",
+        "by": "用户会话 0f23fe43"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.63",
+    "version": "v1.64",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -2672,18 +2679,21 @@
     "blockers": [
       {
         "gate": "G-ACCOUNT-SCOPE",
-        "status": "pending",
+        "status": "approved",
         "affects": [
           "D-08",
           "D-11"
         ],
         "source": "合并稿 H.2 / contracts/README §6",
         "desc": "独立研究账号与频道范围（TDesktop 导出授权；单频道先行→五频道）。未批：仅合成夹具；禁止用生产 watcher 会话/凭据代替独立研究账号",
-        "addedAt": "2026-09-10T18:10:25Z"
+        "addedAt": "2026-09-10T18:10:25Z",
+        "decidedAt": "2026-09-24T07:46:51Z",
+        "decision": "用户原话「1. 批准」。按提案执行：单频道先行，再扩到五频道；只用独立研究账号导出（TDesktop JSON），不得用生产 watcher 会话或凭据代替。导出本身由用户操作。",
+        "decidedBy": "用户（会话 0f23fe43）"
       },
       {
         "gate": "G-RETENTION-CLOUD",
-        "status": "pending",
+        "status": "approved_local_only",
         "affects": [
           "D-05",
           "D-08",
@@ -2691,7 +2701,10 @@
         ],
         "source": "合并稿 H.2 / contracts/README §6",
         "desc": "云上传范围与数据保留/撤回合同（合并稿 H.1，逐对象批准，默认不上传）。未批：真实聊天记录不得进入 data/",
-        "addedAt": "2026-09-10T18:10:25Z"
+        "addedAt": "2026-09-10T18:10:25Z",
+        "decidedAt": "2026-09-24T07:46:51Z",
+        "decision": "用户原话「2. 可以传到home-mini 有外挂硬盘」。批准的范围：真实聊天记录与派生数据存放在 home-mini 的外挂硬盘（本地研究目录），保留期限与撤回按合并稿 H.1 默认表执行。第三方云上传未获批准，仍默认不上传；若日后要用云端模型处理正文，须另行逐对象批准。",
+        "decidedBy": "用户（会话 0f23fe43）"
       },
       {
         "gate": "G-OC-200-3",
@@ -2730,14 +2743,17 @@
       },
       {
         "gate": "G-LICENSE-SEARCH",
-        "status": "pending",
+        "status": "approved",
         "affects": [
           "R-05",
           "R-09"
         ],
         "source": "合并稿 H.2 / contracts/README §6",
         "desc": "许可与延后搜索：AlphaGen 代码复用需许可证据、DEAP 交付另核；GP/E 档位再议。未批：只做封顶枚举，不引入受限代码",
-        "addedAt": "2026-09-10T18:10:25Z"
+        "addedAt": "2026-09-10T18:10:25Z",
+        "decidedAt": "2026-09-24T07:46:51Z",
+        "decision": "用户原话「6. 批准」。允许按 E.2 的达档条件启用 GP 等 E 档搜索。前提不变：AlphaGen 代码复用须先取得许可证据（这是技术前提，不是用户可豁免的事项），许可未明时只做接口分析、不复制代码；DEAP 的交付方式另核；研究许可不等于上线授权。",
+        "decidedBy": "用户（会话 0f23fe43）"
       }
     ],
     "milestones": {
