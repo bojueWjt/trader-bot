@@ -75,11 +75,19 @@ SCHEMA_HASH = schema_hash(EXTRACTED_EVENT_SCHEMA)
 NUM_RE = re.compile(r"(?<![\d.])(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)(?:\s*(万|w|W|k|K))?(?![\d])")
 RANGE_RE = re.compile(r"(?<![\d.])(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*[-–~～至到]\s*(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(万|w|W|k|K)?(?![\d])")
 UNIT_MULT = {"万": 10000, "w": 10000, "W": 10000, "k": 1000, "K": 1000}
+#: 整数部分超过这么多位的数字串不可能是价格、档位或数量（多是订单号、哈希、电话），不当数字识别。
+#: 不设这道线时，round(Decimal, 12) 对 17 位以上的整数会超出默认 28 位精度抛 InvalidOperation，
+#: 一条真实消息就能让整批导入中断（2026-09-25 真实导出实测）。
+MAX_INT_DIGITS = 15
+
+
+def _too_long(token: str) -> bool:
+    return len(token.replace(",", "").split(".", 1)[0]) > MAX_INT_DIGITS
 
 
 def parse_number_token(tok: str) -> Decimal | None:
     m = NUM_RE.fullmatch(tok.strip())
-    if not m:
+    if not m or _too_long(m.group(1)):
         return None
     v = Decimal(m.group(1).replace(",", ""))
     return round(v * UNIT_MULT.get(m.group(2) or "", 1), 12)
@@ -102,6 +110,8 @@ def find_numbers(text: str, lo: int = 0, hi: int | None = None) -> list[Num]:
     hi = len(text) if hi is None else hi
     out: list[Num] = []
     for m in NUM_RE.finditer(text, lo, hi):
+        if _too_long(m.group(1)):
+            continue
         raw = Decimal(m.group(1).replace(",", ""))
         unit = m.group(2)
         out.append(Num(round(raw * UNIT_MULT.get(unit or "", 1), 12), m.start(), m.end(), unit, raw))
@@ -373,6 +383,8 @@ def parse_message(text: str) -> ParseResult:
     entry_nums: list[Num] = []
     if en_seg:
         rm = RANGE_RE.search(text, *en_seg)
+        if rm and (_too_long(rm.group(1)) or _too_long(rm.group(2))):
+            rm = None                     # 超长数字串不是价格区间
         if rm:
             unit = rm.group(3)
             mult = UNIT_MULT.get(unit or "", 1)
