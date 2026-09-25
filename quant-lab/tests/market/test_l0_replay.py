@@ -170,3 +170,75 @@ def test_g1_coverage_exclusions_and_decision_view_mutant(tmp_path, monkeypatch):
     broken = mutant(l0.replay, 'decision_graph=False', 'decision_graph=True')
     with pytest.raises(AssertionError):
         assert_excluded(broken(graph_version="l0-test", channel=CHANNEL, out=tmp_path / "mutant"))
+
+
+# ---------------------------------------------------------------- 参考价入场（真实数据：峰哥 472 笔里 418 笔是「现价附近」无价格）
+
+from quant_lab.market.asof import MarkAt
+from quant_lab.market.contract import ContractError
+
+
+class _Marks:
+    """t_dec 及以前是 100，之后是 999：用来识别有没有偷看决策时刻之后的价格。"""
+
+    def __init__(self, missing=False):
+        self.missing, self.calls = missing, []
+
+    def mark_at(self, instrument_id, at, **_):
+        self.calls.append(at)
+        if self.missing:
+            return MarkAt(None, "MARK_STALE", None, None)
+        return MarkAt(Decimal("100") if at <= T0 else Decimal("999"), None, at, 0.0)
+
+
+def _row(entries):
+    return {"episode_id": "e1", "instrument_id": instrument_id("BTCUSDT"), "t_dec": T0,
+            "order_plan": {"entries": entries, "side": "short"}}
+
+
+MREF = {"kind": "market_ref", "price_lo": None, "price_hi": None, "fraction": None, "tif": "IOC", "post_only": False}
+
+
+def test_market_ref_gets_the_mark_known_at_decision_time():
+    marks = _Marks()
+    fixed, why = l0.resolve_market_refs(_row([MREF]), marks)
+    assert why is None and marks.calls == [T0]
+    e = fixed["order_plan"]["entries"][0]
+    assert e["price_lo"] == e["price_hi"] == Decimal("100") and e["kind"] == "market_ref"
+
+
+def test_mutant_reading_after_decision_time_takes_a_future_price():
+    """突变：参考价取 t_dec 之后一分钟，拿到的是未来价格 999——正常实现必须是 100。"""
+    broken = mutant(l0.resolve_market_refs, 'marks.mark_at(row["instrument_id"], row["t_dec"])',
+                    'marks.mark_at(row["instrument_id"], row["t_dec"] + __import__("datetime").timedelta(minutes=1))')
+    fixed, _ = broken(_row([MREF]), _Marks())
+    assert fixed["order_plan"]["entries"][0]["price_lo"] == Decimal("999")
+
+
+def test_market_ref_without_a_mark_is_excluded_with_a_reason():
+    fixed, why = l0.resolve_market_refs(_row([MREF]), _Marks(missing=True))
+    assert fixed is None and why == "MARKET_REF_UNRESOLVED:MARK_STALE"
+
+
+def test_priced_entries_are_left_alone():
+    row = _row([{"kind": "limit", "price_lo": Decimal("101"), "price_hi": Decimal("101"), "fraction": None, "tif": "GTC", "post_only": False}])
+    marks = _Marks()
+    fixed, why = l0.resolve_market_refs(row, marks)
+    assert fixed is row and why is None and marks.calls == []
+
+
+def test_one_bad_plan_is_excluded_and_the_run_continues(built, monkeypatch):
+    root, _ = built
+    real, state = l0.build_request, {"n": 0}
+
+    def flaky(row, **kw):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise ContractError("synthetic bad plan")
+        return real(row, **kw)
+
+    monkeypatch.setattr(l0, "build_request", flaky)
+    report = l0.replay(graph_version="l0-test", channel=CHANNEL, out=root / "flaky")
+    assert report["replay_exclusions"]["reason_counts"] == {"PLAN_CONTRACT_INVALID:ContractError": 1}
+    assert report["replay_exclusions"]["n_replayed"] == report["replay_exclusions"]["n_decision_episodes"] - 1
+    assert pl.read_parquet(root / "flaky" / "trades.parquet").height == report["replay_exclusions"]["n_replayed"]

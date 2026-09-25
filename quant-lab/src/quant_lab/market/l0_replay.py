@@ -18,7 +18,7 @@ from quant_lab.data.api import load_episodes
 from quant_lab.data.graph import resolve_alias
 from quant_lab.data.lake import Layout, write_parquet_atomic
 from quant_lab.data.sources import canonical_peer_id
-from quant_lab.market.contract import EVIDENCE_CENSORS, build_request, resolve_policy
+from quant_lab.market.contract import EVIDENCE_CENSORS, ContractError, build_request, resolve_policy
 from quant_lab.market.execution import load_market_from_lake, simulate_batch
 
 
@@ -70,6 +70,27 @@ def summarize(table: pl.DataFrame) -> dict:
                                         for key in ("mark_ok", "funding_ok", "rules_ok", "bars_ok")}}
 
 
+#: 参考价入场（原文「现价附近」「市价」等，G1 只记 market_ref、不写价格——G1 不猜市价）在重放时的参考价来源。
+#: 取决策时刻 t_dec 已知的最新标记价（严格 as-of，不前视），只用于按风险预算定仓；成交仍由内核按市价在 t_start 撮合。
+MARKET_REF_SOURCE = "mark_asof_t_dec"
+
+
+def resolve_market_refs(row: dict, marks) -> tuple[dict | None, str | None]:
+    """把无价格的 market_ref 入场补成 t_dec 时的 as-of 标记价；取不到就返回原因码，由调用方计入覆盖排除。"""
+    plan = row.get("order_plan")
+    entries = (plan or {}).get("entries") or []
+    if not any(e.get("kind") == "market_ref" and e.get("price_lo") is None for e in entries):
+        return row, None
+    if row.get("t_dec") is None or row.get("instrument_id") is None:
+        return None, "MARKET_REF_UNRESOLVED"
+    mark = marks.mark_at(row["instrument_id"], row["t_dec"])
+    if mark.price is None:
+        return None, f"MARKET_REF_UNRESOLVED:{mark.reason or 'NO_MARK'}"
+    fixed = [dict(e, price_lo=mark.price, price_hi=mark.price) if e.get("kind") == "market_ref" and e.get("price_lo") is None else e
+             for e in entries]
+    return dict(row, order_plan=dict(plan, entries=fixed)), None
+
+
 def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: str | Path | None = None,
            policy_version: str = "base-v1", risk_budget: Decimal = Decimal("100")) -> dict:
     layout = Layout.from_root(None)
@@ -97,10 +118,22 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
             exclusion_reasons["G1_DECISION_INELIGIBLE"] += 1
         if set(codes) & set(EVIDENCE_CENSORS) or row["instrument_id"] is None:
             coverage_excluded += 1
-    requests = [build_request(row, policy_version=policy.version, policy_hash=policy.content_hash,
-                              risk_budget=risk_budget, market_manifest="l0-active-silver",
-                              cost_scenario="base", path_scenario="primary")
-                for row in episodes.iter_rows(named=True)]
+    from quant_lab.data.market_lake import LakeMarket
+    marks = LakeMarket(lake)
+    requests, replay_exclusions, market_ref_resolved = [], Counter(), []
+    for row in episodes.iter_rows(named=True):
+        fixed, why = resolve_market_refs(row, marks)
+        if fixed is None:
+            replay_exclusions[why] += 1
+            continue
+        if fixed is not row:
+            market_ref_resolved.append(row["episode_id"])
+        try:
+            requests.append(build_request(fixed, policy_version=policy.version, policy_hash=policy.content_hash,
+                                          risk_budget=risk_budget, market_manifest="l0-active-silver",
+                                          cost_scenario="base", path_scenario="primary"))
+        except (ContractError, ValueError) as exc:   # 单笔计划不合契约：记原因码继续，不让整批中断
+            replay_exclusions[f"PLAN_CONTRACT_INVALID:{type(exc).__name__}"] += 1
     market_hashes = {}
 
     def resolver(request):
@@ -114,7 +147,9 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
         pl.col("order_plan").struct.field("entries").alias("entries"),
         pl.col("order_plan").struct.field("stop").struct.field("price").alias("stop"),
         pl.col("order_plan").struct.field("tps").alias("targets"),
-    ).drop("order_plan", "canonical_events").sort(["t_dec", "episode_id"])
+    ).drop("order_plan", "canonical_events").with_columns(
+        pl.col("episode_id").is_in(market_ref_resolved).alias("market_ref_resolved"),   # 参考价由 t_dec as-of 标记价补出
+    ).sort(["t_dec", "episode_id"])
     report = {
         "claim_status": "descriptive_only", "graph_version": graph_version, "channel": channel,
         "kernel": "A", "policy_version": policy.version, "policy_hash": policy.content_hash,
@@ -131,6 +166,10 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
         "g1_exclusions": {"n_entry_episodes": descriptions.height, "n_excluded": excluded.height,
                           "reason_counts": dict(sorted(exclusion_reasons.items())),
                           "n_coverage_excluded": coverage_excluded},
+        "replay_exclusions": {"n_decision_episodes": episodes.height, "n_replayed": len(requests),
+                              "reason_counts": dict(sorted(replay_exclusions.items()))},
+        "market_ref_entries": {"n_resolved": len(market_ref_resolved), "reference_source": MARKET_REF_SOURCE,
+                               "note": "原文只写「现价 / 附近」无价格的入场，参考价取 t_dec 时 as-of 标记价，仅用于定仓；成交由内核在 t_start 按市价撮合"},
         **summarize(table),
     }
     target = Path(out)
