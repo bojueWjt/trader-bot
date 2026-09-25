@@ -15,6 +15,9 @@ from .lake import sha256_file
 
 CHANNEL_PEER_BASE = 1_000_000_000_000  # Telegram peer_id 规范：channel → -100xxxxxxxxxx
 CHANNEL_CHAT_TYPES = frozenset({"public_channel", "private_channel"})
+#: 超级群组里还有其他成员的发言，默认不读；只有 channels.txt 里明确点名的才摄入。
+#: 目标信号源里 Gauls、Titan、峰哥在 Telegram 中就是超级群组（2026-09-25 实测整号导出）。
+SUPERGROUP_CHAT_TYPES = frozenset({"public_supergroup", "private_supergroup"})
 
 #: TDesktop 单条消息已知顶层字段（其余视为 SCHEMA_DRIFT 候选）
 TDESKTOP_KNOWN_KEYS = frozenset(
@@ -46,6 +49,11 @@ def canonical_channel_id(raw_id: int, chat_type: str | None) -> int:
 
 def _skip_non_channel(chat_type: str | None) -> bool:
     return chat_type not in CHANNEL_CHAT_TYPES
+
+
+def _admitted_supergroup(chat_type: str | None, peer: int, allowed_peer_ids: frozenset[int] | None) -> bool:
+    """超级群组只在白名单启用且点名时摄入；没有白名单时一律按非频道跳过。"""
+    return chat_type in SUPERGROUP_CHAT_TYPES and allowed_peer_ids is not None and peer in allowed_peer_ids
 
 
 def _whitelist_peer_id(raw_id: int) -> int:
@@ -369,7 +377,10 @@ def _scan_whole_account(
     for chat, _left in iter_account_chats(doc):
         chat_type = chat.get("type") if hasattr(chat, "get") else None
         type_key = chat_type if isinstance(chat_type, str) else None
-        if _skip_non_channel(type_key):
+        # 没有白名单时不读超级群组的任何字段（连 id 都不碰）；只有白名单启用时才需要 id 判断是否点名
+        is_group = type_key in SUPERGROUP_CHAT_TYPES and allowed_peer_ids is not None
+        if _skip_non_channel(type_key) and not (is_group and _admitted_supergroup(
+                type_key, canonical_channel_id(int(chat["id"]), type_key), allowed_peer_ids)):
             skipped[type_key or "unknown"] += 1
             continue
         peer = canonical_channel_id(int(chat["id"]), type_key)
@@ -408,7 +419,8 @@ def _scan_single_chat(
     name = doc.get("name") or str(doc["id"])
     type_key = kind if isinstance(kind, str) else None
     is_channel = type_key is not None and not _skip_non_channel(type_key)
-    if allowed_peer_ids is not None and (not is_channel or peer not in allowed_peer_ids):
+    admitted = is_channel or _admitted_supergroup(type_key, peer, allowed_peer_ids)
+    if allowed_peer_ids is not None and (not admitted or peer not in allowed_peer_ids):
         listings = [_present_listing(peer, type_key or "", from_account=False)] if is_channel else []
         return TDesktopScan([], {}, listings, False)
     chunk, listing = _ingest_chat_messages(

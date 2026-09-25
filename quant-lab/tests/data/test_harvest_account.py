@@ -689,3 +689,62 @@ def test_empty_listing_mutant_drops_empty_channel(account, monkeypatch):
     )
     with pytest.raises(AssertionError):
         assert EMPTY_PEER in {row["id"] for row in harvest.run()["channel_reports"]}
+
+
+# ---------------------------------------------------------------- 超级群组（Gauls / Titan / 峰哥 在 Telegram 里是超级群组）
+
+GROUP_SIGNAL_TEXT = "D08_SUPERGROUP_SIGNAL_BTC_LONG_62000"
+SUPERGROUP = 111000010
+SUPERGROUP_PEER = canonical_peer_id(SUPERGROUP, "private_supergroup")
+
+
+def _account_with_supergroup():
+    return {"chats": {"list": [
+        {"name": "Chan One", "type": "public_channel", "id": CH1, "messages": [_msg(1, text=CHANNEL1_TEXT, unix=TS_2024_A)]},
+        {"name": "Signal Group", "type": "private_supergroup", "id": SUPERGROUP,
+         "messages": [_msg(1, text=GROUP_SIGNAL_TEXT, unix=TS_2024_A)]},
+    ]}}
+
+
+@pytest.mark.parametrize("listed", [str(SUPERGROUP), str(SUPERGROUP_PEER)])
+def test_allowlisted_supergroup_is_ingested(tmp_path, listed):
+    """白名单点名的超级群组被摄入；裸 id 与 -100 形式都认。"""
+    from quant_lab.data.sources import load_channel_whitelist
+    (tmp_path / "channels.txt").write_text(f"{listed}\n{CH1}\n", encoding="utf-8")
+    allowed = load_channel_whitelist(tmp_path / "channels.txt")
+    scan = scan_tdesktop_document(_account_with_supergroup(), tmp_path, raw_uri="result.json", raw_hash="abc", allowed_peer_ids=allowed)
+    assert sorted(m.text for m in scan.messages) == sorted([CHANNEL1_TEXT, GROUP_SIGNAL_TEXT])
+    assert {m.channel_id for m in scan.messages} == {CH1_PEER, SUPERGROUP_PEER}
+
+
+def test_supergroup_without_allowlist_is_skipped():
+    """没有白名单时，超级群组仍按非频道跳过：群里有其他成员的发言，不能默认摄入。"""
+    scan = scan_tdesktop_document(_account_with_supergroup(), pathlib.Path("."), raw_uri="result.json", raw_hash="abc")
+    assert [m.text for m in scan.messages] == [CHANNEL1_TEXT]
+    assert scan.skipped_by_type == {"private_supergroup": 1}
+
+
+def test_supergroup_not_on_the_allowlist_is_skipped(tmp_path):
+    scan = scan_tdesktop_document(_account_with_supergroup(), tmp_path, raw_uri="result.json", raw_hash="abc",
+                                  allowed_peer_ids=frozenset({CH1_PEER}))
+    assert [m.text for m in scan.messages] == [CHANNEL1_TEXT]
+    assert GROUP_SIGNAL_TEXT not in repr(scan)
+
+
+def test_mutant_admitting_supergroups_without_allowlist_leaks_group_text(monkeypatch):
+    """突变：把「须白名单点名」去掉，超级群组的消息在没有白名单时也进来了。"""
+    import quant_lab.data.sources as S
+    monkeypatch.setattr(S, "_admitted_supergroup", lambda chat_type, peer, allowed: chat_type in S.SUPERGROUP_CHAT_TYPES)
+    monkeypatch.setattr(S, "_scan_whole_account", mutant(
+        S._scan_whole_account, "type_key in SUPERGROUP_CHAT_TYPES and allowed_peer_ids is not None", "type_key in SUPERGROUP_CHAT_TYPES"))
+    scan = S.scan_tdesktop_document(_account_with_supergroup(), pathlib.Path("."), raw_uri="result.json", raw_hash="abc")
+    assert GROUP_SIGNAL_TEXT in [m.text for m in scan.messages]
+
+
+def test_mutant_without_supergroup_admission_drops_the_target_group(tmp_path, monkeypatch):
+    """突变：去掉超级群组准入，白名单点名的目标群被静默跳过——这正是 2026-09-25 实测导出会丢 Gauls/Titan/峰哥 的原因。"""
+    import quant_lab.data.sources as S
+    monkeypatch.setattr(S, "_admitted_supergroup", lambda chat_type, peer, allowed: False)
+    scan = S.scan_tdesktop_document(_account_with_supergroup(), tmp_path, raw_uri="result.json", raw_hash="abc",
+                                    allowed_peer_ids=frozenset({CH1_PEER, SUPERGROUP_PEER}))
+    assert GROUP_SIGNAL_TEXT not in [m.text for m in scan.messages]
