@@ -16,7 +16,7 @@ from typing import Any
 
 from . import dedup, extract, normalize
 from .lake import Layout
-from .sources import ChannelListing, RawMessage, discover, ingest_pull_dir, ingest_tdesktop_dir, load_channel_whitelist
+from .sources import ChannelListing, ChannelWhitelistInvalid, RawMessage, discover, ingest_pull_dir, ingest_tdesktop_dir, load_channel_whitelist
 
 
 class HarvestRefusal(ValueError):
@@ -72,7 +72,7 @@ def _repository_root() -> pathlib.Path:
 
 def _pull_jsonl_files(root: pathlib.Path) -> list[pathlib.Path]:
     pull_dir = root / "pull"
-    return sorted(p for p in pull_dir.glob("*.jsonl") if p.is_file()) if pull_dir.is_dir() else []
+    return sorted(p for p in pull_dir.glob("*.jsonl") if p.is_file() and not p.name.startswith("._")) if pull_dir.is_dir() else []
 
 
 def _content_key(message: RawMessage) -> tuple[Any, ...]:
@@ -150,8 +150,11 @@ def run(*, export_dir: str | os.PathLike | None = None) -> dict[str, Any]:
     pull_dir = default_export / "pull"
     if pull_dir.exists() and not pull_dir.resolve().is_relative_to(default_export.resolve()):
         raise HarvestRefusal("EXPORT_SYMLINK_ESCAPE")
-    try:
+    try:                                  # 白名单坏了要报白名单，不能报成导出无效（2026-09-25 实测误导）
         allowed = load_channel_whitelist(default_export / "channels.txt")
+    except ChannelWhitelistInvalid as exc:
+        raise HarvestRefusal(f"CHANNEL_WHITELIST_INVALID:line{exc.lineno}") from None
+    try:
         scan = ingest_tdesktop_dir(source, allowed_peer_ids=allowed)
         for path in pull_files:
             if not path.resolve().is_relative_to(default_export.resolve()):

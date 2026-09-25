@@ -65,12 +65,23 @@ def load_channel_whitelist(path: pathlib.Path) -> frozenset[int] | None:
     if not path.is_file():
         return None
     ids: list[int] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        s = line.strip()
-        if not s or s.startswith("#"):
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        s = line.split("#", 1)[0].strip()          # 允许整行注释与行尾注释
+        if not s:
             continue
-        ids.append(_whitelist_peer_id(int(s)))
+        try:
+            ids.append(_whitelist_peer_id(int(s)))
+        except ValueError:
+            raise ChannelWhitelistInvalid(lineno) from None
     return frozenset(ids)
+
+
+class ChannelWhitelistInvalid(ValueError):
+    """白名单某行不是整数 id。只带行号，不带行内容。"""
+
+    def __init__(self, lineno: int):
+        super().__init__(f"channels.txt 第 {lineno} 行不是频道 id")
+        self.lineno = lineno
 
 
 @dataclass
@@ -603,7 +614,8 @@ def ingest_pull_dir(
     if not pull_dir.is_dir():
         return messages, listings
     root = root or pull_dir
-    for path in sorted(p for p in pull_dir.glob("*.jsonl") if p.is_file()):
+    # exFAT / 网络盘上 macOS 会生成 AppleDouble 伴生文件（._name.jsonl），不是数据
+    for path in sorted(p for p in pull_dir.glob("*.jsonl") if p.is_file() and not p.name.startswith("._")):
         named = _peer_from_pull_name(path)
         if allowed_peer_ids is not None and named is not None and named not in allowed_peer_ids:
             listings.append(
