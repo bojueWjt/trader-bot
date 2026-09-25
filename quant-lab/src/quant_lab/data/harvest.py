@@ -131,8 +131,9 @@ def _data_root() -> pathlib.Path:
     return root
 
 
-def run(*, export_dir: str | os.PathLike | None = None) -> dict[str, Any]:
-    root = _data_root()
+def scan_inputs(root: pathlib.Path, *, export_dir: str | os.PathLike | None = None,
+                require_whitelist: bool = False, channel: int | None = None) -> dict[str, Any]:
+    """harvest 与构建共用发现、白名单及路径门禁；过滤先于归一化和媒体落盘。"""
     default_export = root / "import" / "telegram"
     source = pathlib.Path(export_dir).expanduser().resolve() if export_dir is not None else default_export
     if not source.is_dir():
@@ -154,14 +155,34 @@ def run(*, export_dir: str | os.PathLike | None = None) -> dict[str, Any]:
         allowed = load_channel_whitelist(default_export / "channels.txt")
     except ChannelWhitelistInvalid as exc:
         raise HarvestRefusal(f"CHANNEL_WHITELIST_INVALID:line{exc.lineno}") from None
+    if require_whitelist and allowed is None:
+        raise HarvestRefusal("CHANNEL_WHITELIST_REQUIRED")
+    if channel is not None:
+        if allowed is None or channel not in allowed:
+            raise HarvestRefusal("CHANNEL_NOT_WHITELISTED")
+        allowed = frozenset({channel})
     try:
         scan = ingest_tdesktop_dir(source, allowed_peer_ids=allowed)
         for path in pull_files:
             if not path.resolve().is_relative_to(default_export.resolve()):
                 raise HarvestRefusal("EXPORT_SYMLINK_ESCAPE")
-        pull_msgs, pull_listings = ingest_pull_dir(default_export / "pull", allowed_peer_ids=allowed, root=default_export) if pull_files else ([], [])
     except HarvestRefusal:
         raise
+    except (ValueError, TypeError, KeyError, AttributeError, OSError, OverflowError):
+        raise HarvestRefusal("TDESKTOP_EXPORT_INVALID") from None
+    return {"source": source, "exports": exports, "allowed": allowed, "scan": scan,
+            "pull_files": pull_files, "default_export": default_export}
+
+
+def run(*, export_dir: str | os.PathLike | None = None) -> dict[str, Any]:
+    root = _data_root()
+    default_export = root / "import" / "telegram"
+    inputs = scan_inputs(root, export_dir=export_dir if export_dir is not None else default_export)
+    source, exports, allowed, scan, pull_files = (
+        inputs[k] for k in ("source", "exports", "allowed", "scan", "pull_files")
+    )
+    try:
+        pull_msgs, pull_listings = ingest_pull_dir(default_export / "pull", allowed_peer_ids=allowed, root=default_export) if pull_files else ([], [])
     except (ValueError, TypeError, KeyError, AttributeError, OSError, OverflowError):
         raise HarvestRefusal("TDESKTOP_EXPORT_INVALID") from None
     messages = list(scan.messages) + list(pull_msgs)

@@ -105,9 +105,12 @@ def quarantine(flow: str, *, status: str | None = None) -> pl.DataFrame:
     return q.filter(pl.col("status") == status) if status else q
 
 
-def build(fixture_dir: str | os.PathLike, layout: Layout, *, graph_version: str, llm_fixture: str | os.PathLike | None = None, ocr_fixture: str | os.PathLike | None = None,
-          adjudicator_fixture: str | os.PathLike | None = None, ingested_at: datetime | None = None, alias: bool = False, llm: str | None = None) -> dict[str, Any]:
-    """端到端（夹具模式）：归一 → 去重 → 抽取 → 规范化/行情校验（合成桩）→ 链接 → 生命周期 + 发布。
+def build(fixture_dir: str | os.PathLike | None, layout: Layout, *, graph_version: str, llm_fixture: str | os.PathLike | None = None, ocr_fixture: str | os.PathLike | None = None,
+          adjudicator_fixture: str | os.PathLike | None = None, ingested_at: datetime | None = None, alias: bool = False, llm: str | None = None,
+          market_lake: str | os.PathLike | None = None, market: str = "fixture",
+          export_dir: str | os.PathLike | None = None, channel: int | None = None) -> dict[str, Any]:
+    """端到端：归一 → 去重 → 抽取 → 行情校验 → 链接 → 生命周期 + 发布。
+    仅显式 market=real 或 market_lake 启用真实行情，默认保持夹具行为。
     alias=True：把 graph_version 当别名，实际发布不可变版本 `<alias>@<input_hash[:8]>` 并把别名指过去；旧版本原样保留，不删除（T04）。"""
     from . import dedup, extract, lifecycle, linker, normalize, validate
     from .graph import set_alias
@@ -115,27 +118,76 @@ def build(fixture_dir: str | os.PathLike, layout: Layout, *, graph_version: str,
 
     if llm is not None:
         extraction_client(llm=llm, llm_fixture=llm_fixture)  # 闸门先于归一写盘。
+    from .lake import stable_id
+    from .sources import canonical_peer_id, ingest_pull_dir, load_channel_whitelist, read_all
+
+    if market not in ("fixture", "real"):
+        raise ValueError("market 必须为 fixture 或 real")
+    real = market_lake is not None or market == "real"
+    root = Layout.from_root(None).quarantine_path.parent.parent
+    selected = canonical_peer_id(channel, "channel") if channel is not None else None
+    whitelist_path = root / "import" / "telegram" / "channels.txt"
+    allowed = load_channel_whitelist(whitelist_path)
+    source = pathlib.Path(fixture_dir) if fixture_dir is not None else root / "import" / "telegram"
+    normalize_kwargs = {}
+    if real or export_dir is not None:
+        from .harvest import _data_root, scan_inputs
+        root = _data_root()
+        inputs = scan_inputs(root, export_dir=export_dir if export_dir is not None else source,
+                             require_whitelist=True, channel=selected)
+        source = inputs["source"]
+        allowed = inputs["allowed"]
+        pull_msgs, _ = ingest_pull_dir(inputs["default_export"] / "pull", allowed_peer_ids=allowed, root=inputs["default_export"])
+        normalize_kwargs = {"tdesktop_only": True, "allowed_peer_ids": allowed,
+                            "source_messages": inputs["scan"].messages, "extra_messages": pull_msgs}
+    elif allowed is not None or selected is not None:
+        if allowed is not None and selected is not None and selected not in allowed:
+            raise ValueError("CHANNEL_NOT_WHITELISTED")
+        if selected is not None:
+            allowed = frozenset({selected})
+        normalize_kwargs = {"source_messages": list(read_all(source, allowed_peer_ids=allowed))}
+    # 使用独立派生工作集，避免累计 harvest 湖或前一次其他老师构建混入本次图。
+    if real or export_dir is not None or allowed is not None:
+        scope = stable_id("build-scope", sorted(allowed) if allowed is not None else [], str(source.resolve()))[:16]
+        work = layout.gold_dir.parent / "_build" / scope
+        scoped = Layout(work / "bronze", work / "silver", layout.gold_dir,
+                        work / "_loss", layout.quarantine_path)
+        layout = scoped
+    provider = None
+    lifecycle_kwargs = {}
+    if real:
+        from .market_lake import LakeMarket
+        provider = LakeMarket(market_lake if market_lake is not None else root / "lake" / "market")
+        lifecycle_kwargs["registry_version"] = provider.registry.version
     out: dict[str, Any] = {}
-    out["normalize"] = normalize.run(pathlib.Path(fixture_dir), layout, ingested_at=ingested_at)
+    out["normalize"] = normalize.run(source, layout, ingested_at=ingested_at, **normalize_kwargs)
     out["dedup"] = dedup.run(layout, ingested_at=ingested_at)
     out["extract"] = extract.run(layout, llm_fixture=llm_fixture, ocr_fixture=ocr_fixture, ingested_at=ingested_at, llm=llm)
-    out["validate"] = validate.run(layout, ingested_at=ingested_at, synthetic=True)
+    if provider is None:
+        out["validate"] = validate.run(layout, ingested_at=ingested_at, synthetic=True)
+    else:
+        out["validate"] = validate.run(layout, ingested_at=ingested_at, marks=provider, registry=provider.registry)
     out["linker"] = linker.run(layout, adjudicator=RecordedClient.from_file(adjudicator_fixture) if adjudicator_fixture else None, ingested_at=ingested_at)
     if alias:
-        ih = lifecycle.input_hash_of(layout, ingested_at=ingested_at)
+        ih = lifecycle.input_hash_of(layout, ingested_at=ingested_at, **lifecycle_kwargs)
         gv = f"{graph_version}@{ih[:8]}"
-        out["lifecycle"] = lifecycle.run(layout, graph_version=gv, ingested_at=ingested_at)
+        out["lifecycle"] = lifecycle.run(layout, graph_version=gv, ingested_at=ingested_at, **lifecycle_kwargs)
         set_alias(layout, graph_version, gv)
         out["lifecycle"]["alias"] = {graph_version: gv}
     else:
-        out["lifecycle"] = lifecycle.run(layout, graph_version=graph_version, ingested_at=ingested_at)
+        out["lifecycle"] = lifecycle.run(layout, graph_version=graph_version, ingested_at=ingested_at, **lifecycle_kwargs)
     return out
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="quant_lab.data API / 构建（夹具模式）")
+    ap = argparse.ArgumentParser(description="quant_lab.data API / 构建（默认夹具，显式接入真实行情）")
     ap.add_argument("--build", action="store_true")
-    ap.add_argument("--fixture")
+    source_group = ap.add_mutually_exclusive_group()
+    source_group.add_argument("--fixture")
+    source_group.add_argument("--export-dir", help="整号 TDesktop 导出目录；pull 固定从数据根 import/telegram/pull 读取")
+    ap.add_argument("--market", choices=["fixture", "real"], default="fixture")
+    ap.add_argument("--market-lake", help="显式启用真实行情；--market real 缺省取 DATA_ROOT/lake/market")
+    ap.add_argument("--channel", type=int, help="只构建该频道（白名单内的 Telegram peer id）")
     ap.add_argument("--graph-version", default="fixture-v1")
     providers = ap.add_mutually_exclusive_group()
     providers.add_argument("--llm-fixture")
@@ -152,11 +204,12 @@ def main(argv: list[str] | None = None) -> int:
         os.environ["QUANT_LAB_DATA_ROOT"] = str(a.lake_root)
     layout = Layout.flat(a.out) if a.out else Layout.from_root(None)
     if a.build:
-        if not a.fixture:
-            ap.error("--build 需要 --fixture")
+        if not a.fixture and not a.export_dir and a.market != "real" and a.market_lake is None:
+            ap.error("--build 需要 --fixture、--export-dir 或显式真实行情模式")
         try:
-            res = build(a.fixture, layout, graph_version=a.graph_version, llm_fixture=a.llm_fixture, ocr_fixture=a.ocr_fixture, adjudicator_fixture=a.adjudicator_fixture, alias=a.alias, llm=a.llm)
-        except PermissionError as exc:
+            res = build(a.fixture, layout, graph_version=a.graph_version, llm_fixture=a.llm_fixture, ocr_fixture=a.ocr_fixture, adjudicator_fixture=a.adjudicator_fixture, alias=a.alias, llm=a.llm,
+                        market_lake=a.market_lake, market=a.market, export_dir=a.export_dir, channel=a.channel)
+        except (PermissionError, ValueError) as exc:
             ap.error(str(exc))
         print(json.dumps({k: {kk: vv for kk, vv in v.items() if kk not in ("paths", "inputs", "raw_hashes", "items")} for k, v in res.items()}, ensure_ascii=False, indent=2, default=str))
         return 0
