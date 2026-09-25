@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-24T08:13:37Z",
+  "updatedAt": "2026-09-25T05:10:07Z",
   "phase": "P2",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -658,10 +658,17 @@
         "file": "taskList.json integration.blockers G-ACCOUNT-SCOPE",
         "summary": "用户没有研究小号：改为用户本人账号经 Telegram Desktop 官方导出；仍禁用 watcher 会话和脚本批量拉取。",
         "by": "用户会话 0f23fe43"
+      },
+      {
+        "n": 90,
+        "at": "2026-09-25T05:10:07Z",
+        "file": "taskList.json integration.blockers",
+        "summary": "G-ACCOUNT-SCOPE：舒琴/TraderCash 授权本人账号限速脚本拉取；数据根定在黑苹果 /Volumes/G/quant-lab-data。",
+        "by": "用户会话 0f23fe43"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.66",
+    "version": "v1.67",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -2705,13 +2712,17 @@
         "source": "合并稿 H.2 / contracts/README §6",
         "desc": "独立研究账号与频道范围（TDesktop 导出授权；单频道先行→五频道）。未批：仅合成夹具；禁止用生产 watcher 会话/凭据代替独立研究账号",
         "addedAt": "2026-09-10T18:10:25Z",
-        "decidedAt": "2026-09-24T08:13:37Z",
-        "decision": "用户原话「1. 批准」，后补「我没有研究小号」。修订：导出账号改为用户本人的 Telegram 账号，只经官方 Telegram Desktop 的「导出聊天记录」（JSON 加图片）导出，节奏由 Telegram 官方控制。仍然禁止：使用线上 watcher 的会话文件或凭据，以及用脚本（Telethon 等）批量拉取历史。单频道先行，再扩到五频道。",
+        "decidedAt": "2026-09-25T05:10:07Z",
+        "decision": "用户本人账号。四个群（坚果TV、Gauls、峰哥、Titan）经 Telegram Desktop 官方整号导出（2026-09-25，存黑苹果 /Volumes/G/yingpan）。舒琴、TraderCash 开了「禁止保存内容」，官方导出为空；用户选择「写脚本用我的号慢慢拉」：授权以本人账号、经限速只读脚本（quant_lab.data.tg_pull）拉取这两个群的历史，由用户本人完成登录。仍然禁止使用线上 watcher 的会话或凭据。目标 6 个：舒琴、Titan、Gauls、坚果TV、TraderCash、峰哥（峰哥在预注册五频道之外，正式声明前须另行纳入）。",
         "decidedBy": "用户（会话 0f23fe43）",
         "history": [
           {
             "at": "2026-09-24T07:46:51Z",
             "decision": "用户原话「1. 批准」。按提案执行：单频道先行，再扩到五频道；只用独立研究账号导出（TDesktop JSON），不得用生产 watcher 会话或凭据代替。导出本身由用户操作。"
+          },
+          {
+            "at": "2026-09-24T08:13:37Z",
+            "decision": "用户原话「1. 批准」，后补「我没有研究小号」。修订：导出账号改为用户本人的 Telegram 账号，只经官方 Telegram Desktop 的「导出聊天记录」（JSON 加图片）导出，节奏由 Telegram 官方控制。仍然禁止：使用线上 watcher 的会话文件或凭据，以及用脚本（Telethon 等）批量拉取历史。单频道先行，再扩到五频道。"
           }
         ]
       },
@@ -2727,7 +2738,7 @@
         "desc": "云上传范围与数据保留/撤回合同（合并稿 H.1，逐对象批准，默认不上传）。未批：真实聊天记录不得进入 data/",
         "addedAt": "2026-09-10T18:10:25Z",
         "decidedAt": "2026-09-24T07:46:51Z",
-        "decision": "用户原话「2. 可以传到home-mini 有外挂硬盘」。批准的范围：真实聊天记录与派生数据存放在 home-mini 的外挂硬盘（本地研究目录），保留期限与撤回按合并稿 H.1 默认表执行。第三方云上传未获批准，仍默认不上传；若日后要用云端模型处理正文，须另行逐对象批准。",
+        "decision": "用户原话「2. 可以传到home-mini 有外挂硬盘」。批准的范围：真实聊天记录与派生数据存放在 home-mini 的外挂硬盘（本地研究目录），保留期限与撤回按合并稿 H.1 默认表执行。第三方云上传未获批准，仍默认不上传；若日后要用云端模型处理正文，须另行逐对象批准。 实际存放：用户把导出放在黑苹果（家中）/Volumes/G；研究数据根定为同盘 /Volumes/G/quant-lab-data（本地、家中，不上云）。",
         "decidedBy": "用户（会话 0f23fe43）"
       },
       {
