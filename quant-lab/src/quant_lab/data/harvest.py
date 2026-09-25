@@ -1,6 +1,7 @@
 """D-08 / PoC 1a：独立研究账号的 TDesktop JSON + 媒体 → 本地湖与无原文报告。
 
-仅导入用户提供的文件；不读取 watcher 会话、不拉取 Telethon、不调用 LLM。
+仅导入用户提供的文件；不读取 watcher 会话、不调用 LLM。
+可选摄入 DATA_ROOT/import/telegram/pull/*.jsonl（由 quant_lab.data.tg_pull 离线写出）。
 真实导出必须使用仓库外的 QUANT_LAB_DATA_ROOT（home-mini 外挂硬盘）。
 """
 from __future__ import annotations
@@ -15,7 +16,7 @@ from typing import Any
 
 from . import dedup, extract, normalize
 from .lake import Layout
-from .sources import ChannelListing, RawMessage, discover, ingest_tdesktop_dir, load_channel_whitelist
+from .sources import ChannelListing, RawMessage, discover, ingest_pull_dir, ingest_tdesktop_dir, load_channel_whitelist
 
 
 class HarvestRefusal(ValueError):
@@ -47,6 +48,14 @@ def _merged_channel_reports(listings: list[ChannelListing], ordinary: list[RawMe
     for channel_id in sorted(groups):
         group = groups[channel_id]
         rec: dict[str, Any] = {"id": channel_id, **_channel_metrics([m for m in ordinary if m.channel_id == channel_id])}
+        kinds = sorted({getattr(c, "source", "tdesktop") for c in group})
+        rec["sources"] = kinds
+        if len(kinds) > 1:
+            rec["source"] = "mixed"
+        elif kinds:
+            rec["source"] = kinds[0]
+        else:
+            rec["source"] = "tdesktop"
         account_names = [c.name for c in group if c.from_account and c.name]
         if any(c.from_account for c in group):
             rec["name"] = account_names[0] if account_names else ""
@@ -59,6 +68,53 @@ def _merged_channel_reports(listings: list[ChannelListing], ordinary: list[RawMe
 
 def _repository_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[4]
+
+
+def _pull_jsonl_files(root: pathlib.Path) -> list[pathlib.Path]:
+    pull_dir = root / "pull"
+    return sorted(p for p in pull_dir.glob("*.jsonl") if p.is_file()) if pull_dir.is_dir() else []
+
+
+def _content_key(message: RawMessage) -> tuple[Any, ...]:
+    media = tuple((ref.kind, ref.sha256 or ref.rel_path) for ref in message.media)
+    return (message.channel_id, message.message_id, message.text, message.edited_unixtime, media)
+
+
+def _ordinary_for_report(td_messages: list[RawMessage], pull_messages: list[RawMessage]) -> list[RawMessage]:
+    """跨源相同版本只计一次；TDesktop 侧原计数不变。"""
+    td_ord = [m for m in td_messages if m.message_type == "message"]
+    seen = {_content_key(m) for m in td_ord}
+    extra: list[RawMessage] = []
+    for message in pull_messages:
+        if message.message_type != "message":
+            continue
+        key = _content_key(message)
+        if key in seen:
+            continue
+        seen.add(key)
+        extra.append(message)
+    return td_ord + extra
+
+
+def _overall_source(*, has_td: bool, has_pull: bool) -> str:
+    if has_td and has_pull:
+        return "mixed"
+    if has_pull:
+        return "pull"
+    return "tdesktop"
+
+
+def _source_rows(td_messages: list[RawMessage], pull_messages: list[RawMessage]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, str]] = set()
+    for kind, bundle in (("tdesktop", td_messages), ("pull", pull_messages)):
+        for message in bundle:
+            key = (kind, message.channel_id, message.raw_uri)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({"kind": kind, "channel_id": message.channel_id, "path": message.raw_uri})
+    return rows
 
 
 def _data_root() -> pathlib.Path:
@@ -84,34 +140,48 @@ def run(*, export_dir: str | os.PathLike | None = None) -> dict[str, Any]:
     if not any(source.iterdir()):
         raise HarvestRefusal("EXPORT_DIR_EMPTY")
     exports = discover(source, tdesktop_only=True)
-    if not exports:
+    pull_files = _pull_jsonl_files(default_export)
+    if not exports and not pull_files:
         raise HarvestRefusal("TDESKTOP_EXPORT_NOT_FOUND")
     for _, directory in exports:
         for path in (directory / "result.json", directory / "export_manifest.json"):
             if not path.resolve().is_relative_to(source.resolve()):
                 raise HarvestRefusal("EXPORT_SYMLINK_ESCAPE")
+    pull_dir = default_export / "pull"
+    if pull_dir.exists() and not pull_dir.resolve().is_relative_to(default_export.resolve()):
+        raise HarvestRefusal("EXPORT_SYMLINK_ESCAPE")
     try:
         allowed = load_channel_whitelist(default_export / "channels.txt")
         scan = ingest_tdesktop_dir(source, allowed_peer_ids=allowed)
+        for path in pull_files:
+            if not path.resolve().is_relative_to(default_export.resolve()):
+                raise HarvestRefusal("EXPORT_SYMLINK_ESCAPE")
+        pull_msgs, pull_listings = ingest_pull_dir(default_export / "pull", allowed_peer_ids=allowed, root=default_export) if pull_files else ([], [])
+    except HarvestRefusal:
+        raise
     except (ValueError, TypeError, KeyError, AttributeError, OSError, OverflowError):
         raise HarvestRefusal("TDESKTOP_EXPORT_INVALID") from None
-    messages = scan.messages
-    ordinary = [m for m in messages if m.message_type == "message"]
-    if not ordinary and allowed is None and not scan.whole_account:
+    messages = list(scan.messages) + list(pull_msgs)
+    listings = list(scan.listings) + list(pull_listings)
+    ordinary = _ordinary_for_report(scan.messages, pull_msgs)
+    if not ordinary and allowed is None and not scan.whole_account and not pull_msgs:
         raise HarvestRefusal("TDESKTOP_EXPORT_EMPTY")
 
     # 分母是本次导出的普通消息（含重复快照），不是湖中历次导入的累计行。
     n = len(ordinary)
+    n_service = sum(1 for m in messages if m.message_type != "message")
     candidates = sum(extract.parse_message(m.text).kind not in ("analysis", "chatter", "result_post", "undecidable") for m in ordinary)
     years = Counter(str(m.message_date.year) if m.message_date else "unknown" for m in ordinary)
     files = sorted({(m.channel_id, m.raw_hash) for m in messages})
-    in_scope = [c for c in scan.listings if c.ingested]
-    present = {c.channel_id for c in scan.listings}
+    in_scope = [c for c in listings if c.ingested]
+    present = {c.channel_id for c in listings}
     missing = sorted(allowed - present) if allowed is not None else []
-    channel_ids = sorted({c.channel_id for c in in_scope} | {m.channel_id for m in messages})
+    channel_ids = sorted({c.channel_id for c in in_scope} | {m.channel_id for m in ordinary})
+    has_td = bool(exports) or bool(scan.messages) or bool(scan.listings)
+    has_pull = bool(pull_msgs) or bool(pull_listings)
     report = {
-        "poc": "1a", "source": "tdesktop", "status": "ok",
-        "n_messages": n, "n_service_messages": len(messages) - n,
+        "poc": "1a", "source": _overall_source(has_td=has_td, has_pull=has_pull), "status": "ok",
+        "n_messages": n, "n_service_messages": n_service,
         "denominator": "ordinary_messages_in_this_export",
         "edit_ratio": (sum(m.edited_raw is not None or m.edited_unixtime is not None or m.edit_time_problem is not None for m in ordinary) / n) if n else 0.0,
         "image_ratio": (sum(any(ref.kind == "photo" for ref in m.media) for m in ordinary) / n) if n else 0.0,
@@ -120,6 +190,7 @@ def run(*, export_dir: str | os.PathLike | None = None) -> dict[str, Any]:
         "signal_rate": {"value": (candidates / n) if n else 0.0, "n_candidates": candidates, "method": "deterministic_parser_candidate_rate", "verified": False},
         "channels": channel_ids,
         "exports": [{"channel_id": peer, "sha256": digest} for peer, digest in files],
+        "sources": _source_rows(list(scan.messages), list(pull_msgs)),
         "manual_review": {"status": "not_run", "reason": "用户决定暂不人工抽查"},
         "telethon_comparison": {"status": "not_run", "reason": "需要独立账号凭据；严禁使用生产 watcher 会话"},
         "ocr": {"status": "not_run", "reason": "图片暂无 OCR"},
@@ -132,7 +203,10 @@ def run(*, export_dir: str | os.PathLike | None = None) -> dict[str, Any]:
         "channel_reports": _merged_channel_reports(in_scope, ordinary, messages),
     }
     layout = Layout.from_root(root)
-    normalized = normalize.run(source, layout, tdesktop_only=True, allowed_peer_ids=allowed)
+    if not pull_msgs:
+        normalized = normalize.run(source, layout, tdesktop_only=True, allowed_peer_ids=allowed)
+    else:
+        normalized = normalize.run(source, layout, tdesktop_only=True, allowed_peer_ids=allowed, extra_messages=pull_msgs)
     dedup.run(layout)
     extract.run(layout)
     report["batch_id"] = normalized["batch_id"]

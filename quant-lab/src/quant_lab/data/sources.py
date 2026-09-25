@@ -228,6 +228,7 @@ class ChannelListing:
     end: datetime | None
     ingested: bool = True
     from_account: bool = False
+    source: str = "tdesktop"
 
 
 @dataclass
@@ -508,7 +509,12 @@ def ingest_tdesktop_dir(
     return TDesktopScan(messages, dict(sorted(skipped.items())), listings, whole)
 
 
-def read_telethon_jsonl(path: pathlib.Path, *, root: pathlib.Path | None = None) -> Iterator[RawMessage]:
+def read_telethon_jsonl(
+    path: pathlib.Path,
+    *,
+    root: pathlib.Path | None = None,
+    allowed_peer_ids: frozenset[int] | None = None,
+) -> Iterator[RawMessage]:
     """Telethon 实收快照（每行一条观察，可对同一消息多次观察 → 多版本）。字段：
     peer_id, id, date(unix), edit_date(unix)?, message, entities?, reply_to_msg_id?, grouped_id?,
     fwd_from{from_name?, from_id?, channel_post?, date?}?, media[{kind, path, size}]?, first_seen_at, snapshot_at?
@@ -521,6 +527,9 @@ def read_telethon_jsonl(path: pathlib.Path, *, root: pathlib.Path | None = None)
             if not line.strip():
                 continue
             m = json.loads(line)
+            peer = int(m["peer_id"])
+            if allowed_peer_ids is not None and peer not in allowed_peer_ids:
+                continue
             unix, prob = _parse_unix(m.get("date"))
             eunix, eprob = _parse_unix(m.get("edit_date")) if m.get("edit_date") is not None else (None, None)
             fwd = m.get("fwd_from") or {}
@@ -535,8 +544,13 @@ def read_telethon_jsonl(path: pathlib.Path, *, root: pathlib.Path | None = None)
                 if ref.exists:
                     ref.sha256 = sha256_file(real)
                 media.append(ref)
+            first_seen = _dt(m.get("first_seen_at"))
+            snapshot = _dt(m.get("snapshot_at"))
+            cohort = m.get("cohort")
+            # history-pull + first_seen 空：H1 可用时刻 = 本批 snapshot
+            export_snapshot = snapshot if first_seen is None and isinstance(cohort, str) and cohort.startswith("history-pull") else None
             yield RawMessage(
-                channel_id=int(m["peer_id"]),
+                channel_id=peer,
                 channel_name=m.get("peer_name") or str(m["peer_id"]),
                 message_id=int(m["id"]),
                 message_type="service" if m.get("action") else "message",
@@ -555,18 +569,81 @@ def read_telethon_jsonl(path: pathlib.Path, *, root: pathlib.Path | None = None)
                 media=media,
                 from_id=str(m.get("from_id")) if m.get("from_id") is not None else None,
                 action=m.get("action"),
-                first_seen_at=_dt(m.get("first_seen_at")),
-                snapshot_at=_dt(m.get("snapshot_at")),
+                first_seen_at=first_seen,
+                snapshot_at=snapshot,
                 raw_uri=raw_uri,
                 raw_hash=raw_hash,
                 unknown_keys=[],
                 time_unit_problem=prob,
                 edit_time_problem=eprob,
                 raw_index=idx,
-                cohort_id=m.get("cohort"),
+                export_snapshot_at=export_snapshot,
+                cohort_id=cohort,
                 sequence_evidence=m.get("observed_sequence"),
                 quote_only=m.get("quote_only", False),
             )
+
+
+def _peer_from_pull_name(path: pathlib.Path) -> int | None:
+    try:
+        return int(path.stem)
+    except (TypeError, ValueError):
+        return None
+
+
+def ingest_pull_dir(
+    pull_dir: pathlib.Path,
+    *,
+    allowed_peer_ids: frozenset[int] | None = None,
+    root: pathlib.Path | None = None,
+) -> tuple[list[RawMessage], list[ChannelListing]]:
+    """只读 DATA_ROOT/import/telegram/pull/*.jsonl（非递归）。"""
+    messages: list[RawMessage] = []
+    listings: list[ChannelListing] = []
+    if not pull_dir.is_dir():
+        return messages, listings
+    root = root or pull_dir
+    for path in sorted(p for p in pull_dir.glob("*.jsonl") if p.is_file()):
+        named = _peer_from_pull_name(path)
+        if allowed_peer_ids is not None and named is not None and named not in allowed_peer_ids:
+            listings.append(
+                ChannelListing(
+                    channel_id=named,
+                    name="",
+                    chat_type="channel",
+                    n_messages=0,
+                    start=None,
+                    end=None,
+                    ingested=False,
+                    from_account=False,
+                    source="pull",
+                )
+            )
+            continue
+        file_msgs = list(read_telethon_jsonl(path, root=root, allowed_peer_ids=allowed_peer_ids))
+        peers = {m.channel_id for m in file_msgs}
+        if named is not None:
+            peers.add(named)
+        for peer in sorted(peers):
+            group = [m for m in file_msgs if m.channel_id == peer]
+            ingest = allowed_peer_ids is None or peer in allowed_peer_ids
+            if ingest:
+                messages.extend(group)
+            dates = [m.message_date for m in group if m.message_date]
+            listings.append(
+                ChannelListing(
+                    channel_id=peer,
+                    name=group[0].channel_name if group else "",
+                    chat_type="channel",
+                    n_messages=sum(1 for m in group if m.message_type == "message") if ingest else 0,
+                    start=min(dates) if ingest and dates else None,
+                    end=max(dates) if ingest and dates else None,
+                    ingested=ingest,
+                    from_account=False,
+                    source="pull",
+                )
+            )
+    return messages, listings
 
 
 def discover(fixture_dir: pathlib.Path, *, tdesktop_only: bool = False) -> list[tuple[str, pathlib.Path]]:
@@ -590,4 +667,4 @@ def read_all(
         if kind == "tdesktop":
             yield from read_tdesktop_export(p, root=fixture_dir, allowed_peer_ids=allowed_peer_ids)
         else:
-            yield from read_telethon_jsonl(p, root=fixture_dir)
+            yield from read_telethon_jsonl(p, root=fixture_dir, allowed_peer_ids=allowed_peer_ids)
