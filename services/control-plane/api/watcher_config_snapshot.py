@@ -48,6 +48,7 @@ _DECIMAL_RE = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?\Z")
 _SHA_RE = re.compile(r"[0-9a-f]{64}\Z")
 _GENERATED_RE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\Z")
 _LOG = logging.getLogger(__name__)
+_LOG_SETUP_LOCK = threading.Lock()
 
 
 class SnapshotUnavailable(Exception):
@@ -373,19 +374,46 @@ class SnapshotCache:
         self.last_refresh_error: str | None = None
         self._blocked_reason: str | None = None
         self.next_refresh_at = self._clock()
+        self._logged_state = "cold"
+        self._logged_revision: int | None = None
+
+    def _state_locked(self) -> str:
+        if self._blocked_reason == "unauthorized":
+            return "unauthorized"
+        if self._blocked_reason in {"invalid", "schema_mismatch"}:
+            return "invalid"
+        if self._snapshot is None or self._verified_at is None:
+            return "cold"
+        if self._clock() - self._verified_at > MAX_AGE:
+            return "expired"
+        return "fresh"
+
+    def _log_transition_locked(self, reason: str) -> str:
+        state = self._state_locked()
+        revision = self._snapshot.revision if self._snapshot is not None else None
+        if state == self._logged_state and revision == self._logged_revision:
+            return state
+        age_ms = None
+        if self._verified_at is not None:
+            age_ms = max(0, int((self._clock() - self._verified_at) * 1000))
+        if state == "expired":
+            reason = "max_age_exceeded"
+        elif state == "unauthorized":
+            reason = "unauthorized"
+        elif state == "invalid":
+            reason = self._blocked_reason or "invalid"
+        _LOG.info(
+            "snapshot_state_transition from=%s to=%s reason=%s revision=%s age_ms=%s last_error=%s",
+            self._logged_state, state, reason, revision, age_ms, self.last_refresh_error,
+        )
+        self._logged_state = state
+        self._logged_revision = revision
+        return state
 
     @property
     def state(self) -> str:
         with self._lock:
-            if self._blocked_reason == "unauthorized":
-                return "unauthorized"
-            if self._blocked_reason in {"invalid", "schema_mismatch"}:
-                return "invalid"
-            if self._snapshot is None or self._verified_at is None:
-                return "cold"
-            if self._clock() - self._verified_at > MAX_AGE:
-                return "expired"
-            return "fresh"
+            return self._log_transition_locked("observed")
 
     def require_fresh(self) -> SnapshotLease:
         with self._lock:
@@ -441,6 +469,7 @@ class SnapshotCache:
                 self._blocked_reason = None
                 self._failures = 0
                 self.next_refresh_at = self._verified_at + REFRESH_INTERVAL
+                self._log_transition_locked("refresh_success")
             return True
         except OSError:
             self._failure("unavailable")
@@ -456,13 +485,26 @@ class SnapshotCache:
             self._failures += 1
             delay = _BACKOFF[min(self._failures - 1, len(_BACKOFF) - 1)]
             self.next_refresh_at = self._clock() + delay
+            self._log_transition_locked(error)
 
     def start(self) -> None:
         with self._lock:
             if self._thread is not None:
                 return
             self._stop.clear()
-        self.refresh()
+        started_at = time.monotonic()
+        refreshed = self.refresh()
+        duration_ms = max(0, int((time.monotonic() - started_at) * 1000))
+        with self._lock:
+            state = self._log_transition_locked("warmup_observed")
+            verified = self._snapshot if refreshed and state == "fresh" else None
+        _LOG.info(
+            "snapshot_warmup result=%s revision=%s content_sha256=%s pid=%d role=operator-query duration_ms=%d",
+            "success" if verified is not None else "cold",
+            verified.revision if verified is not None else None,
+            verified.content_sha256[:12] if verified is not None else None,
+            os.getpid(), duration_ms,
+        )
         with self._lock:
             if self._thread is None:
                 self._thread = threading.Thread(target=self._run, name="watcher-config-snapshot", daemon=True)
@@ -500,8 +542,32 @@ def get_process_cache() -> SnapshotCache:
         return _process_cache
 
 
+def _ensure_info_logging() -> None:
+    # Uvicorn's default configuration leaves application loggers without a
+    # handler and inheriting WARNING. Configure only this module, once needed.
+    with _LOG_SETUP_LOCK:
+        _LOG.setLevel(logging.INFO)
+        current = _LOG
+        while current is not None:
+            if any(
+                not isinstance(handler, logging.NullHandler)
+                and handler.level <= logging.INFO
+                for handler in current.handlers
+            ):
+                return
+            if not current.propagate:
+                break
+            current = current.parent
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.INFO)
+        _LOG.addHandler(handler)
+        # Do not duplicate these records if root logging is configured later.
+        _LOG.propagate = False
+
+
 def start_if_enabled() -> None:
     if enabled():
+        _ensure_info_logging()
         get_process_cache().start()
 
 
