@@ -523,3 +523,32 @@ def test_zone_range_and_signed_token_mutant(monkeypatch):
     monkeypatch.setattr(cx, "NUMBER", re.compile(cx.NUMBER.pattern.replace(r"[+\-]?", "")))
     with pytest.raises(AssertionError):
         invariant()
+
+
+def test_restart_reasks_transport_failures_and_backoff(tmp_path, fake_codex, monkeypatch):
+    script, capture = fake_codex
+    path, output = tmp_path / "prompts", tmp_path / "run"
+    prompts(path, 2)
+    monkeypatch.setenv("CX_MODE", "fail")
+    cx.run_batches(path, output, executable=str(script), batch_size=2, retries=0)
+    assert all(cx._transport_failed(r) for r in cx.read_jsonl(output / "responses.jsonl"))
+    failed_journal = next((output / "completed").glob("*.json"))
+    monkeypatch.setenv("CX_MODE", "ok")
+    def invariant(runner):
+        report = runner(path, output, executable=str(script), batch_size=2)
+        assert report["calls"] == 1 and report["abstained"] == 0
+        # Make the stale failure sort last: a restart must still keep the answer.
+        failed_journal.rename(output / "completed" / "zzzz.json")
+        again = runner(path, output, executable=str(script), batch_size=2)
+        assert again["calls"] == 0 and again["abstained"] == 0
+    invariant(cx.run_batches)
+    with pytest.raises(AssertionError):
+        (output / "completed" / "zzzz.json").rename(failed_journal)
+        for extra in set((output / "completed").glob("*.json")) - {failed_journal}:
+            extra.unlink()
+        invariant(mutant(cx.run_batches, 'if k not in completed or _transport_failed(completed[k])]', 'if k not in completed]'))
+    slept = []
+    monkeypatch.setattr(cx.time, "sleep", slept.append)
+    monkeypatch.setenv("CX_MODE", "fail")
+    cx.run_batches(path, tmp_path / "backoff", executable=str(script), batch_size=2, retries=2, backoff=10)
+    assert slept == [10, 20]

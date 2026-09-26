@@ -224,7 +224,14 @@ def _tokens(log):
     return sum(int(m.replace(",", "")) for m in matches) if matches else None
 
 
-def _run_batch(batch, directory, executable, batch_id, retries, timeout):
+TRANSPORT_FAILED = "transport_failed_after_retries"
+
+
+def _transport_failed(record):
+    return record.get("abstain", {}).get("note") == TRANSPORT_FAILED
+
+
+def _run_batch(batch, directory, executable, batch_id, retries, timeout, backoff=0):
     prompt = dumps({"instructions": BATCH_RULES, "messages": batch})
     schema_path = directory / "schema.json"
     attempts = []
@@ -265,7 +272,10 @@ def _run_batch(batch, directory, executable, batch_id, retries, timeout):
         attempts.append(metric)
         if error is None:
             return results, attempts
-    return [{"key": p["key"], **abstain("transport_failed_after_retries")} for p in batch], attempts
+        if backoff and attempt < retries:
+            # "model at capacity" is transient; immediate retries just burn the budget.
+            time.sleep(min(600, backoff * 2 ** attempt))
+    return [{"key": p["key"], **abstain(TRANSPORT_FAILED)} for p in batch], attempts
 
 
 def length_batches(rows, batch_size=20, max_chars=12000):
@@ -282,10 +292,10 @@ def length_batches(rows, batch_size=20, max_chars=12000):
         yield batch
 
 
-def run_batches(prompts: Path, directory: Path, *, executable=None, batch_size=20, max_chars=12000, concurrency=3, retries=2, timeout=600):
+def run_batches(prompts: Path, directory: Path, *, executable=None, batch_size=20, max_chars=12000, concurrency=3, retries=2, timeout=600, backoff=0):
     import fcntl
     from .llm import record_key, SCHEMA_NAME_EXTRACT
-    if batch_size < 1 or max_chars < 1 or concurrency < 1 or retries < 0 or not math.isfinite(timeout) or timeout <= 0:
+    if batch_size < 1 or max_chars < 1 or concurrency < 1 or retries < 0 or not math.isfinite(timeout) or timeout <= 0 or backoff < 0:
         raise ValueError("invalid runner limits")
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=True)
@@ -314,10 +324,13 @@ def run_batches(prompts: Path, directory: Path, *, executable=None, batch_size=2
             write_json(journal / "seed.json", list(completed.values()))
         for path in journal_paths:
             for row in json.loads(path.read_text(), parse_float=Decimal):
-                completed[row["key"]] = row
+                # Journal file order is arbitrary; an old transport failure never masks a later answer.
+                if row["key"] not in completed or _transport_failed(completed[row["key"]]):
+                    completed[row["key"]] = row
         if any(completed[k].get("response", {}).get("schema_version") != 2 for k in inputs.keys() & completed.keys() if inputs[k]["schema_name"] == cx_v2.SCHEMA_NAME and "response" in completed[k]):
             raise ValueError("stale_v1_journal_use_new_output_dir")
-        pending = [r for k, r in inputs.items() if k not in completed]
+        # Transport failures carry no model judgement, so a restart asks again.
+        pending = [r for k, r in inputs.items() if k not in completed or _transport_failed(completed[k])]
         _atomic_text(response_path, "".join(dumps(completed[k]) + "\n" for k in sorted(completed)))
         write_json(directory / "schema.json", output_schema())
         started = time.monotonic()
@@ -327,7 +340,7 @@ def run_batches(prompts: Path, directory: Path, *, executable=None, batch_size=2
             futures = []
             for index, batch in enumerate(length_batches(pending, batch_size, max_chars)):
                 bid = f"{invocation}-{index:06d}"
-                future = pool.submit(_run_batch, batch, directory, executable, bid, retries, timeout)
+                future = pool.submit(_run_batch, batch, directory, executable, bid, retries, timeout, backoff)
                 futures.append((future, bid))
             ids = {f: bid for f, bid in futures}
             for future in as_completed(ids):
@@ -458,13 +471,15 @@ def main(argv=None):
     parser.add_argument("--concurrency", type=int, default=3)
     parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("--timeout", type=float, default=600)
+    parser.add_argument("--backoff", type=float, default=30, help="seconds before the 2nd attempt, doubling; 0 disables")
     parser = sub.add_parser("import")
     parser.add_argument("--responses", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = ap.parse_args(argv)
     if args.command == "run":
         report = run_batches(args.prompts, args.output_dir, executable=args.codex, batch_size=args.batch_size,
-                             max_chars=args.max_chars, concurrency=args.concurrency, retries=args.retries, timeout=args.timeout)
+                             max_chars=args.max_chars, concurrency=args.concurrency, retries=args.retries, timeout=args.timeout,
+                             backoff=args.backoff)
     elif args.command == "import":
         report = import_responses(args.responses, args.output)
     else:
