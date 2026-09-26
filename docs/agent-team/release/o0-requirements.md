@@ -1,7 +1,8 @@
-# O-0 发行要求可追溯清单（wac-032 草案，wac-045 修订）
+# O-0 发行要求可追溯清单（wac-032 草案，wac-045 修订，wac-059 第 3 轮）
 
 > 作者：watcher-app-crew-release-steward。状态：**草案，未执行任何生产动作，也没有做只读现场核对**。
 > wac-045 修订：处置审查报告 `reviews/wac-032.md`（5 🔴、18 🟡、4 💭），逐条见 §7；按用户 2026-09-26 裁决（W-0b 方案 A、Caddy `*` 严格单段锚定 `path_regexp`）与 Planner 对 D-05…D-08 的决定更新。事实基线：集成分支 `f7641cb`（含 wac-040 `a881802`、W-0b）。
+> wac-059 第 3 轮：处置复审报告 `reviews/wac-032-r2.md` 的 🔴-1 与 🟡-1…4，见 §8。WGW-1.0.2 的 Caddy 清单 v2 与片段适配不在本轮（另有任务 wac-060）。
 > 基线：worktree `auto/wac-032`，分支点 `3d58761`；写作期间集成分支已前进到 `4fb0c11`（多了 C-0 校准 `eaf333d`、C-0 测试加固 `122ef51`、A-0 加固看板），本清单按 `4fb0c11` 的事实标注状态。
 > 依据：计划 `docs/plans/2026-09-11-watcher-to-app-migration.md` v0.6（下称"计划"）；契约 `contracts/backend-api.md` WGW-1.0.1 §9（下称"契约"）；审查报告 `docs/agent-team/reviews/`（wac-022 的审查报告 `wac-022.md` 在 `.worktrees/wac-integ` 中尚未提交，按其现场内容引用）；`AGENTS.md`；`docs/agent-operations.md`（主 checkout 中的未跟踪文件，集成分支没有）；协作协议 `docs/agent-team/watcher-app-crew-workflow-protocol.md`。
 > 配套：`o0-site-checklist.md`（S-xx）、`o0-runbook-deploy.md`（阶段 C/W/O）、`o0-runbook-credentials.md`、`o0-runbook-snapshot-switch.md`、`o0-authorization-list.md`（O0-Axx），脚本草案在 `scripts/ops/o0/`。
@@ -147,35 +148,34 @@
 | R86 | watcher 重启是信号采集空窗；重启后要核对有无漏信号 | `docs/agent-operations.md` §1；记忆 09-04/09-25 | apply 在自动回滚窗口内断言 180 秒内出现 `[watcher] Connected, listening...`；verify 记录转发行计数；runbook 给出 feeder 计数对照命令 |
 | R87 | 凭据零接触：不打印、不提交、不写日志 | 协议铁律 3 | 工具只输出变量名；现场核对默认拒绝输出，Caddy 完整配置不离开主机；泄露测试 15 个哨兵 0 泄露 |
 
-## 6. 本地已实跑的证据（wac-045，全部在本机，未连 jp-24）
+## 6. 本地已实跑的证据（wac-059 更新，全部在本机，未连 jp-24）
 
 一键复跑：`O0_WAL_REPRO_DB=<审查 scratchpad/walt/w.db> O0_FLEET_REPRO_DIR=<审查 scratchpad/fleet/evidence> bash scripts/ops/o0/tests/run_all.sh`（两个环境变量可省略，省略时用内嵌的等价夹具）。
 
 | 命令 | 结果 |
 |---|---|
-| `bash -n` 全部 11 个 shell 脚本；`python3 -m py_compile` 4 个 Python 工具 | `BASH_N_OK files=11`；`PY_COMPILE_OK` |
-| `python3 scripts/ops/o0/o0_tool.py selftest` | `SELFTEST_OK checks=32 fleet_cases=11 redaction_shapes=3+2 gates=10 warmup=6` |
+| `bash -n` 全部 12 个 shell 脚本；`python3 -m py_compile` 4 个 Python 工具 | `BASH_N_OK files=12`；`PY_COMPILE_OK` |
+| `python3 scripts/ops/o0/o0_tool.py selftest` | `SELFTEST_OK checks=39 fleet_cases=11 redaction_shapes=3+2 path_shapes=4 gates=14 warmup=6`（路径中的四种令牌形状 0 泄露，合法网关正则原样保留；`ok:false`/`"true"`/`1`/`null` 的门禁记录在候选一致的前提下被拒） |
 | `python3 scripts/ops/o0/o0_watcher_credentials.py selftest` | `SELFTEST_OK scenarios=13 values_checked_for_leak=19 output_lines=79` |
 | `python3 scripts/ops/o0/o0_caddy_watcher_routes.py selftest` | `SELFTEST_OK good_passes=108 variants_caught=20/20 (raw and skeleton) lines=16 single_segment_strict=ok skeleton_verify=ok before_deploy_mode=ok` |
 | `python3 scripts/ops/o0/o0_watcher_config_baseline.py selftest --repro-db <审查 walt/w.db>` | `SELFTEST_OK … wal_case=ok repro_refused=ok repro_copy_sees_config_revision=ok`（审查的复现文件只在私有拷贝上使用，sha 前后不变） |
-| `bash scripts/ops/o0/tests/site_check_leak_test.sh` | `LEAK_TEST_OK sections=19 sentinels=15 leaks=0 skeleton_parity=ok` |
+| `bash scripts/ops/o0/tests/site_check_leak_test.sh` | `REDACTION_PARITY_OK corpus=18`；`LEAK_TEST_OK sections=19 sentinels=24 leaks=0 skeleton_parity=ok redaction_parity=ok path_shapes=4`（Caddyfile 与 adapted JSON 两处都放了四种路径令牌；S-01 单元行里放了短 Bearer 哨兵） |
 | `bash scripts/ops/o0/tests/fleet_guard_test.sh`（审查的 fleet-a…d 复现文件） | `FLEET_GUARD_TEST_OK cases=7`：空对空 → 退出 2；`hb_age 1.0 → 412.7` → 退出 3；第 3 次采样才出现的 HALT → 退出 3 |
-| `bash scripts/ops/o0/tests/auth_gate_test.sh` | `AUTH_GATE_TEST_OK checks=17`：绑定矩阵 475 组合 0 误判；runbook 示例 33 条全部通过绑定表；沙箱内 apply 无门禁、候选镜像缺失、凭据变了、候选变了都在写入前被拒，无状态变更类 docker 调用 |
+| `bash scripts/ops/o0/tests/auth_gate_test.sh` | `AUTH_GATE_TEST_OK checks=18`：绑定矩阵 475 组合 0 误判；runbook 示例 34 条全部通过绑定表；沙箱内 apply 无门禁、候选镜像缺失、凭据变了、候选变了都在写入前被拒，无状态变更类 docker 调用；步骤顺序（`STRUCTURE_OK`，见下一行第 1 部分） |
+| `bash scripts/ops/o0/tests/apply_rollback_test.sh` | `APPLY_ROLLBACK_TEST_OK checks=33`：(1) plan 输出的步骤顺序；(2) 沙箱内真脚本 `--execute`：Caddy、watcher、operator-query 各一次"替换前失败"（不 restart/不重建，文件逐字节还原）与"替换后失败"（还原后 restart/重建一次），Caddy 另有"回滚自身失败"（立即停下、不再 restart、记 `ROLLBACK FAILED`）；每种情况回滚后都有舰队守卫判定写入 evidence；node-control/event-ingest 从未被调用 |
 | 五个脚本 plan 模式 | 退出 0，不执行任何动作 |
-| 打包门禁 `o0_package.sh --report-only --run-tests`（未带 --execute） | 见 §6.1：G4、G7、G9-pytest 失败，`deploy_candidate: false` |
+| 打包门禁 `o0_package.sh --report-only --run-tests`（未带 --execute） | 见 §6.1：只剩 G7 失败，`deploy_candidate: false` |
 
 ### 6.1 打包门禁（本机，`--report-only --run-tests`，未带 --execute）
 
-命令：`bash scripts/ops/o0/o0_package.sh --candidate 2c86aef --out <scratchpad>/pkg-wac045 --report-only --run-tests`（候选必须是带 `scripts/ops/o0` 的提交，G11；`2c86aef` = 本任务提交，其中集成分支部分为 `f7641cb`）。
+命令：`bash scripts/ops/o0/o0_package.sh --candidate ce2461a --out <scratchpad>/pkg-wac059 --report-only --run-tests`（候选必须是带 `scripts/ops/o0` 的提交，G11；`ce2461a` = 本轮代码提交，其中集成分支部分为 `a9900e3`）。
 
 | 门禁 | 结果 |
 |---|---|
-| G1、G2（`ROUTES_DIFF_EMPTY rows=63 … phase_max=P2`）、G3、G5（`COMPOSE_OK env_file=True`）、G6、G8（5 个文件）、G10（17 个候选工具与 runbook 文件）、G11（14 个工具文件取自候选）、G12（`RUNTIME_MANIFEST_OK files=33`） | PASS |
-| G9 watcher | PASS：`tests 107 / pass 107 / fail 0 / skipped 0` |
-| G4 | **FAIL**：`CLOSURE_NOT_WHITELISTED lib/config-store.js`（P-05 余项） |
-| G9 pytest | **FAIL**：`1 failed, 25 passed`；失败的是 wac-040 自己的 `test_watcher_runtime_require_closure_is_packaged`，原因同 G4 |
+| G1、G2（`ROUTES_DIFF_EMPTY rows=63 … phase_max=P2`）、G3、G4（`CLOSURE_OK closure=13 whitelist=34`）、G5（`COMPOSE_OK env_file=True`）、G6、G8（5 个文件）、G10（17 个候选工具与 runbook 文件）、G11（14 个工具文件取自候选）、G12（`RUNTIME_MANIFEST_OK files=34`） | PASS |
+| G9 | PASS：pytest `26 passed`；watcher `tests 107 / pass 107 / fail 0 / skipped 0` |
 | G7 | **FAIL**：wac-015 未合入（P-02） |
-| 结论 | `deploy_candidate: false`，`failed_gates=3`；不能申请 O0-A02 之后的授权 |
+| 结论 | `deploy_candidate: false`，`failed_gates=1`；不能申请 O0-A02 之后的授权 |
 
 ## 7. 审查 wac-032 的逐条处置
 
@@ -226,3 +226,22 @@
 - 舰队守卫稳定窗默认值（60 秒 + 3 × 20 秒）没有仓库里的节点 fail-closed 判定时长可依据，列为用户确认项（授权清单 §二）。
 - 以运行中镜像为基础做 overlay：候选不再携带的白名单文件（manifest 中 `ABSENT`）不会从镜像里删除；构建器要求白名单全集存在，所以目前不会出现这种情况，一旦出现需改为全量基础镜像另行审定。
 - `tests/auth_gate_test.sh` 用 `O0_SANDBOX` 测试缝；它在任何存在 `/srv/trader-v3` 的主机上被拒绝，不会放宽 jp-24 上的检查。
+
+## 8. 复审 wac-032-r2 的处置（wac-059，第 3 轮，范围按 Planner 限定）
+
+| 项 | 处置 | 证据 |
+|---|---|---|
+| 🔴-1 路径里的字面秘密 | `o0_tool.py` 与 site check 内嵌库同步加 `redact_path`：按 `/` 与正则元字符切段，段长 ≥ 12 且同时含字母和数字，或 ≥ 16 位十六进制，换成 `<seg len=N>`，其余段保留。用在三处：`redact_line` 对每个含 `/` 的词（覆盖 `redact`、Caddyfile diff、S-02 大纲、S-10/S-16 单元行）、骨架的路径键（`path`、`pattern`、`uri`、`root`、`strip_path_*`）、`redact-json` 第二层。顺带让 S-01 的 `systemctl cat caddy` 行也过 `$REDACT`（新加的短 Bearer 哨兵在这里泄露过） | 审查的四种形状在 leak test（Caddyfile 与 adapted JSON）和 selftest 里 0 泄露；`^/m/v1/watcher/trading/risks/[^/]+$`、`/m/v1/watcher/media/*` 原样保留；caddy selftest `skeleton_verify=ok` 不变 |
+| 🟡-1 自动回滚多余的 restart、回滚后不跑守卫 | `o0_common.sh` 新增 `o0_arm_auto_rollback` / `o0_mark_runtime_replaced` / `o0_auto_rollback`。标记放在 restart/重建步骤**之前**（restart 失败也可能已改变服务，按"已尝试"算）。回滚先还原文件（fail-fast，失败就不再 restart），只有标记之后才 restart/重建；然后对 apply 基线跑一次舰队守卫（只报告），结论写 `evidence/auto-rollback.log`，退出 1。三个脚本各自拆成 `rollback_files` 与 `rollback_runtime`；手动 `rollback` 阶段两者都做。runbook C-2、W-3、O-2 的失败处置已改 | `apply_rollback_test.sh` 7 个沙箱场景；变异 R1a–R1h 全部被抓 |
+| 🟡-2 步骤顺序无测试 | plan 输出结构测试：preflight/build 首步清旧门禁、末步写门禁；apply 首步 REQUIRE 门禁；舰队基线 < 备份 < 回滚上膛 < 第一个线上写入；`RUNTIME_REPLACEMENT_BEGINS` 紧挨 restart；restart 后有守卫且默认 60 s + 4 × 20 s；演练 `docker stop -t 30`、无 `docker kill`；`dryrun.post.db` 由 `sqlite-backup` 产出且分析对象是它。`auth_gate_test.sh` 也调用这一部分，审查的原变异命令不改就能抓到 | 变异 1g、1h、3g、4d、4e、P1–P4 被抓 |
+| 🟡-3 `ok:false` 断言空转 | 先把 `RELEASE.json` 改回候选 `c…c` 并断言门禁重新通过，再只改 `ok`；另测 `"true"`、`1`、`null` | 变异 3j 被抓 |
+| 🟡-4 内嵌 `redact_line` 未钉住 | parity 从骨架扩到 `redact_line`、`redact_path`，用 18 条语料（短 Bearer、basic、查询值、`KEY=VALUE`、`Environment=`、四种路径令牌、合法路径）；S-01/S-10 桩里加短 Bearer 哨兵 | 变异 5e 被抓 |
+| 本轮顺带发现 | watcher apply 的安装步骤 `grep '^ABSENT  ' … \| …` 在清单没有 `ABSENT` 行时（正常情况）在 pipefail 下失败，线上每次 apply 都会走进自动回滚。改为 `awk`。沙箱测试首次跑就暴露了它 | 变异 W1（改回 grep）被抓 |
+
+变异复跑（审查的 `mut046/muts.py` 变异集，复制到 scratchpad `mut059*/`，pristine 取本轮代码）：
+
+- 审查原测试命令（不含新测试文件）：37 个变异里 30 个被抓；3 个存活（4a、5d、5f，审查已判为等价或纵深防御）；5b、5c 的锚点因 🔴-1 改动消失，按新代码重新定锚后 2/2 被抓。
+- 加上 `apply_rollback_test.sh`：结果相同。
+- 本轮新增 22 个变异（B1a–B1i、R1a–R1h、W1、P1–P4）：21 个被抓；B1h（大纲 `classify` 不再按段替换）存活，属等价变异：每个 token 随后还会经过 `redact_line` 的路径规则。
+
+未在本轮处理（按范围限定，记为待办）：🟡-5（restore-db 失败的恢复路径与原属主）、🟡-6（S-10 隔离检查进阶段 O preflight）、🟡-7（守卫阈值取自生产节点配置）、💭 1–5；WGW-1.0.2 的 Caddy 清单 v2 与片段适配（§7 of r2）归 wac-060。

@@ -29,7 +29,7 @@ Caddy 只重启一次（阶段 C），operator-query 只重启一次（阶段 O�
 
 | 门禁 | 证据 | 不满足 |
 |---|---|---|
-| 本地打包门禁 G1–G12 全部 PASS，`RELEASE.json` 的 `deploy_candidate: true` | `o0_package.sh` 输出与 `logs/` | 不申请任何生产授权。当前（`o0-requirements.md` §6.1）G4、G7、G9-pytest 失败 |
+| 本地打包门禁 G1–G12 全部 PASS，`RELEASE.json` 的 `deploy_candidate: true` | `o0_package.sh` 输出与 `logs/` | 不申请任何生产授权。当前（`o0-requirements.md` §6.1）只剩 G7 失败 |
 | 现场只读核对（`o0-site-checklist.md`）无阻断项，§二的参数已按现场确认 | L-A5 汇总页 | 同上 |
 | 用户已确认 D-02（Caddy HALT 风险与窗口）、D-04（共享代码目录） | 看板备注 | 同上 |
 | 选定低流量窗口：避开信号密集时段；用户在场、手机能收 Telegram 告警 | 用户确认 | 顺延 |
