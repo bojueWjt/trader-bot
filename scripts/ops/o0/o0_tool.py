@@ -43,6 +43,7 @@ import http.client
 import json
 import os
 import re
+import shlex
 import sqlite3
 import sys
 import tempfile
@@ -98,10 +99,19 @@ LONG_OPAQUE = re.compile(r"(?<![A-Za-z0-9_./-])(?=[A-Za-z0-9_+=-]*[0-9])(?=[A-Za
 KV = re.compile(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*[=:]\s*)(.*)$")
 # "Path as a secret" (review wac-032-r2 🔴-1): probe tokens, webhook tokens, bot tokens and
 # rewrite targets sit INSIDE paths, where LONG_OPAQUE (it does not look behind '/') cannot
-# see them. Paths are split at '/' and regex metacharacters; a segment that is >= 12 chars
-# with a letter and a digit, or >= 16 hex digits, becomes <seg len=N>; other segments stay.
+# see them. A token is ">= 12 chars with a letter and a digit" or ">= 16 hex digits".
+# Two passes (review wac-032-r3 🟡-1: escapes, '.', '-' and '+' cut one token into short
+# pieces that each stayed below the threshold):
+# 1. the path is split at '/' into chunks; a chunk is judged with {placeholders}, regex
+#    syntax and separators removed ('+' and '=' are base64 characters and stay); a token
+#    replaces the WHOLE chunk with <seg len=N>;
+# 2. any other chunk is split at regex metacharacters and each piece is judged as before.
+PATH_CHUNK_SPLIT = re.compile(r"(/+)")
 PATH_SEG_SPLIT = re.compile(r"([/^$.*+?()\[\]{}|\\]+)")
 PATH_WORD = re.compile(r"[^\s\"']*/[^\s\"']*")
+CHUNK_PLACEHOLDER = re.compile(r"\{[A-Za-z0-9_.$:-]+\}")
+CHUNK_REGEX_SYNTAX = re.compile(r"\[[^\]]*\][*+?]?|\(\?[A-Za-z:]*|[\\^$()|*?{}\[\]]")
+CHUNK_SEPARATORS = re.compile(r"[.\-_:~%&,;!@]")
 
 
 def _token_segment(seg: str) -> bool:
@@ -110,9 +120,25 @@ def _token_segment(seg: str) -> bool:
     return re.fullmatch(r"[0-9A-Fa-f]{16,}", seg) is not None
 
 
-def redact_path(value: str) -> str:
-    parts = PATH_SEG_SPLIT.split(value)
+def _squash_chunk(chunk: str) -> str:
+    return CHUNK_SEPARATORS.sub("", CHUNK_REGEX_SYNTAX.sub("", CHUNK_PLACEHOLDER.sub("", chunk)))
+
+
+def _redact_pieces(chunk: str) -> str:
+    parts = PATH_SEG_SPLIT.split(chunk)
     return "".join(f"<seg len={len(p)}>" if i % 2 == 0 and p and _token_segment(p) else p for i, p in enumerate(parts))
+
+
+def redact_path(value: str) -> str:
+    out = []
+    for i, chunk in enumerate(PATH_CHUNK_SPLIT.split(value)):
+        if i % 2 == 1 or not chunk:
+            out.append(chunk)
+        elif _token_segment(_squash_chunk(chunk)):
+            out.append(f"<seg len={len(chunk)}>")
+        else:
+            out.append(_redact_pieces(chunk))
+    return "".join(out)
 
 
 def redact_line(line: str) -> str:
@@ -552,6 +578,149 @@ def cmd_fleet_compare(args: argparse.Namespace) -> int:
     return rc
 
 
+# Review wac-032-r2 🟡-7: the guard thresholds must match the PRODUCTION node heartbeat
+# parameters that site check S-00 reads (interval = runtime/control_plane_session.py
+# DEFAULT_HEARTBEAT_INTERVAL_SECONDS, 2.0 in 67b401a; fail-closed timeout = node config
+# control_plane.heartbeat_timeout_seconds, 15 in the examples). Rules:
+#   max heartbeat age and max age jump within [2, 3] x interval (2.5 x is the target):
+#     tighter = a merely late heartbeat reads as frozen; looser = a dead node is seen late;
+#   settle window >= timeout + 3 x interval: a fail-closed HALT is written with the first
+#     heartbeat after the channel returns, so sampling earlier could miss it.
+# The defaults (2 s, 15 s -> 5, 5, 60) pass. Any other set needs the user's confirmation
+# (o0-runbook-deploy.md §0); this check only refuses inconsistent sets.
+def fleet_params_check(interval: float, timeout: float, max_age: float, max_jump: float, settle: float,
+                       samples: int, sample_interval: float) -> tuple[int, list[str]]:
+    if not all(v > 0 for v in (interval, timeout, max_age, max_jump)) or settle < 0 or samples < 1 or sample_interval < 0:
+        return 2, [f"FLEET_PARAMS_UNCOMPARABLE non-positive value (interval={interval} timeout={timeout} max_age={max_age} "
+                   f"max_jump={max_jump} settle={settle} samples={samples} sample_interval={sample_interval})"]
+    lo, hi, target = 2 * interval, 3 * interval, 2.5 * interval
+    min_settle = timeout + 3 * interval
+    why = []
+    if not lo <= max_age <= hi:
+        why.append(f"O0_FLEET_MAX_HB_AGE={max_age} outside [{lo:g}, {hi:g}] (2-3 x interval {interval:g})")
+    if not lo <= max_jump <= hi:
+        why.append(f"O0_FLEET_MAX_HB_JUMP={max_jump} outside [{lo:g}, {hi:g}]")
+    if settle < min_settle:
+        why.append(f"O0_FLEET_SETTLE_S={settle} < timeout {timeout:g} + 3 x interval {interval:g} = {min_settle:g}")
+    head = (f"node heartbeat interval={interval:g}s timeout={timeout:g}s; guard max_hb_age={max_age:g} max_hb_jump={max_jump:g} "
+            f"settle={settle:g}s samples={samples} every {sample_interval:g}s")
+    if why:
+        return 2, [head] + [f"  {w}" for w in why] + [
+            f"FLEET_PARAMS_INCONSISTENT suggested: O0_FLEET_MAX_HB_AGE={target:g} O0_FLEET_MAX_HB_JUMP={target:g} "
+            f"O0_FLEET_SETTLE_S={max(60.0, min_settle):g} (adjust only with the user's confirmation, runbook §0)"]
+    return 0, [head, f"FLEET_PARAMS_OK target_max_hb_age={target:g} min_settle={min_settle:g}"]
+
+
+def cmd_fleet_params(args: argparse.Namespace) -> int:
+    rc, lines = fleet_params_check(args.hb_interval_s, args.hb_timeout_s, args.max_hb_age, args.max_hb_jump,
+                                   args.settle_s, args.samples, args.sample_interval_s)
+    print("\n".join(lines))
+    return rc
+
+
+# ---------------------------------------------------------------- control-plane unit isolation
+# Review wac-032-r2 🟡-6 (site check S-10 as a machine gate of stage O): the three control-plane
+# units share one code directory (D-04), so the ONLY thing keeping the watcher gateway/snapshot
+# values inside operator-query is its env file. node-control and event-ingest must not load
+# operator-query.env, must not carry any WATCHER_*TOKEN name in Environment= or in their own
+# env files, and operator-query must run from the directory stage O installs into.
+# Names only: env VALUES are parsed in-process and never printed.
+WATCHER_CRED_NAME = re.compile(r"^WATCHER_[A-Z0-9_]*TOKEN[A-Z0-9_]*$")
+
+
+def _parse_unit_show(text: str) -> dict:
+    out: dict = {"envfiles": [], "env_names": []}
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        if key == "EnvironmentFiles":
+            m = re.match(r"^(-?)(\S+)(?: \(ignore_errors=(yes|no)\))?$", value.strip())
+            if m:
+                out["envfiles"].append((m.group(2), m.group(1) == "-" or m.group(3) == "yes"))
+        elif key == "Environment":
+            try:
+                words = shlex.split(value)
+            except ValueError:
+                words = value.split()
+            out["env_names"] += [w.split("=", 1)[0] for w in words if "=" in w]
+        elif key in ("LoadState", "WorkingDirectory"):
+            out[key] = value.strip()
+    return out
+
+
+def _env_file_names(path: str) -> list[str] | None:
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    names = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
+        if m:
+            names.append(m.group(1))
+    return names
+
+
+def cp_isolation_check(shows: dict[str, str], oq_unit: str, other_units: list[str], oq_env: str,
+                       cp_root: str) -> tuple[int, list[str]]:
+    lines: list[str] = []
+    units = {u: _parse_unit_show(shows.get(u, "")) for u in [oq_unit] + other_units}
+    for u, info in units.items():
+        if info.get("LoadState") != "loaded":
+            return 2, [f"CP_ISOLATION_UNCOMPARABLE {u}: LoadState={info.get('LoadState', '<missing>')} (unit unknown or systemctl output unreadable)"]
+    violations = []
+    oq_env_real = os.path.realpath(oq_env)
+    root = os.path.normpath(cp_root)
+    oq_wd = os.path.normpath(units[oq_unit].get("WorkingDirectory") or "/")
+    if oq_wd not in (root, os.path.join(root, "api")):
+        violations.append(f"CODE_DIR_MISMATCH {oq_unit} WorkingDirectory={oq_wd} is not {root} or {root}/api (--cp-root, S-13)")
+    for u in other_units:
+        info = units[u]
+        for path, ignore in info["envfiles"]:
+            if os.path.realpath(path) == oq_env_real or os.path.basename(path) == "operator-query.env":
+                violations.append(f"ENVFILE_ISOLATION VIOLATION {u} loads {path} (it would hold the watcher gateway/snapshot values after O-2)")
+                continue
+            names = _env_file_names(path)
+            if names is None:
+                if not ignore:
+                    return 2, [f"CP_ISOLATION_UNCOMPARABLE {u}: env file {path} unreadable"]
+                lines.append(f"{u}: env file {path} absent (ignore_errors=yes)")
+                continue
+            bad = sorted(n for n in names if WATCHER_CRED_NAME.match(n))
+            if bad:
+                violations.append(f"ENVFILE_ISOLATION VIOLATION {u}: {path} defines {','.join(bad)}")
+        bad_env = sorted(n for n in info["env_names"] if WATCHER_CRED_NAME.match(n))
+        if bad_env:
+            violations.append(f"ENVFILE_ISOLATION VIOLATION {u}: Environment= defines {','.join(bad_env)}")
+        if not any(v.startswith(("ENVFILE_ISOLATION VIOLATION " + u)) for v in violations):
+            lines.append(f"ENVFILE_ISOLATION ok {u} envfiles={len(info['envfiles'])} env_names={len(info['env_names'])}")
+    shared = [u for u in other_units if os.path.normpath(units[u].get("WorkingDirectory") or "/") == oq_wd]
+    lines.append(f"working directories: " + " ".join(f"{u}={os.path.normpath(units[u].get('WorkingDirectory') or '<unset>')}" for u in units))
+    if violations:
+        return 1, lines + violations + [f"CP_ISOLATION_FAILED violations={len(violations)} (stage O blocked; report to the user)"]
+    d04 = "yes (D-04 applies: their next restart loads the new code)" if shared else "no (D-04 does not apply)"
+    return 0, lines + [f"CP_ISOLATION_OK shared_code_dir={','.join(shared) or 'none'} d04={d04}"]
+
+
+def cmd_cp_isolation(args: argparse.Namespace) -> int:
+    import subprocess
+    shows = {}
+    for u in [args.oq_unit] + args.other_unit:
+        r = subprocess.run(["systemctl", "show", u, "-p", "LoadState", "-p", "WorkingDirectory", "-p", "EnvironmentFiles", "-p", "Environment"],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"CP_ISOLATION_UNCOMPARABLE systemctl show {u} rc={r.returncode}")
+            return 2
+        shows[u] = r.stdout
+    rc, lines = cp_isolation_check(shows, args.oq_unit, args.other_unit, args.oq_env, args.cp_root)
+    print("\n".join(lines))
+    return rc
+
+
 # ---------------------------------------------------------------- gates
 def _bundle_identity(bundle: Path) -> dict:
     release = json.loads((bundle / "RELEASE.json").read_text(encoding="utf-8"))
@@ -684,6 +853,49 @@ def cmd_warmup_check(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------- selftest
+# Path-token corpus (review wac-032-r3 §2.2, scratchpad r3probe/newshapes.py). Shared with
+# tests/site_check_leak_test.sh, which runs the same corpus through the site check's own copy.
+PATH_SHAPES_R3 = (
+    ("/hook/SENTINEL%2Fq1w2%3De3r4t5/*", ("SENTINEL%2Fq1w2", "q1w2%3De3r4t5")),                 # N1 url-encoded
+    ("/hook/qwertyASDFGH%2Bzxcvbn", ("qwertyASDFGH%2Bzxcvbn", "qwertyASDFGH")),                  # N1b
+    ("/api/x?token=pw7qs&sig=SENTINELsig0123456789", ("SENTINELsig0123456789",)),                # N2 query k=v
+    ("/api?SENTINELtoken0123abc", ("SENTINELtoken0123abc",)),                                   # N2b query, no '='
+    (r"^/bot1234567890\:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw/.*$", ("AAHdqTcvCH1v", "1234567890")),  # N3 escaped ':'
+    (r"^/hook/ab12cd34\-ef56gh78\-ij90kl12$", ("ab12cd34", "ef56gh78", "ij90kl12")),            # N3b escaped '-'
+    (r"^/k/SENTINELre\.gex0123456789$", ("SENTINELre", "gex0123456789")),                        # N3c escaped '.'
+    ("/n/4829105738291045", ("4829105738291045",)),                                             # N4 16 digits (hex rule)
+    ("/h/DEADBEEFCAFEBABE", ("DEADBEEFCAFEBABE",)),                                             # N4b letter-only hex
+    ("/jwt/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV",
+     ("eyJhbGciOiJIUzI1NiJ9", "SflKxwRJSMeKKF2QT4fw")),                                        # N5 JWT
+    ("/k/ab12cd34ef.56gh78ij90", ("ab12cd34ef", "56gh78ij90")),                                 # N5b dotted short parts
+    ("/hook/3f2504e0-4f89-11d3-9a0c-0305e82c3301", ("3f2504e0", "0305e82c3301")),               # N6 UUID
+    ("/k/Ab3dEfG5hI+x/jK7lMnO9pQ==", ("Ab3dEfG5hI", "jK7lMnO9pQ")),                             # N7 raw base64
+    ("/bot1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw/*", ("AAHdqTcvCH1vGWJx",)),             # N9 unescaped bot token
+    ("(?i)^/hook/(?:SENTINELgrp0123abcd)$", ("SENTINELgrp0123abcd",)),                          # N10 (?i) group
+    ("/t/a1b2c3d4e5f6", ("a1b2c3d4e5f6",)),                                                     # exactly 12 mixed
+)
+# exact outputs that pin each rule on its own (a removed rule or a moved threshold changes them)
+PATH_RULE_PINS = (
+    ("/n/4829105738291045", "/n/<seg len=16>"),       # hex rule only (no letter)
+    ("/h/DEADBEEFCAFEBABE", "/h/<seg len=16>"),       # hex rule only (no digit)
+    ("/n/482910573829104", "/n/482910573829104"),     # 15 digits: below the hex threshold (documented residual)
+    ("/t/a1b2c3d4e5f6", "/t/<seg len=12>"),           # exactly 12 with letter and digit
+    ("/p/a1b2c3d4e5f", "/p/a1b2c3d4e5f"),             # 11: below the threshold (documented residual)
+    (r"^/hook/ab12cd34\-ef56gh78\-ij90kl12$", "^/hook/<seg len=29>"),   # whole chunk, not pieces
+    ("/k/Ab3dEfG5hI+x/jK7lMnO9pQ==", "/k/<seg len=12>/<seg len=12>"),  # '+' and '=' are token characters
+)
+LEGIT_PATHS = (
+    "/m/v1/watcher/dialogs", "/m/v1/watcher/disconnect", "/m/v1/watcher/groups", "/m/v1/watcher/media/*", "/m/v1/watcher/reconnect",
+    "/m/v1/watcher/status", "/m/v1/watcher/trading/accounts", "/m/v1/watcher/trading/accounts/*", "/m/v1/watcher/trading/briefings",
+    "/m/v1/watcher/trading/channels", "/m/v1/watcher/trading/channels/*", "/m/v1/watcher/trading/messages", "/m/v1/watcher/trading/orders",
+    "/m/v1/watcher/trading/orders/active", "/m/v1/watcher/trading/risks", "/m/v1/watcher/trading/risks/*",
+    "/watcher/*", "/api/price-alerts/*", "/api/price-monitor/*", "/v1/nodes/[^/]+/status", "^/m/v1/watcher/trading/risks/[^/]+$",
+    "/.well-known/acme-challenge/*", "/m/v1/watcher/config/revision", "{http.request.uri}", "/api/login/*",
+    "/m/v1/watcher/trading/price-alerts/[^/]+$", "(?i:/m/v1/watcher)(?:/|$)", "^(?i:/m/v1/watcher)(?:/|$)",
+    "/api{http.request.uri.path.1}",   # a placeholder is structure: it is removed before a chunk is judged
+)
+
+
 def cmd_selftest(_args: argparse.Namespace) -> int:
     import contextlib
     import io
@@ -810,6 +1022,80 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
         for keep in (f"	@wgw_risk path_regexp {good_re}", "	reverse_proxy 127.0.0.1:8183", "	handle_path /m/v1/watcher/media/* {"):
             assert redact_line(keep) == keep, ("over-redaction", keep)
         checks += 1
+        # review wac-032-r3 🟡-1 / 🟡-3: every r3probe shape (escaped '-', escaped '.', dotted
+        # short parts, raw base64 incl. '+' and '=='), the hex rule on its own (digit-only and
+        # letter-only hex carry no letter+digit mix), the exact 12-char threshold; 0 leaks in
+        # every output, and the legitimate paths (16 generated gateway paths + 12) kept as is.
+        for shape, needles in PATH_SHAPES_R3:
+            cfg3 = {"apps": {"http": {"servers": {"s": {"routes": [
+                {"match": [{"path": [shape]}, {"path_regexp": {"name": "n", "pattern": shape}}],
+                 "handle": [{"handler": "rewrite", "uri": shape, "strip_path_prefix": shape}, {"handler": "file_server", "root": shape}]}]}}}}}
+            outputs = [json.dumps(_redact_json(cfg3)), json.dumps(caddy_skeleton(cfg3)), redact_path(shape)]
+            outputs += [redact_line(f"	{d} {shape}") for d in ("handle", "rewrite *", "@m path_regexp", "root *", "handle_path", "uri strip_prefix")]
+            for out_text in outputs:
+                for needle in needles:
+                    assert needle not in out_text, ("r3 path shape leaked", shape, needle, out_text)
+            checks += 1
+        for shape, want in PATH_RULE_PINS:
+            assert redact_path(shape) == want, ("path rule pin", shape, redact_path(shape), want)
+            checks += 1
+        over = [p for p in LEGIT_PATHS if redact_path(p) != p or redact_line(p) != p]
+        assert not over, ("legitimate paths over-redacted", over)
+        checks += 1
+        # fleet guard parameters vs production node heartbeat parameters (review wac-032-r2 🟡-7)
+        defaults = dict(interval=2.0, timeout=15.0, max_age=5.0, max_jump=5.0, settle=60.0, samples=4, sample_interval=20.0)
+        def fp(**kw):
+            a = dict(defaults, **kw)
+            return fleet_params_check(a["interval"], a["timeout"], a["max_age"], a["max_jump"], a["settle"], a["samples"], a["sample_interval"])
+        assert fp()[0] == 0, fp()
+        for kw, what in ((dict(interval=4.0), "slower heartbeat, default age 5 < 8: late beats read as frozen"),
+                         (dict(interval=1.0), "faster heartbeat, age 5 > 3: dead node seen late"),
+                         (dict(timeout=60.0), "settle 60 < 60 + 6"),
+                         (dict(max_jump=9.0), "jump outside the band"),
+                         (dict(settle=20.0), "settle 20 < 21"),
+                         (dict(interval=0.0), "non-positive interval")):
+            rc_p, lines_p = fp(**kw)
+            assert rc_p == 2, (what, lines_p)
+            checks += 1
+        assert fp(interval=4.0, max_age=10.0, max_jump=10.0)[0] == 0, "a consistent non-default set passes"
+        assert fp(settle=21.0)[0] == 0 and fp(settle=20.9)[0] == 2, "settle bound is timeout + 3 x interval exactly"
+        assert "O0_FLEET_MAX_HB_AGE=10" in fp(interval=4.0)[1][-1], "the suggestion names the 2.5 x interval value"
+        checks += 4
+        # control-plane unit isolation (review wac-032-r2 🟡-6, site check S-10 as a gate)
+        cp = base / "cp"
+        (cp / "api").mkdir(parents=True)
+        oq_env_f, nc_env_f, bad_env_f = base / "operator-query.env", base / "node-control.env", base / "leaky.env"
+        oq_env_f.write_text("WATCHER_GATEWAY_TOKEN=SENTINELoqGW0123456789\nRISK_ADMIN_TOKEN=x\n", encoding="utf-8")
+        nc_env_f.write_text("NAUTILUS_NODE_AUTH_JSON={}\n", encoding="utf-8")
+        bad_env_f.write_text("export WATCHER_SNAPSHOT_TOKEN=SENTINELleak0123456789\n", encoding="utf-8")
+        U_OQ, U_NC, U_EI = "trader-v3-controlplane-operator-query", "trader-v3-controlplane-node-control", "trader-v3-controlplane-event-ingest"
+        def show(wd, files, env=""):
+            return "LoadState=loaded\nWorkingDirectory=%s\n%sEnvironment=%s\n" % (wd, "".join(f"EnvironmentFiles={f} (ignore_errors=no)\n" for f in files), env)
+        good_shows = {U_OQ: show(cp / "api", [oq_env_f], "PYTHONPATH=/x"), U_NC: show(cp / "api", [nc_env_f]),
+                      U_EI: show(cp / "api", [], "FOO=SENTINELvalue0123456789 BAR=1")}
+        def iso(shows):
+            return cp_isolation_check(shows, U_OQ, [U_NC, U_EI], str(oq_env_f), str(cp))
+        rc_i, lines_i = iso(good_shows)
+        assert rc_i == 0 and "CP_ISOLATION_OK shared_code_dir=" + U_NC + "," + U_EI in lines_i[-1], lines_i
+        for name, shows_bad, want in (
+            ("node-control loads operator-query.env", dict(good_shows, **{U_NC: show(cp / "api", [nc_env_f, oq_env_f])}), 1),
+            ("event-ingest Environment= carries a watcher token name", dict(good_shows, **{U_EI: show(cp / "api", [], "WATCHER_GATEWAY_TOKEN=SENTINELenv0123456789")}), 1),
+            ("node-control env file defines a watcher token", dict(good_shows, **{U_NC: show(cp / "api", [bad_env_f])}), 1),
+            ("operator-query runs from another directory", dict(good_shows, **{U_OQ: show(base / "elsewhere", [oq_env_f])}), 1),
+            ("unknown unit (LoadState not-found)", dict(good_shows, **{U_EI: "LoadState=not-found\n"}), 2),
+            ("empty systemctl output", dict(good_shows, **{U_NC: ""}), 2),
+            ("unreadable env file without ignore_errors", dict(good_shows, **{U_NC: show(cp / "api", [base / "missing.env"])}), 2),
+        ):
+            rc_i, lines_i = iso(shows_bad)
+            assert rc_i == want, (name, rc_i, lines_i)
+            text_i = "\n".join(lines_i)
+            assert "SENTINEL" not in text_i, (name, "env value printed")
+            checks += 1
+        rc_i, lines_i = iso(dict(good_shows, **{U_NC: show(base / "other", [nc_env_f]), U_EI: show(base / "other", [])}))
+        assert rc_i == 0 and "shared_code_dir=none" in lines_i[-1], lines_i
+        rc_i, lines_i = iso(dict(good_shows, **{U_EI: "LoadState=loaded\nWorkingDirectory=%s\nEnvironmentFiles=-%s\n" % (cp / "api", base / "missing.env")}))
+        assert rc_i == 0, ("a missing '-' (optional) env file is not a violation", lines_i)
+        checks += 2
         # warm-up
         j = ("Sep 26 x uvicorn[11]: INFO snapshot_warmup result=success revision=7 content_sha256=abcdefabcdef pid=11 role=operator-query duration_ms=40\n"
              "Sep 26 x uvicorn[12]: INFO snapshot_warmup result=success revision=7 content_sha256=abcdefabcdef pid=12 role=operator-query duration_ms=41\n")
@@ -824,7 +1110,7 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
         for path in sorted(base.rglob("*"), reverse=True):
             path.unlink() if path.is_file() else path.rmdir()
         base.rmdir()
-    print(f"SELFTEST_OK checks={checks} fleet_cases={len(cases)} redaction_shapes=3+2 path_shapes=4 gates=14 warmup=6")
+    print(f"SELFTEST_OK checks={checks} fleet_cases={len(cases)} redaction_shapes=3+2 path_shapes=4+{len(PATH_SHAPES_R3)} path_pins={len(PATH_RULE_PINS)} legit_paths={len(LEGIT_PATHS)} gates=14 fleet_params=10 cp_isolation=9 warmup=6")
     return 0
 
 
@@ -891,6 +1177,21 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-hb-jump", type=float, default=5.0)
     p.add_argument("--known-down", default="", help="nodes the user declared stopped before the change")
     p.set_defaults(func=cmd_fleet_compare)
+    p = sub.add_parser("fleet-params", help="guard thresholds vs the production node heartbeat parameters (S-00)")
+    p.add_argument("--hb-interval-s", type=float, required=True)
+    p.add_argument("--hb-timeout-s", type=float, required=True)
+    p.add_argument("--max-hb-age", type=float, required=True)
+    p.add_argument("--max-hb-jump", type=float, required=True)
+    p.add_argument("--settle-s", type=float, required=True)
+    p.add_argument("--samples", type=int, required=True)
+    p.add_argument("--sample-interval-s", type=float, required=True)
+    p.set_defaults(func=cmd_fleet_params)
+    p = sub.add_parser("cp-isolation", help="stage O gate: control-plane unit env isolation (site check S-10)")
+    p.add_argument("--oq-unit", required=True)
+    p.add_argument("--other-unit", action="append", required=True)
+    p.add_argument("--oq-env", required=True)
+    p.add_argument("--cp-root", required=True)
+    p.set_defaults(func=cmd_cp_isolation)
     p = sub.add_parser("gate-write")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--stage", required=True)

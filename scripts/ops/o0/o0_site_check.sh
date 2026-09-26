@@ -49,6 +49,9 @@ OQ_ENV_FILE="${OQ_ENV_FILE:-/srv/trader-v3/secrets/control-plane/operator-query.
 CP_UNITS="trader-v3-controlplane-operator-query trader-v3-controlplane-node-control trader-v3-controlplane-event-ingest"
 VENV_PY="${VENV_PY:-/srv/trader-v3/.venv-cp/bin/python}"
 JP24_MARKER="${JP24_MARKER:-/srv/trader-v3}"   # overridable only for the local leak-test harness
+NODE_APP_ROOT="${NODE_APP_ROOT:-/app}"          # node image code root (services/nautilus-node)
+HB_SAMPLES="${HB_SAMPLES:-6}"                   # S-00 observed heartbeat age: samples x gap seconds
+HB_SAMPLE_GAP="${HB_SAMPLE_GAP:-2}"
 
 if [ "$MODE" = "execute" ]; then
   [ "$AUTH_ID" = "O0-A01" ] || { echo "ABORT: the site check needs exactly --auth-id O0-A01" >&2; exit 2; }
@@ -71,8 +74,12 @@ REDACTIONS = (
 )
 LONG_OPAQUE = re.compile(r"(?<![A-Za-z0-9_./-])(?=[A-Za-z0-9_+=-]*[0-9])(?=[A-Za-z0-9_+=-]*[A-Za-z])[A-Za-z0-9_+=-]{28,}(?![A-Za-z0-9_./-])")
 KV = re.compile(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*[=:]\s*)(.*)$")
+PATH_CHUNK_SPLIT = re.compile(r"(/+)")
 PATH_SEG_SPLIT = re.compile(r"([/^$.*+?()\[\]{}|\\]+)")
 PATH_WORD = re.compile(r"[^\s\"']*/[^\s\"']*")
+CHUNK_PLACEHOLDER = re.compile(r"\{[A-Za-z0-9_.$:-]+\}")
+CHUNK_REGEX_SYNTAX = re.compile(r"\[[^\]]*\][*+?]?|\(\?[A-Za-z:]*|[\\^$()|*?{}\[\]]")
+CHUNK_SEPARATORS = re.compile(r"[.\-_:~%&,;!@]")
 PLACEHOLDER_RE = re.compile(r"^(Bearer |Basic )?\{[A-Za-z0-9_.$:-]+\}$")
 HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")
 SAFE_KEY_RE = re.compile(r"^[A-Za-z0-9_@.:*/+-]{1,64}$")
@@ -85,9 +92,23 @@ def _token_segment(seg):
         return True
     return re.fullmatch(r"[0-9A-Fa-f]{16,}", seg) is not None
 
-def redact_path(value):
-    parts = PATH_SEG_SPLIT.split(value)
+def _squash_chunk(chunk):
+    return CHUNK_SEPARATORS.sub("", CHUNK_REGEX_SYNTAX.sub("", CHUNK_PLACEHOLDER.sub("", chunk)))
+
+def _redact_pieces(chunk):
+    parts = PATH_SEG_SPLIT.split(chunk)
     return "".join(f"<seg len={len(p)}>" if i % 2 == 0 and p and _token_segment(p) else p for i, p in enumerate(parts))
+
+def redact_path(value):
+    out = []
+    for i, chunk in enumerate(PATH_CHUNK_SPLIT.split(value)):
+        if i % 2 == 1 or not chunk:
+            out.append(chunk)
+        elif _token_segment(_squash_chunk(chunk)):
+            out.append(f"<seg len={len(chunk)}>")
+        else:
+            out.append(_redact_pieces(chunk))
+    return "".join(out)
 
 def redact_line(line):
     if line.lstrip().startswith("Environment="):
@@ -283,6 +304,29 @@ def compose_watcher_block(path):
 PY
 export O0_PYLIB
 
+# S-00 heartbeat parameters, run INSIDE each node container with its own python: prints only
+# numbers (never the config, never a token); any error prints its class name only.
+IFS= read -r -d '' NODE_HB_PY <<'PY' || [ -n "$NODE_HB_PY" ]
+import json, re, sys
+def num(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else "<non-numeric>"
+try:
+    cp = json.load(open(sys.argv[1])).get("control_plane") or {}
+    print("heartbeat_timeout_seconds=%s" % num(cp.get("heartbeat_timeout_seconds")), end=" ")
+except Exception as exc:
+    print("heartbeat_timeout_seconds=<unreadable:%s>" % type(exc).__name__, end=" ")
+try:
+    m = re.search(r"^DEFAULT_HEARTBEAT_INTERVAL_SECONDS\s*=\s*([0-9.]+)\s*$", open(sys.argv[2] + "/runtime/control_plane_session.py").read(), re.M)
+    print("default_heartbeat_interval_seconds=%s" % (m.group(1) if m else "<not-found>"), end=" ")
+except Exception as exc:
+    print("default_heartbeat_interval_seconds=<unreadable:%s>" % type(exc).__name__, end=" ")
+try:
+    print("node_py_overrides_interval=%s" % ("heartbeat_interval_seconds" in open(sys.argv[2] + "/app/node.py").read()))
+except Exception as exc:
+    print("node_py_overrides_interval=<unreadable:%s>" % type(exc).__name__)
+PY
+export NODE_HB_PY
+
 section() { printf '\n=== %s\n' "$*"; }
 run() {
   # run "S-xx description" 'shell text'
@@ -307,7 +351,15 @@ REDACT="${PYRUN}[print(redact_line(l.rstrip(chr(10)))) for l in sys.stdin]\""
 keys_of() { printf "sed -E -e '/^[[:space:]]*(#|\$)/d' -e 's/^[[:space:]]*export[[:space:]]+//' -e 's/=.*//' -- %s | sort" "$1"; }
 
 run "S-00 fleet state before any O-0 action (docs/agent-operations.md §0); node ids = O0_FLEET_NODES for every fleet guard" \
-  "docker exec trader-v3-postgres psql -U postgres -d trader -Atc \"SELECT node_id||' '||coalesce(status::text,'NULL')||' '||coalesce(release_id::varchar(12),'NULL')||' hb_age='||coalesce(round(extract(epoch from now()-last_seen_at)::numeric,1)::text,'NULL') FROM node_heartbeats ORDER BY node_id\"; for p in 8081 8082 8083 8084; do printf 'ready:%s %s\n' \$p \"\$(curl -s -o /dev/null -w '%{http_code}' -m 3 http://127.0.0.1:\$p/ready || true)\"; done"
+  "docker exec trader-v3-postgres psql -U postgres -d trader -Atc \"SELECT node_id||' '||coalesce(status::text,'NULL')||' '||coalesce(release_id::varchar(12),'NULL')||' hb_age='||coalesce(round(extract(epoch from now()-last_seen_at)::numeric,1)::text,'NULL') FROM node_heartbeats ORDER BY node_id\"; for p in 8081 8082 8083 8084; do printf 'ready:%s %s\n' \$p \"\$(curl -s -o /dev/null -w '%{http_code}' -m 3 http://127.0.0.1:\$p/ready || true)\"; done
+   echo '--- node heartbeat parameters for the fleet guard (O0_NODE_HB_INTERVAL_S / O0_NODE_HB_TIMEOUT_S; review wac-032-r2 🟡-7)'
+   for c in \$(docker ps --format '{{.Names}}' | grep -E '^trader-v3-node-' | sort); do
+     cfg=\$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \$c | sed -n 's/^NODE_CONFIG_PATH=//p')
+     printf '%s NODE_CONFIG_PATH=%s ' \$c \"\${cfg:-<unset>}\"; docker exec \$c python3 -c \"\$NODE_HB_PY\" \"\$cfg\" '$NODE_APP_ROOT' || echo 'NODE_HB_PARAMS_UNREADABLE'
+   done
+   echo '--- observed heartbeat age ($HB_SAMPLES samples, ${HB_SAMPLE_GAP}s apart): the max approximates the real interval'
+   i=0; while [ \$i -lt $HB_SAMPLES ]; do docker exec trader-v3-postgres psql -U postgres -d trader -Atc \"SELECT node_id||' '||coalesce(status::text,'NULL')||' '||coalesce(release_id::varchar(12),'NULL')||' hb_age='||coalesce(round(extract(epoch from now()-last_seen_at)::numeric,1)::text,'NULL') FROM node_heartbeats ORDER BY node_id\"; i=\$((i + 1)); [ \$i -ge $HB_SAMPLES ] || sleep $HB_SAMPLE_GAP; done \\
+     | awk '{split(\$4, a, \"=\"); v = a[2] + 0; if (!(\$1 in m) || v > m[\$1]) m[\$1] = v; n[\$1]++} END {for (k in m) printf \"observed_max_hb_age %s %.1f samples=%d\\n\", k, m[k], n[k]}' | sort"
 
 run "S-01 caddy version, unit, EnvironmentFile key names" \
   "caddy version; systemctl show caddy -p ActiveState,SubState,ExecMainStartTimestamp,NRestarts,EnvironmentFiles; systemctl cat caddy | grep -E '^(ExecStart|ExecReload|EnvironmentFile)' | $REDACT; echo '--- keys in $CADDY_ENV'; $(keys_of "'$CADDY_ENV'"); stat -c '%a %U:%G %s %y %n' '$CADDY_ENV' '$CADDYFILE'"
@@ -321,8 +373,8 @@ run "S-03 Caddyfile adapted with v3.env loaded WITHOUT shell expansion -> ALLOWL
 run "S-04 running config (admin API) vs file-adapted config compared ON THE HOST; verdict + differing JSON paths (no values) + running skeleton" \
   "${PYRUN}f=adapt_file(sys.argv[1], sys.argv[2]); r=running_config(); d=list(diff_pointers(f, r)); print(\\\"RUNNING_EQUALS_FILE=\\\" + (\\\"yes\\\" if not d else \\\"no\\\")); [print(\\\"DIFF_PATH\\\", p) for p in d[:40]]; print_skeleton(\\\"RUNNING\\\", r)\" '$CADDY_ENV' '$CADDYFILE'"
 
-run "S-05 watcher container: image, labels, ports, restart, health, env NAMES, DB/host env values" \
-  "docker inspect -f 'image={{.Image}} config_image={{.Config.Image}} started={{.State.StartedAt}} restarts={{.RestartCount}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' $WATCHER_CONTAINER; docker inspect -f '{{json .HostConfig.PortBindings}}' $WATCHER_CONTAINER; docker inspect -f '{{json .Config.Labels}}' $WATCHER_CONTAINER | python3 -c 'import json,sys; d=json.load(sys.stdin) or {}; [print(k,\"=\",v) for k,v in sorted(d.items()) if k.startswith((\"org.trader\",\"com.docker.compose\"))]'; echo '--- env names'; docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $WATCHER_CONTAINER | sed 's/=.*//' | sort; echo '--- non-secret env values'; docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $WATCHER_CONTAINER | grep -E '^(TRADER_TRADING_DB_PATH|WATCHER_TRADING_DB|TRADING_DB_PATH|WATCHER_MEDIA_DIR|WATCHER_HOST|PRICE_MONITOR_ENABLED|HERMES_TRADER_CRON_ENABLED)='; docker inspect -f '{{range .Mounts}}{{.Type}} {{.Source}} -> {{.Destination}} rw={{.RW}}{{println}}{{end}}' $WATCHER_CONTAINER"
+run "S-05 watcher container: image, user (owner of the DB files, restore-db), labels, ports, restart, health, env NAMES, DB/host env values" \
+  "docker inspect -f 'image={{.Image}} config_image={{.Config.Image}} user={{if .Config.User}}{{.Config.User}}{{else}}<image-default-root>{{end}} started={{.State.StartedAt}} restarts={{.RestartCount}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' $WATCHER_CONTAINER; docker inspect -f '{{json .HostConfig.PortBindings}}' $WATCHER_CONTAINER; docker inspect -f '{{json .Config.Labels}}' $WATCHER_CONTAINER | python3 -c 'import json,sys; d=json.load(sys.stdin) or {}; [print(k,\"=\",v) for k,v in sorted(d.items()) if k.startswith((\"org.trader\",\"com.docker.compose\"))]'; echo '--- env names'; docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $WATCHER_CONTAINER | sed 's/=.*//' | sort; echo '--- non-secret env values'; docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $WATCHER_CONTAINER | grep -E '^(TRADER_TRADING_DB_PATH|WATCHER_TRADING_DB|TRADING_DB_PATH|WATCHER_MEDIA_DIR|WATCHER_HOST|PRICE_MONITOR_ENABLED|HERMES_TRADER_CRON_ENABLED)='; docker inspect -f '{{range .Mounts}}{{.Type}} {{.Source}} -> {{.Destination}} rw={{.RW}}{{println}}{{end}}' $WATCHER_CONTAINER"
 
 run "S-06 listening sockets: watcher (only 127.0.0.1:9090), operator-query, Caddy admin, node channel (confirm the address used by the stage C probe, expected 172.30.1.1:8080)" \
   "ss -ltnpH | grep -E ':(9090|9100|8181|8182|8183|8080|2019|443|80)[[:space:]]' | awk '{print \$4, \$6}' | sort -u; echo '--- node channel candidates (:8080)'; ss -ltnH | awk '{print \$4}' | grep -E ':8080\$' | sort -u"

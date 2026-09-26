@@ -3,7 +3,8 @@
 # Runbook: docs/agent-team/release/o0-runbook-deploy.md stage O.
 #
 # Phases (every phase needs --auth-id O0-A08):
-#   preflight  read-only gates; writes the oq-preflight gate only if all pass
+#   preflight  read-only gates (incl. the S-10 unit isolation check); writes the oq-preflight
+#              gate only if all pass
 #   apply      refuses unless that gate matches this bundle and inputs; re-runs the cheap
 #              gates; then backup, env merge, install, restart operator-query ONLY, inline
 #              gateway probe with the system_observer identity (failure = automatic rollback)
@@ -67,6 +68,13 @@ switch_off_check() {
   o0_sh "snapshot switch is OFF and stays OFF in this stage (C-0 default)" \
     "v=\$(sed -n 's/^WATCHER_CONFIG_SNAPSHOT_ENABLED=//p' '$OQ_ENV'); echo \"WATCHER_CONFIG_SNAPSHOT_ENABLED=\${v:-<unset>}\"; [ -z \"\$v\" ] || [ \"\$v\" = 0 ]"
 }
+# site check S-10 as a machine gate (review wac-032-r2 🟡-6): the three units share one code
+# directory (D-04), so the env file is the only boundary; a violation blocks stage O
+isolation_check() {
+  o0_step "control-plane unit isolation (S-10): node-control/event-ingest load no operator-query.env and no WATCHER_*TOKEN name; operator-query runs from --cp-root (names only)" \
+    "$O0_PY" "$TOOLS/o0_tool.py" cp-isolation --oq-unit "$UNIT" --other-unit trader-v3-controlplane-node-control \
+    --other-unit trader-v3-controlplane-event-ingest --oq-env "$OQ_ENV" --cp-root "$CP_ROOT"
+}
 cred_check() {
   o0_step "credential set: operator-query holds the watcher CURRENT gateway/snapshot values; distinct from the catalog" \
     "$O0_PY" "$TOOLS/o0_watcher_credentials.py" check --watcher-env "$CRED_SET/watcher.env" \
@@ -83,6 +91,7 @@ phase_preflight() {
   baseline_check
   switch_off_check
   cred_check
+  isolation_check
   o0_sh "build an overlay copy (live tree + candidate files) for the import smoke" \
     "rm -rf '$OVERLAY'; mkdir -p '$OVERLAY'; cp -a '$CP_ROOT/.' '$OVERLAY/'; cd '$BUNDLE/controlplane' && find . -type f | sed 's|^\\./||' | while read -r rel; do install -D -m 0644 \"\$rel\" '$OVERLAY'/\"\$rel\"; done"
   o0_sh "import smoke from the overlay with the unit's environment (no network, no DB startup): gateway artifact loads, phase_max=P2, yaml_sha256 as reviewed, /v1/watcher only on operator-query" \
@@ -127,6 +136,7 @@ phase_apply() {
   baseline_check
   switch_off_check
   cred_check
+  isolation_check
   o0_fleet_baseline before-oq
   # ---- changes
   o0_sh "backup overwritten files, list new files, backup env file (0700 dir)" \

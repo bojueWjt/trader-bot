@@ -37,6 +37,14 @@ O0_FLEET_MAX_HB_JUMP="${O0_FLEET_MAX_HB_JUMP:-5}"
 O0_FLEET_SETTLE_S="${O0_FLEET_SETTLE_S:-60}"
 O0_FLEET_SAMPLES="${O0_FLEET_SAMPLES:-4}"
 O0_FLEET_INTERVAL_S="${O0_FLEET_INTERVAL_S:-20}"
+# Production node heartbeat parameters (review wac-032-r2 🟡-7): set them to what site check
+# S-00 printed (interval = DEFAULT_HEARTBEAT_INTERVAL_SECONDS of the running node image,
+# timeout = control_plane.heartbeat_timeout_seconds of every node config). The defaults are
+# the 67b401a values. Every --execute run checks that the guard thresholds above are
+# consistent with them (o0_tool.py fleet-params) and refuses otherwise; changing any of these
+# values needs the user's confirmation (o0-runbook-deploy.md §0).
+O0_NODE_HB_INTERVAL_S="${O0_NODE_HB_INTERVAL_S:-2}"
+O0_NODE_HB_TIMEOUT_S="${O0_NODE_HB_TIMEOUT_S:-15}"
 # Gate freshness (AGENTS.md evidence freshness: fault report 1 h, capacity evidence 24 h).
 O0_GATE_MAX_AGE_S="${O0_GATE_MAX_AGE_S:-3600}"
 O0_BUILD_GATE_MAX_AGE_S="${O0_BUILD_GATE_MAX_AGE_S:-86400}"
@@ -196,13 +204,36 @@ o0_require_execute_context() {
   o0_require_stage_dir "$O0_STAGE_DIR"
   [ -d "$O0_STAGE_DIR" ] || o0_die "stage dir does not exist: $O0_STAGE_DIR"
   mkdir -p -m 0700 "$O0_STAGE_DIR/evidence"
+  o0_fleet_params_check
   local cand="<no-bundle>"
   if [ -r "$O0_STAGE_DIR/bundle/RELEASE.json" ]; then
     cand="$("$O0_PY" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("candidate","?"))' "$O0_STAGE_DIR/bundle/RELEASE.json")"
   fi
   o0_log "authorization=$O0_AUTH_ID script=$script phase=$O0_PHASE candidate=$cand stage=$O0_STAGE_DIR"
-  printf '%s script=%s phase=%s auth=%s candidate=%s ack_data_loss=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$script" "$O0_PHASE" \
-    "$O0_AUTH_ID" "$cand" "$O0_ACK_DATA_LOSS" >> "$O0_STAGE_DIR/evidence/authorizations.log"
+  printf '%s script=%s phase=%s auth=%s candidate=%s ack_data_loss=%s fleet_params=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$script" "$O0_PHASE" \
+    "$O0_AUTH_ID" "$cand" "$O0_ACK_DATA_LOSS" "$(o0_fleet_params_summary)" >> "$O0_STAGE_DIR/evidence/authorizations.log"
+}
+
+o0_fleet_params_summary() {
+  printf 'hb_interval=%s,hb_timeout=%s,max_hb_age=%s,max_hb_jump=%s,settle=%s,samples=%sx%s' "$O0_NODE_HB_INTERVAL_S" "$O0_NODE_HB_TIMEOUT_S" \
+    "$O0_FLEET_MAX_HB_AGE" "$O0_FLEET_MAX_HB_JUMP" "$O0_FLEET_SETTLE_S" "$O0_FLEET_SAMPLES" "$O0_FLEET_INTERVAL_S"
+}
+
+# Guard thresholds vs production node heartbeat parameters (review wac-032-r2 🟡-7), before
+# any step of any execute run. O0_FLEET_PARAMS_SANDBOX_SKIP is honoured only together with
+# O0_SANDBOX (itself refused on jp-24): the sandbox tests use sub-second windows.
+o0_fleet_params_check() {
+  local out rc=0
+  if [ -n "${O0_SANDBOX:-}" ] && [ "${O0_FLEET_PARAMS_SANDBOX_SKIP:-}" = 1 ]; then
+    [ ! -e /srv/trader-v3 ] || o0_die "O0_SANDBOX is refused on a host that has /srv/trader-v3"
+    o0_log "SANDBOX: fleet parameter check skipped (sub-second test windows)"
+    return 0
+  fi
+  out="$("$O0_PY" "$O0_TOOL" fleet-params --hb-interval-s "$O0_NODE_HB_INTERVAL_S" --hb-timeout-s "$O0_NODE_HB_TIMEOUT_S" \
+    --max-hb-age "$O0_FLEET_MAX_HB_AGE" --max-hb-jump "$O0_FLEET_MAX_HB_JUMP" --settle-s "$O0_FLEET_SETTLE_S" \
+    --samples "$O0_FLEET_SAMPLES" --sample-interval-s "$O0_FLEET_INTERVAL_S" 2>&1)" || rc=$?
+  while IFS= read -r line; do o0_log "$line"; done <<< "$out"
+  [ "$rc" = 0 ] || o0_die "fleet guard thresholds are inconsistent with the node heartbeat parameters (S-00): adjust per o0-runbook-deploy.md §0, only with the user's confirmation"
 }
 
 # ---------------------------------------------------------------- fleet guard

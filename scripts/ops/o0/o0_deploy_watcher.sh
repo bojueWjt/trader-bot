@@ -268,6 +268,49 @@ phase_rollback() {
   o0_fleet_settle_compare before-watcher-rollback after-watcher-rollback
 }
 
+# ---- restore-db (O0-A07R). Review wac-032-r2 🟡-5: the file that goes back keeps the
+# ORIGINAL owner and mode (recorded with stat before anything moves, not hard-coded), and a
+# failure after the watcher was stopped has a recovery path: the automatic rollback puts the
+# set-aside files back (mv keeps owner, mode and inode), proves their sha, starts the watcher
+# and runs the fleet guard. Manual path: o0-runbook-deploy.md W-6.
+DBDIR="$(dirname "$WATCHER_DB")"
+DBNAME="$(basename "$WATCHER_DB")"
+REPLACED="$BK/db-replaced"
+FAILED_RESTORE="$BK/db-failed-restore"
+
+watcher_up_check() {  # watcher_up_check <file with the start time>
+  o0_sh "watcher up: 'Web UI listening', no '[db] Failed', Telegram reconnected within ${TG_TIMEOUT_S}s" \
+    "since=\$(cat '$1'); lg() { docker logs --since \"\$since\" '$CONTAINER' 2>&1; }
+     i=0; while [ \$i -lt $TG_TIMEOUT_S ]; do [ \"\$(lg | awk '/\\[watcher\\] Connected, listening/{c++} END{print c+0}')\" -ge 1 ] && break; sleep 5; i=\$((i + 5)); done
+     [ \"\$(lg | awk '/\\[db\\] Failed/{c++} END{print c+0}')\" = 0 ] && [ \"\$(lg | awk '/Web UI listening/{c++} END{print c+0}')\" -ge 1 ] && [ \"\$(lg | awk '/\\[watcher\\] Connected, listening/{c++} END{print c+0}')\" -ge 1 ] && echo RESTORE_DB_WATCHER_UP"
+}
+
+# automatic recovery, files: the live DB goes back to the set-aside files (the state before
+# restore-db started); whatever the failed restore left behind is kept in db-failed-restore/
+restore_db_recover_files() {
+  o0_step "recovery: make sure the watcher is stopped before the DB files move" "${DC[@]}" stop "$SERVICE"
+  o0_sh "recovery: set the restored copy aside, move the original DB files back (owner, mode, inode kept by mv)" \
+    "umask 077; mkdir -p '$FAILED_RESTORE'; chmod 700 '$FAILED_RESTORE'
+     while read -r n; do
+       if [ -e '$REPLACED'/\"\$n\" ]; then
+         if [ -e '$DBDIR'/\"\$n\" ]; then mv -- '$DBDIR'/\"\$n\" '$FAILED_RESTORE'/; fi
+         mv -- '$REPLACED'/\"\$n\" '$DBDIR'/\"\$n\"
+       fi
+     done < '$EV/watcher-db-replaced.files'
+     for s in -wal -shm; do
+       if [ -e '$DBDIR/$DBNAME'\"\$s\" ] && ! grep -qx '$DBNAME'\"\$s\" '$EV/watcher-db-replaced.files'; then mv -- '$DBDIR/$DBNAME'\"\$s\" '$FAILED_RESTORE'/; fi
+     done
+     cd '$DBDIR' && sha256sum -c '$EV/watcher-db-replaced.sha256' | sed 's|^|original DB back: |'
+     now=\$(stat -c '%u:%g %a' '$WATCHER_DB'); was=\$(cat '$EV/watcher-db-owner.txt'); echo \"owner/mode now=\$now recorded=\$was\"; [ \"\$now\" = \"\$was\" ]
+     echo RESTORE_DB_RECOVERED_FILES"
+}
+# automatic recovery, runtime: the watcher is started again on its original DB
+restore_db_recover_runtime() {
+  o0_sh "recovery: record the start time" "date -u +%Y-%m-%dT%H:%M:%SZ | tee '$EV/watcher-restore-recovery.at'"
+  o0_step "recovery: start watcher on the original DB" "${DC[@]}" start "$SERVICE"
+  watcher_up_check "$EV/watcher-restore-recovery.at"
+}
+
 phase_restore_db() {
   o0_note "O0-A07R ONLY: replaces the live DB with the pre-apply copy; config writes and Telegram messages stored after apply are LOST"
   o0_sh "snapshot switch must be OFF before the DB goes back in time (otherwise snapshot_revision_regressed / invalid): assert, do not change" \
@@ -275,18 +318,31 @@ phase_restore_db() {
   o0_sh "the pre-apply copy is intact (sha recorded at apply, integrity_check ok)" \
     "sha256sum -c '$EV/watcher-db-backup.sha256'
      $(o0_quote "$O0_PY") -c 'import sqlite3,sys; c=sqlite3.connect(\"file:\"+sys.argv[1]+\"?mode=ro\",uri=True); r=c.execute(\"PRAGMA integrity_check\").fetchone()[0]; print(\"integrity\", r); sys.exit(0 if r==\"ok\" else 1)' '$BK/watcher-trading.pre-o0.db'"
+  o0_sh "record owner, mode and sha of the live DB files BEFORE anything moves (the restored file gets the same owner and mode); refuse a second run over earlier set-aside files" \
+    "test -f '$WATCHER_DB' || { echo 'LIVE_DB_MISSING $WATCHER_DB'; exit 1; }
+     if [ -d '$REPLACED' ] && [ -n \"\$(ls -A '$REPLACED')\" ]; then echo 'DB_REPLACED_NOT_EMPTY: an earlier restore-db set files aside there; recover or move them first (runbook W-6)'; exit 1; fi
+     umask 077; mkdir -p '$REPLACED'; chmod 700 '$REPLACED'
+     stat -c '%u:%g %a' '$WATCHER_DB' | tee '$EV/watcher-db-owner.txt'
+     cd '$DBDIR' && for n in '$DBNAME' '$DBNAME-wal' '$DBNAME-shm'; do if [ -e \"\$n\" ]; then echo \"\$n\"; fi; done > '$EV/watcher-db-replaced.files'
+     xargs sha256sum < '$EV/watcher-db-replaced.files' > '$EV/watcher-db-replaced.sha256'
+     sed 's|^|set aside: |' '$EV/watcher-db-replaced.files'"
   o0_fleet_baseline before-restore-db
+  o0_arm_auto_rollback watcher-restore-db restore_db_recover_files restore_db_recover_runtime before-restore-db
+  o0_mark_runtime_replaced
   o0_step "stop watcher" "${DC[@]}" stop "$SERVICE"
-  o0_sh "set aside the current DB files, then install the pre-apply copy and prove the installed bytes equal it" \
-    "umask 077; mkdir -p '$BK/db-replaced'; for f in '$WATCHER_DB' '$WATCHER_DB-wal' '$WATCHER_DB-shm'; do if [ -e \"\$f\" ]; then mv \"\$f\" '$BK/db-replaced/'; fi; done
-     cp '$BK/watcher-trading.pre-o0.db' '$WATCHER_DB'; chown root:root '$WATCHER_DB'; chmod 600 '$WATCHER_DB'
-     [ \"\$(sha256sum < '$WATCHER_DB' | cut -d' ' -f1)\" = \"\$(cut -d' ' -f1 '$EV/watcher-db-backup.sha256')\" ] && echo RESTORED_DB_SHA_OK"
+  o0_sh "set aside the current DB files, then install the pre-apply copy with the RECORDED owner and mode and prove bytes, owner and mode" \
+    "while read -r n; do mv -- '$DBDIR'/\"\$n\" '$REPLACED'/; done < '$EV/watcher-db-replaced.files'
+     own=\$(cut -d' ' -f1 '$EV/watcher-db-owner.txt'); mode=\$(cut -d' ' -f2 '$EV/watcher-db-owner.txt')
+     cp -- '$BK/watcher-trading.pre-o0.db' '$WATCHER_DB'; chown \"\$own\" '$WATCHER_DB'; chmod \"\$mode\" '$WATCHER_DB'
+     [ \"\$(sha256sum < '$WATCHER_DB' | cut -d' ' -f1)\" = \"\$(cut -d' ' -f1 '$EV/watcher-db-backup.sha256')\" ] || { echo RESTORED_DB_SHA_MISMATCH; exit 1; }
+     echo RESTORED_DB_SHA_OK
+     now=\$(stat -c '%u:%g %a' '$WATCHER_DB'); echo \"owner/mode now=\$now recorded=\$(cat '$EV/watcher-db-owner.txt')\"
+     [ \"\$now\" = \"\$(cat '$EV/watcher-db-owner.txt')\" ] || { echo RESTORED_DB_OWNER_MODE_MISMATCH; exit 1; }
+     echo RESTORED_DB_OWNER_MODE_OK"
   o0_sh "record the restart time" "date -u +%Y-%m-%dT%H:%M:%SZ | tee '$EV/watcher-restore.at'"
   o0_step "start watcher" "${DC[@]}" start "$SERVICE"
-  o0_sh "watcher up on the restored DB: 'Web UI listening', no '[db] Failed', Telegram reconnected" \
-    "since=\$(cat '$EV/watcher-restore.at'); lg() { docker logs --since \"\$since\" '$CONTAINER' 2>&1; }
-     i=0; while [ \$i -lt $TG_TIMEOUT_S ]; do [ \"\$(lg | awk '/\\[watcher\\] Connected, listening/{c++} END{print c+0}')\" -ge 1 ] && break; sleep 5; i=\$((i + 5)); done
-     [ \"\$(lg | awk '/\\[db\\] Failed/{c++} END{print c+0}')\" = 0 ] && [ \"\$(lg | awk '/Web UI listening/{c++} END{print c+0}')\" -ge 1 ] && [ \"\$(lg | awk '/\\[watcher\\] Connected, listening/{c++} END{print c+0}')\" -ge 1 ] && echo RESTORE_DB_WATCHER_UP"
+  watcher_up_check "$EV/watcher-restore.at"
+  trap - ERR
   o0_fleet_settle_compare before-restore-db after-restore-db
 }
 
