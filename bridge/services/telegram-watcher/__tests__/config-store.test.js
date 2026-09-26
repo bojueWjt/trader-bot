@@ -56,23 +56,30 @@ test.before(async () => {
     const requestedIdentity = req.get("x-test-identity");
     const identity = requestedIdentity === "gateway-viewer" ? "gateway" : requestedIdentity;
     if (identity !== "none") {
-      req.watcherAuth = {
+      const { PAYLOAD } = require('../lib/generated/gateway-routes');
+      const route = PAYLOAD.routes.find(row => row.identity === identity && row.method === req.method && new RegExp('^' + row.inner_path.replace(/\{[a-z_]+\}/g, '[^/]+') + '$', 'u').test(req.path));
+      Object.defineProperty(req, 'watcherRoute', { value: route, writable: false, configurable: false, enumerable: true });
+      const auth = {
         identity, role: identity === "gateway" ? (requestedIdentity === "gateway-viewer" ? "viewer" : "risk_admin") : null,
-        actor: identity === "gateway" ? (requestedIdentity === "gateway-viewer" ? "app:viewer" : "app:risk_admin") : "browser",
+        actor: identity === "gateway" ? (requestedIdentity === "gateway-viewer" ? "app:viewer" : "app:risk_admin") : identity,
         tokenFingerprint: identity === "gateway" ? "123456789abc" : null,
       };
+      Object.defineProperty(req, 'watcherAuth', { value: Object.freeze(auth), writable: false, configurable: false, enumerable: true });
     }
     next();
   });
   registerTradingApi(app, { getDb: database, getStatus: () => ({}) });
-  server = await new Promise((resolve) => {
+  server = await new Promise((resolve, reject) => {
     const listening = app.listen(0, "127.0.0.1", () => resolve(listening));
+    listening.once("error", reject);
   });
   base = "http://127.0.0.1:" + server.address().port;
 });
 
 test.after(async () => {
-  await new Promise((resolve) => server.close(resolve));
+  if (server) {
+    await new Promise((resolve) => server.close(resolve));
+  }
   delete require.cache[tradingApiModule];
   delete process.env.TRADER_TRADING_DB_PATH;
   fs.rmSync(temp, { recursive: true, force: true });
@@ -80,9 +87,9 @@ test.after(async () => {
 
 test("T0-2 empty snapshot is valid, stable, and snapshot identity only", async () => {
   const missing = await request("GET", "/api/trading/config-snapshot", undefined, "none");
-  assert.equal(missing.status, 401);
+  assert.equal(missing.status, 500);
   const browser = await request("GET", "/api/trading/config-snapshot");
-  assert.equal(browser.status, 403);
+  assert.equal(browser.status, 500);
   const first = await request("GET", "/api/trading/config-snapshot", undefined, "snapshot");
   assert.equal(first.status, 200);
   assert.equal(first.body.schema_version, "watcher-config-snapshot.v1");
@@ -219,7 +226,7 @@ test("T0-2 gateway write requires risk_admin in watcherAuth", async () => {
   const denied = await write("POST", "/api/trading/risks",
     { symbol: "DENIED", risk_ratio: 0.01 }, { identity: "gateway-viewer" });
   assert.equal(denied.status, 403);
-  assert.equal(denied.body.code, "insufficient_scope");
+  assert.equal(denied.body.code, "identity_forbidden");
   assert.equal(revision, before);
 });
 

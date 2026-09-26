@@ -703,6 +703,8 @@
           <div class="btn-group" style="margin-top:0;margin-bottom:12px">
             <button class="btn btn-ghost" onclick="loadDialogs()">加载群组列表</button>
             <button class="btn btn-primary" onclick="saveGroups()">保存选择</button>
+            <button class="btn btn-ghost" onclick="changeWatcherConnection('disconnect')">断开监听</button>
+            <button class="btn btn-ghost" onclick="changeWatcherConnection('reconnect')">重新连接</button>
           </div>
           <div class="group-list" id="groupList">
             <div class="empty">点击"加载群组列表"</div>
@@ -915,14 +917,18 @@
       const configResource = configMatch ? configMatch[1] : null;
       let pendingKey = null;
       let body = opts.body;
-      if (configResource && method !== 'GET') {
-        if (!Number.isSafeInteger(configRevisions[configResource])) {
+      const reentrant = method === 'POST' && /^\/(groups|disconnect|reconnect)$/.test(path);
+      if ((configResource && method !== 'GET') || reentrant) {
+        if (configResource && !Number.isSafeInteger(configRevisions[configResource])) {
           throw new Error('配置版本尚未加载，请刷新后重试');
         }
         pendingKey = method + ':' + path + ':' + JSON.stringify(body || {});
         let pending = pendingConfigWrites.get(pendingKey);
         if (!pending) {
-          pending = { expected_revision: configRevisions[configResource], client_ref: crypto.randomUUID() };
+          pending = { client_ref: crypto.randomUUID() };
+          if (configResource) {
+            pending.expected_revision = configRevisions[configResource];
+          }
           pendingConfigWrites.set(pendingKey, pending);
         }
         body = { ...(body || {}), ...pending };
@@ -946,7 +952,7 @@
       try {
         payload = await res.json();
       } catch (err) {
-        payload = {};
+        throw new Error('响应无法读取，操作结果未知，请用原请求重试');
       }
       if (!res.ok && !payload.error) {
         payload.error = payload.message || `请求失败 (${res.status})`;
@@ -1168,6 +1174,26 @@
           <span class="g-tag">${g.isChannel ? '频道' : '群组'}</span>
         </label>
       `).join('');
+    }
+
+    async function changeWatcherConnection(action) {
+      const message = action === 'disconnect'
+        ? '确定断开监听吗？断开后会停止信号采集与断流告警，直到重新连接。'
+        : '确定重新连接监听吗？';
+      if (!confirm(message)) {
+        return;
+      }
+      try {
+        const result = await api('/' + action, { method: 'POST' });
+        if (!result.ok) {
+          toast(result.error || '操作失败');
+          return;
+        }
+        toast('请求已提交，连接状态以刷新结果为准');
+        await checkStatus();
+      } catch (error) {
+        toast('操作结果未知，请重试并查看连接状态');
+      }
     }
 
     async function saveGroups() {

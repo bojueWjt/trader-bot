@@ -1,23 +1,24 @@
 const Database = require("better-sqlite3");
 
-const DEFAULT_TRADING_DB_PATH = "/var/lib/docker/volumes/trader_signal-data/_data/watcher-trading.db";
+const { resolveTradingDbPath } = require("./db-path");
 
 function readLastMessageIngestedAt(env = process.env) {
-  const dbPath = String(env.TRADER_TRADING_DB_PATH || env.WATCHER_TRADING_DB || env.TRADING_DB_PATH || DEFAULT_TRADING_DB_PATH).trim();
+  const dbPath = resolveTradingDbPath(env);
   let db;
   try {
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    db.pragma("busy_timeout = 5000");
     const row = db.prepare("SELECT max(created_at) AS latest FROM telegram_messages").get();
-    if (!row || !row.latest) {
+    if (row && row.latest === null) {
       return null;
     }
     const parsed = new Date(`${row.latest.replace(" ", "T")}Z`);
     if (Number.isNaN(parsed.getTime())) {
-      return null;
+      throw new Error("invalid message timestamp");
     }
     return parsed.toISOString();
   } catch {
-    return null;
+    throw new Error("message database unreadable");
   } finally {
     if (db) {
       db.close();

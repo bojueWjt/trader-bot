@@ -50,7 +50,7 @@ test("pending multiplier accounts are visibly disabled and excluded from routing
 
 test("config writes send expected_revision and client_ref from GET header", () => {
   assert.match(pageSource, /X-Config-Revision/);
-  assert.match(pageSource, /expected_revision: configRevisions\[configResource\]/);
+  assert.match(pageSource, /pending.expected_revision = configRevisions\[configResource\]/);
   assert.match(pageSource, /client_ref: crypto\.randomUUID\(\)/);
   assert.match(pageSource, /revision_conflict/);
 });
@@ -187,4 +187,69 @@ test("DELETE config requests send JSON body and risk bounds match server", () =>
   assert.match(pageSource, /method: 'DELETE', body: \{\}/);
   assert.match(pageSource, /default_risk_ratio <= 0 \|\| default_risk_ratio > 0\.1/);
   assert.match(pageSource, /risk_ratio <= 0 \|\| risk_ratio > 0\.1/);
+});
+
+test('groups/disconnect/reconnect send client_ref and reuse it after transport or JSON failure', async () => {
+  const start = pageSource.indexOf('    async function api(path, opts = {}) {');
+  const end = pageSource.indexOf('    function setButtonBusy', start);
+  const sent = [];
+  let mode = 'transport';
+  const context = {
+    crypto: {randomUUID:()=> 'site-ref-' + sent.length},
+    fetch: async (url, opts) => {
+      sent.push({url,body:JSON.parse(opts.body)});
+      if (mode === 'transport') throw new Error('transport failed');
+      return {ok:true,status:200,headers:{get:()=>null},json:async()=>{
+        if (mode === 'json') throw new Error('invalid JSON');
+        return {ok:true,revision:0,replay:true};
+      }};
+    },
+    toast() {},
+  };
+  vm.runInNewContext('const configRevisions={};const pendingConfigWrites=new Map();' + pageSource.slice(start,end),context);
+  for (const route of ['/groups','/disconnect','/reconnect']) {
+    const opts={method:'POST',body:route === '/groups' ? {groups:[]} : {}};
+    mode='transport';
+    await assert.rejects(context.api(route,opts));
+    const first=sent.at(-1).body;
+    assert.ok(first.client_ref);
+    assert.equal(Object.hasOwn(first,'expected_revision'),false);
+    mode='json';await assert.rejects(context.api(route,opts));
+    assert.equal(sent.at(-1).body.client_ref,first.client_ref);
+    mode='success';await context.api(route,opts);
+    assert.equal(sent.at(-1).body.client_ref,first.client_ref);
+    await context.api(route,opts);
+    assert.notEqual(sent.at(-1).body.client_ref,first.client_ref);
+  }
+});
+
+test('disconnect and reconnect require Chinese confirmation before any request', async () => {
+  const start = pageSource.indexOf('    async function changeWatcherConnection(action) {');
+  const end = pageSource.indexOf('    async function saveGroups()', start);
+  assert.ok(start > 0 && end > start);
+  assert.match(pageSource, /changeWatcherConnection\('disconnect'\)/);
+  assert.match(pageSource, /changeWatcherConnection\('reconnect'\)/);
+  const sent = [];
+  const prompts = [];
+  let approved = false;
+  const context = {
+    confirm(message) { prompts.push(message); return approved; },
+    api: async (route, options) => { sent.push({ route, options }); return { ok:true }; },
+    checkStatus: async () => {},
+    toast() {},
+  };
+  vm.runInNewContext(pageSource.slice(start, end), context);
+  for (const action of ['disconnect', 'reconnect']) {
+    await context.changeWatcherConnection(action);
+    assert.equal(sent.length, 0, `${action} sent a request after cancellation`);
+  }
+  assert.match(prompts[0], /断开监听/);
+  assert.match(prompts[0], /停止信号采集/);
+  assert.match(prompts[0], /断流告警/);
+  assert.match(prompts[1], /重新连接/);
+  approved = true;
+  for (const action of ['disconnect', 'reconnect']) {
+    await context.changeWatcherConnection(action);
+  }
+  assert.deepEqual(sent.map(item => item.route), ['/disconnect', '/reconnect']);
 });

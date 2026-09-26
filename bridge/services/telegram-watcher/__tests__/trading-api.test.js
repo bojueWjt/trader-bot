@@ -90,7 +90,10 @@ test.before(async () => {
   const app = express();
   app.use(express.json());
   app.use((req, res, next) => {
-    req.watcherAuth = { identity: "browser", role: null, actor: "browser", tokenFingerprint: null };
+    const { PAYLOAD } = require('../lib/generated/gateway-routes');
+    const route = PAYLOAD.routes.find(row => row.identity === 'browser' && row.method === req.method && new RegExp('^' + row.inner_path.replace(/\{[a-z_]+\}/g, '[^/]+') + '$', 'u').test(req.path));
+    Object.defineProperty(req, 'watcherAuth', { value: Object.freeze({ identity: 'browser', role: null, actor: 'browser', tokenFingerprint: null }), writable: false, configurable: false, enumerable: true });
+    Object.defineProperty(req, 'watcherRoute', { value: route, writable: false, configurable: false, enumerable: true });
     next();
   });
   registerTradingApi(app, {
