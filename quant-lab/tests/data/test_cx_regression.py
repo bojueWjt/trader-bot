@@ -109,3 +109,19 @@ def test_open_fields_scored_on_now_open_actions_not_sibling_analysis(tmp_path):
     assert items['fiction-0']['fields']['symbol']['correct'] and items['fiction-0']['fields']['side']['correct']
     # Without a predicted open, every action is still scored, so a missed open cannot look field-perfect.
     assert not items['fiction-1']['fields']['symbol']['correct']
+
+
+def test_cmp_leg_compared_only_where_gold_states_it():
+    ladder = action(entry=dict(kind='ladder', price=None, lo=None, hi=None, levels=[
+        dict(kind='market_ref', price=None, fraction=None), dict(kind='limit', price=number(95), fraction=None)]))
+    limit_only = action(entry=dict(kind='limit', price=number(95), lo=None, hi=None, levels=[]))
+    gold = dict(entry=dict(levels=['95']), entry_market_leg=True)
+    assert regression.compare_field('entry', dict(gold), [ladder]) == (True, None)
+    assert regression.compare_field('entry', dict(gold), [limit_only]) == (False, None)
+    assert regression.compare_field('entry', dict(gold, entry_market_leg=False), [ladder]) == (False, None)
+    unstated = dict(entry=dict(levels=['95']))
+    assert regression.compare_field('entry', unstated, [ladder]) == (True, None)
+    assert unstated['_leg_seen'] == [False]
+    grouped = dict(entry=dict(by_symbol={'BTC': dict(levels=['95'])}), entry_market_leg=dict(by_symbol={'BTC': True}))
+    assert regression.compare_field('entry', grouped, [ladder]) == (True, None) and grouped['_leg_seen'] == [True]
+    assert regression.compare_field('symbol', dict(symbol='UNI'), [action(symbol_raw='#UNI/USDT')]) == (True, None)

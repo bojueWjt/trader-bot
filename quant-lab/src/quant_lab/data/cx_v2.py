@@ -19,8 +19,8 @@ time_ref: now=本条新发出，past=回顾/转述此前订单，conditional=等
 回复只有明确说「再开/重新入场」才算 now open；展示旧单、重复引用是 past；previous_text 仅用于辨别指向，绝不可作数字证据。
 「挂单 X」「X 附近入」是 now open；「如果到 X 再开」「若反应好我会考虑空」是 conditional。
 「现价 X」entry.kind=market_ref，price.value=X；没有数字的 CMP 不补数字。
-「CMP 和 X」是一个 ladder，两档分别 kind=market_ref 与 limit，未知 CMP price=null 并说明原因；分批边界绝不是现价。
-zone 的 lo/hi 是区间，ladder 的 levels 是离散档，每档可带 fraction（比例以百分数表示，50 表示 50%）。
+「CMP 和 X」「CMP 至 X」「现价到 X」「从当前价格 DCA 到 X」都是 ladder：两档分别 kind=market_ref 与 limit，未知 CMP price=null 并说明原因；分批边界绝不是现价。
+zone 只用于两端都有数字的区间（lo/hi 都非 null）；ladder 的 levels 是离散档，每档可带 fraction（比例以百分数表示，50 表示 50%）。
 stop.kind=price 或 condition；条件止损保留完整 condition 文字和其中价格（无明确价格留 null），不能变成即时价格止损。
 tps 每项 kind=price/percent；percent 是相对入场的百分数（5 表示 5%），不是收益杠杆倍数，禁止在抽取时换算成目标价。
 每个数字对象 {value,quote} 都必须引用当前 text 中逐字连续片段，并含完整数字及明确单位。
@@ -233,7 +233,7 @@ def validate_response(payload, text):
 
 
 def parse_actions(payload, text):
-    from .extract import ParseResult
+    from .extract import ParseResult, canonical_symbol
     clean = validate_response(payload, text)
     rows = []
     kinds = dict(open="entry_proposal", add="add", reduce="reduce", take_profit="reduce", stop_loss_hit="close_claimed",
@@ -242,7 +242,8 @@ def parse_actions(payload, text):
         kind = kinds[action["op"]]
         if action["op"] == "open" and action["time_ref"] != "now":
             kind = "entry_claimed"  # description only; checks retain the actual op/time
-        res = ParseResult(kind=kind, branch_index=action["branch_index"], symbol_raw=action["symbol_raw"], side=action["side"])
+        # The verbatim spelling stays in checks.action; the registry resolves the canonical code.
+        res = ParseResult(kind=kind, branch_index=action["branch_index"], symbol_raw=canonical_symbol(action["symbol_raw"]), side=action["side"])
         res.checks = dict(llm_evidence_valid=action["op"] != "undecidable", schema_version=2,
                           op=action["op"], time_ref=action["time_ref"], action=action,
                           field_issues=action["field_issues"], batch_stats=clean["stats"])
@@ -255,12 +256,17 @@ def parse_actions(payload, text):
             if k in ("market_ref", "limit") and entry["price"]:
                 price = value(entry["price"])
                 res.entry = dict(kind=k, lo=price, hi=price)
+            elif k == "market_ref":
+                # Numberless CMP: priced from the as-of mark at t_dec in replay, like the rule parser's 现价.
+                res.notes.append("market_ref")
             elif k == "zone" and entry["lo"] and entry["hi"]:
                 res.entry = dict(kind=k, lo=value(entry["lo"]), hi=value(entry["hi"]))
             elif k == "ladder":
                 res.entries = [value(p["price"]) for p in entry["levels"] if p["price"]]
                 if res.entries:
                     res.entry = dict(kind=k, lo=min(res.entries), hi=max(res.entries))
+                elif entry["levels"] and all(p["kind"] == "market_ref" for p in entry["levels"]):
+                    res.notes.append("market_ref")
         stop = action["stop"]
         if stop and stop["kind"] == "price":
             res.stop = value(stop["price"])

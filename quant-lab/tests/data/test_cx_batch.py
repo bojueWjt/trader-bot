@@ -548,7 +548,20 @@ def test_restart_reasks_transport_failures_and_backoff(tmp_path, fake_codex, mon
             extra.unlink()
         invariant(mutant(cx.run_batches, 'if k not in completed or _transport_failed(completed[k])]', 'if k not in completed]'))
     slept = []
-    monkeypatch.setattr(cx.time, "sleep", slept.append)
+    monkeypatch.setattr(cx, "_sleep", slept.append)
     monkeypatch.setenv("CX_MODE", "fail")
     cx.run_batches(path, tmp_path / "backoff", executable=str(script), batch_size=2, retries=2, backoff=10)
     assert slept == [10, 20]
+
+
+def test_wire_message_drops_only_redundant_copies(tmp_path, fake_codex, monkeypatch):
+    from quant_lab.data import cx_v2
+    system, user = cx_v2.build_prompt("仿写 BTC 现价100做多", channel_name="虚构", message_date="2026-01-01", previous_text="父帖")
+    row = dict(key="k", schema_name=cx_v2.SCHEMA_NAME, system=system, user=user, text="仿写 BTC 现价100做多")
+    wire = cx.wire_message(row)
+    assert wire == {"key": "k", "schema_name": cx_v2.SCHEMA_NAME, "text": "仿写 BTC 现价100做多", "channel_name": "虚构",
+                    "message_date": "2026-01-01", "previous_text": "父帖"}
+    # A row whose system prompt differs from the shared instructions must travel whole, or the model loses its rules.
+    other = dict(row, system="另一套规则")
+    assert cx.wire_message(other) is other
+    assert len(cx.dumps(wire)) < len(cx.dumps(row)) / 2

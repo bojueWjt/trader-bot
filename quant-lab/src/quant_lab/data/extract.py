@@ -17,6 +17,7 @@ import math
 import os
 import pathlib
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -123,6 +124,21 @@ SYMBOL_ALIASES: dict[str, str] = {
     "比特币": "BTC", "大饼": "BTC", "饼": "BTC", "以太坊": "ETH", "以太": "ETH", "姨太": "ETH", "索拉": "SOL", "谷歌": "GOOGL",
     "美光": "MU", "原油": "CL", "美油": "CL", "布伦特": "BZ", "黄金": "XAU", "白银": "XAG",
 }
+_QUOTE_SUFFIX_RE = re.compile(r"(?:[/\-_]?USDT(?:\.P)?|\.P|PERP)$")
+
+
+def canonical_symbol(raw: str | None) -> str | None:
+    """LLM 原样抄写的币种（$ENA、#UNI/USDT、near、大饼）规范成登记表使用的代码；规则解析器本来就输出这种形式。"""
+    if raw is None:
+        return None
+    s = unicodedata.normalize("NFKC", raw).strip()
+    if s in SYMBOL_ALIASES:
+        return SYMBOL_ALIASES[s]
+    s = s.upper().lstrip("#$").strip()
+    s = _QUOTE_SUFFIX_RE.sub("", s).strip()
+    return s or None
+
+
 SYMBOL_STOP = {
     "TP", "SL", "USD", "USDT", "RSI", "MA", "EMA", "BE", "NFP", "CPI", "AREAN", "DC", "TV", "VAL", "OK", "LONG", "SHORT", "GM",
     "FOMO", "ATH", "ATL", "HTF", "LTF", "PA", "AI", "ETF", "FED", "GDP", "PMI", "VIP", "ID", "UTC", "AM", "PM", "MIGRATION", "TEST",

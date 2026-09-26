@@ -16,6 +16,7 @@ import math
 from pathlib import Path
 
 from . import cx_batch as cx, cx_v2
+from .extract import canonical_symbol
 from .llm import record_key
 
 DEFAULT_TRUTH = Path('/private/tmp/claude-501/-Users-balen-projects-trader-bot/0f23fe43-9647-49dc-9185-0f7c3826c2ff/scratchpad/cx-pilot/review-result.json')
@@ -59,10 +60,51 @@ def atom(value):
 
 
 def symbol(value):
+    # Same canonicalizer the pipeline applies before registry lookup ($ENA, #UNI/USDT, near, 大饼).
+    return canonical_symbol(value)
+
+
+ALLOWED_GOLD_ENTRY = {'lo', 'hi', 'kind', 'levels', 'raw', 'unit_unspecified', 'raw_ambiguous'}
+
+
+def entry_shape(value, *, predicted=False):
+    """(priced anchors, market_leg). market_leg=None means the gold label does not say."""
     if value is None:
-        return None
-    aliases = {'比特币': 'BTC', '大饼': 'BTC', '以太坊': 'ETH', '以太': 'ETH'}
-    return aliases.get(value, value.upper().removeprefix('#').removesuffix('USDT'))
+        return frozenset(), False
+    if predicted:
+        kind = value['kind']
+        if kind == 'ladder':
+            anchors = {('market' if p['kind'] == 'market_ref' else 'limit', atom(p.get('price')))
+                       for p in value['levels'] if not (p['kind'] == 'market_ref' and p.get('price') is None)}
+            return frozenset(anchors), any(p['kind'] == 'market_ref' for p in value['levels'])
+        if kind == 'zone':
+            lo, hi = atom(value.get('lo')), atom(value.get('hi'))
+            if lo is not None and hi is not None:
+                return frozenset({('zone', *sorted([lo, hi], key=Decimal))}), False
+            return frozenset({('limit', lo if lo is not None else hi)}), False
+        price = atom(value.get('price'))
+        if kind == 'market_ref':
+            return frozenset({('market', price)} if price is not None else set()), True
+        return frozenset({('limit', price)}), False
+    if set(value) - ALLOWED_GOLD_ENTRY:
+        raise ValueError('entry_semantics_require_review')
+    if 'levels' in value:
+        return frozenset(('limit', decimal(v)) for v in value['levels']), None
+    lo, hi = value.get('lo'), value.get('hi')
+    kind = value.get('kind', 'limit')
+    if kind == 'market_ref':
+        if lo is None and hi is None:
+            return frozenset(), True
+        if lo != hi:
+            raise ValueError('market_range_requires_review')
+        return frozenset({('market', decimal(lo))}), True
+    if lo is None and hi is None:
+        return frozenset(), None
+    if lo is None or hi is None:
+        return frozenset({('limit', decimal(lo if lo is not None else hi))}), None
+    if kind == 'zone' or lo != hi:
+        return frozenset({('zone', *sorted([decimal(lo), decimal(hi)], key=Decimal))}), None
+    return frozenset({('limit', decimal(lo))}), None
 
 
 def signature(field, value, *, predicted=False):
@@ -70,30 +112,6 @@ def signature(field, value, *, predicted=False):
     if field in ('symbol', 'side'):
         vals = value if isinstance(value, list) else [value]
         return sorted({str(symbol(v) if field == 'symbol' else v) for v in vals})
-    if field == 'entry':
-        if value is None:
-            return []
-        if predicted:
-            kind = value['kind']
-            if kind == 'ladder':
-                return sorted({str((p['kind'], atom(p.get('price')))) for p in value['levels']})
-            if kind == 'zone':
-                return [str(('zone', *sorted([atom(value.get('lo')), atom(value.get('hi'))], key=str)))]
-            return [str((kind, atom(value.get('price'))))]
-        if set(value) - {'lo', 'hi', 'kind', 'levels', 'raw', 'unit_unspecified', 'raw_ambiguous'}:
-            raise ValueError('entry_semantics_require_review')
-        if 'levels' in value:
-            return sorted({str(('limit', decimal(v))) for v in value['levels']})
-        lo, hi = value.get('lo'), value.get('hi')
-        kind = value.get('kind', 'limit')
-        if lo is None and hi is None:
-            # "现价进场" without a number is still a market-referenced entry, not an absent one.
-            return [str(('market_ref', None))] if kind == 'market_ref' else []
-        if lo != hi:
-            if kind == 'market_ref':
-                raise ValueError('market_range_requires_review')
-            return [str(('zone', *sorted([decimal(v) if v is not None else None for v in (lo, hi)], key=str)))]
-        return [str((kind, decimal(lo)))]
     if field == 'stop':
         if value is None:
             return None
@@ -119,7 +137,15 @@ def signature(field, value, *, predicted=False):
     raise ValueError('unknown_field')
 
 
+def _leg_for(gold, name, identity):
+    leg = gold.get('entry_market_leg')
+    if isinstance(leg, dict) and 'by_symbol' in leg and identity == 'symbol_raw':
+        return {symbol(k): v for k, v in leg['by_symbol'].items()}.get(symbol(name))
+    return leg
+
+
 def compare_field(field, gold, actions):
+    """(correct, pending). Entry also reports whether the market leg was actually evaluated via gold['_leg_seen']."""
     if not actions or all(a['op'] == 'undecidable' for a in actions):
         return False, None
     expected = gold.get(field)
@@ -137,13 +163,23 @@ def compare_field(field, gold, actions):
                 outcomes = []
                 for name, value in named.items():
                     members = [a for a in actions if (symbol(a.get(identity)) == symbol(name) if identity == 'symbol_raw' else a.get(identity) == name)]
-                    outcomes.append(compare_field(field, {field: value}, members))
+                    sub = {field: value, 'entry_market_leg': _leg_for(gold, name, identity)}
+                    outcomes.append(compare_field(field, sub, members))
+                    gold.setdefault('_leg_seen', []).extend(sub.get('_leg_seen', []))
                 pending = next((p for _, p in outcomes if p), None)
                 return all(ok for ok, _ in outcomes), pending
     try:
+        if field == 'entry':
+            anchors, leg = entry_shape(expected)
+            explicit = gold.get('entry_market_leg')
+            if isinstance(explicit, bool):
+                leg = explicit
+            got = [entry_shape(a.get(key), predicted=True) for a in actions]
+            gold.setdefault('_leg_seen', []).append(leg is not None)
+            # A shared gold value applies to every action unless explicitly grouped.
+            return all(g[0] == anchors and (leg is None or g[1] == leg) for g in got), None
         want = signature(field, expected)
         got = [signature(field, a.get(key), predicted=True) for a in actions]
-        # A shared gold value applies to every action unless explicitly grouped.
         return all(v == want for v in got), None
     except (ValueError, TypeError, KeyError):
         return False, 'semantic_comparison_requires_independent_review'
@@ -179,6 +215,7 @@ def summarize(rows):
     gates = [m['passes'] for m in metrics.values() if m['passes'] is not None]
     return dict(metrics=metrics, field_evidence_failed=sum(r['field_evidence_failed'] for r in rows),
                 pending_fields=sum(bool(v['pending']) for r in rows for v in r['fields'].values()),
+                entry_market_leg_unevaluated=sum(not r['fields']['entry'].get('market_leg_evaluated', True) for r in opens if 'entry' in r['fields']),
                 passes=all(gates) and all(metrics[k]['passes'] is True for k in ('open_false_discovery', 'open_miss', *FIELDS, 'evidence_discarded')))
 
 
@@ -234,7 +271,8 @@ def check(truth_path, prompts_path, responses_path, *, adjudications=None):
                 if mask.get('evaluable') is False or field in gold.get('image_affected_fields', []):
                     continue
                 # Gold fields describe the new trade; a sibling analysis/close action must not dilute them.
-                correct, pending = compare_field(field, gold, now_opens or actions)
+                probe = dict(gold)
+                correct, pending = compare_field(field, probe, now_opens or actions)
                 override = overrides.get(identity, {}).get(field)
                 if override is not None:
                     if type(override.get('correct')) is not bool or not override.get('reason'):
@@ -244,6 +282,9 @@ def check(truth_path, prompts_path, responses_path, *, adjudications=None):
                         raise ValueError('adjudication_cannot_approve_discard_or_rejected_evidence')
                     correct, pending = override['correct'], None
                 scored[field] = dict(correct=correct, pending=pending)
+                if field == 'entry':
+                    # Uncomparable is not equal: say when gold never stated whether a CMP leg exists.
+                    scored[field]['market_leg_evaluated'] = all(probe.get('_leg_seen') or [False])
         rows.append(dict(item_id=identity, channel=gold['channel'], truth_open=truth_open, predicted_open=predicted_open,
                          truth_op=gold['truth_op'], op_evaluable=op_eval, op_matches=op == gold['truth_op'],
                          raw_op_matches=raw_op == gold['truth_op'], fields=scored,

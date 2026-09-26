@@ -245,3 +245,36 @@ def test_zero_percent_is_a_proved_value_not_missing():
     assert atom['value'] == '0'
     with pytest.raises(ValueError):
         v2.exact_number(number(0), '仿写价0')
+
+
+def test_cmp_legs_and_raw_symbols_reach_an_executable_plan(tmp_path):
+    text = '仿写 $BTC/USDT CMP 和挂单 95 做多；止损 90。'
+    entry = dict(kind='ladder', price=None, lo=None, hi=None, levels=[
+        dict(kind='market_ref', price=None, fraction=None), dict(kind='limit', price=number(95), fraction=None)])
+    _, _, _, cp, _ = v2_lake(tmp_path, [action(symbol_raw='$BTC/USDT', entry=entry, tps=[])], text)
+    row = cp.filter(pl.col('extractor_name') == 'llm').row(0, named=True)
+    assert row['symbol_raw'] == 'BTC' and row['instrument_id'] is not None
+    plan = lifecycle._order_plan(row, row['stop'], row['tps'], None)
+    # The CMP leg is priced from the as-of mark at t_dec in replay; the limit leg keeps its quoted price.
+    assert [(e['kind'], e['price_lo']) for e in plan['entries']] == [('market_ref', None), ('limit', Decimal(95))]
+    # An unpriced limit leg is still not guessable.
+    entry['levels'][1]['price'] = None
+    _, _, _, gap, _ = v2_lake(tmp_path / 'gap', [action(entry=entry, tps=[])], text)
+    gap_row = gap.filter(pl.col('extractor_name') == 'llm').row(0, named=True)
+    assert lifecycle._order_plan(gap_row, gap_row['stop'], gap_row['tps'], None) is None
+
+
+def test_numberless_cmp_open_is_a_market_entry_not_a_missing_one(tmp_path):
+    text = '仿写 #BTC 现价做多；止损 90。'
+    _, _, _, cp, _ = v2_lake(tmp_path, [action(symbol_raw='#BTC', tps=[],
+        entry=dict(kind='market_ref', price=None, lo=None, hi=None, levels=[]))], text)
+    row = cp.filter(pl.col('extractor_name') == 'llm').row(0, named=True)
+    assert row['entry_mode'] == 'market_ref' and lifecycle.dec_plan_possible(row)
+    plan = lifecycle._order_plan(row, row['stop'], row['tps'], None)
+    assert [(e['kind'], e['price_lo']) for e in plan['entries']] == [('market_ref', None)]
+
+
+@pytest.mark.parametrize('raw,code', [('$ENA', 'ENA'), ('#UNI/USDT', 'UNI'), ('INJ/USDT', 'INJ'), ('near', 'NEAR'),
+                                      ('大饼', 'BTC'), ('BTCUSDT.P', 'BTC'), ('ＥＴＨ', 'ETH'), ('原油', 'CL'), (None, None)])
+def test_canonical_symbol(raw, code):
+    assert extract.canonical_symbol(raw) == code

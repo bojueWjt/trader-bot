@@ -225,14 +225,26 @@ def _tokens(log):
 
 
 TRANSPORT_FAILED = "transport_failed_after_retries"
+_sleep = time.sleep  # test hook: subprocess internals also call time.sleep
 
 
 def _transport_failed(record):
     return record.get("abstain", {}).get("note") == TRANSPORT_FAILED
 
 
+def wire_message(row):
+    """What the model sees for one message. v2 rows share one system prompt (sent once as instructions),
+    and their user JSON already carries text/channel/date/previous_text, so the per-row copies are dropped.
+    The record key still hashes the full system+user pair, so nothing about identity changes."""
+    if row.get("schema_name") != cx_v2.SCHEMA_NAME or row.get("system") != BATCH_RULES:
+        return row
+    user = json.loads(row["user"])
+    user.pop("schema_version", None)
+    return {"key": row["key"], "schema_name": row["schema_name"], **user}
+
+
 def _run_batch(batch, directory, executable, batch_id, retries, timeout, backoff=0):
-    prompt = dumps({"instructions": BATCH_RULES, "messages": batch})
+    prompt = dumps({"instructions": BATCH_RULES, "messages": [wire_message(r) for r in batch]})
     schema_path = directory / "schema.json"
     attempts = []
     for attempt in range(retries + 1):
@@ -274,7 +286,7 @@ def _run_batch(batch, directory, executable, batch_id, retries, timeout, backoff
             return results, attempts
         if backoff and attempt < retries:
             # "model at capacity" is transient; immediate retries just burn the budget.
-            time.sleep(min(600, backoff * 2 ** attempt))
+            _sleep(min(600, backoff * 2 ** attempt))
     return [{"key": p["key"], **abstain(TRANSPORT_FAILED)} for p in batch], attempts
 
 
@@ -282,7 +294,7 @@ def length_batches(rows, batch_size=20, max_chars=12000):
     """Bound serialized message content, never split/truncate a single message."""
     batch, size = [], 0
     for row in rows:
-        length = len(dumps(row))
+        length = len(dumps(wire_message(row)))
         if batch and (len(batch) >= batch_size or size + length > max_chars):
             yield batch
             batch, size = [], 0
