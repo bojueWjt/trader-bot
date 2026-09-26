@@ -6309,6 +6309,17 @@ def _watcher_account_is_enabled(row, account_columns: set[str]) -> bool:
     return not status or status in {"1", "active", "enabled", "true"}
 
 
+def _http_from_snapshot(exc: BaseException) -> HTTPException:
+    if isinstance(exc, watcher_config_snapshot.SnapshotRouteConflict):
+        return HTTPException(
+            status_code=409,
+            detail="watcher channel route conflicts with requested account_id",
+        )
+    if isinstance(exc, watcher_config_snapshot.SnapshotDataRejected):
+        return HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return HTTPException(status_code=503, detail="snapshot_unavailable")
+
+
 def _load_channel_risk_route(
     channel_id: str,
     account_id: str | None = None,
@@ -6316,20 +6327,13 @@ def _load_channel_risk_route(
     if watcher_config_snapshot.enabled():
         try:
             lease = watcher_config_snapshot.get_process_cache().require_fresh()
-            target_id = lease.snapshot.channels.get(str(channel_id or "").strip())
-            if target_id is None:
-                raise watcher_config_snapshot.SnapshotUnavailable()
-            execution_id = lease.snapshot.accounts[target_id].execution_account_id
-            requested_id = execution_id if account_id is None else account_id
-            addon = lease.channel_addon(str(channel_id), requested_id)
-            return {"execution_account_id": execution_id, "risk_capital_addon": addon}
-        except watcher_config_snapshot.SnapshotRouteConflict as exc:
-            raise HTTPException(
-                status_code=409,
-                detail="watcher channel route conflicts with requested account_id",
-            ) from exc
-        except watcher_config_snapshot.SnapshotUnavailable as exc:
-            raise HTTPException(status_code=503, detail="snapshot_unavailable") from exc
+            return lease.channel_route(channel_id, account_id)
+        except (
+            watcher_config_snapshot.SnapshotRouteConflict,
+            watcher_config_snapshot.SnapshotDataRejected,
+            watcher_config_snapshot.SnapshotUnavailable,
+        ) as exc:
+            raise _http_from_snapshot(exc) from exc
     import sqlite3
 
     normalized_channel_id = str(channel_id or "").strip()
@@ -6506,8 +6510,11 @@ def _account_risk_capital_addon(account_id: str) -> float:
         try:
             lease = watcher_config_snapshot.get_process_cache().require_fresh()
             return lease.account_addon(account_id)
-        except watcher_config_snapshot.SnapshotUnavailable as exc:
-            raise HTTPException(status_code=503, detail="snapshot_unavailable") from exc
+        except (
+            watcher_config_snapshot.SnapshotDataRejected,
+            watcher_config_snapshot.SnapshotUnavailable,
+        ) as exc:
+            raise _http_from_snapshot(exc) from exc
     import sqlite3
 
     try:
@@ -8523,12 +8530,15 @@ def _symbol_risk_ratio(
         try:
             snapshot_lease = watcher_config_snapshot.get_process_cache().require_fresh()
         except watcher_config_snapshot.SnapshotUnavailable as exc:
-            raise HTTPException(status_code=503, detail="snapshot_unavailable") from exc
+            raise _http_from_snapshot(exc) from exc
     if snapshot_lease is not None:
         try:
             return snapshot_lease.risk_ratio(symbol, account_id)
-        except watcher_config_snapshot.SnapshotUnavailable as exc:
-            raise HTTPException(status_code=503, detail="snapshot_unavailable") from exc
+        except (
+            watcher_config_snapshot.SnapshotDataRejected,
+            watcher_config_snapshot.SnapshotUnavailable,
+        ) as exc:
+            raise _http_from_snapshot(exc) from exc
     import sqlite3
 
     try:
@@ -9231,13 +9241,12 @@ def operator_order(
                     )
                 else:
                     open_risk_capital_addon = open_snapshot_lease.account_addon(account_id)
-            except watcher_config_snapshot.SnapshotRouteConflict as exc:
-                raise HTTPException(
-                    status_code=409,
-                    detail="watcher channel route conflicts with requested account_id",
-                ) from exc
-            except watcher_config_snapshot.SnapshotUnavailable as exc:
-                raise HTTPException(status_code=503, detail="snapshot_unavailable") from exc
+            except (
+                watcher_config_snapshot.SnapshotRouteConflict,
+                watcher_config_snapshot.SnapshotDataRejected,
+                watcher_config_snapshot.SnapshotUnavailable,
+            ) as exc:
+                raise _http_from_snapshot(exc) from exc
         elif open_raw_channel not in ("hermes-operator", "operator"):
             open_risk_capital_addon = (
                 _channel_risk_capital_addon(
