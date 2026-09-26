@@ -10577,9 +10577,11 @@ def role_database_health():
 
 from v1_mirror import router as v1_mirror_router  # noqa: E402
 from operator_queries import router as operator_queries_router  # noqa: E402
+import watcher_gateway  # noqa: E402
 
 app.router.routes.extend(v1_mirror_router.routes)
 app.router.routes.extend(operator_queries_router.routes)
+watcher_gateway.register_routes(app)
 
 _install_retryable_db_error_handler(app)
 all_role_app = app
@@ -10590,6 +10592,8 @@ def create_app(role: AppRole | str | None = None) -> FastAPI:
     role_app = build_role_app(all_role_app, resolved)
     if role_app is not all_role_app:
         _install_retryable_db_error_handler(role_app)
+    if resolved in (AppRole.ALL, AppRole.OPERATOR_QUERY):
+        watcher_gateway.install_middleware(role_app)
     if resolved is not AppRole.ALL:
         role_app.router.on_startup.append(
             lambda: _verify_role_database_on_startup(role_app, resolved)
