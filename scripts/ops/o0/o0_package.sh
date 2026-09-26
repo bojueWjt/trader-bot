@@ -12,7 +12,12 @@
 #   G7 W-0 integration (wac-015) merged: hand-written watcher-routes.js gone               (wac-007 🟡-2)
 #   G8 control-plane change set equals the reviewed file list (no silent extras)
 #   G9 (--run-tests) P2 assertion tests + watcher suite                                   (wac-016-r2 §7-1)
-#   G10 o0 scripts contain no RESUME / caddy reload
+#   G10 the candidate's o0 tools and release runbooks contain no forbidden production verb
+#       (RESUME, caddy reload/load, /v1/commands, node-control/event-ingest restart, compose down/restart)
+#   G11 the candidate commit carries scripts/ops/o0 (the bundle's tools come from the CANDIDATE,
+#       never from the packaging worktree) plus the offline image builder
+#   G12 the offline builder accepts the bundle's watcher runtime manifest (exact whitelist set,
+#       hashes, sizes) - the same validation it runs on jp-24 before building
 #
 # Usage:
 #   o0_package.sh --candidate <commit> [--baseline 67b401a] --out <new dir> [--run-tests] [--report-only] [--plan]
@@ -66,7 +71,7 @@ if [ "$O0_MODE" = "plan" ]; then
   o0_step "export candidate tree" git -C "$REPO" archive --format=tar "$CANDIDATE"
   o0_step "G2 generator check" python3 scripts/contracts/check_watcher_gateway_routes.py
   o0_step "G4 closure" "$O0_PY" "$O0_TOOL" closure --watcher-root bridge/services/telegram-watcher --builder scripts/build_immutable_watcher_image.py
-  o0_note "G1/G3/G5-G8/G10 are file checks; G9 runs pytest + npm test when --run-tests"
+  o0_note "G1/G3/G5-G8/G10-G12 are file checks; G9 runs pytest + npm test when --run-tests"
   exit 0
 fi
 
@@ -152,8 +157,10 @@ if [ "${#CHANGED[@]}" -gt 0 ] && [ "${#EXTRA[@]}" -eq 0 ]; then gate_pass "G8 co
 
 # G9
 if [ "$RUN_TESTS" = "1" ]; then
+  PYTESTS=(tests/control-plane/test_caddy_watcher_gateway_paths.py tests/control-plane/api/test_watcher_gateway.py)
+  [ -f "$OUT/src/tests/deployment/test_watcher_package_contract.py" ] && PYTESTS+=(tests/deployment/test_watcher_package_contract.py)
   if (cd "$OUT/src" && LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 PYTHONUTF8=1 "$MAIN_CHECKOUT/.venv-arch/bin/python" -m pytest -q -p no:cacheprovider \
-        tests/control-plane/test_caddy_watcher_gateway_paths.py tests/control-plane/api/test_watcher_gateway.py) >"$OUT/logs/g9-pytest.log" 2>&1; then
+        "${PYTESTS[@]}") >"$OUT/logs/g9-pytest.log" 2>&1; then
     gate_pass "G9 pytest $(tail -n 1 "$OUT/logs/g9-pytest.log")"
   else
     gate_fail "G9 pytest (see $OUT/logs/g9-pytest.log)"
@@ -171,8 +178,25 @@ if [ "$RUN_TESTS" = "1" ]; then
   rm -f "$W/node_modules"
 fi
 
+# G11 (before G10: G10 scans the candidate's own tools)
+CT="$OUT/src/scripts/ops/o0"
+TOOL_FILES=()
+if [ -d "$CT" ] && [ -f "$CT/o0_common.sh" ] && [ -f "$OUT/src/scripts/build_immutable_watcher_image.py" ] && [ -f "$OUT/src/scripts/release_manifest.py" ]; then
+  for f in "$CT"/o0_*.sh "$CT"/o0_*.py "$OUT/src/scripts/sync_operator_risk_db.py" "$OUT/src/scripts/build_immutable_watcher_image.py" "$OUT/src/scripts/release_manifest.py"; do TOOL_FILES+=("$f"); done
+  gate_pass "G11 candidate carries scripts/ops/o0 (${#TOOL_FILES[@]} tool files) and the offline image builder"
+else
+  gate_fail "G11 candidate $CAND_SHA lacks scripts/ops/o0 or the image builder: the bundle's tools must come from the candidate"
+fi
+
 # G10
-if o0_forbid_patterns "$O0_SCRIPT_DIR"/o0_*.sh; then gate_pass "G10 o0 scripts free of RESUME and reload verbs"; fi
+G10_FILES=()
+for f in "${TOOL_FILES[@]}"; do case "$f" in */o0_*.sh|*/o0_*.py) G10_FILES+=("$f") ;; esac; done
+for f in "$OUT/src/docs/agent-team/release"/o0-*.md; do [ -f "$f" ] && G10_FILES+=("$f"); done
+if [ "${#G10_FILES[@]}" -gt 0 ] && (o0_forbid_patterns "${G10_FILES[@]}") >"$OUT/logs/g10.log" 2>&1; then
+  gate_pass "G10 ${#G10_FILES[@]} candidate tool/runbook files free of forbidden production verbs"
+else
+  gate_fail "G10 forbidden production verb or nothing to scan (see $OUT/logs/g10.log)"
+fi
 
 # ---- bundle + manifests
 B="$OUT/bundle"
@@ -203,18 +227,50 @@ printf 'docker-compose.yml\n' > "$OUT/manifests/compose.paths"
 "$O0_PY" "$O0_TOOL" manifest-build --root "$B/compose" --paths-file "$OUT/manifests/compose.paths" --out "$OUT/manifests/compose.candidate.sha256"
 "$O0_PY" "$O0_TOOL" manifest-build --root "$OUT/base/bridge" --paths-file "$OUT/manifests/compose.paths" --out "$OUT/manifests/compose.baseline.sha256"
 put "$OUT/src/contracts/generated/caddy-watcher-gateway-paths.txt" "$B/caddy/caddy-watcher-gateway-paths.txt"
-"$O0_PY" "$O0_SCRIPT_DIR/o0_caddy_watcher_routes.py" render --paths "$B/caddy/caddy-watcher-gateway-paths.txt" > "$B/caddy/watcher-gateway.caddy"
-for f in "$O0_SCRIPT_DIR"/o0_*.sh "$O0_SCRIPT_DIR"/o0_*.py "$OUT/src/scripts/sync_operator_risk_db.py"; do put "$f" "$B/tools/$(basename "$f")" 0755; done
-cp "$OUT"/manifests/*.sha256 "$B/"
-python3 - "$OUT" "$CAND_SHA" "$BASE_SHA" "${#FAILED_GATES[@]}" > "$B/RELEASE.json" <<'PY'
-import json, sys
+for f in "${TOOL_FILES[@]}"; do put "$f" "$B/tools/$(basename "$f")" 0755; done
+if [ -f "$B/tools/o0_caddy_watcher_routes.py" ]; then
+  "$O0_PY" "$B/tools/o0_caddy_watcher_routes.py" render --paths "$B/caddy/caddy-watcher-gateway-paths.txt" > "$B/caddy/watcher-gateway.caddy"
+fi
+# G12: runtime manifest for scripts/build_immutable_watcher_image.py (payload = bundle/watcher/<rel>)
+if python3 - "$OUT/src/scripts" "$B" "$CAND_SHA" >"$OUT/logs/g12.log" 2>&1 <<'PY'
+import hashlib, importlib.util, json, sys
 from pathlib import Path
-out, cand, base, failed = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+scripts, bundle, cand = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+sys.path.insert(0, str(scripts))
+spec = importlib.util.spec_from_file_location("builder", scripts / "build_immutable_watcher_image.py")
+builder = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(builder)
+files = []
+for _source, release_path, target_path in builder.WATCHER_RELEASE_FILES:
+    path = bundle / release_path
+    if not path.is_file():
+        raise SystemExit(f"G12 payload missing: {release_path}")
+    files.append({"release_path": release_path, "target_path": target_path,
+                  "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "size": path.stat().st_size})
+manifest = {"schema_version": builder.WATCHER_RUNTIME_MANIFEST_SCHEMA_VERSION, "files": files,
+            "payload_subject_sha256": builder._payload_subject_sha256(files)}
+mpath = bundle / builder.WATCHER_RUNTIME_MANIFEST_NAME
+mpath.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+source = {"schema": "o0-release-source/v1", "candidate": cand,
+          "watcher_runtime": {"manifest": mpath.name, "manifest_sha256": hashlib.sha256(mpath.read_bytes()).hexdigest()}}
+(bundle / "release-source-manifest.json").write_text(json.dumps(source, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+builder._require_release_source_contract(mpath.resolve())
+builder.validate_watcher_runtime_manifest(mpath)
+print(f"RUNTIME_MANIFEST_OK files={len(files)} payload_subject_sha256={manifest['payload_subject_sha256'][:16]}")
+PY
+then gate_pass "G12 $(tail -n 1 "$OUT/logs/g12.log")"; else gate_fail "G12 offline builder rejects the runtime manifest: $(tail -n 1 "$OUT/logs/g12.log")"; fi
+cp "$OUT"/manifests/*.sha256 "$B/"
+python3 - "$OUT" "$CAND_SHA" "$BASE_SHA" "${#FAILED_GATES[@]}" "$B/tools" > "$B/RELEASE.json" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+out, cand, base, failed, tools = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), Path(sys.argv[5])
 g3 = Path(out, "logs/g3.log").read_text().strip().splitlines()
 meta = dict(kv.split("=", 1) for kv in g3[-1].split()[1:]) if g3 and g3[-1].startswith("META_OK") else {}
+tool_sha = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(tools.glob("*")) if p.is_file()}
 print(json.dumps({"schema": "o0-release/v1", "candidate": cand, "baseline": base,
                   "yaml_sha256": meta.get("yaml_sha256"), "phase_max": meta.get("phase_max"),
                   "payload_sha256": meta.get("payload_sha256"), "failed_gates": failed,
+                  "tools_from": "candidate:scripts/ops/o0", "tools_sha256": tool_sha,
                   "deploy_candidate": failed == 0}, indent=1, sort_keys=True))
 PY
 ( cd "$B" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 shasum -a 256 > SHA256SUMS )

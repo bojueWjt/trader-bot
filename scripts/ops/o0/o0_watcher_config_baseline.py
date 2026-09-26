@@ -102,9 +102,24 @@ def is_number(value: object) -> bool:
 
 
 def open_copy(path: Path) -> sqlite3.Connection:
+    """Open a consistent COPY read-only.
+
+    Never ``immutable=1``: that flag makes SQLite ignore the ``-wal`` file, so a
+    database whose last writer did not checkpoint (e.g. a container killed with
+    SIGKILL) would be read as it was BEFORE those writes (review wac-032 🔴-4).
+    A non-empty ``-wal`` next to the file means it is not a finished copy: refuse
+    and ask for ``o0_tool.py sqlite-backup`` (the backup API reads the WAL frames
+    and the copy is switched to a rollback journal).
+    """
     if not path.is_file():
         raise BaselineError(f"not a file: {path}")
-    uri = "file:" + str(path.resolve()) + "?mode=ro&immutable=1"
+    wal = Path(str(path) + "-wal")
+    if wal.exists() and wal.stat().st_size > 0:
+        raise BaselineError(
+            f"wal_not_checkpointed: {wal.name} holds {wal.stat().st_size} bytes of un-checkpointed writes; "
+            "make a copy first (o0_tool.py sqlite-backup --source <db> --dest <copy>) and analyse the copy"
+        )
+    uri = "file:" + str(path.resolve()) + "?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     return conn
@@ -325,7 +340,75 @@ def cmd_baseline(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_selftest(_args: argparse.Namespace) -> int:
+def _wal_regression(base: Path, repro_db: Path | None) -> str:
+    """Review wac-032 🔴-4: writes left in an un-checkpointed WAL must be seen or refused."""
+    import subprocess
+    db = base / "wal.db"
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript(
+        """
+        CREATE TABLE account_configs (account_id TEXT PRIMARY KEY, default_risk_ratio REAL, account_type TEXT NOT NULL,
+          parent_account_id TEXT NOT NULL DEFAULT '', execution_account_id TEXT NOT NULL, risk_capital_addon REAL NOT NULL DEFAULT 0,
+          is_enabled INTEGER NOT NULL DEFAULT 1);
+        CREATE TABLE channel_routing (channel_id TEXT PRIMARY KEY, target_account_id TEXT NOT NULL);
+        CREATE TABLE symbol_risk_configs (symbol TEXT PRIMARY KEY, risk_ratio REAL NOT NULL);
+        INSERT INTO account_configs VALUES ('main-1', 0.01, 'main', '', 'account-a', 0, 1);
+        """
+    )
+    conn.commit()
+    conn.close()
+    # a "migration" that dies without checkpointing, like `docker rm -f` on the dry-run container
+    code = (
+        "import os,sqlite3,sys\n"
+        "c=sqlite3.connect(sys.argv[1]); c.execute('PRAGMA journal_mode=WAL'); c.execute('PRAGMA wal_autocheckpoint=0')\n"
+        "c.execute('CREATE TABLE config_revision (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL)')\n"
+        "c.execute('INSERT INTO config_revision VALUES (1, 0)'); c.commit(); os._exit(0)\n"
+    )
+    subprocess.run([sys.executable, "-c", code, str(db)], check=True)
+    wal = Path(str(db) + "-wal")
+    assert wal.exists() and wal.stat().st_size > 0, "fixture did not leave a WAL"
+    immutable = sqlite3.connect("file:" + str(db) + "?mode=ro&immutable=1", uri=True)
+    hidden = [r[0] for r in immutable.execute("SELECT name FROM sqlite_master WHERE name='config_revision'")]
+    immutable.close()
+    assert hidden == [], "fixture no longer reproduces the immutable=1 blind spot"
+    try:
+        open_copy(db)
+    except BaselineError as exc:
+        assert "wal_not_checkpointed" in str(exc)
+    else:
+        raise AssertionError("open_copy accepted a database with an un-checkpointed WAL")
+    tool = Path(__file__).resolve().parent / "o0_tool.py"
+    copy = base / "wal.copy.db"
+    subprocess.run([sys.executable, str(tool), "sqlite-backup", "--source", str(db), "--dest", str(copy)],
+                   check=True, stdout=subprocess.DEVNULL)
+    result = analyse(open_copy(copy))
+    assert result["revision"] == 0, ("the copy must carry the migration's config_revision", result["revision"])
+    note = "wal_case=ok"
+    if repro_db is not None:
+        import shutil
+        local = base / "repro.db"
+        for suffix in ("", "-wal", "-shm"):  # work on a private copy: the repro stays untouched
+            if Path(str(repro_db) + suffix).exists():
+                shutil.copyfile(str(repro_db) + suffix, str(local) + suffix)
+        repro_db = local
+        try:
+            open_copy(repro_db)
+        except BaselineError as exc:
+            assert "wal_not_checkpointed" in str(exc)
+            note += " repro_refused=ok"
+        else:
+            raise AssertionError(f"review repro {repro_db} was not refused")
+        repro_copy = base / "repro.copy.db"
+        subprocess.run([sys.executable, str(tool), "sqlite-backup", "--source", str(repro_db), "--dest", str(repro_copy)],
+                       check=True, stdout=subprocess.DEVNULL)
+        names = [r[0] for r in open_copy(repro_copy).execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+        assert "config_revision" in names, names
+        note += " repro_copy_sees_config_revision=ok"
+    return note
+
+
+def cmd_selftest(args: argparse.Namespace) -> int:
     cases = {0.01: "0.01", 0.1: "0.1", 100.0: "100", 1e-7: "1e-7", 1.5e-7: "1.5e-7", 1e21: "1e+21",
              123456789012345680000.0: "123456789012345680000", 0.000001: "0.000001", 2.5: "2.5", 0: "0", 1e22: "1e+22", 5e-324: "5e-324"}
     for value, expected in cases.items():
@@ -397,10 +480,11 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
                        "account_id_not_gateway_addressable"):
             assert needed in items, (needed, items)
         assert result["content_sha256"] is None
-        print(f"SELFTEST_OK number_cases={len(cases)} good_digest={result and 'checked'} bad_rules={len(rules)} bad_items={len(items)}")
+        wal_note = _wal_regression(base, args.repro_db)
+        print(f"SELFTEST_OK number_cases={len(cases)} good_digest={result and 'checked'} bad_rules={len(rules)} bad_items={len(items)} {wal_note}")
         return 0
     finally:
-        for p in base.iterdir():
+        for p in sorted(base.iterdir()):
             p.unlink()
         base.rmdir()
 
@@ -414,6 +498,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--expect-content-sha256", help="compare with the live snapshot content_sha256")
     p.set_defaults(func=cmd_baseline)
     p = sub.add_parser("selftest")
+    p.add_argument("--repro-db", type=Path, help="optional: review repro DB with an un-checkpointed WAL (scratchpad/walt/w.db); it is copied, never modified")
     p.set_defaults(func=cmd_selftest)
     args = parser.parse_args(argv)
     return args.func(args)

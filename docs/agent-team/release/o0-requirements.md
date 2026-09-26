@@ -1,6 +1,7 @@
-# O-0 发行要求可追溯清单（wac-032 草案）
+# O-0 发行要求可追溯清单（wac-032 草案，wac-045 修订）
 
 > 作者：watcher-app-crew-release-steward。状态：**草案，未执行任何生产动作，也没有做只读现场核对**。
+> wac-045 修订：处置审查报告 `reviews/wac-032.md`（5 🔴、18 🟡、4 💭），逐条见 §7；按用户 2026-09-26 裁决（W-0b 方案 A、Caddy `*` 严格单段锚定 `path_regexp`）与 Planner 对 D-05…D-08 的决定更新。事实基线：集成分支 `f7641cb`（含 wac-040 `a881802`、W-0b）。
 > 基线：worktree `auto/wac-032`，分支点 `3d58761`；写作期间集成分支已前进到 `4fb0c11`（多了 C-0 校准 `eaf333d`、C-0 测试加固 `122ef51`、A-0 加固看板），本清单按 `4fb0c11` 的事实标注状态。
 > 依据：计划 `docs/plans/2026-09-11-watcher-to-app-migration.md` v0.6（下称"计划"）；契约 `contracts/backend-api.md` WGW-1.0.1 §9（下称"契约"）；审查报告 `docs/agent-team/reviews/`（wac-022 的审查报告 `wac-022.md` 在 `.worktrees/wac-integ` 中尚未提交，按其现场内容引用）；`AGENTS.md`；`docs/agent-operations.md`（主 checkout 中的未跟踪文件，集成分支没有）；协作协议 `docs/agent-team/watcher-app-crew-workflow-protocol.md`。
 > 配套：`o0-site-checklist.md`（S-xx）、`o0-runbook-deploy.md`（阶段 C/W/O）、`o0-runbook-credentials.md`、`o0-runbook-snapshot-switch.md`、`o0-authorization-list.md`（O0-Axx），脚本草案在 `scripts/ops/o0/`。
@@ -21,18 +22,18 @@
 
 | ID | 前置 | 当前状态（以 git 与看板为证） | 由谁拦截 |
 |---|---|---|---|
-| P-01 | W-0b 配置写路径合入集成分支（`auto/wac-011` @ `59e5a59`） | **blocked**：第 3 次 FAIL，等待用户裁决（审查推荐方案 A，只补测试 env 三个假 token） | 打包门禁 G6 |
+| P-01 | W-0b 配置写路径合入集成分支 | **done**：用户选方案 A，已合入 `f7641cb`（第 4 轮小修 wac-043 仍在进行，合入后复跑门禁） | 打包门禁 G6（现 PASS） |
 | P-02 | W-0 集成补齐 wac-015（E-02 格式、`req.watcherRoute`、W6/W7、改用生成的 `gateway-routes.js`、删手写 `watcher-routes.js`、停用 `db_manager.py` 直写） | **pending**，未开工 | G7 |
 | P-03 | `db_manager.py` 写命令停用（D1），且 jp-24 上没有调用者 | 代码侧属 P-02；现场由 S-15 核对 | G7 + S-15 |
-| P-04 | compose 把六个 `WATCHER_*` 交给 watcher（建议 `env_file: /srv/trader-secrets/watcher-gateway.env`），健康检查不插值 | **未派任务**。集成分支 compose 只在健康检查脚本里读 `WATCHER_BROWSER_PROXY_TOKEN`，environment 未传任何凭据（wac-009 🟡-5） | G5 |
-| P-05 | watcher 镜像白名单 `WATCHER_RUNTIME_RELATIVE_PATHS` 补齐运行时闭包 | **未派任务**。本地实测 `CLOSURE_FAILED closure=12 whitelist=28 missing=4`：`lib/auth.js`、`lib/media.js`、`lib/status.js`、`lib/generated/watcher-routes.js`；W-0b 合入后还要加 `lib/config-store.js`，wac-015 后换成 `lib/generated/gateway-routes.js` | G4 |
+| P-04 | compose 把六个 `WATCHER_*` 交给 watcher（`env_file: /srv/trader-secrets/watcher-gateway.env`），健康检查不插值 | **done**：wac-040 已合入 `a881802` | G5（现 PASS） |
+| P-05 | watcher 镜像白名单 `WATCHER_RUNTIME_RELATIVE_PATHS` 补齐运行时闭包 | **部分**：wac-040 补了 `lib/auth.js`、`lib/media.js`、`lib/status.js`、两个生成文件；W-0b 在其后合入，`lib/config-store.js` 仍不在白名单（本地 `CLOSURE_NOT_WHITELISTED lib/config-store.js`）。需 Planner 派发（可并入 wac-015） | G4（现 FAIL）、G12 |
 | P-06 | （建议）watcher 提供只做数据库初始化后退出的入口，供副本演练用 | 未提。没有它时，阶段 W 用完整 `server.js` 在 `--network none` 容器里跑，看到 `Web UI listening` 即停 | 阶段 W build |
-| P-07 | 数据库初始化失败退出前推 Telegram 告警（wac-011-r3 🟡-2） | 未派。二选一：wac-015 补代码，或 O-0 巡检按容器重启次数告警（待 Planner 定） | D-07 |
+| P-07 | 数据库初始化失败退出前推 Telegram 告警（wac-011-r3 🟡-2） | **Planner 已定**：wac-015 复用 `sendWatcherAlert`；O-0 保留 90 秒重启计数兜底 | D-07 |
 | P-08 | 若走正式发布流水线 `make_account_stall_release.py`：保留 `host/generated/` 子目录 | 本草案的 O-0 bundle 自带目录结构，不依赖该脚本；若改走流水线，需另派 | 阶段 O manifest |
 | P-09 | C-0 校准（403 锁存、4 MiB、R12、E-14 拒因）与测试加固 | **done**：`eaf333d`（wac-022，审查 wac-023 PASS）、`122ef51`（wac-033，含持久化证据测试） | — |
-| P-10 | C-0 每个 worker 预热成功或锁存时写一条日志，带 `revision`、`content_sha256`、pid（wac-007 💭-2） | **未派**。没有它，"所有 worker 预热成功并记录 revision"无法逐 worker 观测 | 切换 runbook §3 |
+| P-10 | C-0 每个 worker 预热成功或锁存时写一条日志，带 `revision`、`content_sha256`、pid | **wac-041 `c9b1e3f` 审查中**：格式 `snapshot_warmup result=… revision=… content_sha256=<12> pid=… role=operator-query duration_ms=…`；切换门禁用 `o0_tool.py warmup-check` 判定“每个 worker 一行成功” | 切换 runbook §3.2.3 |
 | P-11 | T0-6 三路对照工具与报告（计划 §4.1 第 2 步、§4.3 T0-6） | **未派**（看板 M5：三路对照工具待派） | 切换 runbook §2 |
-| P-12 | WGW-1.0.2 勘误：Caddy 清单中 `*` 的语义为"恰好一个非空段"，规定翻译方式（wac-026 🟡-1 第 5 点） | 未出 | D-03 |
+| P-12 | WGW-1.0.2 勘误：Caddy 清单中 `*` 的语义为“恰好一个非空段”，翻译为锚定、区分大小写的 `path_regexp` | **用户已裁决 2026-09-26**，勘误待出；核对工具已按裁决收紧 | D-03 |
 | P-13 | jp-24 `.venv-cp` 的 Python ≥ 3.11，且可 import `httpx` | 未核（S-12） | 阶段 O preflight |
 | P-14 | jp-24 控制面代码与 `67b401a` 一致（09-22 起有热挂载史，线上 read_api 曾漂移） | 未核（S-13） | 阶段 O preflight |
 | P-15 | jp-24 watcher 源码与 compose 与 `67b401a` 一致 | 未核（S-07） | 阶段 W preflight |
@@ -61,7 +62,7 @@
 | R16 | "所有 operator-query worker 预热成功并记录 revision → 打开新 reader 开关 → 重启对应服务（部署门禁完成后的授权窗口内）" | 计划 §4.1 第 3 步 | P-10 | 切换 runbook §3（含与 C-0 现实现的差异说明） |
 | R17 | "外部路由白名单与浏览器回归通过、生产只读/dry_run 冒烟通过、失败恢复演练通过后，删 env 别名与副本（备份保留 30 天）" | 计划 §4.1 第 4 步 | — | 切换 runbook §4 |
 | R18 | "关闭开关 → 恢复 env → 重启 → 清缓存；回退数据必须是回退时经校验的真库一致快照，不是 09-06 文件" | 计划 §4.1 第 4 步 | P-17 | 切换 runbook §5 |
-| R19 | "记录部署前每节点状态/心跳/审计，部署后保持授权状态（HALTED 保持 HALTED，不把 RESUME 列为部署步骤）；Caddy 变更用 `validate` + `restart`（禁 reload）" | 计划 §4.2 | — | 每阶段 `fleet-before/after` 对比，变化即停；脚本自检 `o0_forbid_patterns` |
+| R19 | “记录部署前每节点状态/心跳/审计，部署后保持授权状态（HALTED 保持 HALTED，不把 RESUME 列为部署步骤）；Caddy 变更用 `validate` + `restart`（禁 reload）” | 计划 §4.2 | — | 舰队守卫：apply 首步重新记录基线（节点集合精确、心跳 < 5 秒），变更后稳定窗 + 多次采样比较状态、release、`/ready` 与心跳新鲜度；0 行、缺节点判无法比较；G10 与脚本自检拒绝禁用动词 |
 | R20 | "分两段暂停 watcher 容器并实测……未实测不得宣称交易不受影响" | 计划 §4.2 | 切换后才有 61s 口径 | Tester 在隔离环境实测；生产实测是可选授权项 O0-A12 |
 | R21 | "按轮换顺序轮换 `gateway` token 期间 app 无报错" | 计划 §4.2 | P-16 | 可选演练 O0-A11 |
 | R22 | "浏览器 basicauth 路径回归不变" | 计划 §4.2 | — | 阶段 C/W 探针 + 用户浏览器核对 |
@@ -110,8 +111,8 @@
 | R55 | 启动迁移只跑一次：回滚到旧版 watcher 再升回来会出现"同 revision 异摘要"，C-0 锁存 `invalid`；写进 O-0 回滚 runbook | wac-011 第 6 点 | — | 阶段 W 回滚说明；切换 runbook 规则"开关开着时先关开关再回滚 watcher" |
 | R56 | 首次迁移拿锁超过 5 秒（例如 `db_manager.py` 正在写）会让 watcher 整体起不来 | wac-011 第 7 点 | P-03 | S-15；apply 前确认无写者；启动失败自动回滚 |
 | R57 | 存量行违反 SQLite CHECK 会让同一行上无关的修改得到 400；基线列出这类行 | wac-011-r2 第 6 点 | — | 基线 `check_constraint_violation`、`account_configs_without_check_constraints` |
-| R58 | 换容器之前在生产库一致快照副本上先跑一次初始化，确认以 0 结束并通过；写明回滚（回退镜像，恢复迁移前备份） | wac-011-r3 🟡-1；看板 M11 | P-06（可选） | 阶段 W build（副本演练）、apply（迁移前在线备份）、rollback、restore-db |
-| R59 | 数据库初始化失败路径只写容器日志，用户收不到告警：wac-015 补告警，或 O-0 巡检按容器重启次数告警 | wac-011-r3 🟡-2；看板 M11 | P-07 | D-07；阶段 W verify 检查 90 秒内重启计数为 0 |
+| R58 | 换容器之前在生产库一致快照副本上先跑一次初始化，确认以 0 结束并通过；写明回滚 | wac-011-r3 🟡-1；看板 M11 | — | 阶段 W build：演练容器正常停止（退出码 0），演练库再经备份 API 拷出新副本后分析（看得到 WAL，🔴-4）；apply、rollback、restore-db |
+| R59 | 数据库初始化失败路径的告警 | wac-011-r3 🟡-2；看板 M11 | P-07 | wac-015 代码内告警；阶段 W apply 在自动回滚窗口内断言 90 秒内重启计数为 0 |
 | R60 | 启动测试防真实会话 `config.json` 造成双活（同类风险用于 O-0 演练） | wac-011-r3 🟡-3 | — | S-07 要求构建上下文无 `config.json`；演练容器 `--network none` 且挂空配置 |
 | R61 | 新开 C-0 校准任务，作为 O-0 数据基线和开关打开的前置 | wac-013 🟡-6 | P-09 done | — |
 | R62 | C-0 `_safe_id` 拒绝首尾空白 id（整份快照 invalid），基线补上这一项 | wac-013 💭-3 | — | 基线 `surrounding_whitespace_id` |
@@ -120,7 +121,7 @@
 | R65 | 门禁除校验脚本外也跑 P2 断言测试，或核对 `phase_max=P2` | wac-016-r2 §7 第 1 条 | — | G2（脚本已强制 P2，wac-026）+ G9 跑两份 P2 断言测试 |
 | R66 | 不把 `{param}` 原样贴进 Caddyfile（未知占位符替换成空串） | wac-026 🟡-1 (a) | — | `render` 用 `[^/]+`；清单含 `{` 即拒绝 |
 | R67 | 每行用 `path`+`method` 具名匹配器；媒体行 HEAD 显式列出 | wac-026 🟡-1 (b) | — | `render`；verify 比对方法集合 |
-| R68 | Caddy `*` 在末尾时是前缀匹配、会跨段：改用锚定 `path_regexp`，或接受前缀并写明"Caddy 只做粗筛，精确边界在网关" | wac-026 🟡-1 (c) | P-12 | 默认锚定；`--accept-prefix` 仅在 Planner 选 D-03 (b) 时使用 |
+| R68 | Caddy `*` 在末尾时是前缀匹配、会跨段 | wac-026 🟡-1 (c) | P-12 | **用户裁决：锚定单段 `path_regexp`**；`--accept-prefix` 已删除；verify 对前缀写法、`(?i)`、`[^/]*`、`.+`、缺 `$`、静态行用 `path` 匹配器都判失败，负样本含多段、空段、尾斜杠、大小写变体 |
 | R69 | `/m` 的 handle 块里不得有兜底 `reverse_proxy`，清单外路径落到 404 或其他既有路由 | wac-026 🟡-1 (d) | — | verify 负样本：尾斜杠、多段、空段、未列方法、未注册路径都不得到达网关 |
 | R70 | 写核对脚本：解析 adapt 后 JSON，抽出 `/m/v1/watcher/` 全部 `(path, method)` 与清单逐行比较，对称差为空且行数 > 0 | wac-026 🟡-1 (e) | — | `o0_caddy_watcher_routes.py verify`，自测 14 种破坏全部抓住 |
 | R71 | 确认生产 Caddy 版本（path cleaning 自 #4407 引入） | wac-026 🟡-1 (f) | — | S-01 |
@@ -134,27 +135,81 @@
 | ID | 要求 | 出处 | 落点 |
 |---|---|---|---|
 | R76 | staging 用 `/srv/trader-staging`，不用 `/tmp`（12G tmpfs） | `AGENTS.md` 已知陷阱；协议铁律 | `o0_require_stage_dir` 只接受 `/srv/trader-staging/o0-*` |
-| R77 | 部署脚本 `set -eo pipefail`；部署前后 sha 校验并与基线比对 | 协议；记忆"部署脚本两条铁律"（`cmd \| tail` 吞退出码） | 所有脚本 `set -Eeo pipefail`；manifest-verify 前后各一次；管道里不用 `grep -q`（SIGPIPE） |
+| R77 | 部署脚本 `set -eo pipefail`；部署前后 sha 校验并与基线比对 | 协议；记忆“部署脚本两条铁律” | 所有脚本 `set -Eeo pipefail`；每个落盘文件（源码、compose、Caddyfile、env、恢复的库）装后都有 sha 校验；管道末尾不用 `grep -q`，计数用 `awk` 或 `grep -c` |
 | R78 | 控制面代码落盘后必须重启对应 systemd 服务才生效 | `AGENTS.md` | 阶段 O 安装后立即只重启 operator-query |
 | R79 | node-control 重启会全舰队 HALT；只改 operator-query 时不要动它 | 协议；记忆 | 阶段 O verify 断言另两个单元 MainPID 与启动时间不变 |
 | R80 | Caddy 只 `validate` 后 `restart`，禁止 reload；validate 要带 `v3.env` 且不能用 shell `source`（bcrypt 的 `$` 会被展开） | 协议；记忆 jp24 caddy 条目 | `o0_tool.py env-exec` 无展开加载；脚本自检拒绝 reload 字样 |
 | R81 | 任何 Caddy restart 可能瞬断节点通道导致全舰队 fail-closed HALT（08-30 发生，08-31 未发生） | 记忆；`INTEGRATION_REPORT.md` §7 | D-02；阶段 C 记录并对比舰队状态，变化即停，不 RESUME |
-| R82 | 门禁全部完成于停机之前；门禁失败即中止并保持原版本 | `AGENTS.md` | 每阶段 preflight 只读；apply 失败自动回滚 |
+| R82 | 门禁全部完成于停机之前；门禁失败即中止并保持原版本 | `AGENTS.md` | 机读门禁文件（`*.gate.json`）绑定候选与输入摘要，apply 第一步核对；watcher 候选镜像在停服务前核对存在与 ID；`tests/auth_gate_test.sh` 证明被拒时没有任何写入 |
 | R83 | 不采信转述的"已完成"，查审计与心跳 | `AGENTS.md`；协议 | 每阶段前后心跳快照 |
 | R84 | 线上 read_api 有热补丁漂移史，部署前务必与基线 sha 核对 | 记忆（09-02、09-10、09-22 热挂载） | 阶段 O preflight `controlplane-context.baseline.sha256`，漂移即中止 |
 | R85 | 三个控制面服务都跑 `read_api:app`，共用代码目录 | 记忆 09-24 | D-04；import 冒烟覆盖三种角色 |
-| R86 | watcher 重启是信号采集空窗；重启后要核对有无漏信号 | `docs/agent-operations.md` §1；记忆 09-04/09-25 | 阶段 W 选低流量窗口；verify 看 Telegram 连接与入库 |
-| R87 | 凭据零接触：不打印、不提交、不写日志 | 协议铁律 3 | 工具只输出变量名；`tests/site_check_leak_test.sh` 用 9 个哨兵值证明现场脚本 0 泄露 |
+| R86 | watcher 重启是信号采集空窗；重启后要核对有无漏信号 | `docs/agent-operations.md` §1；记忆 09-04/09-25 | apply 在自动回滚窗口内断言 180 秒内出现 `[watcher] Connected, listening...`；verify 记录转发行计数；runbook 给出 feeder 计数对照命令 |
+| R87 | 凭据零接触：不打印、不提交、不写日志 | 协议铁律 3 | 工具只输出变量名；现场核对默认拒绝输出，Caddy 完整配置不离开主机；泄露测试 15 个哨兵 0 泄露 |
 
-## 6. 本地已实跑的证据（全部在本机，未连 jp-24）
+## 6. 本地已实跑的证据（wac-045，全部在本机，未连 jp-24）
+
+一键复跑：`O0_WAL_REPRO_DB=<审查 scratchpad/walt/w.db> O0_FLEET_REPRO_DIR=<审查 scratchpad/fleet/evidence> bash scripts/ops/o0/tests/run_all.sh`（两个环境变量可省略，省略时用内嵌的等价夹具）。
 
 | 命令 | 结果 |
 |---|---|
-| `bash -n` 全部 7 个 shell 脚本；`python3 -m py_compile` 全部 4 个 Python 工具 | 全部通过 |
-| `python3 scripts/ops/o0/o0_watcher_credentials.py selftest` | `SELFTEST_OK scenarios=13 values_checked_for_leak=19` |
-| `python3 scripts/ops/o0/o0_caddy_watcher_routes.py selftest` | `SELFTEST_OK good_passes=72 variants_caught=14/14 lines=16 accept_prefix_mode=ok before_deploy_mode=ok` |
-| `python3 scripts/ops/o0/o0_watcher_config_baseline.py selftest` | `SELFTEST_OK number_cases=12 ... bad_rules=5 bad_items=8` |
-| JS 数字格式交叉核对：3008 个浮点数，`String(Number(x))`（node 24）对比 `js_number_string` | `mismatches 0` |
-| 基线工具的 `content_sha256` 对比 W-0b `59e5a59` 的 `makeSnapshot`（同一库 43 行，含 Unicode 与怪异浮点） | 两边都是 `626e2059…1dfb42` |
-| `bash scripts/ops/o0/tests/site_check_leak_test.sh`（桩化 docker/systemctl/caddy/curl 等，9 个哨兵秘密） | `LEAK_TEST_OK sections=19 sentinels=9 leaks=0`（首轮抓到一个真泄露：`sed ... \| sort < file` 的重定向绑到了 sort，已修） |
-| `bash scripts/ops/o0/o0_package.sh --candidate integ/watcher-app-crew --report-only --run-tests`（候选 `4fb0c11`） | G1、G2（`ROUTES_DIFF_EMPTY rows=63 … phase_max=P2`）、G3、G8、G9（pytest 24 passed；watcher tests 77 / fail 0 / skipped 0）、G10 通过；**G4、G5、G6、G7 失败 → `deploy_candidate: false`**，与 P-01/P-02/P-04/P-05 一致 |
+| `bash -n` 全部 11 个 shell 脚本；`python3 -m py_compile` 4 个 Python 工具 | `BASH_N_OK files=11`；`PY_COMPILE_OK` |
+| `python3 scripts/ops/o0/o0_tool.py selftest` | `SELFTEST_OK checks=32 fleet_cases=11 redaction_shapes=3+2 gates=10 warmup=6` |
+| `python3 scripts/ops/o0/o0_watcher_credentials.py selftest` | `SELFTEST_OK scenarios=13 values_checked_for_leak=19 output_lines=79` |
+| `python3 scripts/ops/o0/o0_caddy_watcher_routes.py selftest` | `SELFTEST_OK good_passes=108 variants_caught=20/20 (raw and skeleton) lines=16 single_segment_strict=ok skeleton_verify=ok before_deploy_mode=ok` |
+| `python3 scripts/ops/o0/o0_watcher_config_baseline.py selftest --repro-db <审查 walt/w.db>` | `SELFTEST_OK … wal_case=ok repro_refused=ok repro_copy_sees_config_revision=ok`（审查的复现文件只在私有拷贝上使用，sha 前后不变） |
+| `bash scripts/ops/o0/tests/site_check_leak_test.sh` | `LEAK_TEST_OK sections=19 sentinels=15 leaks=0 skeleton_parity=ok` |
+| `bash scripts/ops/o0/tests/fleet_guard_test.sh`（审查的 fleet-a…d 复现文件） | `FLEET_GUARD_TEST_OK cases=7`：空对空 → 退出 2；`hb_age 1.0 → 412.7` → 退出 3；第 3 次采样才出现的 HALT → 退出 3 |
+| `bash scripts/ops/o0/tests/auth_gate_test.sh` | `AUTH_GATE_TEST_OK checks=17`：绑定矩阵 475 组合 0 误判；runbook 示例 33 条全部通过绑定表；沙箱内 apply 无门禁、候选镜像缺失、凭据变了、候选变了都在写入前被拒，无状态变更类 docker 调用 |
+| 五个脚本 plan 模式 | 退出 0，不执行任何动作 |
+| 打包门禁 `o0_package.sh --report-only --run-tests`（未带 --execute） | 见 §6.1 |
+
+## 7. 审查 wac-032 的逐条处置
+
+### 7.1 🔴
+
+| # | 处置 | 落点与测试 |
+|---|---|---|
+| 🔴-1 舰队守卫空转、看不见冻结心跳 | 采样改为 §0 查询（状态、release、心跳年龄，NULL 显式打印）+ `/ready`；比较移到 `o0_tool.py fleet-compare`：节点集合必须恰好等于 `O0_FLEET_NODES`，0 行、缺节点、多节点、不可解析 → 无法比较（退出 2）；心跳 ≥ 5 秒（§0 阈值）或年龄跃升 > 5 秒 → 变化（退出 3）；基线本身不新鲜 → 拒绝开始。apply 第一步重新记录基线，preflight 的样本只用于门禁。变更后等稳定窗（默认 60 秒）再采 4 次、间隔 20 秒，每次都比较。回滚只记录回滚前样本，不设门槛 | `o0_common.sh`（`o0_fleet_baseline`、`o0_fleet_settle_compare`、`o0_fleet_record`）；`tests/fleet_guard_test.sh`；`o0_tool.py selftest` 11 个比较用例 |
+| 🔴-2 授权号不绑定阶段 | `o0_expected_auth` 表：每个脚本阶段只接受一个号（caddy 全阶段 A05；watcher preflight/build A04、apply-preflight/apply/verify/rollback A07、restore-db A07R；oq 全阶段 A08；守卫按步骤名 R-x/SW-x 绑定）。restore-db 另需 `--i-understand-data-loss`，A07 的号执行不了它。`authorizations.log` 记录时间、脚本、阶段、号、候选、是否确认数据丢失。runbook 所有示例改成完整命令 | `tests/auth_gate_test.sh`（矩阵 + runbook 示例 + 沙箱端到端） |
+| 🔴-3 apply 不依赖门禁结论 | preflight/build 开头删除旧门禁文件，全部通过才写 `evidence/<阶段>.gate.json`（候选、`RELEASE.json` 与 `SHA256SUMS` 摘要、输入文件摘要、候选镜像 ID）；apply 第一步 `gate-check`（存在、阶段、候选、bundle、输入摘要、≤ 1 小时 / build ≤ 24 小时），再重跑便宜门禁。watcher apply 在任何备份与停服务之前核对候选镜像存在且 ID 等于 build 门禁、演练日志未变且含 `MIGRATION_DRYRUN_OK`。Caddy apply 在 restart 之前核对已安装文件等于门禁里的候选 sha，并对已安装文件重新 adapt 与 verify | `o0_common.sh`（`o0_gate_*`）；`o0_tool.py gate-write/gate-check`；`tests/auth_gate_test.sh` 沙箱用例；selftest 10 个门禁用例 |
+| 🔴-4 基线工具看不到 WAL | `open_copy` 去掉 `immutable=1`，改 `mode=ro`；发现非空 `-wal` 即拒绝（`wal_not_checkpointed`，退出 2）。`sqlite-backup` 的副本切成回滚日志模式。演练容器改为 `docker stop -t 30`（SIGTERM，退出码须为 0），分析前再用备份 API 从演练库拷出新副本，在新副本上分析；基线退出码写入证据，2 = 失败 | `o0_watcher_config_baseline.py selftest`（WAL 回归 + 审查复现文件）；`o0_deploy_watcher.sh` build |
+| 🔴-5 Caddy JSON 脱敏只挡已知形状 | 现场核对不再带回整份 Caddy 配置：S-03/S-04 输出白名单骨架（只保留匹配器、handler 顺序、rewrite、上游、头名、占位符；其他字符串一律 `<literal len=N>`），文件与运行配置在主机上比较，只带回 yes/no 与不同处路径。`redact-json` 改为两层（敏感上下文默认拒绝 + 所有字符串过行规则），并新增 URL 查询值规则。S-02 大纲与 compose environment 也改为默认拒绝 | `tests/site_check_leak_test.sh`（新增头匹配器 Bearer、replace、`static_response.body`、vars、查询值、短字面值；骨架与 `o0_tool.py` 输出一致性）；`o0_tool.py selftest` |
+
+### 7.2 🟡
+
+| # | 处置 |
+|---|---|
+| 1 镜像构建方式 | 改用 `scripts/build_immutable_watcher_image.py`：以运行中镜像 ID 为固定基础，只 `COPY` 已审白名单文件，`--network=none --no-cache`，不联网安装依赖；bundle 带运行时清单与来源清单，打包门禁 G12 用构建器自己的校验；build 列出运行中镜像里白名单之外的文件（`BASE_ONLY`）供用户审阅，记录基础镜像的 `org.trader.*` 标签 |
+| 2 Telegram 恢复无断言 | 去掉 `\|\| true`；apply 在自动回滚窗口内等待 `[watcher] Connected, listening...`（180 秒超时），`Session not authorized` 立即失败；verify 断言仍连着且重启计数 0，记录转发行计数；runbook 给出 feeder 对照命令 |
+| 3 落盘文件 sha | compose 装后 `manifest-verify compose-live-vs-candidate`；Caddyfile 装后与门禁候选 sha 比对；三处 env 装后用 `check --holder-env <线上文件>` 按摘要确认；恢复的库与备份 sha 比对 |
+| 4 G10 太窄 | 禁用词加入 `caddy load`、`:2019/load`、`/v1/commands`、node-control/event-ingest 的 restart/stop/kill、`docker compose down/restart/kill/rm`、节点容器 stop/kill/restart；扫描候选里的 `o0_*.sh`、`o0_*.py` 与 `docs/agent-team/release/o0-*.md`；管道末尾改 `grep -c` <!-- o0-allow --> |
+| 5 工具来自工作树 | bundle 的 `tools/` 只取自候选提交（新增 G11），`RELEASE.json` 记录 `tools_sha256` |
+| 6 轮换与切换是手工序列 | 每一步前后加 `o0_fleet_guard.sh`（授权号按步骤绑定）；**不处理**的部分：包成带自动回滚的 `o0_rotate.sh`、`o0_snapshot_switch.sh`。理由：这两段依赖的 wac-015（E-02 双值、`db_manager` 停用）与 wac-041（预热日志）尚未合入，接口可能再变；它们在 O0-A11/A13 之前才需要，届时单独开任务并按本轮同样的门禁与测试标准写 |
+| 7 回滚 5.2 依赖 watcher | 默认路径改为不依赖 watcher：同一窗口对真库做 `sqlite-backup` 并算 `content_sha256`，再对重建的副本拷贝做 `--expect-content-sha256`；watcher 快照只作可选第三方互证；只有默认路径也无法比较时才上报用户 |
+| 8 整份还原 env | 改为只 `apply` 开关与三个别名键；恢复后复跑凭据 `check` |
+| 9 S-09 执行未知代码 | 主机脚本 sha 必须等于 `--expect-sync-sha256` 才执行 `--check`，否则跳过并记为待核 |
+| 10 进程只持自己的凭据 | S-10 断言 node-control/event-ingest 的 EnvironmentFiles 不含 `operator-query.env`，违反即阻断阶段 O |
+| 11 Caddy 探针地址 | r7 改为 `--node-channel`，默认 `172.30.1.1:8080`，列为 S-06 现场确认项 |
+| 12 `GATEWAY_STARTUP_CLEAN` 没看到就算过 | apply 在 ERR trap 内直接用 `SYSTEM_OBSERVER_TOKEN` 打网关期望 200；日志窗口改为重启前记下的 `@epoch` |
+| 13 restore-db 无校验 | 先断言开关为 0、备份 sha 与 `integrity_check`；装回后字节比对；启动后断言 `Web UI listening`、无 `[db] Failed`、Telegram 重连；前后舰队守卫 |
+| 14 回滚不处理 env_file | apply 备份记录 env_file 原状态；回滚时原有则还原、原本没有则删除 |
+| 15 catalog 只传一个文件 | 三个部署脚本支持重复 `--catalog-env`；runbook 与授权清单写明由 S-10/S-11 推导文件清单 |
+| 16 "被接受"只看 400 | 探针加 `--expect-code invalid_actor_headers` |
+| 17 脱敏 diff `; true` | 只容忍 `diff` 的退出码 1；脱敏失败或结果为空即失败 |
+| 18 基线 `\|\| true` | 退出码写入证据，2 = 失败；迁移后分析失败即失败 |
+
+### 7.3 💭
+
+| # | 处置 |
+|---|---|
+| 1 演练 env 对齐 | 加 `HERMES_TRADER_CRON_ENABLED=0`、`SIGNAL_IMPORTER_ENABLED=0`，清空 `WATCHER_ALERT_*` |
+| 2 verify 要求清掉浏览器 Authorization | 已加入，自测新增"浏览器保留 basic Authorization"变体 |
+| 3 `grep -q` 在管道末尾 | `o0_forbid_patterns` 与各计数改为 `grep -c` 或 `awk` |
+| 4 候选号过时 | 本文件头与 §6 按 `f7641cb` 更新 |
+
+### 7.4 本轮新增、需要注意的限制
+
+- 舰队守卫稳定窗默认值（60 秒 + 3 × 20 秒）没有仓库里的节点 fail-closed 判定时长可依据，列为用户确认项（授权清单 §二）。
+- 以运行中镜像为基础做 overlay：候选不再携带的白名单文件（manifest 中 `ABSENT`）不会从镜像里删除；构建器要求白名单全集存在，所以目前不会出现这种情况，一旦出现需改为全量基础镜像另行审定。
+- `tests/auth_gate_test.sh` 用 `O0_SANDBOX` 测试缝；它在任何存在 `/srv/trader-v3` 的主机上被拒绝，不会放宽 jp-24 上的检查。

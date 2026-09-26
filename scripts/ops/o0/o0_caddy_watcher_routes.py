@@ -17,7 +17,16 @@ Sub-commands
              inject ``{env.WATCHER_BROWSER_PROXY_TOKEN}`` (🟡-3 / 🟡-1 g).
              Anything the emulator cannot evaluate is reported UNCOMPARABLE and fails.
   inventory  Structural summary of every route (no header values, no hashes).
-  selftest   Fixture-based self-test (good config + 13 broken variants).
+  selftest   Fixture-based self-test (good config + broken variants), also run on the
+             allowlist skeleton (o0_tool.py caddy-skeleton) that the site check exports.
+
+User ruling 2026-09-26 (to be written into erratum WGW-1.0.2): ``*`` in the Caddy
+path list means EXACTLY ONE NON-EMPTY SEGMENT and is translated to an anchored,
+case-sensitive ``path_regexp`` (``[^/]+``). Caddy's ``path`` matcher with a
+trailing ``*`` is a prefix match that crosses segments and is case-insensitive;
+it is rejected (the former ``--accept-prefix`` option was removed with the ruling).
+All 16 lines use ``path_regexp`` so the whole gateway set is case-sensitive, like
+the gateway's own route table; case variants must not reach the gateway.
 
 The adapted JSON contains the basic-auth bcrypt hash: keep it 0600 and never
 print it. This tool never prints header values except ``{placeholder}`` names.
@@ -112,6 +121,7 @@ def cmd_render(args: argparse.Namespace) -> int:
         "# Place inside the jp-bot.balen.wang site block, beside the existing /m mobile handles.",
         "# Do NOT add any /m/* or /m/v1/* fallback; unmatched paths must fall to the existing non-gateway handler.",
     ]
+    out.insert(3, "# '*' = exactly one non-empty segment (WGW-1.0.2); path_regexp is case-sensitive: do not add (?i)")
     for line in lines:
         out += [
             f"@{line.slug} {{",
@@ -334,7 +344,7 @@ class Report:
         print(f"FAIL {msg}")
 
 
-def _check_gateway_outcome(rep: Report, label: str, out: Outcome, line: Line, upstream: str, accept_prefix: bool) -> None:
+def _check_gateway_outcome(rep: Report, label: str, out: Outcome, line: Line, upstream: str) -> None:
     if not out.responded or out.chain[-1].handler.get("handler") != "reverse_proxy":
         rep.fail(f"{label}: no reverse_proxy responder")
         return
@@ -365,8 +375,6 @@ def _check_gateway_outcome(rep: Report, label: str, out: Outcome, line: Line, up
         methods = set(mset.get("method", []))
         if "path_regexp" in mset and mset["path_regexp"].get("pattern") == line.regex and methods == expected_methods:
             good = True
-        if accept_prefix and "path" in mset and line.path in mset["path"] and methods == expected_methods:
-            good = True
     if not good:
         rep.fail(f"{label}: matched route is not the anchored line matcher ({_route_matcher_summary(matched)})")
         return
@@ -388,7 +396,7 @@ def _check_browser_outcome(rep: Report, label: str, out: Outcome) -> bool:
     dials = _dials(out.chain[-1].handler)
     if not any(d.rsplit(":", 1)[-1] in WATCHER_PORTS for d in dials):
         return False
-    auth_seen = cleared_actor = cleared_fp = False
+    auth_seen = cleared_actor = cleared_fp = cleared_auth = False
     for step in out.chain[:-1]:
         kind = step.handler.get("handler")
         if kind == "authentication":
@@ -397,6 +405,7 @@ def _check_browser_outcome(rep: Report, label: str, out: Outcome) -> bool:
             deleted = {n.lower() for n in (_header_ops(step.handler).get("delete") or [])}
             cleared_actor |= _touches(deleted, "x-watcher-actor")
             cleared_fp |= _touches(deleted, "x-watcher-token-fingerprint")
+            cleared_auth |= _touches(deleted, "authorization")
     proxy_ops = _header_ops(out.chain[-1].handler)
     rp_deleted = {n.lower() for n in (proxy_ops.get("delete") or [])}
     cleared_actor |= _touches(rp_deleted, "x-watcher-actor")
@@ -407,6 +416,8 @@ def _check_browser_outcome(rep: Report, label: str, out: Outcome) -> bool:
         problems.append("no basic auth before the watcher upstream (bypass)")
     if not (cleared_actor and cleared_fp):
         problems.append("X-Watcher-Actor / X-Watcher-Token-Fingerprint not cleared")
+    if not (cleared_auth or "authorization" in rp_deleted):
+        problems.append("browser Authorization (basic credentials) not cleared before the watcher")
     if _touches(rp_deleted, "x-watcher-proxy-auth"):
         problems.append("reverse_proxy deletes X-Watcher-Proxy-Auth (may run after set and drop the injection)")
     if set_ops.get("x-watcher-proxy-auth") != [BROWSER_TOKEN_PLACEHOLDER]:
@@ -431,8 +442,7 @@ def _walk(routes: list, trail: tuple[int, ...] = ()):
                 yield from _walk(handler.get("routes", []), here)
 
 
-def _static_checks(rep: Report, config: dict, lines: list[Line], listen_port: str, upstream: str, accept_prefix: bool) -> list[tuple[tuple[int, ...], dict]]:
-    expected_prefix = {line.path.lower() for line in lines if "*" in line.path}
+def _static_checks(rep: Report, config: dict, lines: list[Line], listen_port: str, upstream: str) -> list[tuple[tuple[int, ...], dict]]:
     watcher_upstreams = []
     expected_regex = {line.regex for line in lines}
     for server in select_servers(config, listen_port):
@@ -442,8 +452,8 @@ def _static_checks(rep: Report, config: dict, lines: list[Line], listen_port: st
                     low = p.lower()
                     if low in ("/m*", "/m/*", "/m/v1*", "/m/v1/*", "/m/v1/watcher*", "/m/v1/watcher/*"):
                         rep.fail(f"route {trail}: forbidden wildcard path matcher {p}")
-                    elif low.startswith("/m/v1/watcher") and "*" in low and not (accept_prefix and low in expected_prefix):
-                        rep.fail(f"route {trail}: prefix '*' matcher {p} crosses segments (use anchored path_regexp)")
+                    elif low.startswith("/m/v1/watcher") and "*" in low:
+                        rep.fail(f"route {trail}: '*' path matcher {p} is a case-insensitive prefix that crosses segments (ruling: anchored path_regexp, exactly one segment)")
                 rx = mset.get("path_regexp", {}).get("pattern")
                 if rx and "/m/v1/watcher" in rx and rx not in expected_regex:
                     rep.fail(f"route {trail}: path_regexp {rx} is not a list line (extra or altered route)")
@@ -462,7 +472,7 @@ def _parse_sample(text: str) -> tuple[str, str]:
 
 
 def run_verify(config: dict, lines: list[Line], *, host: str, listen_port: str, upstream: str,
-               accept_prefix: bool, mobile_samples, browser_samples, before_deploy: bool = False) -> Report:
+               mobile_samples, browser_samples, before_deploy: bool = False) -> Report:
     rep = Report()
 
     def emu(method: str, path: str) -> Outcome | None:
@@ -479,7 +489,7 @@ def run_verify(config: dict, lines: list[Line], *, host: str, listen_port: str, 
             label = f"{method} {line.sample()}"
             out = emu(method, line.sample())
             if out is not None:
-                _check_gateway_outcome(rep, label, out, line, upstream, accept_prefix)
+                _check_gateway_outcome(rep, label, out, line, upstream)
     if before_deploy:
         for line in lines:
             out = emu(line.methods[0], line.sample())
@@ -488,15 +498,18 @@ def run_verify(config: dict, lines: list[Line], *, host: str, listen_port: str, 
     negatives: list[tuple[str, str]] = [("GET", WATCHER_PREFIX + "nope"), ("OPTIONS", WATCHER_PREFIX + "status")]
     all_methods = {"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"}
     for line in lines:
-        if not (accept_prefix and "*" in line.path):
-            # prefix semantics (accepted only by Planner decision) lets "/x/" through; the gateway rejects it
-            negatives.append(("GET", line.sample() + "/"))
+        negatives.append(("GET", line.sample() + "/"))
         missing = sorted(all_methods - set(line.methods))
         if missing:
             negatives.append((missing[0], line.sample()))
-        if "*" in line.path and not accept_prefix:
+        # case-sensitive like the gateway route table: an upper-cased literal segment must not match
+        negatives.append((line.methods[0], line.sample().replace("/watcher/", "/Watcher/", 1)))
+        last_literal = [seg for seg in line.path.split("/") if seg and seg != "*"][-1]
+        negatives.append((line.methods[0], line.sample().replace("/" + last_literal, "/" + last_literal.upper(), 1)))
+        if "*" in line.path:
             negatives.append((line.methods[0], line.sample("a/b")))
             negatives.append((line.methods[0], line.sample("")))
+            negatives.append((line.methods[0], line.sample("x1") + "/extra"))
     for method, path in negatives:
         out = emu(method, path)
         if out is None:
@@ -519,7 +532,7 @@ def run_verify(config: dict, lines: list[Line], *, host: str, listen_port: str, 
             rep.fail(f"mobile {sample}: strips={len(strips)} authorization_touched={touched}")
         else:
             rep.ok(f"mobile {sample} -> {upstream}{out.final_path} (one strip, Authorization untouched)")
-    watcher_routes = _static_checks(rep, config, lines, listen_port, upstream, accept_prefix)
+    watcher_routes = _static_checks(rep, config, lines, listen_port, upstream)
     covered: set[tuple[int, ...]] = set()
     for sample in browser_samples:
         method, path = _parse_sample(sample)
@@ -554,7 +567,6 @@ def cmd_verify(args: argparse.Namespace) -> int:
     config = json.loads(args.adapted.read_text(encoding="utf-8"))
     rep = run_verify(
         config, lines, host=args.host, listen_port=args.listen_port, upstream=args.upstream,
-        accept_prefix=args.accept_prefix,
         mobile_samples=args.mobile_sample or DEFAULT_MOBILE_SAMPLES,
         browser_samples=args.browser_sample or DEFAULT_BROWSER_SAMPLES,
         before_deploy=args.before_deploy,
@@ -655,19 +667,25 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     import contextlib
     import io
 
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from o0_tool import caddy_skeleton  # the structure the site check exports from jp-24
+
     lines, _meta = load_list(args.paths)
 
-    def verdict(cfg: dict, accept_prefix: bool = False) -> tuple[bool, str]:
+    def verdict(cfg: dict, before_deploy: bool = False) -> tuple[bool, str]:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rep = run_verify(cfg, lines, host="jp-bot.balen.wang", listen_port="443", upstream=DEFAULT_GATEWAY_UPSTREAM,
-                             accept_prefix=accept_prefix, mobile_samples=DEFAULT_MOBILE_SAMPLES, browser_samples=DEFAULT_BROWSER_SAMPLES)
+                             mobile_samples=DEFAULT_MOBILE_SAMPLES, browser_samples=DEFAULT_BROWSER_SAMPLES,
+                             before_deploy=before_deploy)
         return (not rep.failures and rep.passes > 0), buf.getvalue()
 
     good = _fixture(lines)
     ok, text = verdict(good)
     assert ok, text
     passes = text.count("\nPASS ") + text.startswith("PASS ")
+    ok_skel, text_skel = verdict(caddy_skeleton(good))
+    assert ok_skel, "the redacted skeleton must keep everything the verifier needs:\n" + text_skel
 
     def mutated(fn):
         cfg = copy.deepcopy(good)
@@ -681,66 +699,64 @@ def cmd_selftest(args: argparse.Namespace) -> int:
                     return i
         raise AssertionError(needle)
 
+    def set_pattern(site, needle, pattern):
+        site[gw_index(site, needle)]["match"][0]["path_regexp"]["pattern"] = pattern
+
+    browser = lambda s: s[-2]["handle"][0]["routes"][0]["handle"]  # noqa: E731
     variants = {
         "fallback /m/* reverse_proxy": lambda s: s.insert(len(s) - 1, {"group": "g1", "match": [{"path": ["/m/*"]}], "handle": [
             {"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/m"}]}, {"handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
         "prefix path matcher instead of anchored regexp": lambda s: s[gw_index(s, "trading/accounts/")]["match"][0].update(
             {"path": ["/m/v1/watcher/trading/accounts/*"]}) or s[gw_index(s, "trading/accounts/")]["match"][0].pop("path_regexp"),
+        "regexp allows several segments": lambda s: set_pattern(s, "trading/risks/", "^/m/v1/watcher/trading/risks/.+$"),
+        "regexp allows an empty segment": lambda s: set_pattern(s, "trading/channels/", "^/m/v1/watcher/trading/channels/[^/]*$"),
+        "regexp made case-insensitive": lambda s: set_pattern(s, "trading/accounts/", "(?i)^/m/v1/watcher/trading/accounts/[^/]+$"),
+        "regexp not anchored at the end": lambda s: set_pattern(s, "media/", "^/m/v1/watcher/media/[^/]+"),
         "double strip": lambda s: s[gw_index(s, "watcher/status")]["handle"][0]["routes"].insert(0, {"handle": [{"handler": "rewrite", "strip_path_prefix": "/m"}]}),
         "panel injection shadows /m": lambda s: s.insert(0, {"group": "g1", "match": [{"path": ["/m/v1/watcher/status"]}], "handle": [
             {"handler": "rewrite", "strip_path_prefix": "/m"},
             {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}], "headers": {"request": {"set": {"Authorization": ["Bearer {env.SYSTEM_OBSERVER_TOKEN}"]}}}}]}),
-        "browser route without basic auth": lambda s: s[-2]["handle"][0]["routes"][0]["handle"].pop(0),
-        "browser proxy header literal": lambda s: s[-2]["handle"][0]["routes"][0]["handle"][2]["headers"]["request"]["set"].update({"X-Watcher-Proxy-Auth": ["x" * 43]}),
-        "reverse_proxy deletes X-Watcher-* wildcard": lambda s: s[-2]["handle"][0]["routes"][0]["handle"][2]["headers"]["request"].update({"delete": ["X-Watcher-*"]}),
-        "browser does not clear actor header": lambda s: s[-2]["handle"][0]["routes"][0]["handle"][1]["request"].update({"delete": ["Authorization"]}),
+        "browser route without basic auth": lambda s: browser(s).pop(0),
+        "browser proxy header literal": lambda s: browser(s)[2]["headers"]["request"]["set"].update({"X-Watcher-Proxy-Auth": ["x" * 43]}),
+        "reverse_proxy deletes X-Watcher-* wildcard": lambda s: browser(s)[2]["headers"]["request"].update({"delete": ["X-Watcher-*"]}),
+        "browser does not clear actor header": lambda s: browser(s)[1]["request"].update({"delete": ["Authorization"]}),
+        "browser keeps basic Authorization": lambda s: browser(s)[1]["request"].update({"delete": ["X-Watcher-Actor", "X-Watcher-Token-Fingerprint", "X-Watcher-Proxy-Auth"]}),
         "wrong upstream port": lambda s: s[gw_index(s, "dialogs")]["handle"][0]["routes"][1]["handle"][0].update({"upstreams": [{"dial": "127.0.0.1:8184"}]}),
         "expression matcher before gateway": lambda s: s.insert(0, {"group": "g1", "match": [{"expression": "{path}.startsWith('/m/')"}], "handle": [{"handler": "static_response", "status_code": 404}]}),
         "missing list line": lambda s: s.pop(gw_index(s, "trading/briefings")),
         "extra method on a line": lambda s: s[gw_index(s, "watcher/status")]["match"][0].update({"method": ["GET", "PATCH"]}),
         "unlisted /m/v1/watcher route": lambda s: s.insert(2, {"group": "g1", "match": [{"path_regexp": {"name": "x", "pattern": "^/m/v1/watcher/price-alerts$"}}], "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}),
         "unauthenticated watcher route for /media": lambda s: s.insert(0, {"group": "g1", "match": [{"path": ["/media/*"]}], "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:9090"}]}]}),
+        "case-insensitive path matcher for a static line": lambda s: s.insert(0, {"group": "g1", "match": [{"path": ["/m/v1/watcher/status"], "method": ["GET"]}], "handle": [
+            {"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/m"}]}, {"handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
     }
     caught = 0
     for name, fn in variants.items():
-        ok_variant, text_variant = verdict(mutated(fn))
-        if ok_variant:
-            print(f"SELFTEST_MISSED {name}")
-            print(text_variant)
-            return 1
+        cfg = mutated(fn)
+        for form, candidate in (("raw", cfg), ("skeleton", caddy_skeleton(cfg))):
+            ok_variant, text_variant = verdict(candidate)
+            if ok_variant:
+                print(f"SELFTEST_MISSED {name} ({form})")
+                print(text_variant)
+                return 1
         caught += 1
     base_cfg = copy.deepcopy(good)
     site = _site(base_cfg)
     site[:] = [r for r in site if not any("/m/v1/watcher" in m.get("path_regexp", {}).get("pattern", "") for m in (r.get("match") or []))]
     site[-2]["handle"][0]["routes"][0]["handle"] = [h for h in site[-2]["handle"][0]["routes"][0]["handle"] if h.get("handler") != "headers"]
     site[-2]["handle"][0]["routes"][0]["handle"][-1].pop("headers", None)
-    def before(cfg):
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            rep = run_verify(cfg, lines, host="jp-bot.balen.wang", listen_port="443", upstream=DEFAULT_GATEWAY_UPSTREAM,
-                             accept_prefix=False, mobile_samples=DEFAULT_MOBILE_SAMPLES, browser_samples=DEFAULT_BROWSER_SAMPLES, before_deploy=True)
-        return not rep.failures and rep.passes > 0, buf.getvalue()
-    ok_before, text_before = before(base_cfg)
+    ok_before, text_before = verdict(base_cfg, before_deploy=True)
     assert ok_before, text_before
+    assert verdict(caddy_skeleton(base_cfg), before_deploy=True)[0], "before-deploy verify must work on the skeleton"
     wild = copy.deepcopy(base_cfg)
     _site(wild).insert(0, {"group": "g1", "match": [{"path": ["/m/*"]}], "handle": [{"handler": "subroute", "routes": [
         {"handle": [{"handler": "rewrite", "strip_path_prefix": "/m"}]}, {"handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]})
-    assert not before(wild)[0], "before-deploy must flag an existing /m wildcard"
+    assert not verdict(wild, before_deploy=True)[0], "before-deploy must flag an existing /m wildcard"
     noauth = copy.deepcopy(base_cfg)
     _site(noauth)[-2]["handle"][0]["routes"][0]["handle"].pop(0)
-    assert not before(noauth)[0], "before-deploy must flag a watcher route without basic auth"
-    prefix_cfg = copy.deepcopy(good)
-    for route in _site(prefix_cfg):
-        for mset in route.get("match") or []:
-            pattern = mset.get("path_regexp", {}).get("pattern", "")
-            for line in lines:
-                if "*" in line.path and pattern == line.regex:
-                    mset.pop("path_regexp")
-                    mset["path"] = [line.path]
-    assert not verdict(prefix_cfg)[0], "prefix matchers must fail in default (anchored) mode"
-    ok_prefix, text_prefix = verdict(prefix_cfg, accept_prefix=True)
-    assert ok_prefix, text_prefix
-    print(f"SELFTEST_OK good_passes={passes} variants_caught={caught}/{len(variants)} lines={len(lines)} accept_prefix_mode=ok before_deploy_mode=ok")
+    assert not verdict(noauth, before_deploy=True)[0], "before-deploy must flag a watcher route without basic auth"
+    print(f"SELFTEST_OK good_passes={passes} variants_caught={caught}/{len(variants)} (raw and skeleton) lines={len(lines)} "
+          "single_segment_strict=ok skeleton_verify=ok before_deploy_mode=ok")
     return 0
 
 
@@ -761,7 +777,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--listen-port", default="443")
     p.add_argument("--upstream", default=DEFAULT_GATEWAY_UPSTREAM)
     p.add_argument("--expect-phase-max", default="P2")
-    p.add_argument("--accept-prefix", action="store_true", help="accept Caddy prefix '*' (Planner decision D-3 option b)")
     p.add_argument("--before-deploy", action="store_true", help="site check S-03/S-04 before stage C: no per-path routes expected, no injection expected")
     p.add_argument("--mobile-sample", action="append")
     p.add_argument("--browser-sample", action="append")
