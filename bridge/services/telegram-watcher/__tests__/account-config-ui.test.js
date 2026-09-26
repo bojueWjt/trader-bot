@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 
 const pagePath = path.join(__dirname, "..", "public", "index.html");
 const pageSource = fs.readFileSync(pagePath, "utf8");
@@ -49,9 +50,71 @@ test("pending multiplier accounts are visibly disabled and excluded from routing
 
 test("config writes send expected_revision and client_ref from GET header", () => {
   assert.match(pageSource, /X-Config-Revision/);
-  assert.match(pageSource, /expected_revision: configRevision/);
+  assert.match(pageSource, /expected_revision: configRevisions\[configResource\]/);
   assert.match(pageSource, /client_ref: crypto\.randomUUID\(\)/);
   assert.match(pageSource, /revision_conflict/);
+});
+
+test("risk conflict refresh does not advance an old account form revision", async () => {
+  const start = pageSource.indexOf("    async function api(path, opts = {}) {");
+  const end = pageSource.indexOf("    function setButtonBusy", start);
+  assert.ok(start > 0 && end > start);
+  const sent = [];
+  let riskReads = 0;
+  let accountStatus = null;
+  const response = (status, body, revision) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: () => revision === undefined ? null : String(revision) },
+    json: async () => body,
+  });
+  const context = {
+    crypto: { randomUUID: () => "ui-ref-" + (sent.length + 1) },
+    fetch: async (url, opts) => {
+      const method = opts.method || "GET";
+      const body = opts.body ? JSON.parse(opts.body) : null;
+      sent.push({ url, method, body });
+      if (url === "/api/trading/accounts" && method === "GET") {
+        return response(200, [], sent.filter((item) => item.url === url).length === 1 ? 5 : 6);
+      }
+      if (url === "/api/trading/risks" && method === "GET") {
+        riskReads += 1;
+        return response(200, [], riskReads === 1 ? 5 : 6);
+      }
+      if (url === "/api/trading/risks" && method === "POST") {
+        return response(409, { code: "revision_conflict", message: "config revision changed" });
+      }
+      if (url === "/api/trading/accounts/account-x" && method === "PUT") {
+        accountStatus = body.expected_revision === 5 ? 409 : 200;
+        return response(accountStatus, accountStatus === 409
+          ? { code: "revision_conflict", message: "config revision changed" }
+          : { ok: true, revision: 7 });
+      }
+      throw new Error("unexpected request " + method + " " + url);
+    },
+    toast: () => {},
+  };
+  context.loadAccounts = () => context.api("/trading/accounts");
+  context.loadChannels = () => context.api("/trading/channels");
+  context.loadRisks = () => context.api("/trading/risks");
+  vm.runInNewContext(
+    "const configRevisions = { accounts: null, channels: null, risks: null };" +
+    "const pendingConfigWrites = new Map();" + pageSource.slice(start, end),
+    context
+  );
+  await context.api("/trading/accounts");
+  await context.api("/trading/risks");
+  const risk = await context.api("/trading/risks", {
+    method: "POST", body: { symbol: "BTCUSDT", risk_ratio: 0.01 },
+  });
+  assert.equal(risk.code, "revision_conflict");
+  const account = await context.api("/trading/accounts/account-x", {
+    method: "PUT", body: { is_enabled: false },
+  });
+  assert.equal(accountStatus, 409);
+  assert.equal(account.code, "revision_conflict");
+  assert.equal(sent.find((item) => item.method === "POST").body.expected_revision, 5);
+  assert.equal(sent.find((item) => item.method === "PUT").body.expected_revision, 5);
 });
 
 test("account edit does not prefill masked credentials and PUT omits account_id", () => {

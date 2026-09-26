@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const { spawn } = require("node:child_process");
 const Database = require("better-sqlite3");
 const express = require("express");
 
@@ -278,6 +279,154 @@ test("T0-2 partial update ignores stored out-of-range risk and enforces new boun
     const result = await write("PUT", "/api/trading/accounts/main-a", { risk_capital_addon: bad });
     assert.equal(result.status, 400);
   }
+});
+
+async function createHierarchyPair(suffix) {
+  const main = "r7-main-" + suffix;
+  const child = "r7-child-" + suffix;
+  const parent = await write("POST", "/api/trading/accounts", {
+    account_id: main, api_key: "fake-key-" + suffix, api_secret: "fake-secret-" + suffix,
+    risk_capital_addon: 0, is_testnet: false,
+  });
+  assert.equal(parent.status, 200);
+  const subaccount = await write("POST", "/api/trading/accounts", {
+    account_id: child, api_key: "fake-child-key-" + suffix, api_secret: "fake-child-secret-" + suffix,
+    account_type: "subaccount", parent_account_id: main,
+    risk_capital_addon: 0, is_testnet: false,
+  });
+  assert.equal(subaccount.status, 200);
+  return { main, child };
+}
+
+test("R7 gateway may disable a child after its main account is disabled", async () => {
+  const { main, child } = await createHierarchyPair("disable");
+  assert.equal((await write("PUT", "/api/trading/accounts/" + main,
+    { is_enabled: false }, { identity: "gateway" })).status, 200);
+  const result = await write("PUT", "/api/trading/accounts/" + child,
+    { is_enabled: false }, { identity: "gateway" });
+  assert.equal(result.status, 200);
+  const db = database();
+  assert.equal(db.prepare("SELECT is_enabled FROM account_configs WHERE account_id = ?").get(child).is_enabled, 0);
+  db.close();
+});
+
+test("R7 gateway may change child addon with a disabled main account", async () => {
+  const { main, child } = await createHierarchyPair("addon");
+  assert.equal((await write("PUT", "/api/trading/accounts/" + main,
+    { is_enabled: false }, { identity: "gateway" })).status, 200);
+  const result = await write("PUT", "/api/trading/accounts/" + child,
+    { risk_capital_addon: 5 }, { identity: "gateway" });
+  assert.equal(result.status, 200);
+  const db = database();
+  assert.equal(db.prepare("SELECT risk_capital_addon FROM account_configs WHERE account_id = ?").get(child).risk_capital_addon, 5);
+  db.close();
+  const structural = await write("PUT", "/api/trading/accounts/" + child,
+    { account_type: "subaccount" }, { identity: "gateway" });
+  assert.equal(structural.status, 400);
+  assert.equal(structural.body.code, "invalid_body");
+});
+
+test("R7 gateway enable toggle ignores stored parent environment mismatch", async () => {
+  const { main, child } = await createHierarchyPair("environment");
+  const db = database();
+  db.prepare("UPDATE account_configs SET is_testnet = 1 WHERE account_id = ?").run(main);
+  db.close();
+  const toggle = await write("PUT", "/api/trading/accounts/" + child,
+    { is_enabled: false }, { identity: "gateway" });
+  assert.equal(toggle.status, 200);
+  const structural = await write("PUT", "/api/trading/accounts/" + child,
+    { parent_account_id: main }, { identity: "gateway" });
+  assert.equal(structural.status, 400);
+  assert.equal(structural.body.code, "invalid_body");
+});
+
+test("T0-2 snapshot order and content hash ignore account insertion order", async () => {
+  const ids = ["账户α", "a-lower", "S", "M"];
+  const insert = (db, id, index) => db.prepare(
+    "INSERT INTO account_configs (account_id, api_key, api_secret, execution_account_id) VALUES (?, ?, ?, ?)"
+  ).run(id, "fake-key", "fake-secret", "ordered-execution-" + index);
+  const firstDb = database();
+  ids.forEach((id, index) => insert(firstDb, id, index));
+  firstDb.close();
+  const first = (await request("GET", "/api/trading/config-snapshot", undefined, "snapshot")).body;
+  assert.deepEqual(first.accounts.filter((row) => ids.includes(row.account_id)).map((row) => row.account_id),
+    ["M", "S", "a-lower", "账户α"]);
+  const secondDb = database();
+  ids.forEach((id) => secondDb.prepare("DELETE FROM account_configs WHERE account_id = ?").run(id));
+  ids.slice().reverse().forEach((id) => insert(secondDb, id, ids.indexOf(id)));
+  secondDb.close();
+  const second = (await request("GET", "/api/trading/config-snapshot", undefined, "snapshot")).body;
+  assert.deepEqual(first.accounts, second.accounts);
+  assert.equal(first.content_sha256, second.content_sha256);
+  const cleanup = database();
+  ids.forEach((id) => cleanup.prepare("DELETE FROM account_configs WHERE account_id = ?").run(id));
+  cleanup.close();
+});
+
+test("T0-2 cross-process committed audit is observed after lock wait as replay", async () => {
+  const { __test } = require("../lib/config-store");
+  const body = { symbol: "XPROC", risk_ratio: 0.01, expected_revision: revision };
+  const requestHash = __test.digest({ method: "POST", path: "/api/trading/risks", body });
+  const clientRef = "xproc-ref-0001";
+  const saved = JSON.stringify({ ok: true, symbol: "XPROC", risk_ratio: 0.01,
+    revision: revision + 1, replay: false });
+  const script = `const Database = require(${JSON.stringify(require.resolve("better-sqlite3"))});
+const db = new Database(${JSON.stringify(file)});
+db.exec("BEGIN IMMEDIATE");
+db.prepare("INSERT INTO symbol_risk_configs (symbol, risk_ratio) VALUES ('XPROC', 0.01)").run();
+db.prepare("UPDATE config_revision SET revision = revision + 1 WHERE id = 1").run();
+db.prepare("INSERT INTO config_audit (idempotency_key, actor, source, token_fingerprint, operation, request_sha256, status_code, response_json, revision_before, revision_after, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+  ${JSON.stringify("browser|risk.upsert|" + clientRef)}, "browser", "browser", null, "risk.upsert",
+  ${JSON.stringify(requestHash)}, 200, ${JSON.stringify(saved)}, ${revision}, ${revision + 1}, new Date().toISOString());
+process.stdout.write("locked\\n");
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+db.exec("COMMIT");
+db.close();`;
+  const child = spawn(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "pipe"] });
+  const completed = new Promise((resolve) => child.once("exit", resolve));
+  await new Promise((resolve) => child.stdout.once("data", resolve));
+  const result = await request("POST", "/api/trading/risks", { ...body, client_ref: clientRef });
+  assert.equal(await completed, 0);
+  assert.equal(result.status, 200);
+  assert.equal(result.body.replay, true);
+  revision = result.body.revision;
+});
+
+test("T0-2 SQLite CHECK maps to 400 validation_failed", async () => {
+  const db = database();
+  db.pragma("ignore_check_constraints = ON");
+  db.prepare("UPDATE account_configs SET risk_capital_addon = -1 WHERE account_id = 'main-a'").run();
+  db.close();
+  const failed = await write("PUT", "/api/trading/accounts/main-a", { is_enabled: true });
+  assert.equal(failed.status, 400);
+  assert.equal(failed.body.code, "validation_failed");
+  const repair = database();
+  repair.pragma("ignore_check_constraints = ON");
+  repair.prepare("UPDATE account_configs SET risk_capital_addon = 0 WHERE account_id = 'main-a'").run();
+  repair.close();
+});
+
+test("T0-2 unknown exception is logged without request secret", async () => {
+  const secret = "fake-unknown-error-secret";
+  const db = database();
+  db.exec("CREATE TRIGGER reject_account_update BEFORE UPDATE ON account_configs " +
+    "BEGIN SELECT RAISE(ABORT, 'fake-unknown-error-secret'); END");
+  db.close();
+  const logs = [];
+  const original = console.error;
+  console.error = (...parts) => logs.push(parts);
+  let result;
+  try {
+    result = await write("PUT", "/api/trading/accounts/main-a", { api_key: secret });
+  } finally {
+    console.error = original;
+    const cleanup = database();
+    cleanup.exec("DROP TRIGGER reject_account_update");
+    cleanup.close();
+  }
+  assert.equal(result.status, 500);
+  assert.ok(logs.length > 0);
+  assert.equal(JSON.stringify(logs).includes(secret), false);
 });
 
 test("T0-2 concurrent same ref commits once and failed audit rolls back", async () => {

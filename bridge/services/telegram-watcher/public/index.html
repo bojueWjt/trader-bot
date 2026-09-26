@@ -897,7 +897,7 @@
     let channelCache = [];
     let editingAccountId = false;
     let selectedAccountType = 'main';
-    let configRevision = null;
+    const configRevisions = { accounts: null, channels: null, risks: null };
     const pendingConfigWrites = new Map();
 
     /* ====== Helpers ====== */
@@ -911,17 +911,18 @@
 
     async function api(path, opts = {}) {
       const method = opts.method || 'GET';
-      const configPath = /^\/trading\/(?:accounts|channels|risks)(?:\/|$)/.test(path);
+      const configMatch = /^\/trading\/(accounts|channels|risks)(?:\/|$)/.exec(path);
+      const configResource = configMatch ? configMatch[1] : null;
       let pendingKey = null;
       let body = opts.body;
-      if (configPath && method !== 'GET') {
-        if (!Number.isSafeInteger(configRevision)) {
+      if (configResource && method !== 'GET') {
+        if (!Number.isSafeInteger(configRevisions[configResource])) {
           throw new Error('配置版本尚未加载，请刷新后重试');
         }
         pendingKey = method + ':' + path + ':' + JSON.stringify(body || {});
         let pending = pendingConfigWrites.get(pendingKey);
         if (!pending) {
-          pending = { expected_revision: configRevision, client_ref: crypto.randomUUID() };
+          pending = { expected_revision: configRevisions[configResource], client_ref: crypto.randomUUID() };
           pendingConfigWrites.set(pendingKey, pending);
         }
         body = { ...(body || {}), ...pending };
@@ -935,10 +936,10 @@
       }
       const res = await fetch('/api' + path, requestOptions);
       const revisionHeader = res.headers.get('X-Config-Revision');
-      if (configPath && method === 'GET' && revisionHeader !== null) {
+      if (configResource && method === 'GET' && revisionHeader !== null) {
         const observed = Number(revisionHeader);
         if (Number.isSafeInteger(observed)) {
-          configRevision = observed;
+          configRevisions[configResource] = observed;
         }
       }
       let payload = {};
@@ -950,8 +951,8 @@
       if (!res.ok && !payload.error) {
         payload.error = payload.message || `请求失败 (${res.status})`;
       }
-      if (res.ok && Number.isSafeInteger(payload.revision)) {
-        configRevision = payload.revision;
+      if (configResource && res.ok && Number.isSafeInteger(payload.revision)) {
+        configRevisions[configResource] = payload.revision;
       }
       if (pendingKey && (res.ok || res.status < 500)) {
         pendingConfigWrites.delete(pendingKey);
@@ -961,6 +962,11 @@
         if (path.startsWith('/trading/accounts')) await loadAccounts();
         if (path.startsWith('/trading/channels')) await loadChannels();
         if (path.startsWith('/trading/risks')) await loadRisks();
+      }
+      if (pendingKey && res.ok) {
+        if (configResource === 'accounts') await loadAccounts();
+        if (configResource === 'channels') await loadChannels();
+        if (configResource === 'risks') await loadRisks();
       }
       return payload;
     }

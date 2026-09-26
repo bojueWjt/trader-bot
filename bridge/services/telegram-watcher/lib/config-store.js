@@ -96,8 +96,15 @@ function sendError(res, error, defaultCode) {
     }
     return res.status(error.status).json(response);
   }
+  if (["SQLITE_CONSTRAINT_CHECK", "SQLITE_CONSTRAINT_NOTNULL"].includes(error.code)) {
+    const response = { code: "validation_failed", message: "configuration validation failed" };
+    if (browser) {
+      response.error = response.message;
+    }
+    return res.status(400).json(response);
+  }
   if (["SQLITE_CONSTRAINT_UNIQUE", "SQLITE_CONSTRAINT_PRIMARYKEY",
-    "SQLITE_CONSTRAINT_FOREIGNKEY", "SQLITE_CONSTRAINT_CHECK"].includes(error.code)) {
+    "SQLITE_CONSTRAINT_FOREIGNKEY"].includes(error.code)) {
     const response = { code: "constraint_conflict", message: "configuration constraint failed" };
     if (browser) {
       response.error = response.message;
@@ -105,6 +112,14 @@ function sendError(res, error, defaultCode) {
     return res.status(409).json(response);
   }
   const response = { code: defaultCode, message: "configuration database unavailable" };
+  // Error messages can contain SQL parameters or request values. Log only stable
+  // diagnostic fields, never the exception text or request body.
+  const errorName = error && typeof error.name === "string" ? error.name : "Error";
+  const errorCode = error && typeof error.code === "string" ? error.code : "unknown";
+  console.error("[config-store] unexpected error", {
+    name: /^[A-Za-z]+Error$/.test(errorName) ? errorName : "Error",
+    code: /^SQLITE_[A-Z_]+$/.test(errorCode) ? errorCode : "unknown",
+  });
   if (browser) {
     response.error = response.message;
   }
@@ -310,10 +325,14 @@ function validateAccountInput(db, input, current, identity) {
   if (Object.hasOwn(input, "parent_account_id") && typeof row.parent_account_id !== "string") {
     fail(400, "invalid_body", "parent_account_id is invalid");
   }
-  validateHierarchy(db, row);
-  const duplicate = db.prepare("SELECT account_id FROM account_configs WHERE execution_account_id = ?").get(row.execution_account_id);
-  if (duplicate && duplicate.account_id !== row.account_id) {
-    fail(409, "constraint_conflict", "execution account already exists");
+  if (!current || ["account_type", "parent_account_id", "is_testnet"].some((field) => Object.hasOwn(input, field))) {
+    validateHierarchy(db, row);
+  }
+  if (!current || Object.hasOwn(input, "execution_account_id")) {
+    const duplicate = db.prepare("SELECT account_id FROM account_configs WHERE execution_account_id = ?").get(row.execution_account_id);
+    if (duplicate && duplicate.account_id !== row.account_id) {
+      fail(409, "constraint_conflict", "execution account already exists");
+    }
   }
   return row;
 }

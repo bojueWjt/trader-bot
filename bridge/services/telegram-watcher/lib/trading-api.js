@@ -150,6 +150,7 @@ function ensureTradingTables() {
     }).immediate();
   } catch (err) {
     console.log("[db] Failed to ensure trading tables:", safeErrorMessage(err));
+    process.exitCode = 1;
     throw err;
   } finally {
     closeDb(db);

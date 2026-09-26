@@ -660,10 +660,14 @@ test("protects accounts referenced by children, routes, or active orders", async
   const mainWithChild = await request("DELETE", "/api/trading/accounts/main-live");
   assert.equal(mainWithChild.status, 409);
   assert.equal(mainWithChild.body.code, "constraint_conflict");
+  assert.equal(mainWithChild.body.subaccount_count, 1);
+  assert.equal(mainWithChild.body.error, "Account has subaccounts");
 
   const routedSubaccount = await request("DELETE", "/api/trading/accounts/channel-sub");
   assert.equal(routedSubaccount.status, 409);
   assert.equal(routedSubaccount.body.code, "constraint_conflict");
+  assert.equal(routedSubaccount.body.channel_count, 1);
+  assert.equal(routedSubaccount.body.error, "Account is used by channel routing");
 
   const removedRoute = await request("DELETE", "/api/trading/channels/sub-channel");
   assert.equal(removedRoute.status, 200);
@@ -678,4 +682,6 @@ test("protects accounts referenced by children, routes, or active orders", async
   const activeSubaccount = await request("DELETE", "/api/trading/accounts/channel-sub");
   assert.equal(activeSubaccount.status, 409);
   assert.equal(activeSubaccount.body.code, "constraint_conflict");
+  assert.equal(activeSubaccount.body.active_order_count, 1);
+  assert.equal(activeSubaccount.body.error, "Account has active orders");
 });
