@@ -14,7 +14,8 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "contracts/watcher-gateway-routes.yaml"
 PYTHON = ROOT / "services/control-plane/api/generated/watcher_gateway_routes.py"
 JAVASCRIPT = ROOT / "bridge/services/telegram-watcher/lib/generated/gateway-routes.js"
-OUTPUTS = (PYTHON, JAVASCRIPT)
+CADDY = ROOT / "contracts/generated/caddy-watcher-gateway-paths.txt"
+OUTPUTS = (PYTHON, JAVASCRIPT, CADDY)
 PHASES = ("P0", "P1", "P2", "P3")
 TOP_KEYS = set("schema_version contract_version frozen_at amended_at source_plan paths roles identities actor_headers regex_dialect secret_fields secret_key_pattern budgets path_params query_params body_fields response_headers media_request_headers invariants never_allowed gateway_excluded routes".split())
 ROW_KEYS = set("id phase identity method outer_path inner_path roles query body response budget write".split())
@@ -237,6 +238,24 @@ def payload(data, yaml_sha256, phase_max):
     return result
 
 
+def _render_caddy(value, yaml_sha256, phase_max):
+    grouped = {}
+    prefix = value["paths"]["caddy_external_prefix"]
+    for row in value["routes"]:
+        if row["identity"] != "gateway":
+            continue
+        external = re.sub(r"\{[^{}]+\}", "*", prefix + row["outer_path"])
+        grouped.setdefault(external, set()).add(row["method"])
+    lines = [
+        "# _generated_from contracts/watcher-gateway-routes.yaml",
+        f"# _yaml_sha256 {yaml_sha256}",
+        f"# _phase_max {phase_max}",
+    ]
+    for path in sorted(grouped):
+        lines.append(path + " " + " ".join(sorted(grouped[path])))
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
 def render(data, yaml_sha256, phase_max):
     value = payload(data, yaml_sha256, phase_max)
     canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -276,4 +295,4 @@ deepFreeze(PAYLOAD);
 const SECRET_KEY_REGEX = new RegExp(PAYLOAD.secret_key_pattern.pattern, 'u' + PAYLOAD.secret_key_pattern.flags);
 module.exports = {{ PAYLOAD, PAYLOAD_SHA256, SECRET_KEY_REGEX }};
 '''
-    return {PYTHON: py.encode(), JAVASCRIPT: js.encode()}
+    return {PYTHON: py.encode(), JAVASCRIPT: js.encode(), CADDY: _render_caddy(value, yaml_sha256, phase_max)}
