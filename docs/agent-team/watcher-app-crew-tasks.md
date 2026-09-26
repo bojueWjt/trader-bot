@@ -9,7 +9,7 @@
 |--------|------|------|
 | M0 契约冻结 | 路由真源 YAML、backend-api.md 新节 | done（WGW-1.0 → 1.0.1，4464ff5） |
 | M1 watcher 地基 | W-0（拆为 W-0a 鉴权层 wac-009、W-0b 配置写路径 wac-011） | W-0a done（05e9013）；W-0b 第 3 次 FAIL，等待用户裁决 |
-| M2 控制面快照 | C-0 | done（d5e269b，开关默认关）；开关打开前置：wac-022 校准 |
+| M2 控制面快照 | C-0 | done（d5e269b + 校准 eaf333d，开关默认关）；打开开关只剩 O-0 数据基线 |
 | M3 平板基础设施 | T-0 | done（代码合入 91f6c8e；真机与键盘避让待 Tester） |
 | M4 网关 | C-1 | done（cb4c5c8）；O-0 门禁须跑 P2 断言测试并核对 phase_max=P2 |
 | M5 对照与发行准备 | O-0（非生产部分 + Release 清单） | in_progress（Caddy 清单 done be76e92；三路对照工具与 Release 清单待派） |
@@ -45,8 +45,8 @@
 | wac-019 | [Reviewer] W-0b 修复复审 | trader-bot | — | 协议红线 6、7 | watcher test | wac-018 | watcher-app-crew-reviewer（Opus 子代理） | done | FAIL，1 🔴 4 🟡；Gap Analysis：根因为上轮测量误判，建议再修一轮（最后一轮）；报告 reviews/wac-011-r2.md |
 | wac-020 | [Executor] W-0b 第 3 轮修复：DB 初始化失败显式 process.exit(1)，测试改为隔离环境真实启动 server.js；补 🟡1–4 测试 | trader-bot | `lib/trading-api.js`、`__tests__/` | reviews/wac-011-r2.md 🔴-1、🟡1–4 | watcher test | wac-019 | watcher-app-crew-backend-executor（Codex gpt-6-sol high） | blocked | 59e5a59；产品代码已修对；FAIL 第 3 次：启动测试缺 W-0a 的三个假 token，合入集成分支后变红 |
 | wac-021 | [Reviewer] W-0b 第 3 轮复审 | trader-bot | — | 协议红线 6、7 | watcher test | wac-020 | watcher-app-crew-reviewer（Opus 子代理） | done | FAIL 第 3 次，1 🔴（测试环境缺三个假 token，源于任务书遗漏）；退出并重启的取舍可接受；推荐方案 A 第 4 轮小修；**等待用户裁决**；报告 reviews/wac-011-r3.md |
-| wac-022 | [Executor] C-0 校准（开关打开前置）：403 锁为 unauthorized；非 JSON 与超 1 MiB 不锁、上限 4 MiB；R12 channel-route 归开仓依赖；E-14 拒绝原因与旧 reader 等价；补 7 个漏变异测试 | trader-bot | `services/control-plane/api/watcher_config_snapshot.py`、read_api 相关调用点、`tests/control-plane/` | reviews/wac-013.md 🟡1–5；契约 §9.11、§9.16 E-01/E-14；R1、R12 | control-plane pytest | wac-014 | watcher-app-crew-backend-executor（Codex gpt-6-sol high） | review | 94a2911；自报全量 831 passed / 5 预存失败 |
-| wac-023 | [Reviewer] C-0 校准 | trader-bot | — | 协议红线 1、6、7 | control-plane pytest | wac-022 | watcher-app-crew-reviewer（Opus 子代理） | in_progress | 2026-09-26 派发 |
+| wac-022 | [Executor] C-0 校准（开关打开前置）：403 锁为 unauthorized；非 JSON 与超 1 MiB 不锁、上限 4 MiB；R12 channel-route 归开仓依赖；E-14 拒绝原因与旧 reader 等价；补 7 个漏变异测试 | trader-bot | `services/control-plane/api/watcher_config_snapshot.py`、read_api 相关调用点、`tests/control-plane/` | reviews/wac-013.md 🟡1–5；契约 §9.11、§9.16 E-01/E-14；R1、R12 | control-plane pytest | wac-014 | watcher-app-crew-backend-executor（Codex gpt-6-sol high） | done | 94a2911 → 集成 eaf333d |
+| wac-023 | [Reviewer] C-0 校准 | trader-bot | — | 协议红线 1、6、7 | control-plane pytest | wac-022 | watcher-app-crew-reviewer（Opus 子代理） | done | PASS，0 🔴 3 🟡；合并后全量 855/5；变异 43 抓 41；控制面代码满足开关前置，剩 O-0 数据基线；报告 reviews/wac-022.md |
 | wac-024 | [Executor] C-1 修复：🔴1 中间件只装一次且可重复调用；🔴2 R13 phase_max=P2 重新生成；🔴3 媒体错误响应长度；🔴4 补 5 组安全验收测试；🟡：双 Cache-Control、超长整数 500、G5 停用告警日志、S-10 读 YAML secret_fields、JS 摘要自检测试、路由集合断言改到 operator-query app | trader-bot | 同 wac-016（`.worktrees/wac-016`，先合入最新集成分支） | reviews/wac-016.md 第 10 节 | control-plane pytest、生成器校验、watcher test | wac-017 | watcher-app-crew-backend-executor（Codex gpt-6-sol high） | done | 5e54023 → 集成 cb4c5c8 |
 | wac-025 | [Reviewer] C-1 修复复审 | trader-bot | — | 协议红线 2–5、7 | 同上 | wac-024 | watcher-app-crew-reviewer（Opus 子代理） | done | PASS，0 🔴；全量 815/5；生成物 P2 59 行；变异 34 抓 33（1 等价）；报告 reviews/wac-016-r2.md |
 | wac-026 | [Executor] 契约 §9.14 第三份生成物：Caddy 路径清单（O-0 用） | trader-bot | `scripts/contracts/` 与清单产物 | 契约 §9.14 | 生成器校验 | wac-025 | watcher-app-crew-backend-executor（Codex） | done | 745bc70 → 集成 be76e92 |
@@ -55,3 +55,5 @@
 | wac-029 | [Executor] A-0 加固：R14 isConnectionInvalid、非 JSON 503 归类、同 client_ref 规则多形状测试、禁写真实拦截断言、设置页无 TextInput 与出错渲染、token 不入错误对象、media() 客户端超时；补 wac-028 列出的存活变异测试 | alert-personal | `src/services/watcherApi.ts`、`src/screens/SettingsScreen.tsx`、`__tests__/` | reviews/wac-027.md 🟡1–7；R14 | typecheck/lint/test:android | wac-028 | watcher-app-crew-app-executor（Codex gpt-6-sol medium） | review | 1ea3e75、5b141e5；自报 33 套件 301 用例全过 |
 | wac-030 | [Reviewer] A-0 加固 | alert-personal | — | 协议红线 2、7 | 同上 | wac-029 | watcher-app-crew-reviewer（Opus 子代理） | in_progress | 2026-09-26 派发 |
 | wac-031 | [Reviewer] Caddy 路径清单 | trader-bot | — | 协议红线 5、7 | 生成器校验 | wac-026 | watcher-app-crew-reviewer（Opus 子代理） | done | PASS，0 🔴；全量 821/5；变异 18 抓 17（1 等价）；Caddy `*` 为前缀匹配会跨段，O-0 用锚定 path_regexp 并列入 WGW-1.0.2；报告 reviews/wac-026.md |
+| wac-032 | [Release] O-0 发行准备草案：jp-24 现场核对清单、部署/回滚/凭据轮换/快照切换 runbook、待用户授权清单（只写文档与脚本草案，不连生产） | trader-bot | `docs/agent-team/release/`、`scripts/` 下脚本草案 | 计划 §4.1、§9 O-0；各审查报告中的 O-0 事项 | bash -n、dry-run | wac-031 | watcher-app-crew-release-steward（Opus 子代理） | in_progress | |
+| wac-033 | [Executor] C-0 测试补强（低优先级）：4 MiB 上限精确值断言、禁用加冲突的判定顺序、真实提交后持久化证据回归 | trader-bot | `tests/control-plane/` | reviews/wac-022.md 🟡A–C | control-plane pytest | wac-023 | watcher-app-crew-backend-executor（Codex） | pending | 打开快照开关前完成即可 |
