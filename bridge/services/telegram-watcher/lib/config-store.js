@@ -411,6 +411,9 @@ function transactWrite(db, req, resource, action, key) {
     fail(identity ? 403 : 401, identity ? "identity_forbidden" : "unauthenticated",
       "configuration identity required");
   }
+  if (identity === "gateway" && req.watcherAuth.role !== "risk_admin") {
+    fail(403, "insufficient_scope", "risk_admin required");
+  }
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     fail(400, "invalid_body", "JSON object required");
   }

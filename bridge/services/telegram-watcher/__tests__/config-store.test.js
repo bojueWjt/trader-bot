@@ -52,11 +52,12 @@ test.before(async () => {
   const app = express();
   app.use(express.json());
   app.use((req, res, next) => {
-    const identity = req.get("x-test-identity");
+    const requestedIdentity = req.get("x-test-identity");
+    const identity = requestedIdentity === "gateway-viewer" ? "gateway" : requestedIdentity;
     if (identity !== "none") {
       req.watcherAuth = {
-        identity, role: identity === "gateway" ? "risk_admin" : null,
-        actor: identity === "gateway" ? "app:risk_admin" : "browser",
+        identity, role: identity === "gateway" ? (requestedIdentity === "gateway-viewer" ? "viewer" : "risk_admin") : null,
+        actor: identity === "gateway" ? (requestedIdentity === "gateway-viewer" ? "app:viewer" : "app:risk_admin") : "browser",
         tokenFingerprint: identity === "gateway" ? "123456789abc" : null,
       };
     }
@@ -210,6 +211,15 @@ test("T0-2 gateway secret input is rejected and cannot read secrets", async () =
   assert.equal(audit.token_fingerprint, "123456789abc");
   assert.equal(audit.actor, "app:risk_admin");
   assert.equal(JSON.stringify(audit).includes("fake-new-key"), false);
+});
+
+test("T0-2 gateway write requires risk_admin in watcherAuth", async () => {
+  const before = revision;
+  const denied = await write("POST", "/api/trading/risks",
+    { symbol: "DENIED", risk_ratio: 0.01 }, { identity: "gateway-viewer" });
+  assert.equal(denied.status, 403);
+  assert.equal(denied.body.code, "insufficient_scope");
+  assert.equal(revision, before);
 });
 
 test("T0-2 browser keeps credential rotation while mask placeholders are rejected", async () => {
