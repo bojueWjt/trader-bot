@@ -373,11 +373,18 @@ function registerBriefingRoutes(app) {
   app.get("/api/trading/briefings", (req, res) => {
     let db;
     try {
-      const hours = parseInt(req.query.hours) || 24;
+      const hours = req.query.hours === undefined ? 24 : Number(req.query.hours);
+      const limit = req.query.limit === undefined ? 500 : Number(req.query.limit);
+      const params = [hours];
+      let query = "SELECT * FROM briefings WHERE created_at >= datetime('now', '-' || ? || ' hours')";
+      if (req.query.before_created_at !== undefined) {
+        query += " AND (created_at, id) < (?, ?)";
+        params.push(req.query.before_created_at, Number(req.query.before_id));
+      }
+      query += " ORDER BY created_at DESC, id DESC LIMIT ?";
+      params.push(limit);
       db = getTradingDb();
-      const rows = db.prepare(
-        "SELECT * FROM briefings WHERE created_at >= datetime('now', '-' || ? || ' hours') ORDER BY created_at DESC"
-      ).all(hours);
+      const rows = db.prepare(query).all(...params);
       res.json(sanitizeForResponse(rows));
     } catch (err) {
       sendServerError(res, err);
@@ -391,16 +398,22 @@ function registerTelegramMessageRoutes(app) {
   app.get("/api/trading/messages", (req, res) => {
     let db;
     try {
-      const hours = parseInt(req.query.hours) || 24;
+      const hours = req.query.hours === undefined ? 24 : Number(req.query.hours);
+      const limit = req.query.limit === undefined ? 500 : Number(req.query.limit);
       const channel = req.query.channel;
       db = getTradingDb();
-      let query = 'SELECT * FROM telegram_messages WHERE created_at >= datetime("now", "-" || ? || " hours")';
+      let query = "SELECT * FROM telegram_messages WHERE created_at >= datetime('now', '-' || ? || ' hours')";
       const params = [hours];
-      if (channel) {
+      if (channel !== undefined) {
         query += " AND channel_id = ?";
         params.push(channel);
       }
-      query += " ORDER BY created_at DESC LIMIT 500";
+      if (req.query.before_created_at !== undefined) {
+        query += " AND (created_at, id) < (?, ?)";
+        params.push(req.query.before_created_at, Number(req.query.before_id));
+      }
+      query += " ORDER BY created_at DESC, id DESC LIMIT ?";
+      params.push(limit);
       const rows = db.prepare(query).all(...params);
       res.json(sanitizeForResponse(rows));
     } catch (err) {

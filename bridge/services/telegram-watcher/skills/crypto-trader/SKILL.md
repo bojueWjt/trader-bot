@@ -308,22 +308,7 @@ python3 scripts/db_manager.py update-order <order_id> OPEN --binance-id "<binanc
 
 ### Step 7: 设置价格警报
 
-下单完成后，**必须**为每个 TP 目标设置价格警报。watcher 会每 10 秒检查一次价格，到价时自动触发 trader agent 做订单管理。
-
-通过 watcher API 添加警报（`http://127.0.0.1:9100`）：
-
-```bash
-# 做多订单的 TP 警报（方向 = above，价格上穿目标价触发）
-curl -X POST http://127.0.0.1:9100/api/price-alerts -H "Content-Type: application/json" \
-  -d '{"order_id": 5, "symbol": "BTCUSDT", "target_price": 68000, "direction": "above", "alert_type": "tp1", "quantity": 0.004, "note": "第一档止盈 25%"}'
-
-curl -X POST http://127.0.0.1:9100/api/price-alerts -H "Content-Type: application/json" \
-  -d '{"order_id": 5, "symbol": "BTCUSDT", "target_price": 72000, "direction": "above", "alert_type": "tp2", "quantity": 0.004, "note": "第二档止盈 50%"}'
-
-# 做空订单的 TP 警报（方向 = below，价格下穿目标价触发）
-curl -X POST http://127.0.0.1:9100/api/price-alerts -H "Content-Type: application/json" \
-  -d '{"order_id": 6, "symbol": "BTCUSDT", "target_price": 62000, "direction": "below", "alert_type": "tp1", "quantity": 0.01, "note": "第一档止盈 25%"}'
-```
+需要价格提醒时，在已鉴权的客户端创建；watcher 的 `/api/price-alerts` 受身份校验保护，无凭据 curl 会返回 401。不要在命令行参数或 shell 历史中输入 token。提醒到价后只记录触发状态，不会自动通知 trader agent 或执行订单管理。
 
 **direction 规则：**
 - LONG 持仓止盈 → `"above"`（价格涨到目标价触发）
@@ -334,20 +319,7 @@ curl -X POST http://127.0.0.1:9100/api/price-alerts -H "Content-Type: applicatio
 - `entry` — 入场价格提醒
 - `custom` — 自定义价格提醒
 
-**查看当前警报：**
-```bash
-curl http://127.0.0.1:9100/api/price-alerts?triggered=false
-```
-
-**删除警报（订单平仓后清理）：**
-```bash
-# 删除单个
-curl -X DELETE http://127.0.0.1:9100/api/price-alerts/1
-# 删除某订单的所有警报
-curl -X DELETE http://127.0.0.1:9100/api/price-alerts/order/5
-```
-
-**到价触发后：** watcher 自动创建 cron job 通知 trader agent，agent 会收到包含订单 ID、当前价、目标价等信息的消息，按照订单管理流程执行（部分平仓/全部平仓/移动止损等）。触发后该警报自动标记为 triggered，不会重复触发。
+**查看与删除提醒：**使用已鉴权的客户端；直接请求 watcher API 需要相应服务身份。到价后提醒会标记为 `triggered`，不会重复触发。交易操作仍需独立决策与授权。
 
 ## Workflow: 处理订单更新
 

@@ -74,8 +74,8 @@ python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py list-risks
 # 检查 Binance 连接和当前实际权益（需要已配置账号）
 python3 ~/.claude/skills/crypto-trader/scripts/binance_trade.py --db ~/projects/trading-data/trading.db --account main get-equity
 
-# 检查 telegram-watcher
-curl http://localhost:9100/api/status
+# 检查 telegram-watcher 数据库表（/api/status 需要经站点登录，不能无凭据 curl）
+sqlite3 ~/projects/trading-data/trading.db "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('account_configs','channel_routing','symbol_risk_configs') ORDER BY name;"
 ```
 
 ---
@@ -185,7 +185,7 @@ python3 ~/.claude/skills/crypto-trader/scripts/briefing.py --db ~/projects/tradi
 | 问题 | 排查 |
 |---|---|
 | 脚本报 `No module named 'binance'` | `pip3 install python-binance` |
-| 数据库报错 `no such table` | 在 watcher 项目目录执行 `node server.js`，再执行 `curl -f http://localhost:9100/api/status` 检查启动；watcher 启动时由 `ensureTradingTables` 建表。 |
+| 数据库报错 `no such table` | 在 watcher 项目目录启动 `node server.js` 并检查启动日志有无 `[db] Failed to ensure trading tables`；用上文 `sqlite3` 命令核对三张表。`/api/status` 需要经站点登录，无凭据 curl 返回 401。 |
 | Binance 报 `APIError(code=-2015)` | API Key 无效或权限不足 |
 | telegram-watcher 无法启动 | 检查 Node.js 是否安装，`npm install` 是否执行 |
 | 管理界面打不开 | 确认 `node server.js` 正在运行，访问 `http://localhost:9100` |
