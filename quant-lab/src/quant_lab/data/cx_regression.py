@@ -85,9 +85,10 @@ def signature(field, value, *, predicted=False):
         if 'levels' in value:
             return sorted({str(('limit', decimal(v))) for v in value['levels']})
         lo, hi = value.get('lo'), value.get('hi')
-        if lo is None and hi is None:
-            return []
         kind = value.get('kind', 'limit')
+        if lo is None and hi is None:
+            # "现价进场" without a number is still a market-referenced entry, not an absent one.
+            return [str(('market_ref', None))] if kind == 'market_ref' else []
         if lo != hi:
             if kind == 'market_ref':
                 raise ValueError('market_range_requires_review')
@@ -218,7 +219,8 @@ def check(truth_path, prompts_path, responses_path, *, adjudications=None):
         note = response.get('abstain', {}).get('note', '')
         op_eval = gold.get('comparison', {}).get('op_evaluable', 'op' not in gold.get('image_affected_fields', []))
         truth_open = gold['truth_op'] == 'open' and op_eval
-        predicted_open = any(a['op'] == 'open' and a['time_ref'] == 'now' for a in actions)
+        now_opens = [a for a in actions if a['op'] == 'open' and a['time_ref'] == 'now']
+        predicted_open = bool(now_opens)
         discarded = not response or 'abstain' in response or invalid or bool(stats.get('whole_message_discarded'))
         model_uncertain = bool(stats.get('model_uncertain')) or note == 'model_undecidable'
         op = 'open' if predicted_open else (actions[0]['op'] if len(actions) == 1 else 'chatter' if payload and not actions else None)
@@ -231,7 +233,8 @@ def check(truth_path, prompts_path, responses_path, *, adjudications=None):
                 mask = gold.get('comparison', {}).get('fields', {}).get(field, {})
                 if mask.get('evaluable') is False or field in gold.get('image_affected_fields', []):
                     continue
-                correct, pending = compare_field(field, gold, actions)
+                # Gold fields describe the new trade; a sibling analysis/close action must not dilute them.
+                correct, pending = compare_field(field, gold, now_opens or actions)
                 override = overrides.get(identity, {}).get(field)
                 if override is not None:
                     if type(override.get('correct')) is not bool or not override.get('reason'):

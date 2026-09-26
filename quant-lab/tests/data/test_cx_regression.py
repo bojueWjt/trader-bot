@@ -90,3 +90,22 @@ def test_gold_grouping_and_percent_condition_comparison():
     assert regression.compare_field('tps', dict(tps=dict(relative_percent=[10])), [a]) == (True, None)
     a['stop'] = dict(kind='condition', condition='周线收盘跌破均线', price=None)
     assert regression.compare_field('stop', dict(stop=dict(condition='周线收盘跌破均线')), [a]) == (True, None)
+
+
+def test_numberless_market_entry_is_not_absent_entry():
+    a = action(entry=dict(kind='market_ref', price=None, lo=None, hi=None, levels=[]))
+    assert regression.compare_field('entry', dict(entry=dict(kind='market_ref', lo=None, hi=None)), [a]) == (True, None)
+    assert regression.compare_field('entry', dict(entry=None), [a]) == (False, None)
+
+
+def test_open_fields_scored_on_now_open_actions_not_sibling_analysis(tmp_path):
+    truth, prompts, rows = corpus(tmp_path)
+    responses = tmp_path / 'responses'
+    sibling = action(op='analysis', symbol_raw='ETH', side='short')
+    records = [dict(key=rows[0]['key'], response=envelope(action(), sibling)),
+               dict(key=rows[1]['key'], response=envelope(action(op='analysis'), sibling))]
+    responses.write_text(''.join(cx.dumps(r) + '\n' for r in records))
+    items = {r['item_id']: r for r in regression.check(truth, prompts, responses)['items']}
+    assert items['fiction-0']['fields']['symbol']['correct'] and items['fiction-0']['fields']['side']['correct']
+    # Without a predicted open, every action is still scored, so a missed open cannot look field-perfect.
+    assert not items['fiction-1']['fields']['symbol']['correct']
