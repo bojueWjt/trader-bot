@@ -378,6 +378,29 @@ def test_channel_route_query_requires_fresh_when_switch_on(monkeypatch):
     assert expired.value.detail == "snapshot_unavailable"
 
 
+@pytest.mark.parametrize("state", ["cold", "invalid", "unauthorized"])
+def test_channel_route_rejects_non_fresh_latched_states(monkeypatch, state):
+    clock = Clock()
+    responses = [(200, payload())]
+    if state == "invalid":
+        responses.append((200, {}))
+    elif state == "unauthorized":
+        responses.append((403, {}))
+    subject = cache(clock, lambda *_: responses.pop(0))
+    if state != "cold":
+        assert subject.refresh() is True
+        clock.now = 10
+        assert subject.refresh() is False
+    assert subject.state == state
+    monkeypatch.setenv("WATCHER_CONFIG_SNAPSHOT_ENABLED", "1")
+    monkeypatch.setattr(read_api, "require_reader", lambda *_args, **_kwargs: "viewer")
+    monkeypatch.setattr(snapshot, "get_process_cache", lambda: subject)
+    with pytest.raises(HTTPException) as exc:
+        operator_queries.operator_query("channel-route", channel="123")
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "snapshot_unavailable"
+
+
 def test_channel_route_query_keeps_legacy_when_switch_off(monkeypatch, tmp_path):
     write_legacy_db(tmp_path / "watcher-trading.db")
     monkeypatch.setattr(read_api, "_WATCHER_TRADING_DB", str(tmp_path / "watcher-trading.db"))

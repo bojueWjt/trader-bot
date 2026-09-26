@@ -3,11 +3,13 @@ const test = require("node:test");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const net = require("node:net");
+const express = require("express");
 const { Writable } = require("node:stream");
 const { once } = require("node:events");
 const { spawnSync } = require("node:child_process");
 const Database = require("better-sqlite3");
-const { createAuthMiddleware } = require("../lib/auth");
+const { createAuthMiddleware, isNeverAllowed, naIntersects, pathPart, assertPayload, neverAllowed } = require("../lib/auth");
 const { createMediaHandler, parseRange } = require("../lib/media");
 const { buildStatus } = require("../lib/status");
 
@@ -82,13 +84,109 @@ async function mediaRequest(root, filename, method = "GET", range, ifRange) {
   return res;
 }
 
-test("temporary deny list matches YAML and applies to all methods", () => {
-  const yamlPath = path.resolve(__dirname, "../../../../contracts/watcher-gateway-routes.yaml");
-  const result = spawnSync("python3", ["-c", "import json,sys,yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1]))['never_allowed']))", yamlPath], { encoding: "utf8" });
+test("never_allowed is the generated payload object", () => {
+  const { PAYLOAD } = require("../lib/generated/gateway-routes");
+  assert.equal(neverAllowed, PAYLOAD.never_allowed);
+  assert.ok(neverAllowed.length > 0 && neverAllowed.every(row => row.methods === "*"));
+});
+
+test("NA, path_part and intersection fixed probes", () => {
+  for (const pathname of ["/api/config", "/API/CONFIG", "/api/config/", "/api/login", "/api/login/", "/api/login/start", "/api/login/anything/else", "/api/login/qr/status", "/", "//", "/index.html", "/healthz", "/healthz/"]) {
+    assert.equal(isNeverAllowed(pathname), true, pathname);
+  }
+  for (const pathname of ["/api/configs", "/api/loginx", "/api/login-x", "/api/status", "/index.htm", "/healthzz", "/media/1-1.jpg"]) {
+    assert.equal(isNeverAllowed(pathname), false, pathname);
+  }
+  for (const pathname of ["/api/login/{x}", "/{x}", "/api/{x}", "/api/{x}/start"]) {
+    assert.ok(neverAllowed.some((entry) => naIntersects(pathname, entry)), pathname);
+  }
+  for (const pathname of ["/api/status", "/api/trading/{x}", "/media/{filename}", "/api/price-alerts/{alert_id}"]) {
+    assert.ok(!neverAllowed.some((entry) => naIntersects(pathname, entry)), pathname);
+  }
+  for (const [target, expected] of [["/api/config#x", "/api/config"], ["/api/config?a#b", "/api/config"], ["/api/status#/../config", "/api/status"], ["/#x", "/"], ["/healthz?a", "/healthz"], ["/api/status", "/api/status"], ["http://x/api/config", "http://x/api/config"]]) {
+    assert.equal(pathPart(target), expected);
+  }
+  const { PAYLOAD } = require("../lib/generated/gateway-routes");
+  const injected = structuredClone(PAYLOAD);
+  injected.routes.push({ ...injected.routes.find((row) => row.identity === "gateway"), inner_path: "/api/login/x" });
+  assert.throws(() => assertPayload(injected), /intersection/u);
+  assert.throws(() => createAuthMiddleware(TOKENS, injected), /intersection/u);
+  assert.equal(invoke("gateway", "/").res.statusCode, 403);
+  assert.equal(invoke("snapshot", "/api/config").res.statusCode, 403);
+  assert.equal(invoke("gateway", "/api/login%2Fstart").res.statusCode, 403);
+  assert.equal(invoke("gateway", "/api/trading/accounts/%E0%A4%A").res.statusCode, 403);
+  assert.notEqual(invoke("browser", "/").res.statusCode, 403);
+  assert.equal(invoke("browser", "/healthz").passed, true);
+  for (const identity of ["gateway", "snapshot"]) {
+    for (const method of ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]) {
+      for (const pathname of ["/api/config", "/API/CONFIG", "/api/login", "/api/login/anything", "/api/login%2Fstart", "/", "/index.html", "/healthz", "http://x/api/status", "*", "/api\\status", "/api/status\""]) {
+        const result = invoke(identity, pathname, method);
+        assert.equal(result.res.statusCode, 403, `${identity} ${method} ${pathname}`);
+        assert.equal(result.passed, false);
+      }
+      for (const pathname of ["/api/status#x", "//index.html", "/./index.html", "/%2e/index.html", "/%2E/", "/%2Findex.html", "/.%2findex.html", "/x/%2e%2e/index.html"]) {
+        const result = invoke(identity, pathname, method);
+        assert.equal(result.res.statusCode, 404, `${identity} ${method} ${pathname}`);
+        assert.equal(result.passed, false);
+      }
+    }
+  }
+});
+
+test("dump-route-table matches generated identities and registered handlers", () => {
+  const script = path.resolve(__dirname, "../scripts/dump-route-table.js");
+  const result = spawnSync(process.execPath, [script], { encoding: "utf8", timeout: 15000 });
   assert.equal(result.status, 0, result.stderr);
-  const { neverAllowed } = require("../lib/generated/watcher-routes");
-  assert.deepEqual(neverAllowed, JSON.parse(result.stdout).map(({inner_path, methods}) => ({inner_path, methods})));
-  assert.ok(neverAllowed.every(row => row.methods === "*"));
+  const actual = JSON.parse(result.stdout);
+  const { PAYLOAD } = require("../lib/generated/gateway-routes");
+  assert.deepEqual(actual.identity_routes, PAYLOAD.routes.map(({ identity, method, inner_path }) => ({ identity, method, inner_path })));
+  assert.ok(actual.handlers.length > 0);
+  assert.deepEqual(actual.missing, []);
+  assert.deepEqual(actual.unexpected, []);
+});
+
+test("non browser raw targets are rejected before handler and static through real sockets", async () => {
+  const app = express();
+  let handlers = 0;
+  let statics = 0;
+  app.use(createAuthMiddleware(TOKENS));
+  app.use((req, res, next) => { handlers += 1; next(); });
+  app.use((req, res, next) => { statics += 1; next(); });
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const port = server.address().port;
+  async function rawRequest(identity, method, target) {
+    return new Promise((resolve, reject) => {
+      const socket = net.createConnection({ host: "127.0.0.1", port });
+      const chunks = [];
+      socket.on("connect", () => {
+        const token = identity === "gateway" ? TOKENS.WATCHER_GATEWAY_TOKEN : TOKENS.WATCHER_SNAPSHOT_TOKEN;
+        socket.write(`${method} ${target} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ${token}\r\nConnection: close\r\n\r\n`);
+      });
+      socket.on("data", (chunk) => chunks.push(chunk));
+      socket.on("error", reject);
+      socket.on("end", () => resolve(Buffer.concat(chunks).toString()));
+    });
+  }
+  try {
+    const forbidden = ["/api/config#x", "/api/login/start#x", "/healthz#x", "/#x", "/index.html#x", "http://x/api/config", "http://x/api/status", "*", "/api\\config#x", "/api\\status", '/api/status"', "/api/{x}", "//", "/api/login/anything", "/api/login%2Fstart"];
+    const missing = ["/api/status#x", "//index.html", "/./index.html", "///", "/%2e/index.html", "/%2E/", "/%2Findex.html", "/.%2findex.html", "/x/%2e%2e/index.html"];
+    for (const identity of ["gateway", "snapshot"]) {
+      for (const method of ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]) {
+        for (const [target, status] of [...forbidden.map((item) => [item, 403]), ...missing.map((item) => [item, 404])]) {
+          const response = await rawRequest(identity, method, target);
+          assert.match(response, new RegExp(`^HTTP/1\\.1 ${status} `), `${identity} ${method} ${target}`);
+          if (method !== "HEAD") {
+            assert.match(response, status === 403 ? /identity_forbidden/u : /route_not_found/u);
+          }
+          assert.equal(handlers, 0);
+          assert.equal(statics, 0);
+        }
+      }
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test("startup validates all current and configured previous tokens", () => {

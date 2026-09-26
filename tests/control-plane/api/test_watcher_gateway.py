@@ -1,6 +1,7 @@
 """T0-1b/T0-4: gateway contract checks without PostgreSQL or sockets."""
 
 import asyncio
+import copy
 import hashlib
 import importlib.util
 import inspect
@@ -413,6 +414,95 @@ async def test_oversized_integer_query_is_invalid_query(setup):
     assert response.status_code == 400 and response.json()["code"] == "invalid_query"
     assert calls == []
     await client.aclose()
+
+
+def test_never_allowed_fixed_probes_and_intersections():
+    entries = wg.PAYLOAD["never_allowed"]
+    assert all(wg.na(path, entries) for path in ("/api/config", "/API/CONFIG", "/api/config/", "/api/login", "/api/login/anything/else", "/", "//", "/index.html", "/healthz/"))
+    assert all(not wg.na(path, entries) for path in ("/api/configs", "/api/loginx", "/api/status", "/index.htm", "/media/1-1.jpg"))
+    assert all(wg.na_gw(path) for path in ("/v1/watcher/config", "/v1/watcher/login", "/V1/WATCHER/LOGIN/START", "/v1/watcher/", "/v1/watcher/index.html", "/v1/watcher/healthz"))
+    assert all(not wg.na_gw(path) for path in ("/v1/watcher/status", "/v1/watcher/configs", "/v1/watcher/trading/accounts"))
+    assert all(any(wg.na_intersects(path, entry) for entry in entries) for path in ("/api/login/{x}", "/{x}", "/api/{x}", "/api/{x}/start"))
+    assert all(not any(wg.na_intersects(path, entry) for entry in entries) for path in ("/api/status", "/api/trading/{x}", "/media/{filename}", "/api/price-alerts/{alert_id}"))
+    assert wg.path_part("/api/config#x") == "/api/config"
+    assert wg.path_part("/api/config?a#b") == "/api/config"
+
+
+@run_async
+async def test_never_allowed_all_methods_and_scope_targets(setup):
+    client, calls, _, _, app = setup
+    for path in ("/v1/watcher/config", "/v1/watcher/login", "/v1/watcher/login/start", "/V1/WATCHER/LOGIN/START", "/v1/watcher/login/qr/status", "/v1/watcher/", "/v1/watcher/index.html", "/v1/watcher/healthz"):
+        for method in ("GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"):
+            response = await client.request(method, path)
+            assert response.status_code == 404, (method, path)
+            if method != "HEAD":
+                assert response.json()["code"] == "route_not_found"
+            assert "allow" not in response.headers
+    assert calls == []
+    await client.aclose()
+    for path, raw, expected in (
+        ("/v1/watcher/config#x", "/v1/watcher/config#x", "route_not_found"),
+        ("/v1/watcher/healthz#x", "/v1/watcher/healthz#x", "route_not_found"),
+        ("/v1/watcher/status#x", "/v1/watcher/status#x", "route_not_found"),
+        ("/v1/watcher/config", "http://x/v1/watcher/config", "route_not_found"),
+        ("http://x/v1/watcher/status", "http://x/v1/watcher/status", None),
+    ):
+        for method in ("GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"):
+            messages = []
+            async def receive():
+                return {"type": "http.request", "body": b"", "more_body": False}
+            async def send(message):
+                messages.append(message)
+            scope = {"type": "http", "asgi": {"version": "3.0"}, "method": method, "scheme": "http", "root_path": "", "path": path, "raw_path": raw.encode("latin1"), "query_string": b"", "server": ("local", 80), "client": ("local", 1), "http_version": "1.1", "headers": [(b"host", b"local")]}
+            await app(scope, receive, send)
+            body = b"".join(message.get("body", b"") for message in messages if message["type"] == "http.response.body")
+            assert next(message["status"] for message in messages if message["type"] == "http.response.start") == 404
+            if expected and method != "HEAD":
+                assert json.loads(body)["code"] == expected
+    assert calls == []
+
+
+@run_async
+async def test_artifact_disable_four_sources_preserves_existing_routes(caplog, monkeypatch):
+    import read_api
+    original = wg.PAYLOAD
+    upstream_calls = []
+    monkeypatch.setattr(wg.gateway, "_resources", lambda budget: upstream_calls.append(budget))
+    async def probe(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://local") as client:
+            old = await client.get("/v1/accounts/", follow_redirects=False)
+            get = await client.get("/v1/watcher/status")
+            post = await client.post("/v1/watcher/config")
+            return old, get, post
+    baseline, _, _ = await probe(read_api.create_app("operator-query"))
+    variants = []
+    collision = copy.deepcopy(original)
+    collision["routes"].append({**copy.deepcopy(next(row for row in original["routes"] if row["identity"] == "gateway")), "id": "gw.injected.get", "outer_path": "/v1/watcher/login/x", "inner_path": "/api/login/x"})
+    variants.append(collision)
+    empty = copy.deepcopy(original)
+    empty["never_allowed"] = []
+    variants.append(empty)
+    methods = copy.deepcopy(original)
+    methods["never_allowed"][0]["methods"] = ["GET"]
+    variants.append(methods)
+    try:
+        for variant in variants:
+            assert wg.load_route_artifact(variant) is False
+            old, get, post = await probe(read_api.create_app("operator-query"))
+            assert (old.status_code, old.content) == (baseline.status_code, baseline.content)
+            for response in (get, post):
+                assert response.status_code == 503
+                assert set(response.json()) == {"code", "message", "request_id"}
+                assert response.json()["code"] == "gateway_disabled"
+        assert wg.load_route_artifact(loader=lambda _: (_ for _ in ()).throw(ImportError("fixture"))) is False
+        old, get, post = await probe(read_api.create_app("operator-query"))
+        assert (old.status_code, old.content) == (baseline.status_code, baseline.content)
+        assert get.status_code == post.status_code == 503
+        assert "gateway_disabled" == get.json()["code"] == post.json()["code"]
+        assert upstream_calls == []
+        assert all(token not in caplog.text for token in FAKE.values())
+    finally:
+        assert wg.load_route_artifact(original)
 
 
 async def assert_h11_response(app, path, headers):

@@ -15,7 +15,8 @@ SOURCE = ROOT / "contracts/watcher-gateway-routes.yaml"
 PYTHON = ROOT / "services/control-plane/api/generated/watcher_gateway_routes.py"
 JAVASCRIPT = ROOT / "bridge/services/telegram-watcher/lib/generated/gateway-routes.js"
 CADDY = ROOT / "contracts/generated/caddy-watcher-gateway-paths.txt"
-OUTPUTS = (PYTHON, JAVASCRIPT, CADDY)
+CADDY_SNIPPET = ROOT / "contracts/generated/caddy-watcher-gateway.caddy"
+OUTPUTS = (PYTHON, JAVASCRIPT, CADDY, CADDY_SNIPPET)
 PHASES = ("P0", "P1", "P2", "P3")
 TOP_KEYS = set("schema_version contract_version frozen_at amended_at source_plan paths roles identities actor_headers regex_dialect secret_fields secret_key_pattern budgets path_params query_params body_fields response_headers media_request_headers invariants never_allowed gateway_excluded routes".split())
 ROW_KEYS = set("id phase identity method outer_path inner_path roles query body response budget write".split())
@@ -83,6 +84,35 @@ def _path_matches(template, path):
     return re.fullmatch("/".join(parts), path) is not None
 
 
+def _ascii_lower(value):
+    return re.sub(r"[A-Z]", lambda match: match.group().lower(), value)
+
+
+def _na_intersects(template, excluded):
+    template_parts = template[1:].split("/")
+    denied = excluded["inner_path"]
+    wildcard = denied.endswith("/*")
+    denied_parts = (denied[:-2] if wildcard else denied)[1:].split("/")
+    if len(template_parts) < len(denied_parts) or (not wildcard and len(template_parts) != len(denied_parts)):
+        return False
+    for actual, expected in zip(template_parts, denied_parts):
+        parameter = re.fullmatch(r"\{[a-z][a-z0-9_]*\}", actual)
+        if parameter and expected:
+            continue
+        if _ascii_lower(actual) != _ascii_lower(expected):
+            return False
+    return True
+
+
+def _matcher_name(outer, prefix):
+    parts = outer[len(prefix) + 1:].split("/")
+    return "wgw_r_" + "_".join(part.strip("{}").replace("-", "_") for part in parts)
+
+
+def _caddy_regex(template):
+    return "^" + "/".join("[^/]+" if part.startswith("{") else part for part in template.split("/")) + "$"
+
+
 def _patterns(data):
     found = []
     for item in data["path_params"].values():
@@ -144,6 +174,28 @@ def validate(data):
     configured_secrets = set(data["secret_fields"])
     _check(SECRET_FIELDS <= configured_secrets, 10, "secret_fields baseline")
     secret = re.compile(data["secret_key_pattern"]["pattern"], re.I if "i" in data["secret_key_pattern"]["flags"] else 0)
+    def is_secret_key(key):
+        return not isinstance(key, str) or not key.isascii() or bool(secret.search(key))
+    denied = data["never_allowed"]
+    _check(isinstance(denied, list) and bool(denied), 21, "never_allowed empty")
+    denied_paths = set()
+    for entry in denied:
+        _check(isinstance(entry, dict) and set(entry) == {"inner_path", "methods", "reason"}, 21, "never_allowed shape")
+        path = entry["inner_path"]
+        valid_path = isinstance(path, str) and (path == "/" or re.fullmatch(r"/(?:[A-Za-z0-9._-]+/)*(?:[A-Za-z0-9._-]+|\*)", path))
+        _check(valid_path and path not in denied_paths, 21, "never_allowed path")
+        _check(isinstance(entry["reason"], str) and bool(entry["reason"]), 21, "never_allowed reason")
+        _check(entry["methods"] == "*", 18, "never_allowed methods")
+        denied_paths.add(path)
+    for definition in (*data["body_fields"].values(), *data["query_params"].values()):
+        if "gateway_enum" in definition:
+            enum = definition.get("enum")
+            subset = definition["gateway_enum"]
+            _check(isinstance(subset, list) and bool(subset) and isinstance(enum, list) and all(item in enum for item in subset), 11, "gateway_enum subset")
+    prefix_paths = data["paths"]
+    for key in ("caddy_external_prefix", "app_outer_prefix"):
+        _check(bool(re.fullmatch(r"/(?:[a-z0-9-]+/)*[a-z0-9-]+", prefix_paths[key])), 22, key)
+    matcher_names = set()
     ids, inner_keys, outer_keys = set(), set(), set()
     snapshots = []
     by_identity = set()
@@ -172,7 +224,11 @@ def validate(data):
             _check(set(row["roles"]) == set(data["roles"]["all_readers"]) if method in {"GET", "HEAD"} else row["roles"] == data["roles"]["writer"], 9, row["id"])
             _check(configured_secrets <= set(row["body"]["deny"]), 10, row["id"])
             _check(not (set(row["body"]["allow"]) & configured_secrets), 10, row["id"])
-            _check(not any(secret.search(k) for k in row["body"]["allow"] + row["query"]), 10, row["id"])
+            _check(not any(is_secret_key(k) for k in row["body"]["allow"] + row["query"]), 10, row["id"])
+            suffix = outer[len(prefix_path) + 1:]
+            for segment in suffix.split("/"):
+                _check(bool(re.fullmatch(r"[a-z0-9-]+|\{[a-z][a-z0-9_]*\}", segment)), 22, row["id"])
+            matcher_names.add(_matcher_name(outer, prefix_path))
             _check(row["budget"] == ("media" if path.startswith("/media/") else "config"), 14, row["id"])
             _check(row["response"]["mask"] == [], 16, row["id"])
         else:
@@ -215,16 +271,22 @@ def validate(data):
     _check(by_identity == {"gateway", "snapshot", "browser"}, 4, "missing identity")
     _check(len(snapshots) == 1 and snapshots[0]["method"] == "GET" and snapshots[0]["inner_path"] == "/api/trading/config-snapshot", 17, "snapshot count/path")
     _check(snapshots[0]["response"]["fields"] == SNAPSHOT_FIELDS, 17, "snapshot fields")
-    for excluded in data["never_allowed"]:
-        _check(excluded["methods"] == "*", 18, "never_allowed methods")
+    _check(len(matcher_names) == len({r["outer_path"] for r in rows if r["identity"] == "gateway"}) and "wgw_fallback" not in matcher_names, 22, "matcher names")
+    for excluded in denied:
+        _check(any(_na_intersects(row["inner_path"], excluded) for row in rows if row["identity"] == "browser"), 21, "never_allowed must intersect browser")
     for row in rows:
         if row["identity"] != "gateway":
             continue
-        for excluded in data["never_allowed"]:
-            _check(not _path_matches(excluded["inner_path"], row["inner_path"]), 18, row["id"])
+        for excluded in denied:
+            _check(not _na_intersects(row["inner_path"], excluded), 18, row["id"])
         for excluded in data["gateway_excluded"]:
             _check(not (_path_matches(excluded["inner_path"], row["inner_path"]) and (excluded["methods"] == "*" or row["method"] in excluded["methods"])), 18, row["id"])
     _check({(r["phase"], r["method"], r["outer_path"]) for r in rows if r["identity"] == "gateway"} == EXPECTED, 19, "plan §3 route coverage")
+    ids_by_name = {r["id"]: r for r in rows}
+    _check(data["body_fields"]["source"].get("gateway_enum") == ["v3"] and data["query_params"]["source"].get("gateway_enum") == ["v3"], 23, "source scope")
+    _check(all(ids_by_name["gw.price_alert.delete"]["body"][key] == ["account_id", "position_ref", "environment", "client_ref"] for key in ("allow", "required")), 23, "price alert delete identity")
+    _check({"source", "account_id", "position_ref", "environment", "client_ref"} <= set(ids_by_name["gw.price_alerts.post"]["body"]["required"]), 23, "price alert write identity")
+    _check("symbol" not in ids_by_name["gw.price_alerts.get"]["query"] and all(ids_by_name[key]["phase"] == "P3" for key in ("gw.price_alert.delete", "gw.price_alerts.post", "gw.price_alerts.get")), 23, "price alert phase/query")
     _regex_check(data)
     return len(rows)
 
@@ -232,7 +294,7 @@ def validate(data):
 def payload(data, yaml_sha256, phase_max):
     if phase_max not in PHASES:
         raise ValueError("phase_max must be P0..P3")
-    result = {k: v for k, v in data.items() if k not in {"invariants", "never_allowed", "gateway_excluded"}}
+    result = {k: v for k, v in data.items() if k not in {"invariants", "gateway_excluded"}}
     result["routes"] = sorted((r for r in data["routes"] if r["identity"] != "gateway" or PHASES.index(r["phase"]) <= PHASES.index(phase_max)), key=lambda r: (r["identity"], r["inner_path"], r["method"]))
     result["_meta"] = {"contract_version": data["contract_version"], "schema_version": data["schema_version"], "yaml_sha256": yaml_sha256, "phase_max": phase_max, "generator": "scripts/contracts/gen_watcher_gateway_routes.py"}
     return result
@@ -244,16 +306,24 @@ def _render_caddy(value, yaml_sha256, phase_max):
     for row in value["routes"]:
         if row["identity"] != "gateway":
             continue
-        external = re.sub(r"\{[^{}]+\}", "*", prefix + row["outer_path"])
+        external = prefix + row["outer_path"]
         grouped.setdefault(external, set()).add(row["method"])
-    lines = [
+    common = [
         "# _generated_from contracts/watcher-gateway-routes.yaml",
         f"# _yaml_sha256 {yaml_sha256}",
         f"# _phase_max {phase_max}",
     ]
+    lines = common + ["# _format watcher-gateway-caddy-paths.v2"]
+    snippet = common + ["# _format watcher-gateway-caddy-snippet.v1", "(watcher_gateway_routes) {"]
     for path in sorted(grouped):
-        lines.append(path + " " + " ".join(sorted(grouped[path])))
-    return ("\n".join(lines) + "\n").encode("ascii")
+        regex = _caddy_regex(path)
+        methods = " ".join(sorted(grouped[path]))
+        lines.append(f"{path} {regex} {methods}")
+        name = _matcher_name(path[len(prefix):], value["paths"]["app_outer_prefix"])
+        snippet.extend((f"\t@{name} {{", f"\t\tpath_regexp {regex}", f"\t\tmethod {methods}", "\t}", f"\thandle @{name} {{", "\t\timport watcher_gateway_upstream", "\t}"))
+    fallback = "^(?i:" + prefix + value["paths"]["app_outer_prefix"] + r")(?:[/\n]|$)"
+    snippet.extend(("\t@wgw_fallback {", f"\t\tpath_regexp {fallback}", "\t}", "\thandle @wgw_fallback {", "\t\trespond 404", "\t}", "}"))
+    return ("\n".join(lines) + "\n").encode("ascii"), ("\n".join(snippet) + "\n").encode("ascii")
 
 
 def render(data, yaml_sha256, phase_max):
@@ -295,4 +365,5 @@ deepFreeze(PAYLOAD);
 const SECRET_KEY_REGEX = new RegExp(PAYLOAD.secret_key_pattern.pattern, 'u' + PAYLOAD.secret_key_pattern.flags);
 module.exports = {{ PAYLOAD, PAYLOAD_SHA256, SECRET_KEY_REGEX }};
 '''
-    return {PYTHON: py.encode(), JAVASCRIPT: js.encode(), CADDY: _render_caddy(value, yaml_sha256, phase_max)}
+    caddy_paths, caddy_snippet = _render_caddy(value, yaml_sha256, phase_max)
+    return {PYTHON: py.encode(), JAVASCRIPT: js.encode(), CADDY: caddy_paths, CADDY_SNIPPET: caddy_snippet}

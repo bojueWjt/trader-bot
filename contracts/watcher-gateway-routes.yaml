@@ -6,12 +6,17 @@
 # 以本文件为准，语义（错误码、状态机、事务顺序）以 backend-api.md §9 为准。
 # 生成物（网关路由表、watcher 身份路由表、Caddy 路径清单）只能由本文件生成，禁止手写第二份矩阵。
 # 校验规格见 contracts/backend-api.md §9.14。运行时不解析本文件（R9）：watcher 与控制面只加载 §9.14.3 的已提交生成物。
-# 勘误：WGW-1.0.1（2026-09-26）改动见 backend-api.md §9.16。
+# 勘误：WGW-1.0.1、WGW-1.0.2（均 2026-09-26）改动见 backend-api.md §9.16。
+# WGW-1.0.2：never_allowed 进入代码生成物 payload；Caddy 清单按"恰好一个非空段"生成锚定 path_regexp；
+#            query_params.source 增 gateway_enum；gw.price_alert.delete 的 body 增身份三元组（P3，phase_max 仍为 P2）。
+# WGW-1.0.2 合并前追补（F-09..F-12，版本号不变）：never_allowed 的判定输入为请求目标的路径部分（path_part），
+#            非 browser 身份先拒非 origin 形式与会被 url.parse 改写的字符；Caddy 兜底正则改为 Python/RE2 同义写法；
+#            网关生成物停用态（R11）；O-0 import 位置。本文件只改注释与 invariants，路由行零改动。
 
 schema_version: watcher-gateway-routes.v1
-contract_version: WGW-1.0.1
+contract_version: WGW-1.0.2
 frozen_at: "2026-09-26"
-amended_at: "2026-09-26"          # WGW-1.0.1 勘误日期（backend-api.md §9.16）
+amended_at: "2026-09-26"          # WGW-1.0.2 勘误日期（backend-api.md §9.16）
 source_plan: "docs/plans/2026-09-11-watcher-to-app-migration.md@v0.6"
 
 # ---------------------------------------------------------------------------
@@ -21,6 +26,7 @@ paths:
   # app 请求 = trading.config.v1 的 baseUrl（已以 /m 结尾）+ outer_path；app 代码常量里不得出现 /m（§2.1 P1-18）
   app_outer_prefix: /v1/watcher
   # Caddy 外部路径 = caddy_external_prefix + outer_path；Caddy 只 strip 一次 /m，按本文件逐路径追加，禁止 /m/v1/* 通配
+  # WGW-1.0.2：{param} 在 Caddy 中 = 恰好一个非空段，生成锚定、区分大小写的 path_regexp（[^/]+），不得用 path 匹配器的 *（§9.14.3）
   caddy_external_prefix: /m
   # operator-query 访问 watcher 的固定上游（宿主 127.0.0.1:9090 → 容器 9100）；host 不可由请求改变，不跟随重定向
   watcher_upstream_default: "http://127.0.0.1:9090"
@@ -167,7 +173,7 @@ query_params:
   before_id: {type: integer, min: 1, requires: before_created_at}
   status: {type: string, pattern: '^[A-Z_]{1,32}$'}
   triggered: {type: string, enum: ["true", "false"]}
-  source: {type: string, enum: [watcher, v3]}
+  source: {type: string, enum: [watcher, v3], gateway_enum: [v3]}   # WGW-1.0.2（A-6）：gateway 只能查 v3；watcher 对 gateway 身份始终加 source='v3'
   account_id: {type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'}
   environment: {type: string, enum: [mainnet, testnet]}
   position_ref: {type: string, max_length: 128}
@@ -235,9 +241,16 @@ invariants:
   - "所有 gateway 写行响应带 revision 与 replay"
   - "never_allowed 中的 inner_path 不得被任何 gateway 行映射（与方法无关，R6）；gateway_excluded 中的 (method, inner_path) 不得被任何 gateway 行映射（methods 为 \"*\" 时与方法无关）"
   - "所有 pattern 满足 regex_dialect（S-20）"
+  - "never_allowed 随两份代码生成物下发（payload 全量、原顺序）；watcher 对非 browser 身份、网关在前缀中间件中各自独立拦截，不依赖身份路由表（WGW-1.0.2，§9.14.3）"
+  - "never_allowed 的判定输入是未解码请求目标的路径部分 path_part（截到第一个 ? 或 #）；watcher 对非 browser 身份先拒绝非 origin 形式目标与含 url.parse 改写字符的路径部分（403），网关对 raw path 不以 / 开头或含 # 的已触发请求返回 404；网关生成物加载或加载期断言失败 → 只停用 /v1/watcher/*（503 gateway_disabled，R11）（WGW-1.0.2 追补，§9.2、§9.4、§9.14.3）"
+  - "gateway outer_path 的每段是 [a-z0-9-] 字面段或整段 {name}；Caddy 生成物中 {name} = 恰好一个非空段（[^/]+），不出现 *（WGW-1.0.2，S-22）"
 
 # ---------------------------------------------------------------------------
 # 永不经网关放行（计划 §3 末行，凭据面）。WGW-1.0.1（R6）：与方法无关，methods 恒为 "*"（覆盖所有方法，含将来新增的）。
+# WGW-1.0.2：本清单原样进入 JS 与 Python 生成物的 payload（Caddy 生成物不含）。运行时算法 NA / NA_gw / NA_intersects 见 §9.14.3：
+#   watcher 对 browser 以外的身份在路径规范化与身份路由表之前拒绝（403 identity_forbidden）；网关前缀中间件在路由匹配前拒绝（404）。
+#   两者的输入都是请求目标的路径部分 path_part（截到第一个 ? 或 #，WGW-1.0.2 追补 F-09），再按各自规则解码一次。
+#   条目只能是 "/"，或字面段（[A-Za-z0-9._-]）加可选结尾 "/*"；"/*" 覆盖基础路径本身及其下任意深度；比较不区分 ASCII 大小写（S-21）。
 # ---------------------------------------------------------------------------
 never_allowed:
   - {inner_path: /api/config, methods: "*", reason: "Telegram api id/hash（凭据面）"}
@@ -541,6 +554,7 @@ routes:
     write: {operation: risk.delete, conditional: true, bumps_revision: true, idempotency: transactional}
 
   # ========================= gateway：P3（D8：只记录与展示触发）=========================
+  # WGW-1.0.2：身份作用域语义已定（backend-api.md §9.12.1），但 phase_max 仍为 P2（R13），以下四行当前不注册。
   - id: gw.price_alerts.get
     phase: P3
     identity: gateway
@@ -578,7 +592,8 @@ routes:
     inner_path: /api/price-alerts/{alert_id}
     roles: [risk_admin]
     query: []
-    body: {allow: [client_ref], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: [client_ref]}
+    # WGW-1.0.2（A-6）：按身份限定删除。watcher 只删 id 相符且 source='v3' 且三元组与行内值相等的行，否则 404 not_found（§9.12.1）
+    body: {allow: [account_id, position_ref, environment, client_ref], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: [account_id, position_ref, environment, client_ref]}
     response: {omit: [], mask: [], headers: json}
     budget: config
     write: {operation: price_alert.delete, conditional: false, bumps_revision: false, idempotency: transactional}

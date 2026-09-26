@@ -1,7 +1,6 @@
 const crypto = require("node:crypto");
 const { PAYLOAD } = require("./generated/gateway-routes");
-const { neverAllowed } = require("./generated/watcher-routes");
-const { routes, path_params: pathParams, actor_headers: actorHeaders } = PAYLOAD;
+const { never_allowed: neverAllowed } = PAYLOAD;
 
 // Python str.strip(), including the C0 separators omitted by JavaScript trim().
 function stripToken(value) {
@@ -79,15 +78,17 @@ function regexForPath(template) {
   return new RegExp(`^${escaped.replace(/\\\{([a-z_]+)\\\}/g, "([^/]+)")}$`);
 }
 
-const compiledRoutes = routes.map((route) => ({
-  row: route,
-  identity: route.identity,
-  method: route.method,
-  regex: regexForPath(route.inner_path),
-  parameterNames: [...route.inner_path.matchAll(/\{([a-z_]+)\}/g)].map((match) => match[1]),
-}));
+function compileRoutes(routes) {
+  return routes.map((route) => ({
+    row: route,
+    identity: route.identity,
+    method: route.method,
+    regex: regexForPath(route.inner_path),
+    parameterNames: [...route.inner_path.matchAll(/\{([a-z_]+)\}/g)].map((match) => match[1]),
+  }));
+}
 
-function routeMatches(route, rawPath, identity) {
+function routeMatches(route, rawPath, identity, pathParams) {
   const match = route.regex.exec(rawPath);
   if (!match) {
     return false;
@@ -111,21 +112,79 @@ function routeMatches(route, rawPath, identity) {
   return true;
 }
 
-function isNeverAllowed(pathname) {
-  return neverAllowed.some(({ inner_path: pattern }) => {
+function pathPart(target) {
+  const marker = target.search(/[?#]/u);
+  return marker < 0 ? target : target.slice(0, marker);
+}
+
+function asciiLower(value) {
+  return value.replace(/[A-Z]/gu, (character) => character.toLowerCase());
+}
+
+function isNeverAllowed(pathname, entries = neverAllowed) {
+  const path = asciiLower(pathname);
+  return entries.some(({ inner_path: innerPath }) => {
+    const pattern = asciiLower(innerPath);
     if (pattern.endsWith("/*")) {
-      return pathname.startsWith(pattern.slice(0, -1));
+      const base = pattern.slice(0, -2);
+      return path === base || path.startsWith(base + "/");
     }
-    return pathname === pattern;
+    return path === pattern || path === pattern + "/";
   });
 }
 
-function createAuthMiddleware(env = process.env) {
+function naIntersects(template, entry) {
+  const denied = entry.inner_path;
+  const wildcard = denied.endsWith("/*");
+  const expected = (wildcard ? denied.slice(0, -2) : denied).slice(1).split("/");
+  const actual = template.slice(1).split("/");
+  if (actual.length < expected.length || (!wildcard && actual.length !== expected.length)) {
+    return false;
+  }
+  return expected.every((segment, index) => {
+    const candidate = actual[index];
+    return (/^\{[a-z][a-z0-9_]*\}$/u.test(candidate) && segment !== "") || asciiLower(candidate) === asciiLower(segment);
+  });
+}
+
+function assertPayload(source) {
+  const entries = source.never_allowed;
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error("never_allowed empty");
+  }
+  const seen = new Set();
+  for (const entry of entries) {
+    if (!entry || Array.isArray(entry) || Object.keys(entry).sort().join(",") !== "inner_path,methods,reason" || entry.methods !== "*" || typeof entry.reason !== "string" || !entry.reason || typeof entry.inner_path !== "string") {
+      throw new Error("never_allowed shape");
+    }
+    const denied = entry.inner_path;
+    if (!(/^\/$|^\/(?:[A-Za-z0-9._-]+\/)*(?:[A-Za-z0-9._-]+|\*)$/u.test(denied)) || seen.has(denied)) {
+      throw new Error("never_allowed path");
+    }
+    seen.add(denied);
+    if (!source.routes.some((row) => row.identity === "browser" && naIntersects(row.inner_path, entry))) {
+      throw new Error("never_allowed browser intersection");
+    }
+  }
+  for (const row of source.routes) {
+    if (row.identity === "gateway" && entries.some((entry) => naIntersects(row.inner_path, entry))) {
+      throw new Error("never_allowed gateway intersection");
+    }
+  }
+}
+
+assertPayload(PAYLOAD);
+
+function createAuthMiddleware(env = process.env, source = PAYLOAD) {
+  assertPayload(source);
   const catalog = tokenCatalog(env);
+  const compiledRoutes = compileRoutes(source.routes);
+  const pathParams = source.path_params;
+  const actorHeaders = source.actor_headers;
   const actorPattern = new RegExp(actorHeaders.actor_pattern, "u");
   const fingerprintPattern = new RegExp(actorHeaders.fingerprint_pattern, "u");
 
-  return function watcherAuth(req, res, next) {
+  const watcherAuth = function watcherAuth(req, res, next) {
     const authorization = rawValues(req, "authorization");
     const proxy = rawValues(req, "x-watcher-proxy-auth");
     const actors = rawValues(req, "x-watcher-actor");
@@ -160,14 +219,26 @@ function createAuthMiddleware(env = process.env) {
       return errorResponse(res, null, 401, "unauthenticated", "authentication required");
     }
 
-    const pathname = req.originalUrl.split("?")[0];
-    if (identity !== "browser" && (pathname.includes("%") || pathname.includes("//") || (pathname !== "/" && pathname.endsWith("/")) || pathname.split("/").some((part) => part === "." || part === ".."))) {
-      return errorResponse(res, identity, 404, "route_not_found", "route not found");
+    const target = req.originalUrl;
+    const pathname = pathPart(target);
+    if (identity !== "browser") {
+      if (!target.startsWith("/") || /[^\x21-\x7E]|[\\"'<>^`{|}]/u.test(pathname)) {
+        return errorResponse(res, identity, 403, "identity_forbidden", "identity forbidden");
+      }
+      let denied = isNeverAllowed(pathname, source.never_allowed);
+      try {
+        denied = denied || isNeverAllowed(decodeURIComponent(pathname), source.never_allowed);
+      } catch {
+        denied = true;
+      }
+      if (denied) {
+        return errorResponse(res, identity, 403, "identity_forbidden", "identity forbidden");
+      }
+      if (target.includes("#") || pathname.includes("%") || pathname.includes("//") || pathname.endsWith("/") || pathname.split("/").some((part) => part === "." || part === "..")) {
+        return errorResponse(res, identity, 404, "route_not_found", "route not found");
+      }
     }
-    if (identity === "gateway" && isNeverAllowed(pathname)) {
-      return errorResponse(res, identity, 403, "identity_forbidden", "identity forbidden");
-    }
-    const matches = compiledRoutes.filter((route) => routeMatches(route, pathname, route.identity));
+    const matches = compiledRoutes.filter((route) => routeMatches(route, pathname, route.identity, pathParams));
     const own = matches.filter((route) => route.identity === identity);
     if (own.length === 0) {
       if (matches.length > 0) {
@@ -206,6 +277,11 @@ function createAuthMiddleware(env = process.env) {
     Object.defineProperty(req, "watcherRoute", { value: selected.row, writable: false, configurable: false, enumerable: true });
     return next();
   };
+  Object.defineProperty(watcherAuth, "routeTable", {
+    value: Object.freeze(compiledRoutes.map(({ row }) => row)),
+    enumerable: false,
+  });
+  return watcherAuth;
 }
 
-module.exports = { createAuthMiddleware, tokenCatalog, matchesToken, isNeverAllowed, stripToken };
+module.exports = { createAuthMiddleware, tokenCatalog, matchesToken, isNeverAllowed, naIntersects, pathPart, assertPayload, neverAllowed, stripToken };
