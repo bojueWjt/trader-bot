@@ -13,8 +13,8 @@
 | M3 平板基础设施 | T-0 | done（代码合入 91f6c8e；真机与键盘避让待 Tester） |
 | M4 网关 | C-1 | done（cb4c5c8）；O-0 门禁须跑 P2 断言测试并核对 phase_max=P2 |
 | M5 对照与发行准备 | O-0（非生产部分 + Release 清单） | in_progress（Caddy 清单 done be76e92；三路对照工具与 Release 清单待派） |
-| M6 app 接入 | A-0 | in_progress（代码先行，联调待 O-0） |
-| M7 信号 Tab | A-1 | pending |
+| M6 app 接入 | A-0 | done（142162e + 加固 c59b666）；联调待 O-0 |
+| M7 信号 Tab | A-1 | in_progress |
 | M8 交易配置 | A-2 | pending |
 | M9 价格提醒 | A-3 | pending |
 | M10 存量页平板改造 | A-T | pending（开工先收紧守卫：见 wac-006 备注） |
@@ -52,8 +52,10 @@
 | wac-026 | [Executor] 契约 §9.14 第三份生成物：Caddy 路径清单（O-0 用） | trader-bot | `scripts/contracts/` 与清单产物 | 契约 §9.14 | 生成器校验 | wac-025 | watcher-app-crew-backend-executor（Codex） | done | 745bc70 → 集成 be76e92 |
 | wac-027 | [Executor] A-0 watcherApi 服务层与设置页只读采集状态行 | alert-personal | `apps/attention-android/src/services/`、`src/screens/SettingsScreen.tsx`、`__tests__/` | 计划 §2.1 app 侧、§4.3 T0-5；契约 §9.5/§9.6 结构码 | typecheck/lint/test:android | wac-025 | watcher-app-crew-app-executor（Codex gpt-6-sol medium） | done | 354c5aa → 集成 142162e |
 | wac-028 | [Reviewer] A-0 | alert-personal | — | 协议红线 2、7、8 | 同上 | wac-027 | watcher-app-crew-reviewer（Opus 子代理） | done | PASS，0 🔴 7 🟡；33/273；报告 reviews/wac-027.md；🟡 由 wac-029 处理 |
-| wac-029 | [Executor] A-0 加固：R14 isConnectionInvalid、非 JSON 503 归类、同 client_ref 规则多形状测试、禁写真实拦截断言、设置页无 TextInput 与出错渲染、token 不入错误对象、media() 客户端超时；补 wac-028 列出的存活变异测试 | alert-personal | `src/services/watcherApi.ts`、`src/screens/SettingsScreen.tsx`、`__tests__/` | reviews/wac-027.md 🟡1–7；R14 | typecheck/lint/test:android | wac-028 | watcher-app-crew-app-executor（Codex gpt-6-sol medium） | review | 1ea3e75、5b141e5；自报 33 套件 301 用例全过 |
-| wac-030 | [Reviewer] A-0 加固 | alert-personal | — | 协议红线 2、7 | 同上 | wac-029 | watcher-app-crew-reviewer（Opus 子代理） | in_progress | 2026-09-26 派发 |
+| wac-029 | [Executor] A-0 加固：R14 isConnectionInvalid、非 JSON 503 归类、同 client_ref 规则多形状测试、禁写真实拦截断言、设置页无 TextInput 与出错渲染、token 不入错误对象、media() 客户端超时；补 wac-028 列出的存活变异测试 | alert-personal | `src/services/watcherApi.ts`、`src/screens/SettingsScreen.tsx`、`__tests__/` | reviews/wac-027.md 🟡1–7；R14 | typecheck/lint/test:android | wac-028 | watcher-app-crew-app-executor（Codex gpt-6-sol medium） | done | 1ea3e75、5b141e5 → 集成 c59b666 |
+| wac-030 | [Reviewer] A-0 加固 | alert-personal | — | 协议红线 2、7 | 同上 | wac-029 | watcher-app-crew-reviewer（Opus 子代理） | done | PASS，0 🔴；33/301；变异上轮 10 个全抓，新 23 抓 20；A-1 媒体约束 5 条；报告 reviews/wac-029.md |
 | wac-031 | [Reviewer] Caddy 路径清单 | trader-bot | — | 协议红线 5、7 | 生成器校验 | wac-026 | watcher-app-crew-reviewer（Opus 子代理） | done | PASS，0 🔴；全量 821/5；变异 18 抓 17（1 等价）；Caddy `*` 为前缀匹配会跨段，O-0 用锚定 path_regexp 并列入 WGW-1.0.2；报告 reviews/wac-026.md |
 | wac-032 | [Release] O-0 发行准备草案：jp-24 现场核对清单、部署/回滚/凭据轮换/快照切换 runbook、待用户授权清单（只写文档与脚本草案，不连生产） | trader-bot | `docs/agent-team/release/`、`scripts/` 下脚本草案 | 计划 §4.1、§9 O-0；各审查报告中的 O-0 事项 | bash -n、dry-run | wac-031 | watcher-app-crew-release-steward（Opus 子代理） | in_progress | |
-| wac-033 | [Executor] C-0 测试补强（低优先级）：4 MiB 上限精确值断言、禁用加冲突的判定顺序、真实提交后持久化证据回归 | trader-bot | `tests/control-plane/` | reviews/wac-022.md 🟡A–C | control-plane pytest | wac-023 | watcher-app-crew-backend-executor（Codex） | pending | 打开快照开关前完成即可 |
+| wac-033 | [Executor] C-0 测试补强（低优先级）：4 MiB 上限精确值断言、禁用加冲突的判定顺序、真实提交后持久化证据回归 | trader-bot | `tests/control-plane/` | reviews/wac-022.md 🟡A–C | control-plane pytest | wac-023 | watcher-app-crew-backend-executor（Codex gpt-6-sol medium） | in_progress | 打开快照开关前完成即可 |
+| wac-034 | [Executor] A-1 信号 Tab：状态条三态、消息流（DB 读模型、分页、UTC）、媒体（取消、body 时限、并发 2、去重、占位）、简报、站点订单只读、断开/重连状态机；compact 与 expanded 双栏；补 wac-030 🟡N14/N15/N19 | alert-personal | `src/screens/` 新屏幕、`src/navigation/RootTabs.tsx`、`src/services/watcherApi.ts`、`__tests__/` | 计划 §5、§7A.1 信号 Tab、T1-1..T1-5、T7A-6；reviews/wac-029.md 的 A-1 约束 | typecheck/lint/test:android | wac-030 | watcher-app-crew-app-executor（Codex gpt-6-sol medium） | in_progress | 不依赖 W-0b |
+| wac-035 | [Reviewer] A-1 信号 Tab | alert-personal | — | 协议红线 2、3、7、8 | 同上 | wac-034 | watcher-app-crew-reviewer（Opus 子代理） | pending | |
