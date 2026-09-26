@@ -1,0 +1,124 @@
+# _generated_from contracts/watcher-gateway-routes.yaml
+# _yaml_sha256 85eb4c88a629acd2555b51dff9306581dc2f25b224ba9ef4992035cf242f6082
+# _phase_max P2
+# _format watcher-gateway-caddy-snippet.v1
+(watcher_gateway_routes) {
+	@wgw_r_dialogs {
+		path_regexp ^/m/v1/watcher/dialogs$
+		method GET
+	}
+	handle @wgw_r_dialogs {
+		import watcher_gateway_upstream
+	}
+	@wgw_r_disconnect {
+		path_regexp ^/m/v1/watcher/disconnect$
+		method POST
+	}
+	handle @wgw_r_disconnect {
+		import watcher_gateway_upstream
+	}
+	@wgw_r_groups {
+		path_regexp ^/m/v1/watcher/groups$
+		method POST
+	}
+	handle @wgw_r_groups {
+		import watcher_gateway_upstream
+	}
+	@wgw_r_media_filename {
+		path_regexp ^/m/v1/watcher/media/[^/]+$
+		method GET HEAD
+	}
+	handle @wgw_r_media_filename {
+		import watcher_gateway_upstream
+	}
+	@wgw_r_reconnect {
+		path_regexp ^/m/v1/watcher/reconnect$
+		method POST
+	}
+	handle @wgw_r_reconnect {
+		import watcher_gateway_upstream
+	}
+	@wgw_r_status {
+		path_regexp ^/m/v1/watcher/status$
+		method GET
+	}
+	handle @wgw_r_status {
+		import watcher_gateway_upstream
+	}
+	@wgw_r_trading_accounts {
+		path_regexp ^/m/v1/watcher/trading/accounts$
+		method GET
+	}
+	handle @wgw_r_trading_accounts {
+		import watcher_gateway_upstream
+	}
+	@wgw_r_trading_accounts_account_id {
+		path_regexp ^/m/v1/watcher/trading/accounts/[^/]+$
+		method DELETE PUT
+	}
+	handle @wgw_r_trading_accounts_account_id {
+		import watcher_gateway_upstream
+	}
+	@wgw_r_trading_briefings {
+		path_regexp ^/m/v1/watcher/trading/briefings$
+		method GET
+	}
+	handle @wgw_r_trading_briefings {
+		import watcher_gateway_upstream
+	}
+	@wgw_r_trading_channels {
+		path_regexp ^/m/v1/watcher/trading/channels$
+		method GET POST
+	}
+	handle @wgw_r_trading_channels {
+		import watcher_gateway_upstream
+	}
+	@wgw_r_trading_channels_channel_id {
+		path_regexp ^/m/v1/watcher/trading/channels/[^/]+$
+		method DELETE
+	}
+	handle @wgw_r_trading_channels_channel_id {
+		import watcher_gateway_upstream
+	}
+	@wgw_r_trading_messages {
+		path_regexp ^/m/v1/watcher/trading/messages$
+		method GET
+	}
+	handle @wgw_r_trading_messages {
+		import watcher_gateway_upstream
+	}
+	@wgw_r_trading_orders {
+		path_regexp ^/m/v1/watcher/trading/orders$
+		method GET
+	}
+	handle @wgw_r_trading_orders {
+		import watcher_gateway_upstream
+	}
+	@wgw_r_trading_orders_active {
+		path_regexp ^/m/v1/watcher/trading/orders/active$
+		method GET
+	}
+	handle @wgw_r_trading_orders_active {
+		import watcher_gateway_upstream
+	}
+	@wgw_r_trading_risks {
+		path_regexp ^/m/v1/watcher/trading/risks$
+		method GET POST
+	}
+	handle @wgw_r_trading_risks {
+		import watcher_gateway_upstream
+	}
+	@wgw_r_trading_risks_symbol {
+		path_regexp ^/m/v1/watcher/trading/risks/[^/]+$
+		method DELETE
+	}
+	handle @wgw_r_trading_risks_symbol {
+		import watcher_gateway_upstream
+	}
+	@wgw_fallback {
+		path_regexp ^(?i:/m/v1/watcher)(?:[/\n]|$)
+	}
+	handle @wgw_fallback {
+		respond 404
+	}
+}

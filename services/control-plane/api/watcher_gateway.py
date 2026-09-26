@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib
 import json
 import logging
 import math
@@ -14,18 +15,14 @@ from uuid import uuid4
 import httpx
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.routing import compile_path
 
 from security.permissions import AuthRequired, PermissionDenied
 from security.principal import PrincipalKind, TokenCatalogError, configured_token_values, resolve_principal
 
-try:
-    from generated.watcher_gateway_routes import PAYLOAD, SECRET_KEY_REGEX
-    _LOAD_ERROR = None
-except Exception as exc:  # missing or corrupt generated module disables only this gateway
-    PAYLOAD = None
-    SECRET_KEY_REGEX = None
-    _LOAD_ERROR = exc
-    logging.getLogger(__name__).error("watcher gateway route artifact unavailable: %s", type(exc).__name__)
+PAYLOAD = None
+SECRET_KEY_REGEX = None
+_LOAD_ERROR = None
 
 LOG = logging.getLogger(__name__)
 PREFIX = "/v1/watcher"
@@ -76,6 +73,103 @@ def _match_template(template, path, patterns):
     return re.fullmatch(source, path) is not None
 
 
+def path_part(target):
+    return re.split(r"[?#]", target, maxsplit=1)[0]
+
+
+def ascii_lower(value):
+    return re.sub(r"[A-Z]", lambda match: match.group().lower(), value)
+
+
+def na(path, entries):
+    candidate = ascii_lower(path)
+    for entry in entries:
+        denied = ascii_lower(entry["inner_path"])
+        if denied.endswith("/*"):
+            base = denied[:-2]
+            if candidate == base or candidate.startswith(base + "/"):
+                return True
+        elif candidate == denied or candidate == denied + "/":
+            return True
+    return False
+
+
+def na_intersects(template, entry):
+    denied = entry["inner_path"]
+    wildcard = denied.endswith("/*")
+    expected = (denied[:-2] if wildcard else denied)[1:].split("/")
+    actual = template[1:].split("/")
+    if len(actual) < len(expected) or (not wildcard and len(actual) != len(expected)):
+        return False
+    for candidate, segment in zip(actual, expected):
+        if re.fullmatch(r"\{[a-z][a-z0-9_]*\}", candidate) and segment:
+            continue
+        if ascii_lower(candidate) != ascii_lower(segment):
+            return False
+    return True
+
+
+def na_gw(path, source=None):
+    source = PAYLOAD if source is None else source
+    prefix = source["paths"]["app_outer_prefix"]
+    entries = []
+    for entry in source["never_allowed"]:
+        inner = entry["inner_path"]
+        outer = prefix + (inner[4:] if inner.startswith("/api/") else inner)
+        entries.append({"inner_path": outer})
+    return na(path, entries)
+
+
+def _validate_artifact(source):
+    entries = source["never_allowed"]
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("never_allowed_empty")
+    seen = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"inner_path", "methods", "reason"} or entry["methods"] != "*" or not isinstance(entry["reason"], str) or not entry["reason"]:
+            raise ValueError("never_allowed_shape")
+        denied = entry["inner_path"]
+        if not isinstance(denied, str) or not re.fullmatch(r"/|/(?:[A-Za-z0-9._-]+/)*(?:[A-Za-z0-9._-]+|\*)", denied) or denied in seen:
+            raise ValueError("never_allowed_path")
+        seen.add(denied)
+        if not any(na_intersects(row["inner_path"], entry) for row in source["routes"] if row["identity"] == "browser"):
+            raise ValueError("never_allowed_browser_intersection")
+    for row in source["routes"]:
+        if row["identity"] != "gateway":
+            continue
+        if any(na_intersects(row["inner_path"], entry) for entry in entries):
+            raise ValueError("never_allowed_gateway_intersection")
+        if row["budget"] not in source["budgets"]:
+            raise ValueError("route_budget")
+        _match_template(row["outer_path"], row["outer_path"], source["path_params"])
+        compile_path(row["outer_path"])
+
+
+def load_route_artifact(source=None, loader=None):
+    """Reentrant startup loader; a failed artifact disables only watcher routes."""
+    global PAYLOAD, SECRET_KEY_REGEX, _LOAD_ERROR
+    try:
+        if source is None:
+            module = (loader or importlib.import_module)("generated.watcher_gateway_routes")
+            source = module.PAYLOAD
+            secret_regex = module.SECRET_KEY_REGEX
+        else:
+            flags = re.I if "i" in source["secret_key_pattern"]["flags"] else 0
+            secret_regex = re.compile(source["secret_key_pattern"]["pattern"], flags)
+        _validate_artifact(source)
+        PAYLOAD, SECRET_KEY_REGEX, _LOAD_ERROR = source, secret_regex, None
+        return True
+    except Exception as exc:
+        PAYLOAD, SECRET_KEY_REGEX, _LOAD_ERROR = None, None, type(exc).__name__
+        checks = {"never_allowed_empty", "never_allowed_shape", "never_allowed_path", "never_allowed_browser_intersection", "never_allowed_gateway_intersection", "route_budget"}
+        check = str(exc) if isinstance(exc, ValueError) and str(exc) in checks else "artifact_load"
+        LOG.error("watcher gateway artifact disabled: %s %s", type(exc).__name__, check)
+        return False
+
+
+load_route_artifact()
+
+
 class GatewayPathMiddleware:
     """G1: raw-path gate scoped to the watcher prefix only."""
 
@@ -89,19 +183,24 @@ class GatewayPathMiddleware:
             return
         decoded = scope.get("path", "")
         raw = scope.get("raw_path", decoded.encode("latin1", "ignore")).decode("latin1")
+        decoded_part, raw_part = path_part(decoded), path_part(raw)
         def triggered(path):
             lower = path.lower()
             return lower == PREFIX or lower.startswith(PREFIX + "/") or lower.startswith(PREFIX + "%")
-        if not (triggered(decoded) or triggered(raw)):
+        if not (triggered(decoded_part) or triggered(raw_part)):
             await self.app(scope, receive, send)
             return
         request_id = uuid4().hex
-        if PAYLOAD is None:
+        if _LOAD_ERROR is not None or PAYLOAD is None:
             response = _error(503, "gateway_disabled", request_id)
             await response(scope, receive, send)
             return
-        invalid = "%" in raw or "//" in raw or raw.endswith("/") or any(p in (".", "..") for p in raw.split("/"))
-        matches = [] if invalid else [r for r in self.routes if _match_template(r["outer_path"], raw, PAYLOAD["path_params"])]
+        invalid = (not raw.startswith("/") or "#" in raw or "%" in raw_part or "//" in raw_part or raw_part.endswith("/") or any(p in (".", "..") for p in raw_part.split("/")))
+        if invalid or na_gw(decoded_part) or na_gw(raw_part):
+            response = _error(404, "route_not_found", request_id)
+            await response(scope, receive, send)
+            return
+        matches = [r for r in self.routes if _match_template(r["outer_path"], raw_part, PAYLOAD["path_params"])]
         if not matches:
             response = _error(404, "route_not_found", request_id)
             await response(scope, receive, send)
@@ -352,6 +451,8 @@ class Gateway:
             path = row["inner_path"]
             for key, value in request.path_params.items():
                 path = path.replace("{" + key + "}", value)
+            if na(path, PAYLOAD["never_allowed"]):
+                return _error(404, "route_not_found", request_id)
             req = httpx.Request(row["method"], upstream_url + path, params=query, content=content, headers=headers)
             timeout = PAYLOAD["budgets"][budget]["timeouts_s"]["total"]
             deadline = asyncio.get_running_loop().time() + timeout
@@ -483,17 +584,22 @@ gateway = Gateway()
 
 
 def register_routes(app):
+    global PAYLOAD, SECRET_KEY_REGEX, _LOAD_ERROR
     if PAYLOAD is None:
         return
-    for row in PAYLOAD["routes"]:
-        if row["identity"] != "gateway":
-            continue
-        def make_endpoint(route):
-            async def endpoint(request: Request):
-                return await gateway.handle(request, route)
-            return endpoint
-        endpoint = make_endpoint(row)
-        app.add_api_route(row["outer_path"], endpoint, methods=[row["method"]], name="watcher_gateway__" + row["id"].replace(".", "_"))
+    try:
+        for row in PAYLOAD["routes"]:
+            if row["identity"] != "gateway":
+                continue
+            def make_endpoint(route):
+                async def endpoint(request: Request):
+                    return await gateway.handle(request, route)
+                return endpoint
+            endpoint = make_endpoint(row)
+            app.add_api_route(row["outer_path"], endpoint, methods=[row["method"]], name="watcher_gateway__" + row["id"].replace(".", "_"))
+    except Exception as exc:
+        PAYLOAD, SECRET_KEY_REGEX, _LOAD_ERROR = None, None, type(exc).__name__
+        LOG.error("watcher gateway artifact disabled: %s route_registration", type(exc).__name__)
 
 
 def install_middleware(app):

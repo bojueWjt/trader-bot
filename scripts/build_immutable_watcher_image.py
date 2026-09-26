@@ -38,7 +38,6 @@ WATCHER_RUNTIME_RELATIVE_PATHS = (
     "lib/db-path.js",
     "lib/env-flags.js",
     "lib/generated/gateway-routes.js",
-    "lib/generated/watcher-routes.js",
     "lib/hermes-cron.js",
     "lib/media.js",
     "lib/reentrant-write.js",

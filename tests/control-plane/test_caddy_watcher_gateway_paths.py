@@ -13,34 +13,35 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 YAML = ROOT / "contracts/watcher-gateway-routes.yaml"
 CADDY = ROOT / "contracts/generated/caddy-watcher-gateway-paths.txt"
+SNIPPET = ROOT / "contracts/generated/caddy-watcher-gateway.caddy"
 PYTHON = ROOT / "services/control-plane/api/generated/watcher_gateway_routes.py"
 JAVASCRIPT = ROOT / "bridge/services/telegram-watcher/lib/generated/gateway-routes.js"
 CHECK = ROOT / "scripts/contracts/check_watcher_gateway_routes.py"
 LIBRARY = ROOT / "scripts/contracts/watcher_gateway_routes_lib.py"
-OUTPUTS = (PYTHON, JAVASCRIPT, CADDY)
+OUTPUTS = (PYTHON, JAVASCRIPT, CADDY, SNIPPET)
 
 # Independent of YAML (plan §3 / backend-api.md §9.14.2 P0–P2).
 EXPECTED_P2_LINES = (
-    "/m/v1/watcher/dialogs GET",
-    "/m/v1/watcher/disconnect POST",
-    "/m/v1/watcher/groups POST",
-    "/m/v1/watcher/media/* GET HEAD",
-    "/m/v1/watcher/reconnect POST",
-    "/m/v1/watcher/status GET",
-    "/m/v1/watcher/trading/accounts GET",
-    "/m/v1/watcher/trading/accounts/* DELETE PUT",
-    "/m/v1/watcher/trading/briefings GET",
-    "/m/v1/watcher/trading/channels GET POST",
-    "/m/v1/watcher/trading/channels/* DELETE",
-    "/m/v1/watcher/trading/messages GET",
-    "/m/v1/watcher/trading/orders GET",
-    "/m/v1/watcher/trading/orders/active GET",
-    "/m/v1/watcher/trading/risks GET POST",
-    "/m/v1/watcher/trading/risks/* DELETE",
+    "/m/v1/watcher/dialogs ^/m/v1/watcher/dialogs$ GET",
+    "/m/v1/watcher/disconnect ^/m/v1/watcher/disconnect$ POST",
+    "/m/v1/watcher/groups ^/m/v1/watcher/groups$ POST",
+    "/m/v1/watcher/media/{filename} ^/m/v1/watcher/media/[^/]+$ GET HEAD",
+    "/m/v1/watcher/reconnect ^/m/v1/watcher/reconnect$ POST",
+    "/m/v1/watcher/status ^/m/v1/watcher/status$ GET",
+    "/m/v1/watcher/trading/accounts ^/m/v1/watcher/trading/accounts$ GET",
+    "/m/v1/watcher/trading/accounts/{account_id} ^/m/v1/watcher/trading/accounts/[^/]+$ DELETE PUT",
+    "/m/v1/watcher/trading/briefings ^/m/v1/watcher/trading/briefings$ GET",
+    "/m/v1/watcher/trading/channels ^/m/v1/watcher/trading/channels$ GET POST",
+    "/m/v1/watcher/trading/channels/{channel_id} ^/m/v1/watcher/trading/channels/[^/]+$ DELETE",
+    "/m/v1/watcher/trading/messages ^/m/v1/watcher/trading/messages$ GET",
+    "/m/v1/watcher/trading/orders ^/m/v1/watcher/trading/orders$ GET",
+    "/m/v1/watcher/trading/orders/active ^/m/v1/watcher/trading/orders/active$ GET",
+    "/m/v1/watcher/trading/risks ^/m/v1/watcher/trading/risks$ GET POST",
+    "/m/v1/watcher/trading/risks/{symbol} ^/m/v1/watcher/trading/risks/[^/]+$ DELETE",
 )
 P3_PATHS = (
     "/m/v1/watcher/price-alerts",
-    "/m/v1/watcher/price-alerts/*",
+    "/m/v1/watcher/price-alerts/{alert_id}",
     "/m/v1/watcher/price-monitor/status",
 )
 
@@ -106,13 +107,19 @@ def test_independent_path_method_expectations():
     assert body[0] == "# _generated_from contracts/watcher-gateway-routes.yaml"
     assert body[1].startswith("# _yaml_sha256 ")
     assert body[2] == "# _phase_max P2"
-    paths = body[3:]
+    assert body[3] == "# _format watcher-gateway-caddy-paths.v2"
+    paths = body[4:]
     assert paths == list(EXPECTED_P2_LINES)
     for line in paths:
-        path, *methods = line.split(" ")
+        path, regex, *methods = line.split(" ")
         assert path.startswith("/m/v1/watcher/")
         assert methods == sorted(set(methods))
-        assert "{" not in path
+        assert regex.startswith("^") and regex.endswith("$")
+    snippet = SNIPPET.read_text(encoding="ascii")
+    assert "# _format watcher-gateway-caddy-snippet.v1\n" in snippet
+    assert snippet.count("\t\tmethod ") == len(paths)
+    assert "path_regexp ^(?i:/m/v1/watcher)(?:[/\\n]|$)" in snippet
+    assert snippet.endswith("\t\trespond 404\n\t}\n}\n")
 
 
 def test_p3_paths_excluded():
@@ -138,6 +145,15 @@ def test_yaml_sha256_digest_matches_source_and_code_artifacts():
 def test_check_fails_on_tampered_caddy_artifact(isolated_root):
     caddy = isolated_root / CADDY.relative_to(ROOT)
     caddy.write_bytes(caddy.read_bytes() + b"# tampered\n")
+    result = _run_check(isolated_root)
+    assert result.returncode == 1
+    assert "DIFF" in result.stdout
+    assert "ROUTES_DIFF_EMPTY" not in result.stdout
+
+
+def test_check_fails_on_tampered_caddy_snippet(isolated_root):
+    snippet = isolated_root / SNIPPET.relative_to(ROOT)
+    snippet.write_bytes(snippet.read_bytes().replace(b"respond 404", b"respond 200"))
     result = _run_check(isolated_root)
     assert result.returncode == 1
     assert "DIFF" in result.stdout
