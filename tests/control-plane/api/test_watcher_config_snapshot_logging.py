@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from pathlib import Path
 import subprocess
 import sys
 import textwrap
@@ -145,14 +146,45 @@ def test_refresh_failure_logs_expiry_without_state_read(caplog, error):
 def test_start_emits_stderr_under_uvicorn_defaults(capfd, handler_location):
     # Isolate dictConfig (which closes existing handlers) from pytest logging.
     # The child's inherited file descriptors are captured by capfd.
-    script = f"sys.path[:0] = {sys.path!r}\n" + textwrap.dedent('''
+    api_dir = str(Path(snapshot.__file__).parent)
+    script = f"import sys\nsys.path.insert(0, {api_dir!r})\n" + textwrap.dedent('''
+        import hashlib
+        import json
         import logging
         import logging.config
         import os
         from copy import deepcopy
         import watcher_config_snapshot as snapshot
-        from test_watcher_config_snapshot import Clock
-        from test_watcher_config_snapshot_logging import _private_payload, _TOKEN
+
+        _TOKEN = "fake-token-must-not-appear"
+
+        class Clock:
+            def __init__(self):
+                self.now = 0.0
+
+            def __call__(self):
+                return self.now
+
+        def _private_payload(revision):
+            body = {
+                "schema_version": "watcher-config-snapshot.v1",
+                "accounts": [{
+                    "account_id": "private-account-sentinel", "kind": "main",
+                    "parent_account_id": None, "execution_account_id": "account-a",
+                    "enabled": True, "risk_capital_addon": "25", "default_risk": "0.01",
+                }],
+                "channels": [{
+                    "channel_id": "private-channel-sentinel",
+                    "target_account_id": "private-account-sentinel",
+                }],
+                "risks": [{"symbol": "BTCUSDT", "risk_ratio": "0.073918"}],
+            }
+            canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            return {
+                **body, "revision": revision,
+                "content_sha256": hashlib.sha256(canonical.encode()).hexdigest(),
+                "generated_at": "2026-09-26T08:00:00.000Z",
+            }
 
         try:
             from uvicorn.config import LOGGING_CONFIG
@@ -212,7 +244,7 @@ def test_start_emits_stderr_under_uvicorn_defaults(capfd, handler_location):
         finally:
             subject.stop()
     ''')
-    subprocess.run([sys.executable, "-c", "import sys\n" + script, handler_location], check=True)
+    subprocess.run([sys.executable, "-I", "-c", script, handler_location], check=True)
     captured = capfd.readouterr()
     lines = captured.err.splitlines()
     assert captured.out == ""
