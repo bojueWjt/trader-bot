@@ -6,12 +6,18 @@ import sqlite3
 import uuid
 from types import MappingProxyType, SimpleNamespace
 
+import psycopg2
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 import operator_queries
 import read_api
 import watcher_config_snapshot as snapshot
+from test_operator_add_position import (
+    ACCOUNT_B, NODE_B, RISK_TOKEN, SYMBOL, _activate_redis_epoch,
+    _entry_body, _seed_account, _seed_reviewed_rollout,
+)
 from test_watcher_config_snapshot import Clock, cache, payload
 
 
@@ -272,8 +278,8 @@ def test_oversize_refresh_does_not_latch_and_age_grows():
 
 
 def test_http_fetch_allows_exactly_4_mib(monkeypatch):
-    body = b"{" + b" " * (snapshot.MAX_SNAPSHOT_BYTES - 2) + b"}"
-    assert len(body) == snapshot.MAX_SNAPSHOT_BYTES
+    body = b"{" + b" " * (4194304 - 2) + b"}"
+    assert len(body) == 4194304
     patch_http(monkeypatch, 200, body)
     status, raw = snapshot._http_fetch(
         "http://127.0.0.1:9090/api/trading/config-snapshot", "fake-token", 2.0,
@@ -294,9 +300,9 @@ def test_http_fetch_rejects_over_4_mib_without_unbounded_read(monkeypatch):
             self.reads.append(n)
             if n > 65536:
                 raise AssertionError(f"unbounded read chunk {n}")
-            if self.sent >= snapshot.MAX_SNAPSHOT_BYTES + 1:
+            if self.sent >= 4194305:
                 raise AssertionError("read continued after the 4 MiB cap")
-            remain = snapshot.MAX_SNAPSHOT_BYTES + 1 - self.sent
+            remain = 4194305 - self.sent
             chunk = b"x" * min(n, remain)
             self.sent += len(chunk)
             return chunk
@@ -323,10 +329,24 @@ def test_http_fetch_rejects_over_4_mib_without_unbounded_read(monkeypatch):
         snapshot._http_fetch(
             "http://127.0.0.1:9090/api/trading/config-snapshot", "fake-token", 2.0,
         )
-    assert response.sent == snapshot.MAX_SNAPSHOT_BYTES + 1
+    assert response.sent == 4194305
     assert response.reads
     assert max(response.reads) <= 65536
-    assert sum(response.reads) <= snapshot.MAX_SNAPSHOT_BYTES + 65536
+    assert sum(response.reads) <= 4194304 + 65536
+
+
+def test_over_4_mib_http_response_is_ordinary_refresh_failure(monkeypatch):
+    clock = Clock()
+    subject = cache(clock, lambda *_: (200, payload()))
+    assert subject.refresh() is True
+    patch_http(monkeypatch, 200, b"{" + b" " * (4194305 - 2) + b"}")
+    subject._fetch = snapshot._http_fetch
+    clock.now = 10
+    assert subject.refresh() is False
+    assert subject.last_refresh_error == "unavailable"
+    assert subject.state == "fresh"
+    clock.now = 61
+    assert subject.state == "expired"
 
 
 def test_http_fetch_html_is_json_decode_error(monkeypatch):
@@ -428,6 +448,14 @@ def test_empty_channel_matches_legacy_detail(monkeypatch, tmp_path):
 def test_route_conflict_matches_legacy_detail(monkeypatch, tmp_path):
     assert assert_switch_equivalent(
         monkeypatch, tmp_path, lambda: read_api._load_channel_risk_route("123", "account-b"),
+    ) == (409, "watcher channel route conflicts with requested account_id")
+
+
+def test_disabled_route_target_with_conflicting_account_checks_conflict_first(monkeypatch, tmp_path):
+    accounts = [{**BASE_ACCOUNTS[0], "enabled": False}]
+    assert assert_switch_equivalent(
+        monkeypatch, tmp_path, lambda: read_api._load_channel_risk_route("123", "account-b"),
+        accounts=accounts,
     ) == (409, "watcher channel route conflicts with requested account_id")
 
 
@@ -592,6 +620,63 @@ def test_m5b_batch_open_uses_one_lease(monkeypatch):
     sizing = next(item for item in result["checks"] if item["name"] == "risk_sizing")
     assert sizing["risk_ratio"] == 0.02
     assert next(item for item in result["checks"] if item["name"] == "config_snapshot")["revision"] == 1
+
+
+def test_committed_open_persists_one_pinned_snapshot_check(monkeypatch, migrated_db):
+    monkeypatch.setenv("DATABASE_URL", migrated_db)
+    monkeypatch.setenv("RISK_ADMIN_TOKEN", RISK_TOKEN)
+    monkeypatch.setenv("WATCHER_CONFIG_SNAPSHOT_ENABLED", "1")
+    monkeypatch.setenv("OPERATOR_MAX_LEVERAGE", "10")
+    monkeypatch.setenv("OPERATOR_ACCOUNT_REGISTRY_JSON", '{"account-b": {}}')
+    _activate_redis_epoch(migrated_db)
+    _seed_reviewed_rollout(migrated_db)
+    _seed_account(migrated_db, account_id=ACCOUNT_B, node_id=NODE_B)
+
+    accounts = [{**BASE_ACCOUNTS[0], "execution_account_id": ACCOUNT_B}]
+    risks = [{"symbol": SYMBOL, "risk_ratio": "0.02"}]
+    revisions = [(200, signed(accounts=accounts, risks=risks, revision=7)),
+                 (200, signed(accounts=accounts, risks=risks, revision=8))]
+    subject = cache(Clock(), lambda *_: revisions.pop(0))
+    assert subject.refresh() is True
+    calls = []
+    original = subject.require_fresh
+
+    def counted():
+        lease = original()
+        calls.append(lease.check["revision"])
+        if len(calls) == 1:
+            assert subject.refresh() is True
+        return lease
+
+    monkeypatch.setattr(subject, "require_fresh", counted)
+    monkeypatch.setattr(snapshot, "get_process_cache", lambda: subject)
+    body = _entry_body("open_position", "wac-033-pinned-commit")
+    client = TestClient(read_api.app)
+    try:
+        response = client.post(
+            "/v1/operator/orders",
+            headers={"Authorization": f"Bearer {RISK_TOKEN}", "X-Request-Id": body["client_ref"]},
+            json=body,
+        )
+    finally:
+        client.close()
+    assert response.status_code == 200, response.text
+    assert calls == [7]
+    with psycopg2.connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT rd.checks FROM risk_decisions rd "
+            "JOIN trade_intents ti ON ti.risk_decision_id = rd.risk_decision_id "
+            "WHERE ti.intent_id = %s",
+            (response.json()["intent_id"],),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    checks = row[0]
+    evidence = [check for check in checks if check.get("name") == "config_snapshot"]
+    assert len(evidence) == 1
+    assert evidence[0]["revision"] == 7
+    assert evidence[0]["snapshot_state"] == "fresh"
+    assert original().check["revision"] == 8
 
 
 def test_m5d_size_entry_batch_forwards_lease(monkeypatch):
