@@ -156,14 +156,14 @@
 | 命令 | 结果 |
 |---|---|
 | `bash -n` 全部 12 个 shell 脚本；`python3 -m py_compile` 4 个 Python 工具 | `BASH_N_OK files=12`；`PY_COMPILE_OK` |
-| `python3 scripts/ops/o0/o0_tool.py selftest` | `SELFTEST_OK checks=82 fleet_cases=11 redaction_shapes=3+2 path_shapes=4+16 path_pins=7 legit_paths=29 gates=14 fleet_params=10 cp_isolation=9 warmup=6`（r2 的四种与 r3 §2.2 的 16 种路径令牌形状在 `redact-json`、骨架、`redact_path` 与六种 Caddyfile 行上 0 泄露；7 条精确钉住：十六进制规则单独生效、12 位阈值、11 位与 15 位的规格边界、整块替换、`+`/`=` 属于令牌；29 条合法路径原样保留；`ok:false`/`"true"`/`1`/`null` 的门禁记录在候选一致的前提下被拒；守卫参数一致性 10 例；控制面单元隔离 9 例，均不打印 env 值） |
+| `python3 scripts/ops/o0/o0_tool.py selftest` | `SELFTEST_OK checks=88 fleet_cases=11 redaction_shapes=3+2 path_shapes=4+18 path_pins=9 legit_paths=29 gates=14 fleet_params=12 cp_isolation=9 warmup=6`（r2 的四种与 r3 §2.2 的 16 种路径令牌形状，另加以 `-` 分隔的数字令牌与以 `.` 分隔的短段令牌在 `redact-json`、骨架、`redact_path` 与六种 Caddyfile 行上 0 泄露；9 条精确钉住：十六进制规则单独生效、12 位阈值、11 位与 15 位的规格边界、整块替换、`+`/`=` 属于令牌、分隔符去掉后才成立的十六进制、带分隔符才够 12 位的短段；29 条合法路径原样保留；`ok:false`/`"true"`/`1`/`null` 的门禁记录在候选一致的前提下被拒；守卫参数一致性 12 例（年龄区间单独钉住）；控制面单元隔离 9 例，均不打印 env 值） |
 | `python3 scripts/ops/o0/o0_watcher_credentials.py selftest` | `SELFTEST_OK scenarios=13 values_checked_for_leak=19 output_lines=79` |
 | `python3 scripts/ops/o0/o0_caddy_watcher_routes.py selftest` | `SELFTEST_OK good_passes=108 variants_caught=20/20 (raw and skeleton) lines=16 single_segment_strict=ok skeleton_verify=ok before_deploy_mode=ok` |
 | `python3 scripts/ops/o0/o0_watcher_config_baseline.py selftest --repro-db <审查 walt/w.db>` | `SELFTEST_OK … wal_case=ok repro_refused=ok repro_copy_sees_config_revision=ok`（审查的复现文件只在私有拷贝上使用，sha 前后不变） |
-| `bash scripts/ops/o0/tests/site_check_leak_test.sh` | `REDACTION_PARITY_OK corpus=70 (base 18 + r3 shapes 16 + pins 7 + legit 29)`；`LEAK_TEST_OK sections=19 sentinels=38 leaks=0 skeleton_parity=ok redaction_parity=ok path_shapes=4+7`（Caddyfile 与 adapted JSON 两处都放了 r2 的四种和 r3 的七种路径令牌；内嵌库自己的 `redact_path`/`redact_line`/骨架逐形状 0 泄露、钉住的输出一致、合法路径不动；S-01 单元行里有短 Bearer 哨兵；S-00 的节点配置与节点 env 里各有一个令牌哨兵，只输出三个数） |
+| `bash scripts/ops/o0/tests/site_check_leak_test.sh` | `REDACTION_PARITY_OK corpus=74 (base 18 + r3 shapes 18 + pins 9 + legit 29)`；`LEAK_TEST_OK sections=19 sentinels=38 leaks=0 skeleton_parity=ok redaction_parity=ok path_shapes=4+7`（Caddyfile 与 adapted JSON 两处都放了 r2 的四种和 r3 的七种路径令牌；内嵌库自己的 `redact_path`/`redact_line`/骨架逐形状 0 泄露、钉住的输出一致、合法路径不动；S-01 单元行里有短 Bearer 哨兵；S-00 的节点配置与节点 env 里各有一个令牌哨兵，只输出三个数） |
 | `bash scripts/ops/o0/tests/fleet_guard_test.sh`（审查的 fleet-a…d 复现文件） | `FLEET_GUARD_TEST_OK cases=7`：空对空 → 退出 2；`hb_age 1.0 → 412.7` → 退出 3；第 3 次采样才出现的 HALT → 退出 3 |
 | `bash scripts/ops/o0/tests/auth_gate_test.sh` | `AUTH_GATE_TEST_OK checks=18`：绑定矩阵 475 组合 0 误判；runbook 示例 34 条全部通过绑定表；沙箱内 apply 无门禁、候选镜像缺失、凭据变了、候选变了都在写入前被拒，无状态变更类 docker 调用；步骤顺序（`STRUCTURE_OK`，见下一行第 1 部分） |
-| `bash scripts/ops/o0/tests/apply_rollback_test.sh` | `APPLY_ROLLBACK_TEST_OK checks=86`：(1) plan 输出的步骤顺序（另含 restore-db 顺序与阶段 O 隔离门禁的位置）；(2) 沙箱内真脚本 `--execute`：Caddy、watcher、operator-query 各一次"替换前失败"（不 restart/不重建，文件逐字节还原）与"替换后失败"（还原后 restart/重建一次），Caddy 另有"回滚自身失败"（立即停下、不再 restart、记 `ROLLBACK FAILED`）；审查 r3 的 D（restart/重建命令本身失败）、E（守卫判变化时只停下报告、不自动回滚）、F（候选清单含 `ABSENT` 行：删除、核对、回滚复原）；restore-db 成功（原属主与权限保持）、启动失败与装回失败时自动恢复到原库、重跑被拒；阶段 O 隔离门禁两种违例在写入前拒绝且不打印值；守卫参数：默认值在真实 execute 中通过并记入 `authorizations.log`，不一致被拒，一致的非默认组合生效，跳过缝离开沙箱无效；node-control/event-ingest 从未被改变状态 |
+| `bash scripts/ops/o0/tests/apply_rollback_test.sh` | `APPLY_ROLLBACK_TEST_OK checks=93`：(1) plan 输出的步骤顺序（另含 restore-db 顺序与阶段 O 隔离门禁的位置）；(2) 沙箱内真脚本 `--execute`：Caddy、watcher、operator-query 各一次"替换前失败"（不 restart/不重建，文件逐字节还原）与"替换后失败"（还原后 restart/重建一次），Caddy 另有"回滚自身失败"（立即停下、不再 restart、记 `ROLLBACK FAILED`）；审查 r3 的 D（restart/重建命令本身失败）、E（守卫判变化时只停下报告、不自动回滚）、F（候选清单含 `ABSENT` 行：删除、核对、回滚复原）；restore-db 成功（原属主与权限保持）、启动失败、装回失败、装回字节不符时自动恢复到原库，移动丢了属主时恢复拒绝启动 watcher（`ROLLBACK FAILED`），重跑被拒；阶段 O 隔离门禁两种违例在写入前拒绝且不打印值；守卫参数：默认值在真实 execute 中通过并记入 `authorizations.log`，不一致被拒，一致的非默认组合生效，跳过缝离开沙箱无效；node-control/event-ingest 从未被改变状态 |
 | 五个脚本 plan 模式 | 退出 0，不执行任何动作 |
 | 打包门禁 `o0_package.sh --report-only --run-tests`（未带 --execute） | 见 §6.1：只剩 G7 失败，`deploy_candidate: false` |
 
@@ -246,3 +246,38 @@
 - 本轮新增 22 个变异（B1a–B1i、R1a–R1h、W1、P1–P4）：21 个被抓；B1h（大纲 `classify` 不再按段替换）存活，属等价变异：每个 token 随后还会经过 `redact_line` 的路径规则。
 
 未在本轮处理（按范围限定，记为待办）：🟡-5（restore-db 失败的恢复路径与原属主）、🟡-6（S-10 隔离检查进阶段 O preflight）、🟡-7（守卫阈值取自生产节点配置）、💭 1–5；WGW-1.0.2 的 Caddy 清单 v2 与片段适配（§7 of r2）归 wac-060。
+
+## 9. 终审 wac-032-r3 剩余待办与 r2 🟡-5/6/7 的处置（wac-072，未连 jp-24）
+
+| 项 | 挡哪一步 | 处置 | 证据 |
+|---|---|---|---|
+| r3 🟡-1 路径令牌碎片 | O0-A01 | `redact_path` 改为两遍（`o0_tool.py` 与 site check 内嵌库逐字相同）：先按 `/` 切块；每块去掉 `{占位符}` 与正则语法后判一次、再去掉分隔符（`.` `-` `_` `:` `~` `%` `&` `,` `;` `!` `@`）判一次，任一次像令牌就把**整块**换成 `<seg len=N>`；不像的块仍走原来的按段规则（只会多脱敏，不会少）。`+`、`=` 是 base64 字符，不去掉（审查原型差的那一位）。占位符先去掉，`/api{http.request.uri.path.1}` 这类结构不被误伤。代价：整块替换后块尾的 `$` 等正则语法也被遮住，只影响可读性，合法路径不受影响 | r3probe `newshapes.py` 复跑：N3b、N3c、N5b、N7 在六个输出面全部 0 泄露；selftest 与 leak test 覆盖 r3 的全部 16 种形状（含裸 base64）另加 2 种（`-` 分隔的数字、`.` 分隔的短段），parity 语料 74 条；29 条合法路径（生成清单 16 条 + 审查列出的 12 条 + 1 条占位符）0 误伤。规格内的残余形状（N2c、N4c、N4d、N8）已写进授权清单 O0-A01 的影响栏，由用户知悉 |
+| r3 🟡-3 测试缺口 | 无（质量项） | 十六进制规则单独钉住（16 位纯数字、16 位纯字母十六进制，两份实现各自断言）；12 位阈值钉住（顺带 r3 💭-2）；审查的 D、E、F 沙箱场景并入 `apply_rollback_test.sh` | 变异 X1、X2、X3、X9 由存活变为被抓 |
+| r2 🟡-5 restore-db 恢复路径与属主 | O0-A07R | 移动之前用 `stat` 记录属主与权限、文件清单与 sha（evidence）；`db-replaced/` 非空即拒绝；装回按记录的属主与权限，核对字节、属主、权限；停 watcher 之后任一步失败自动恢复：确保已停，装回失败的那份与失败启动留下的 `-wal`/`-shm` 移到 `db-failed-restore/`，原文件 `mv` 放回并核对 sha、属主、权限，再启动 watcher、检查启动日志、跑舰队守卫（只报告）；恢复本身失败不启动 watcher。runbook W-6 写明手工路径；S-05 补 `.Config.User` | 沙箱：成功、重跑被拒、启动失败、装回失败、装回字节不符、移动丢属主 6 组场景（inode 级的 `chown`/`stat` 桩：`mv` 保留属主，`cp` 生成 root 属主的新文件）；plan 结构测试钉住顺序 |
+| r2 🟡-6 S-10 隔离进阶段 O | O0-A08 | 新增 `o0_tool.py cp-isolation`，在 O-1 preflight（写门禁之前）与 O-2 apply（备份之前）运行：三个单元必须 `LoadState=loaded`；node-control/event-ingest 不加载 `operator-query.env`，其 `Environment=` 与各自 env 文件里没有 `WATCHER_*TOKEN` 名字；operator-query 的 WorkingDirectory 必须是 `--cp-root` 或其 `api/`；报告是否共用代码目录（D-04 是否适用）。只读名字，不打印值 | selftest 9 例（含值不外泄断言）；沙箱两种违例在任何写入前拒绝；plan 结构测试钉住位置 |
+| r2 🟡-7 守卫阈值对齐生产心跳参数 | O0-A01 采集，O0-A05 起使用 | S-00 在每个节点容器里只打印三个数（配置的 `heartbeat_timeout_seconds`、镜像代码的 `DEFAULT_HEARTBEAT_INTERVAL_SECONDS`、`node.py` 是否覆盖），再实测约 10 秒的心跳年龄最大值。读的是**运行中容器里**的文件，所以 09-22 那类热挂载也会反映出来。新增 `O0_NODE_HB_INTERVAL_S`/`O0_NODE_HB_TIMEOUT_S`（默认 2/15，守卫阈值默认值不变），每次 `--execute` 用 `fleet-params` 核对：年龄与跃升在 [2, 3] × 间隔内，稳定窗 ≥ 判定时长 + 3 × 间隔；不一致即拒绝，并给出建议值；实际参数写进 `authorizations.log`。与默认不一致时的调整与用户确认写在部署 runbook §0 | selftest 12 例；沙箱：默认值在真实 execute 中通过并记录，两种不一致被拒且不采样，一致的非默认组合传到 `fleet-compare`，跳过缝离开沙箱无效；leak test：节点配置里的字面 token 与节点 env 的 token 不外泄 |
+
+**测试缝**：沙箱测试用 0 秒的稳定窗，与规则冲突，所以新增 `O0_FLEET_PARAMS_SANDBOX_SKIP=1`。它只在同时设置了 `O0_SANDBOX` 时生效，而 `O0_SANDBOX` 在有 `/srv/trader-v3` 的主机上直接拒绝。另有测试证明离开沙箱时这个变量不起作用。
+
+**O0-A01 的范围变化**（已写入授权清单）：S-00 新增对每个 `trader-v3-node-*` 容器的只读 `docker exec`（只打印三个数），以及约 10 秒内 6 次只读心跳查询。
+
+### 9.1 变异复跑（全部在 scratchpad，pristine 取本轮最终代码）
+
+- 审查 `mut067b/muts.py`（9 个，测试集含 `apply_rollback_test.sh`）：8 个被抓。**X1、X2、X3、X9 由存活变为被抓**；X7（按段切分去掉 `\`）仍存活，审查已判为等价变异：少切只会多脱敏，而且整块规则先于按段规则判定。
+- 审查 `mut067/muts.py` 与 wac-059 新增（共 57 个，测试集含 `apply_rollback_test.sh`）：
+  - 4a、5d、5f、B1h 存活，审查已判为等价或纵深防御。
+  - 5b、5c、R1d 锚点不再唯一：5b、5c 按审查的重定锚版本 2/2 被抓；R1d 因 restore-db 新增了一处 `o0_mark_runtime_replaced`，改锚到 apply 的那一处后被抓。
+  - 其余全部被抓。
+- 本轮新增 29 个（`mut072b/muts072.py`）：
+  - 路径规则 9 个：两份实现各自去掉整块规则、只判一种形态、去掉 `+`、不去占位符、阈值 13、去掉十六进制规则。
+  - restore-db 7 个：写死 `root:root`、去掉自动恢复、去掉重跑拒绝、去掉运行时标记、恢复不核属主、装回不核 sha、恢复不放回原文件。
+  - 隔离门禁 6 个：apply、preflight 各去掉门禁，工具去掉 `Environment=` 检查、env 文件检查、工作目录检查、`LoadState` 检查。
+  - 守卫参数 6 个：去掉检查调用、去掉稳定窗下限、去掉年龄区间、跳过缝不要求沙箱、S-00 打印整段配置、默认值改动。
+  - 另有 R1d 重定锚 1 个。
+  - 首轮暴露了 N3、R5、R6、F3 存活，分别补了测试：`-` 分隔的数字令牌与 `.` 分隔的短段（同时把块判定改为"两种形态任一"）、装回字节不符与移动丢属主两个场景、单独越界的年龄区间。
+- **最终复跑结果**：
+  - 本轮 29/29 被抓。
+  - 审查 mut067b：8/9 被抓，X7 存活（等价）。
+  - mut067 与 wac-059：57 个里 50 个被抓；4 个存活（4a、5d、5f、B1h，均为已判等价）；3 个锚点失效，重定锚后 3/3 被抓。
+  - 记录在 scratchpad `mut072a/final-all.txt`、`mut072a/final-reanchor.txt`、`mut072b/final-067b.txt`、`mut072b/final-072.txt`。
+

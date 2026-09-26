@@ -235,6 +235,21 @@ for f in sys.argv[2:]:
     owners[str(os.stat(f).st_ino)] = owner
 json.dump(owners, open(db, "w"))
 STUB
+# cp/mv: real, plus two restore-db faults. CP_CORRUPT: the copy onto the watcher DB lands with
+# different bytes. MV_LOSE_OWNER: a cross-filesystem move that does not keep the owner/mode
+# (copy to a new inode, remove the source).
+cat > "$BIN/cp" <<'STUB'
+#!/usr/bin/env bash
+/bin/cp "$@" || exit $?
+if [ -n "${CP_CORRUPT:-}" ]; then last="${*: -1}"; case "$last" in *watcher-trading.db) printf 'x' >> "$last" ;; esac; fi
+STUB
+cat > "$BIN/mv" <<'STUB'
+#!/usr/bin/env bash
+[ -n "${MV_LOSE_OWNER:-}" ] || exec /bin/mv "$@"
+args=(); for a in "$@"; do [ "$a" = "--" ] || args+=("$a"); done
+src="${args[0]}"; dst="${args[1]}"; [ -d "$dst" ] && dst="$dst/$(basename "$src")"
+/bin/cp "$src" "$dst.mvtmp" && /bin/rm -f "$src" && /bin/mv "$dst.mvtmp" "$dst"
+STUB
 cat > "$BIN/stat" <<'STUB'
 #!/usr/bin/env python3
 import json, os, sys
@@ -509,6 +524,21 @@ rdb_setup FAILINSTALL
 CHOWN_FAIL=1 run_restore
 assert_rollback "restore-db FAILINSTALL (chown fails after the move)" yes 'docker compose .* start ' 1 "set aside the current DB files"
 original_back "restore-db FAILINSTALL"
+# the installed copy's bytes differ from the recorded sha: stop at the install step, recover
+rdb_setup CORRUPT
+CP_CORRUPT=1 run_restore
+assert_rollback "restore-db CORRUPT (installed bytes differ from the recorded sha)" yes 'docker compose .* start ' 1 "set aside the current DB files"
+printf '%s' "$OUT" | grep -q RESTORED_DB_SHA_MISMATCH && ok "restore-db CORRUPT: RESTORED_DB_SHA_MISMATCH named" || bad "restore-db CORRUPT: no RESTORED_DB_SHA_MISMATCH"
+original_back "restore-db CORRUPT"
+# the move does not keep owner/mode: recovery must NOT start the watcher on those files
+rdb_setup MVOWNER
+MV_LOSE_OWNER=1 RESTORE_DB_FAIL=1 run_restore
+n_start=$(grep -cE 'compose .* start ' "$CALLS" || true)
+if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q 'ROLLBACK FAILED' && [ "$n_start" = 1 ] \
+   && grep -q 'runtime_rolled_back=no rollback_rc=[1-9][0-9]* fleet_rc=0' "$S/evidence/auto-rollback.log" 2>/dev/null \
+   && [ "$(sha256sum < "$DB" | cut -d' ' -f1)" = "$ORIG_DB_SHA" ]; then
+  ok "restore-db MVOWNER: original bytes back but owner/mode differ -> ROLLBACK FAILED, watcher not started, fleet verdict recorded"
+else bad "restore-db MVOWNER: rc=$RC starts=$n_start"; cat "$S/evidence/auto-rollback.log" 2>/dev/null | sed 's/^/    /'; printf '%s\n' "$OUT" | grep -E 'STEP|owner|ROLLBACK' | tail -6 | sed 's/^/    /'; fi
 # ---- stage O isolation gate (review wac-032-r2 🟡-6): a violation refuses apply before ANY write
 for kind in envfile envname; do
   oq_setup "ISO-$kind"

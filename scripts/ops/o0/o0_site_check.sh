@@ -92,8 +92,9 @@ def _token_segment(seg):
         return True
     return re.fullmatch(r"[0-9A-Fa-f]{16,}", seg) is not None
 
-def _squash_chunk(chunk):
-    return CHUNK_SEPARATORS.sub("", CHUNK_REGEX_SYNTAX.sub("", CHUNK_PLACEHOLDER.sub("", chunk)))
+def _chunk_is_token(chunk):
+    bare = CHUNK_REGEX_SYNTAX.sub("", CHUNK_PLACEHOLDER.sub("", chunk))
+    return _token_segment(bare) or _token_segment(CHUNK_SEPARATORS.sub("", bare))
 
 def _redact_pieces(chunk):
     parts = PATH_SEG_SPLIT.split(chunk)
@@ -104,7 +105,7 @@ def redact_path(value):
     for i, chunk in enumerate(PATH_CHUNK_SPLIT.split(value)):
         if i % 2 == 1 or not chunk:
             out.append(chunk)
-        elif _token_segment(_squash_chunk(chunk)):
+        elif _chunk_is_token(chunk):
             out.append(f"<seg len={len(chunk)}>")
         else:
             out.append(_redact_pieces(chunk))

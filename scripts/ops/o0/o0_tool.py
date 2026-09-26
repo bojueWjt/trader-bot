@@ -102,9 +102,11 @@ KV = re.compile(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*[=:]\s*)(.*)$"
 # see them. A token is ">= 12 chars with a letter and a digit" or ">= 16 hex digits".
 # Two passes (review wac-032-r3 🟡-1: escapes, '.', '-' and '+' cut one token into short
 # pieces that each stayed below the threshold):
-# 1. the path is split at '/' into chunks; a chunk is judged with {placeholders}, regex
-#    syntax and separators removed ('+' and '=' are base64 characters and stay); a token
-#    replaces the WHOLE chunk with <seg len=N>;
+# 1. the path is split at '/' into chunks; a chunk is judged twice, with {placeholders} and
+#    regex syntax removed, and with separators removed as well ('+' and '=' are base64
+#    characters and stay): the first catches short dotted parts that only reach 12 with
+#    their separators, the second catches separated digit/hex tokens; if either is a token,
+#    the WHOLE chunk becomes <seg len=N>;
 # 2. any other chunk is split at regex metacharacters and each piece is judged as before.
 PATH_CHUNK_SPLIT = re.compile(r"(/+)")
 PATH_SEG_SPLIT = re.compile(r"([/^$.*+?()\[\]{}|\\]+)")
@@ -120,8 +122,9 @@ def _token_segment(seg: str) -> bool:
     return re.fullmatch(r"[0-9A-Fa-f]{16,}", seg) is not None
 
 
-def _squash_chunk(chunk: str) -> str:
-    return CHUNK_SEPARATORS.sub("", CHUNK_REGEX_SYNTAX.sub("", CHUNK_PLACEHOLDER.sub("", chunk)))
+def _chunk_is_token(chunk: str) -> bool:
+    bare = CHUNK_REGEX_SYNTAX.sub("", CHUNK_PLACEHOLDER.sub("", chunk))
+    return _token_segment(bare) or _token_segment(CHUNK_SEPARATORS.sub("", bare))
 
 
 def _redact_pieces(chunk: str) -> str:
@@ -134,7 +137,7 @@ def redact_path(value: str) -> str:
     for i, chunk in enumerate(PATH_CHUNK_SPLIT.split(value)):
         if i % 2 == 1 or not chunk:
             out.append(chunk)
-        elif _token_segment(_squash_chunk(chunk)):
+        elif _chunk_is_token(chunk):
             out.append(f"<seg len={len(chunk)}>")
         else:
             out.append(_redact_pieces(chunk))
@@ -873,6 +876,8 @@ PATH_SHAPES_R3 = (
     ("/bot1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw/*", ("AAHdqTcvCH1vGWJx",)),             # N9 unescaped bot token
     ("(?i)^/hook/(?:SENTINELgrp0123abcd)$", ("SENTINELgrp0123abcd",)),                          # N10 (?i) group
     ("/t/a1b2c3d4e5f6", ("a1b2c3d4e5f6",)),                                                     # exactly 12 mixed
+    ("/n/4829-1057-3829-1045", ("4829-1057", "3829-1045")),                                     # dash-separated digits (hex rule after separators)
+    ("/k/a1.b2.c3.d4.e5", ("a1.b2.c3", "c3.d4.e5")),                                            # short dotted parts, 12+ only with the dots
 )
 # exact outputs that pin each rule on its own (a removed rule or a moved threshold changes them)
 PATH_RULE_PINS = (
@@ -883,6 +888,8 @@ PATH_RULE_PINS = (
     ("/p/a1b2c3d4e5f", "/p/a1b2c3d4e5f"),             # 11: below the threshold (documented residual)
     (r"^/hook/ab12cd34\-ef56gh78\-ij90kl12$", "^/hook/<seg len=29>"),   # whole chunk, not pieces
     ("/k/Ab3dEfG5hI+x/jK7lMnO9pQ==", "/k/<seg len=12>/<seg len=12>"),  # '+' and '=' are token characters
+    ("/n/4829-1057-3829-1045", "/n/<seg len=19>"),     # separators removed before the hex rule
+    ("/k/a1.b2.c3.d4.e5", "/k/<seg len=14>"),          # judged with the separators too
 )
 LEGIT_PATHS = (
     "/m/v1/watcher/dialogs", "/m/v1/watcher/disconnect", "/m/v1/watcher/groups", "/m/v1/watcher/media/*", "/m/v1/watcher/reconnect",
@@ -1052,6 +1059,7 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
                          (dict(interval=1.0), "faster heartbeat, age 5 > 3: dead node seen late"),
                          (dict(timeout=60.0), "settle 60 < 60 + 6"),
                          (dict(max_jump=9.0), "jump outside the band"),
+                         (dict(max_age=9.0), "age outside the band on its own (jump still inside)"),
                          (dict(settle=20.0), "settle 20 < 21"),
                          (dict(interval=0.0), "non-positive interval")):
             rc_p, lines_p = fp(**kw)
@@ -1060,7 +1068,9 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
         assert fp(interval=4.0, max_age=10.0, max_jump=10.0)[0] == 0, "a consistent non-default set passes"
         assert fp(settle=21.0)[0] == 0 and fp(settle=20.9)[0] == 2, "settle bound is timeout + 3 x interval exactly"
         assert "O0_FLEET_MAX_HB_AGE=10" in fp(interval=4.0)[1][-1], "the suggestion names the 2.5 x interval value"
-        checks += 4
+        assert any(l.strip().startswith("O0_FLEET_MAX_HB_AGE=9.0 outside") for l in fp(max_age=9.0)[1]), "the age rule names its variable"
+        assert not any("O0_FLEET_MAX_HB_JUMP" in l for l in fp(max_age=9.0)[1][:-1]), "only the age is out of band"
+        checks += 5
         # control-plane unit isolation (review wac-032-r2 🟡-6, site check S-10 as a gate)
         cp = base / "cp"
         (cp / "api").mkdir(parents=True)
@@ -1110,7 +1120,7 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
         for path in sorted(base.rglob("*"), reverse=True):
             path.unlink() if path.is_file() else path.rmdir()
         base.rmdir()
-    print(f"SELFTEST_OK checks={checks} fleet_cases={len(cases)} redaction_shapes=3+2 path_shapes=4+{len(PATH_SHAPES_R3)} path_pins={len(PATH_RULE_PINS)} legit_paths={len(LEGIT_PATHS)} gates=14 fleet_params=10 cp_isolation=9 warmup=6")
+    print(f"SELFTEST_OK checks={checks} fleet_cases={len(cases)} redaction_shapes=3+2 path_shapes=4+{len(PATH_SHAPES_R3)} path_pins={len(PATH_RULE_PINS)} legit_paths={len(LEGIT_PATHS)} gates=14 fleet_params=12 cp_isolation=9 warmup=6")
     return 0
 
 
