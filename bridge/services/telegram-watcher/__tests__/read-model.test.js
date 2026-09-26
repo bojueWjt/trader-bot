@@ -96,23 +96,31 @@ for (const table of ['messages', 'briefings']) {
     const db = new Database(dbPath);
     db.exec(`DELETE FROM ${table === 'messages' ? 'telegram_messages' : 'briefings'}`);
     db.close();
-    const older = insertRows(table, 2, 2);
-    const tied = insertRows(table, 5, 1);
+    insertRows(table, 2, 2);
+    insertRows(table, 5, 1);
+    // These rows have larger ids but earlier timestamps than the tied rows.
+    insertRows(table, 2, 3);
+    const truth = new Database(dbPath, { readonly: true });
+    const expected = truth.prepare(`SELECT id, created_at FROM ${table === 'messages' ? 'telegram_messages' : 'briefings'} ORDER BY created_at DESC, id DESC`).all();
+    truth.close();
     const seen = [];
     let cursor = '';
-    for (let page = 0; page < 5; page += 1) {
+    let exhausted = false;
+    for (let page = 0; page < 10; page += 1) {
       const result = await read(table, `?limit=2${cursor}`);
       assert.equal(result.status, 200, JSON.stringify(result.body));
       assert.ok(Array.isArray(result.body));
-      seen.push(...result.body.map(row => row.id));
+      seen.push(...result.body.map(({ id, created_at }) => ({ id, created_at })));
       if (!result.body.length) {
+        exhausted = true;
         break;
       }
       const last = result.body.at(-1);
       cursor = `&before_created_at=${encodeURIComponent(last.created_at)}&before_id=${last.id}`;
     }
-    assert.deepEqual(seen, [...tied.reverse(), ...older.reverse()]);
-    assert.equal(new Set(seen).size, seen.length);
+    assert.equal(exhausted, true);
+    assert.deepEqual(seen, expected);
+    assert.equal(new Set(seen.map(row => row.id)).size, seen.length);
   });
 
   test(`${table}: hours applies with cursor, default window is 24 hours`, async () => {
