@@ -169,12 +169,13 @@
 
 ### 6.1 打包门禁（本机，`--report-only --run-tests`，未带 --execute）
 
-命令：`bash scripts/ops/o0/o0_package.sh --candidate ce2461a --out <scratchpad>/pkg-wac059 --report-only --run-tests`（候选必须是带 `scripts/ops/o0` 的提交，G11；`ce2461a` = 本轮代码提交，其中集成分支部分为 `a9900e3`）。
+命令：`bash scripts/ops/o0/o0_package.sh --candidate 0eeca85 --out <scratchpad>/pkg-wac072 --report-only --run-tests`（候选必须是带 `scripts/ops/o0` 的提交，G11；`0eeca85` = wac-072 的代码提交，基于集成分支 `487f6eb`；wac-059 时的候选为 `ce2461a`，结果相同）。
 
 | 门禁 | 结果 |
 |---|---|
 | G1、G2（`ROUTES_DIFF_EMPTY rows=63 … phase_max=P2`）、G3、G4（`CLOSURE_OK closure=13 whitelist=34`）、G5（`COMPOSE_OK env_file=True`）、G6、G8（5 个文件）、G10（17 个候选工具与 runbook 文件）、G11（14 个工具文件取自候选）、G12（`RUNTIME_MANIFEST_OK files=34`） | PASS |
 | G9 | PASS：pytest `26 passed`；watcher `tests 107 / pass 107 / fail 0 / skipped 0` |
+| G10 说明 | 本轮新增的 runbook 文本与脚本（W-6 手工路径、单元隔离、节点心跳参数）也在扫描范围内，无禁用动词 |
 | G7 | **FAIL**：wac-015 未合入（P-02） |
 | 结论 | `deploy_candidate: false`，`failed_gates=1`；不能申请 O0-A02 之后的授权 |
 
