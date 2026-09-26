@@ -506,6 +506,26 @@ test("validates addon, subaccount parent, and environment", async () => {
   });
   assert.equal(missingParent.status, 400);
 
+  for (const account of [
+    { account_id: "invalid-type", account_type: "secondary" },
+    { account_id: "self-parent", account_type: "subaccount", parent_account_id: "self-parent" },
+    { account_id: "main-with-parent", account_type: "main", parent_account_id: "main-live" },
+  ]) {
+    const result = await request("POST", "/api/trading/accounts", {
+      api_key: "key",
+      api_secret: "secret",
+      risk_capital_addon: 0,
+      ...account,
+    });
+    assert.equal(result.status, 400, account.account_id);
+    const db = new Database(dbPath);
+    try {
+      assert.equal(db.prepare("SELECT 1 FROM account_configs WHERE account_id = ?").get(account.account_id), undefined);
+    } finally {
+      db.close();
+    }
+  }
+
   const unknownParent = await request("POST", "/api/trading/accounts", {
     account_id: "unknown-parent",
     api_key: "key",
@@ -572,6 +592,26 @@ test("routes channels to both main and subaccounts", async () => {
     target_account_id: "missing",
   });
   assert.equal(unknownTarget.status, 400);
+
+  const disabled = await request("PUT", "/api/trading/accounts/main-live", {
+    is_enabled: false,
+  });
+  assert.equal(disabled.status, 200);
+  const disabledTarget = await request("POST", "/api/trading/channels", {
+    channel_id: "disabled-channel",
+    target_account_id: "main-live",
+  });
+  assert.equal(disabledTarget.status, 400);
+  const db = new Database(dbPath);
+  try {
+    assert.equal(db.prepare("SELECT 1 FROM channel_routing WHERE channel_id = 'disabled-channel'").get(), undefined);
+  } finally {
+    db.close();
+  }
+  const reenabled = await request("PUT", "/api/trading/accounts/main-live", {
+    is_enabled: true,
+  });
+  assert.equal(reenabled.status, 200);
 });
 
 test("updates account settings while blank credentials retain current values", async () => {
