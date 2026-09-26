@@ -9,6 +9,9 @@
 # 勘误：WGW-1.0.1、WGW-1.0.2（均 2026-09-26）改动见 backend-api.md §9.16。
 # WGW-1.0.2：never_allowed 进入代码生成物 payload；Caddy 清单按"恰好一个非空段"生成锚定 path_regexp；
 #            query_params.source 增 gateway_enum；gw.price_alert.delete 的 body 增身份三元组（P3，phase_max 仍为 P2）。
+# WGW-1.0.2 合并前追补（F-09..F-12，版本号不变）：never_allowed 的判定输入为请求目标的路径部分（path_part），
+#            非 browser 身份先拒非 origin 形式与会被 url.parse 改写的字符；Caddy 兜底正则改为 Python/RE2 同义写法；
+#            网关生成物停用态（R11）；O-0 import 位置。本文件只改注释与 invariants，路由行零改动。
 
 schema_version: watcher-gateway-routes.v1
 contract_version: WGW-1.0.2
@@ -239,12 +242,14 @@ invariants:
   - "never_allowed 中的 inner_path 不得被任何 gateway 行映射（与方法无关，R6）；gateway_excluded 中的 (method, inner_path) 不得被任何 gateway 行映射（methods 为 \"*\" 时与方法无关）"
   - "所有 pattern 满足 regex_dialect（S-20）"
   - "never_allowed 随两份代码生成物下发（payload 全量、原顺序）；watcher 对非 browser 身份、网关在前缀中间件中各自独立拦截，不依赖身份路由表（WGW-1.0.2，§9.14.3）"
+  - "never_allowed 的判定输入是未解码请求目标的路径部分 path_part（截到第一个 ? 或 #）；watcher 对非 browser 身份先拒绝非 origin 形式目标与含 url.parse 改写字符的路径部分（403），网关对 raw path 不以 / 开头或含 # 的已触发请求返回 404；网关生成物加载或加载期断言失败 → 只停用 /v1/watcher/*（503 gateway_disabled，R11）（WGW-1.0.2 追补，§9.2、§9.4、§9.14.3）"
   - "gateway outer_path 的每段是 [a-z0-9-] 字面段或整段 {name}；Caddy 生成物中 {name} = 恰好一个非空段（[^/]+），不出现 *（WGW-1.0.2，S-22）"
 
 # ---------------------------------------------------------------------------
 # 永不经网关放行（计划 §3 末行，凭据面）。WGW-1.0.1（R6）：与方法无关，methods 恒为 "*"（覆盖所有方法，含将来新增的）。
 # WGW-1.0.2：本清单原样进入 JS 与 Python 生成物的 payload（Caddy 生成物不含）。运行时算法 NA / NA_gw / NA_intersects 见 §9.14.3：
 #   watcher 对 browser 以外的身份在路径规范化与身份路由表之前拒绝（403 identity_forbidden）；网关前缀中间件在路由匹配前拒绝（404）。
+#   两者的输入都是请求目标的路径部分 path_part（截到第一个 ? 或 #，WGW-1.0.2 追补 F-09），再按各自规则解码一次。
 #   条目只能是 "/"，或字面段（[A-Za-z0-9._-]）加可选结尾 "/*"；"/*" 覆盖基础路径本身及其下任意深度；比较不区分 ASCII 大小写（S-21）。
 # ---------------------------------------------------------------------------
 never_allowed:
