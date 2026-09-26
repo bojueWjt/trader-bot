@@ -6,14 +6,13 @@ CLI tool and importable module for managing the SQLite database
 that backs the crypto-trader Claude Code Skill.
 
 Usage (CLI):
-    python3 db_manager.py init-db
-    python3 db_manager.py add-account main KEY SECRET --risk 0.01 --testnet
+    # Configuration is managed by the watcher site or app.
     python3 db_manager.py list-accounts
 
 Usage (import):
     from db_manager import DatabaseManager
     db = DatabaseManager()
-    db.init_db()
+    db.list_accounts()
 """
 
 import argparse
@@ -35,6 +34,7 @@ EXECUTION_ACCOUNT_ID_PATTERN = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
 )
 ACCOUNT_TYPES = {"main", "subaccount"}
+CONFIG_WRITES_DISABLED = "Configuration writes are disabled: watcher is the only writer. Use the watcher site or app."
 
 # ---------------------------------------------------------------------------
 # Thread-safe connection management
@@ -42,23 +42,27 @@ ACCOUNT_TYPES = {"main", "subaccount"}
 _local = threading.local()
 
 
-def _get_connection(db_path: str) -> sqlite3.Connection:
+def _get_connection(db_path: str, readonly: bool = False) -> sqlite3.Connection:
     """Return a thread-local SQLite connection with WAL mode and Row factory."""
     conn = getattr(_local, "conn", None)
     stored_path = getattr(_local, "db_path", None)
 
-    if conn is None or stored_path != db_path:
+    if conn is None or stored_path != (db_path, readonly):
         if conn is not None:
             try:
                 conn.close()
             except Exception:
                 pass
-        conn = sqlite3.connect(db_path)
+        if readonly:
+            conn = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True)
+        else:
+            conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        if not readonly:
+            conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         _local.conn = conn
-        _local.db_path = db_path
+        _local.db_path = (db_path, readonly)
 
     return conn
 
@@ -143,12 +147,13 @@ CREATE TABLE IF NOT EXISTS signal_operations (
 class DatabaseManager:
     """High-level interface to the trading database."""
 
-    def __init__(self, db_path: str | None = None):
+    def __init__(self, db_path: str | None = None, readonly: bool = False):
         self.db_path = db_path or DEFAULT_DB_PATH
+        self.readonly = readonly
 
     @property
     def conn(self) -> sqlite3.Connection:
-        return _get_connection(self.db_path)
+        return _get_connection(self.db_path, self.readonly)
 
     # -- helpers -------------------------------------------------------------
     def _ensure_dir(self):
@@ -157,98 +162,7 @@ class DatabaseManager:
             os.makedirs(directory, exist_ok=True)
 
     def _ensure_schema(self) -> None:
-        self._ensure_dir()
-        self.conn.executescript(SCHEMA_SQL)
-        columns = {
-            row["name"]
-            for row in self.conn.execute("PRAGMA table_info(account_configs)").fetchall()
-        }
-        multiplier_column_was_missing = (
-            "risk_capital_multiplier" not in columns
-        )
-        if "account_type" not in columns:
-            self.conn.execute(
-                "ALTER TABLE account_configs "
-                "ADD COLUMN account_type TEXT NOT NULL DEFAULT 'main'"
-            )
-        if "parent_account_id" not in columns:
-            self.conn.execute(
-                "ALTER TABLE account_configs "
-                "ADD COLUMN parent_account_id TEXT NOT NULL DEFAULT ''"
-            )
-        if multiplier_column_was_missing:
-            self.conn.execute(
-                "ALTER TABLE account_configs "
-                "ADD COLUMN risk_capital_multiplier REAL"
-            )
-        if "execution_account_id" not in columns:
-            self.conn.execute(
-                "ALTER TABLE account_configs "
-                "ADD COLUMN execution_account_id TEXT NOT NULL DEFAULT ''"
-            )
-        if "is_enabled" not in columns:
-            self.conn.execute(
-                "ALTER TABLE account_configs "
-                "ADD COLUMN is_enabled INTEGER NOT NULL DEFAULT 1"
-            )
-        self.conn.executescript(
-            """
-            UPDATE account_configs
-            SET account_type = 'main'
-            WHERE account_type IS NULL
-               OR account_type = ''
-               OR account_type NOT IN ('main', 'subaccount');
-
-            UPDATE account_configs
-            SET parent_account_id = ''
-            WHERE account_type = 'main'
-               OR parent_account_id IS NULL;
-
-            UPDATE account_configs
-            SET execution_account_id = account_id
-            WHERE execution_account_id IS NULL
-               OR execution_account_id = '';
-
-            CREATE INDEX IF NOT EXISTS idx_account_configs_parent
-            ON account_configs (parent_account_id, account_type);
-
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_account_configs_execution_account
-            ON account_configs (execution_account_id);
-            """
-        )
-        if multiplier_column_was_missing:
-            self.conn.execute(
-                "UPDATE account_configs SET is_enabled = 0"
-            )
-        self._disable_accounts_with_invalid_multiplier()
-        channel_columns = {
-            row["name"]
-            for row in self.conn.execute(
-                "PRAGMA table_info(channel_routing)"
-            ).fetchall()
-        }
-        if "channel_name" not in channel_columns:
-            self.conn.execute(
-                "ALTER TABLE channel_routing "
-                "ADD COLUMN channel_name TEXT DEFAULT ''"
-            )
-        self.conn.commit()
-
-    def _disable_accounts_with_invalid_multiplier(self) -> None:
-        rows = self.conn.execute(
-            "SELECT account_id, risk_capital_multiplier "
-            "FROM account_configs"
-        ).fetchall()
-        for row in rows:
-            if self._valid_risk_capital_multiplier(
-                row["risk_capital_multiplier"]
-            ):
-                continue
-            self.conn.execute(
-                "UPDATE account_configs SET is_enabled = 0 "
-                "WHERE account_id = ?",
-                (row["account_id"],),
-            )
+        raise RuntimeError(CONFIG_WRITES_DISABLED)
 
     @staticmethod
     def _valid_risk_capital_multiplier(value: object) -> bool:
@@ -274,120 +188,12 @@ class DatabaseManager:
 
     # -- init ----------------------------------------------------------------
     def init_db(self) -> dict:
-        """Create all tables. Returns status dict."""
-        self._ensure_schema()
-        return {"status": "ok", "message": "Database initialized", "path": self.db_path}
+        raise RuntimeError(CONFIG_WRITES_DISABLED)
 
-    # -- account_configs -----------------------------------------------------
-    def add_account(
-        self,
-        account_id: str,
-        api_key: str,
-        api_secret: str,
-        risk_ratio: float = 0.01,
-        is_testnet: bool = True,
-        account_type: str = "main",
-        parent_account_id: str = "",
-        risk_capital_multiplier: float | None = None,
-        execution_account_id: str = "",
-    ) -> dict:
-        self._ensure_schema()
-        normalized_account_id = str(account_id).strip()
-        normalized_account_type = str(account_type or "main").strip().lower()
-        normalized_parent_account_id = str(parent_account_id or "").strip()
-        normalized_execution_account_id = str(
-            execution_account_id or normalized_account_id
-        ).strip()
-
-        if not CREDENTIAL_ACCOUNT_ID_PATTERN.fullmatch(
-            normalized_account_id
-        ):
-            return {
-                "status": "error",
-                "message": (
-                    "account_id must be 1-128 printable characters"
-                ),
-            }
-        if normalized_account_type not in ACCOUNT_TYPES:
-            return {
-                "status": "error",
-                "message": "account_type must be main or subaccount",
-            }
-        if not EXECUTION_ACCOUNT_ID_PATTERN.fullmatch(
-            normalized_execution_account_id
-        ):
-            return {
-                "status": "error",
-                "message": (
-                    "execution_account_id must use letters, numbers, dots, "
-                    "underscores, or hyphens"
-                ),
-            }
-        if not math.isfinite(risk_ratio) or risk_ratio < 0:
-            return {
-                "status": "error",
-                "message": "risk_ratio must be a non-negative number",
-            }
-        if not self._valid_risk_capital_multiplier(
-            risk_capital_multiplier
-        ):
-            return {
-                "status": "error",
-                "message": (
-                    "risk_capital_multiplier is required and must be "
-                    "greater than 0"
-                ),
-            }
-
-        hierarchy_error = self._validate_account_hierarchy(
-            account_id=normalized_account_id,
-            account_type=normalized_account_type,
-            parent_account_id=normalized_parent_account_id,
-            is_testnet=is_testnet,
-        )
-        if hierarchy_error:
-            return {"status": "error", "message": hierarchy_error}
-
-        existing_execution_account = self.conn.execute(
-            "SELECT account_id FROM account_configs "
-            "WHERE execution_account_id = ?",
-            (normalized_execution_account_id,),
-        ).fetchone()
-        if existing_execution_account:
-            return {
-                "status": "error",
-                "message": "V3 execution account already exists",
-            }
-
-        try:
-            self.conn.execute(
-                "INSERT INTO account_configs "
-                "(account_id, api_key, api_secret, default_risk_ratio, is_testnet, "
-                "account_type, parent_account_id, risk_capital_multiplier, "
-                "execution_account_id, is_enabled) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
-                (
-                    normalized_account_id,
-                    api_key,
-                    api_secret,
-                    risk_ratio,
-                    int(is_testnet),
-                    normalized_account_type,
-                    normalized_parent_account_id,
-                    risk_capital_multiplier,
-                    normalized_execution_account_id,
-                ),
-            )
-            self.conn.commit()
-            return {"status": "ok", "account_id": normalized_account_id}
-        except sqlite3.IntegrityError:
-            return {
-                "status": "error",
-                "message": f"Account '{normalized_account_id}' already exists",
-            }
+    def add_account(self, *args, **kwargs) -> dict:
+        raise RuntimeError(CONFIG_WRITES_DISABLED)
 
     def list_accounts(self) -> list[dict]:
-        self._ensure_schema()
         rows = self.conn.execute(
             """
             SELECT *
@@ -436,42 +242,16 @@ class DatabaseManager:
         return False
 
     # -- channel_routing -----------------------------------------------------
-    def set_channel(self, channel_id: str, target_account_id: str, channel_name: str = "") -> dict:
-        self._ensure_schema()
-        target = self.conn.execute(
-            "SELECT account_id, is_enabled FROM account_configs "
-            "WHERE account_id = ?",
-            (target_account_id,),
-        ).fetchone()
-        if not target:
-            return {"status": "error", "message": "Target account not found"}
-        if int(target["is_enabled"]) != 1:
-            return {"status": "error", "message": "Target account is disabled"}
-
-        self.conn.execute(
-            "INSERT INTO channel_routing (channel_id, target_account_id, channel_name) "
-            "VALUES (?, ?, ?) "
-            "ON CONFLICT(channel_id) DO UPDATE SET "
-            "target_account_id = excluded.target_account_id, "
-            "channel_name = excluded.channel_name",
-            (channel_id, target_account_id, channel_name),
-        )
-        self.conn.commit()
-        return {"status": "ok", "channel_id": channel_id, "target_account_id": target_account_id}
+    def set_channel(self, *args, **kwargs) -> dict:
+        raise RuntimeError(CONFIG_WRITES_DISABLED)
 
     def list_channels(self) -> list[dict]:
-        self._ensure_schema()
         rows = self.conn.execute("SELECT * FROM channel_routing").fetchall()
         return self._rows_to_list(rows)
 
     # -- symbol_risk_configs -------------------------------------------------
-    def set_risk(self, symbol: str, risk_ratio: float) -> dict:
-        self.conn.execute(
-            "INSERT OR REPLACE INTO symbol_risk_configs (symbol, risk_ratio) VALUES (?, ?)",
-            (symbol, risk_ratio),
-        )
-        self.conn.commit()
-        return {"status": "ok", "symbol": symbol, "risk_ratio": risk_ratio}
+    def set_risk(self, *args, **kwargs) -> dict:
+        raise RuntimeError(CONFIG_WRITES_DISABLED)
 
     def list_risks(self) -> list[dict]:
         rows = self.conn.execute("SELECT * FROM symbol_risk_configs").fetchall()
@@ -774,13 +554,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     parser = build_parser()
+    # Reject legacy writers before parsing credential arguments or opening SQLite.
+    prefix = argparse.ArgumentParser(add_help=False)
+    prefix.add_argument("--db")
+    _, remaining = prefix.parse_known_args()
+    disabled = {"init-db", "add-account", "set-channel", "set-risk"}
+    if remaining and remaining[0] in disabled:
+        parser.exit(2, CONFIG_WRITES_DISABLED + "\n")
     args = parser.parse_args()
 
     if not args.command:
         parser.print_help()
         sys.exit(1)
 
-    db = DatabaseManager(db_path=args.db)
+    db = DatabaseManager(db_path=args.db, readonly=args.command not in {
+        "create-order", "update-order", "update-sl", "add-briefing", "record-signal"
+    })
 
     match args.command:
         case "init-db":

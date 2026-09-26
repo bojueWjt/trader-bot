@@ -1,0 +1,801 @@
+#!/usr/bin/env python3
+"""O-0 Caddy helper: render the watcher-gateway snippet and verify adapted JSON.
+
+DRAFT for docs/agent-team/release/o0-runbook-deploy.md (stage C) and
+o0-site-checklist.md (S-04 .. S-10).
+
+Sub-commands
+  render     Caddyfile snippet from contracts/generated/caddy-watcher-gateway-paths.txt,
+             one named matcher per line, anchored ``path_regexp`` (review wac-026 🟡-1 c)
+             plus ``method`` (🟡-1 b); never pastes ``{param}`` (🟡-1 a).
+  verify     Emulate Caddy route selection on the JSON produced by ``caddy adapt`` (or
+             read back from the admin API) and prove, per list line and per method:
+             exactly one ``/m`` strip, upstream 127.0.0.1:8183, Authorization and
+             X-Watcher-* untouched, no basic auth on the mobile path; negative samples
+             never reach the gateway (no fallback reverse_proxy, 🟡-1 d); browser
+             samples that reach the watcher pass basic auth, clear X-Watcher-* and
+             inject ``{env.WATCHER_BROWSER_PROXY_TOKEN}`` (🟡-3 / 🟡-1 g).
+             Anything the emulator cannot evaluate is reported UNCOMPARABLE and fails.
+  inventory  Structural summary of every route (no header values, no hashes).
+  selftest   Fixture-based self-test (good config + broken variants), also run on the
+             allowlist skeleton (o0_tool.py caddy-skeleton) that the site check exports.
+
+User ruling 2026-09-26 (to be written into erratum WGW-1.0.2): ``*`` in the Caddy
+path list means EXACTLY ONE NON-EMPTY SEGMENT and is translated to an anchored,
+case-sensitive ``path_regexp`` (``[^/]+``). Caddy's ``path`` matcher with a
+trailing ``*`` is a prefix match that crosses segments and is case-insensitive;
+it is rejected (the former ``--accept-prefix`` option was removed with the ruling).
+All 16 lines use ``path_regexp`` so the whole gateway set is case-sensitive, like
+the gateway's own route table; case variants must not reach the gateway.
+
+The adapted JSON contains the basic-auth bcrypt hash: keep it 0600 and never
+print it. This tool never prints header values except ``{placeholder}`` names.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import re
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+MOBILE_PREFIX = "/m"
+WATCHER_PREFIX = "/m/v1/watcher/"
+DEFAULT_GATEWAY_UPSTREAM = "127.0.0.1:8183"
+WATCHER_PORTS = ("9090", "9100")
+BROWSER_TOKEN_PLACEHOLDER = "{env.WATCHER_BROWSER_PROXY_TOKEN}"
+RESPONDERS = {"reverse_proxy", "static_response", "file_server", "error", "php_fastcgi", "copy_response"}
+EVALUABLE = {"host", "path", "path_regexp", "method", "not", "protocol"}
+DEFAULT_MOBILE_SAMPLES = ("GET /m/v1/accounts", "GET /m/v1/mirror/positions", "POST /m/v1/operator/orders")
+DEFAULT_BROWSER_SAMPLES = (
+    "GET /watcher/",
+    "GET /api/status",
+    "GET /api/trading/accounts",
+    "GET /api/config",
+    "POST /api/login/start",
+    "GET /media/1700000000000-1.jpg",
+    "GET /healthz",
+)
+
+
+class Uncomparable(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class Line:
+    path: str
+    methods: tuple[str, ...]
+
+    @property
+    def regex(self) -> str:
+        parts = []
+        for segment in self.path.split("/"):
+            parts.append("[^/]+" if segment == "*" else re.escape(segment).replace("\\-", "-"))
+        return "^" + "/".join(parts) + "$"
+
+    @property
+    def slug(self) -> str:
+        body = self.path[len(WATCHER_PREFIX):].replace("/*", "_param").replace("/", "_").replace("-", "_")
+        return "wgw_" + body
+
+    def sample(self, fill: str = "x1") -> str:
+        if self.path.endswith("/media/*") and fill == "x1":
+            fill = "1700000000000-1.jpg"
+        return "/".join(fill if s == "*" else s for s in self.path.split("/"))
+
+
+def load_list(path: Path) -> tuple[list[Line], dict[str, str]]:
+    meta: dict[str, str] = {}
+    lines: list[Line] = []
+    for raw in path.read_text(encoding="ascii").splitlines():
+        if raw.startswith("# _"):
+            key, _, value = raw[2:].partition(" ")
+            meta[key] = value.strip()
+            continue
+        if not raw.strip():
+            continue
+        parts = raw.split(" ")
+        if len(parts) < 2 or not parts[0].startswith(WATCHER_PREFIX):
+            raise SystemExit(f"bad list line: {raw!r}")
+        if "{" in parts[0] or "}" in parts[0]:
+            raise SystemExit("list contains {param}; regenerate with the contract generator")
+        lines.append(Line(parts[0], tuple(parts[1:])))
+    if not lines:
+        raise SystemExit("list has 0 lines (uncomparable)")
+    for key in ("_generated_from", "_yaml_sha256", "_phase_max"):
+        if key not in meta:
+            raise SystemExit(f"list header missing {key}")
+    return lines, meta
+
+
+# ---------------------------------------------------------------- render
+def cmd_render(args: argparse.Namespace) -> int:
+    lines, meta = load_list(args.paths)
+    out = [
+        "# BEGIN o0 watcher gateway routes (generated by scripts/ops/o0/o0_caddy_watcher_routes.py render)",
+        f"# source {args.paths} yaml_sha256={meta['_yaml_sha256']} phase_max={meta['_phase_max']}",
+        "# Place inside the jp-bot.balen.wang site block, beside the existing /m mobile handles.",
+        "# Do NOT add any /m/* or /m/v1/* fallback; unmatched paths must fall to the existing non-gateway handler.",
+    ]
+    out.insert(3, "# '*' = exactly one non-empty segment (WGW-1.0.2); path_regexp is case-sensitive: do not add (?i)")
+    for line in lines:
+        out += [
+            f"@{line.slug} {{",
+            f"\tpath_regexp {line.slug} {line.regex}",
+            f"\tmethod {' '.join(line.methods)}",
+            "}",
+            f"handle @{line.slug} {{",
+            f"\turi strip_prefix {MOBILE_PREFIX}",
+            f"\treverse_proxy {args.upstream} {{",
+            "\t\tflush_interval -1",
+            "\t}",
+            "}",
+        ]
+    out.append("# END o0 watcher gateway routes")
+    sys.stdout.write("\n".join(out) + "\n")
+    return 0
+
+
+# ---------------------------------------------------------------- emulator
+@dataclass
+class Request:
+    method: str
+    path: str
+    host: str
+    scheme: str = "https"
+
+
+@dataclass
+class Step:
+    handler: dict
+    route_trail: tuple[int, ...]
+    route_match: list | None
+
+
+@dataclass
+class Outcome:
+    chain: list[Step] = field(default_factory=list)
+    responded: bool = False
+    final_path: str = ""
+
+
+def _caddy_path_match(pattern: str, path: str) -> bool:
+    p = pattern.lower()
+    s = path.lower()
+    if p == "*":
+        return True
+    stars = p.count("*")
+    if stars == 0:
+        return s == p
+    if stars == 2 and p.startswith("*") and p.endswith("*"):
+        return p[1:-1] in s
+    if stars == 1 and p.endswith("*"):
+        return s.startswith(p[:-1])
+    if stars == 1 and p.startswith("*"):
+        return s.endswith(p[1:])
+    rx = "^" + "".join("[^/]*" if c == "*" else re.escape(c) for c in p) + "$"
+    return re.match(rx, s) is not None
+
+
+def _match_one_set(mset: dict, req: Request) -> bool:
+    for kind, value in mset.items():
+        if kind not in EVALUABLE:
+            raise Uncomparable(f"matcher '{kind}'")
+        if kind == "host":
+            host = req.host.lower()
+            ok = False
+            for h in value:
+                h = h.lower()
+                if h == host or (h.startswith("*.") and host.endswith(h[1:])):
+                    ok = True
+            if not ok:
+                return False
+        elif kind == "path":
+            if not any(_caddy_path_match(p, req.path) for p in value):
+                return False
+        elif kind == "path_regexp":
+            if re.search(value["pattern"], req.path) is None:
+                return False
+        elif kind == "method":
+            if req.method.upper() not in [m.upper() for m in value]:
+                return False
+        elif kind == "protocol":
+            if value.lower() != req.scheme:
+                return False
+        elif kind == "not":
+            if _match_sets(value, req):
+                return False
+    return True
+
+
+def _match_sets(msets: list | None, req: Request) -> bool:
+    if not msets:
+        return True
+    return any(_match_one_set(m, req) for m in msets)
+
+
+def _apply_rewrite(handler: dict, req: Request) -> None:
+    keys = set(handler) - {"handler"}
+    if not keys <= {"strip_path_prefix", "strip_path_suffix"}:
+        raise Uncomparable(f"rewrite fields {sorted(keys)}")
+    prefix = handler.get("strip_path_prefix")
+    if prefix and req.path.lower().startswith(prefix.lower()):
+        req.path = req.path[len(prefix):] or "/"
+    suffix = handler.get("strip_path_suffix")
+    if suffix and req.path.endswith(suffix):
+        req.path = req.path[: -len(suffix)]
+
+
+def _eval_routes(routes: list, req: Request, trail: tuple[int, ...], out: Outcome, matches: tuple = ()) -> bool:
+    done_groups: set[str] = set()
+    for index, route in enumerate(routes):
+        group = route.get("group")
+        if group and group in done_groups:
+            continue
+        if not _match_sets(route.get("match"), req):
+            continue
+        if group:
+            done_groups.add(group)
+        here = trail + (index,)
+        here_matches = matches + tuple(route.get("match") or ())
+        for handler in route.get("handle", []):
+            kind = handler.get("handler")
+            if kind == "subroute":
+                if _eval_routes(handler.get("routes", []), req, here, out, here_matches):
+                    return True
+                continue
+            if kind == "rewrite":
+                _apply_rewrite(handler, req)
+            out.chain.append(Step(handler, here, list(here_matches)))
+            if kind in RESPONDERS:
+                out.responded = True
+                out.final_path = req.path
+                return True
+        if route.get("terminal"):
+            return False
+    return False
+
+
+def select_servers(config: dict, listen_port: str) -> list[dict]:
+    servers = config.get("apps", {}).get("http", {}).get("servers", {})
+    picked = [s for s in servers.values() if any(str(a).endswith(":" + listen_port) for a in s.get("listen", []))]
+    return picked
+
+
+def emulate(config: dict, req: Request, listen_port: str) -> Outcome:
+    servers = select_servers(config, listen_port)
+    if not servers:
+        raise Uncomparable(f"no server listens on :{listen_port}")
+    if len(servers) > 1:
+        raise Uncomparable(f"{len(servers)} servers listen on :{listen_port}")
+    outcome = Outcome()
+    _eval_routes(servers[0].get("routes", []), req, (), outcome)
+    if not outcome.responded:
+        outcome.final_path = req.path
+    return outcome
+
+
+# ---------------------------------------------------------------- checks
+def _dials(handler: dict) -> list[str]:
+    return [str(u.get("dial", "")) for u in handler.get("upstreams", [])]
+
+
+def _header_ops(handler: dict) -> dict:
+    if handler.get("handler") == "headers":
+        return handler.get("request", {}) or {}
+    if handler.get("handler") == "reverse_proxy":
+        return (handler.get("headers") or {}).get("request", {}) or {}
+    return {}
+
+
+def _touched_names(ops: dict) -> set[str]:
+    names: set[str] = set()
+    for key in ("set", "add"):
+        names |= {n.lower() for n in (ops.get(key) or {})}
+    names |= {n.lower() for n in (ops.get("delete") or [])}
+    names |= {n.lower() for n in (ops.get("replace") or {})}
+    return names
+
+
+def _touches(names: set[str], target: str) -> bool:
+    target = target.lower()
+    for name in names:
+        if name == target:
+            return True
+        if name.endswith("*") and target.startswith(name[:-1]):
+            return True
+        if name.startswith("*") and target.endswith(name[1:]):
+            return True
+    return False
+
+
+def _route_matcher_summary(match: list | None) -> str:
+    if not match:
+        return "<any>"
+    parts = []
+    for mset in match:
+        items = []
+        for kind, value in mset.items():
+            if kind == "path_regexp":
+                items.append(f"path_regexp={value.get('pattern')}")
+            elif kind in ("path", "host", "method"):
+                items.append(f"{kind}={','.join(value)}")
+            else:
+                items.append(kind)
+        parts.append("&".join(items))
+    return " | ".join(parts)
+
+
+class Report:
+    def __init__(self) -> None:
+        self.passes = 0
+        self.failures: list[str] = []
+
+    def ok(self, msg: str) -> None:
+        self.passes += 1
+        print(f"PASS {msg}")
+
+    def fail(self, msg: str) -> None:
+        self.failures.append(msg)
+        print(f"FAIL {msg}")
+
+
+def _check_gateway_outcome(rep: Report, label: str, out: Outcome, line: Line, upstream: str) -> None:
+    if not out.responded or out.chain[-1].handler.get("handler") != "reverse_proxy":
+        rep.fail(f"{label}: no reverse_proxy responder")
+        return
+    last = out.chain[-1]
+    if _dials(last.handler) != [upstream]:
+        rep.fail(f"{label}: upstream {_dials(last.handler)} != [{upstream}]")
+        return
+    strips = [s for s in out.chain if s.handler.get("handler") == "rewrite"]
+    if len(strips) != 1 or strips[0].handler.get("strip_path_prefix") != MOBILE_PREFIX:
+        rep.fail(f"{label}: expected exactly one strip_path_prefix {MOBILE_PREFIX}, got {len(strips)} rewrite(s)")
+        return
+    if not out.final_path.startswith("/v1/watcher/"):
+        rep.fail(f"{label}: upstream path {out.final_path} is not /v1/watcher/...")
+        return
+    for step in out.chain:
+        kind = step.handler.get("handler")
+        if kind == "authentication":
+            rep.fail(f"{label}: mobile path passes through authentication (basic auth) handler")
+            return
+        names = _touched_names(_header_ops(step.handler))
+        if _touches(names, "authorization") or any(_touches(names, h) for h in ("x-watcher-actor", "x-watcher-token-fingerprint", "x-watcher-proxy-auth")):
+            rep.fail(f"{label}: {kind} rewrites Authorization or X-Watcher-* on the mobile path")
+            return
+    matched = last.route_match
+    expected_methods = set(line.methods)
+    good = False
+    for mset in matched or []:
+        methods = set(mset.get("method", []))
+        if "path_regexp" in mset and mset["path_regexp"].get("pattern") == line.regex and methods == expected_methods:
+            good = True
+    if not good:
+        rep.fail(f"{label}: matched route is not the anchored line matcher ({_route_matcher_summary(matched)})")
+        return
+    rep.ok(f"{label} -> {upstream}{out.final_path}")
+
+
+def _reaches_gateway(out: Outcome, upstream: str) -> bool:
+    return (
+        out.responded
+        and out.chain[-1].handler.get("handler") == "reverse_proxy"
+        and upstream in _dials(out.chain[-1].handler)
+        and out.final_path.lower().startswith("/v1/watcher")
+    )
+
+
+def _check_browser_outcome(rep: Report, label: str, out: Outcome) -> bool:
+    if not out.responded or out.chain[-1].handler.get("handler") != "reverse_proxy":
+        return False
+    dials = _dials(out.chain[-1].handler)
+    if not any(d.rsplit(":", 1)[-1] in WATCHER_PORTS for d in dials):
+        return False
+    auth_seen = cleared_actor = cleared_fp = cleared_auth = False
+    for step in out.chain[:-1]:
+        kind = step.handler.get("handler")
+        if kind == "authentication":
+            auth_seen = True
+        if kind == "headers":
+            deleted = {n.lower() for n in (_header_ops(step.handler).get("delete") or [])}
+            cleared_actor |= _touches(deleted, "x-watcher-actor")
+            cleared_fp |= _touches(deleted, "x-watcher-token-fingerprint")
+            cleared_auth |= _touches(deleted, "authorization")
+    proxy_ops = _header_ops(out.chain[-1].handler)
+    rp_deleted = {n.lower() for n in (proxy_ops.get("delete") or [])}
+    cleared_actor |= _touches(rp_deleted, "x-watcher-actor")
+    cleared_fp |= _touches(rp_deleted, "x-watcher-token-fingerprint")
+    set_ops = {k.lower(): v for k, v in (proxy_ops.get("set") or {}).items()}
+    problems = []
+    if not auth_seen:
+        problems.append("no basic auth before the watcher upstream (bypass)")
+    if not (cleared_actor and cleared_fp):
+        problems.append("X-Watcher-Actor / X-Watcher-Token-Fingerprint not cleared")
+    if not (cleared_auth or "authorization" in rp_deleted):
+        problems.append("browser Authorization (basic credentials) not cleared before the watcher")
+    if _touches(rp_deleted, "x-watcher-proxy-auth"):
+        problems.append("reverse_proxy deletes X-Watcher-Proxy-Auth (may run after set and drop the injection)")
+    if set_ops.get("x-watcher-proxy-auth") != [BROWSER_TOKEN_PLACEHOLDER]:
+        value = set_ops.get("x-watcher-proxy-auth")
+        shown = "absent" if value is None else ("placeholder " + value[0] if value and re.fullmatch(r"\{[A-Za-z0-9_.]+\}", value[0] or "") else f"<literal len={len(value[0]) if value else 0}>")
+        problems.append(f"X-Watcher-Proxy-Auth set is {shown}, expected {BROWSER_TOKEN_PLACEHOLDER}")
+    if _touches(_touched_names(proxy_ops), "authorization") and "authorization" not in rp_deleted:
+        problems.append("reverse_proxy sets Authorization towards the watcher")
+    if problems:
+        rep.fail(f"{label}: " + "; ".join(problems))
+    else:
+        rep.ok(f"{label} -> watcher via basic auth, cleared X-Watcher-*, injected placeholder")
+    return True
+
+
+def _walk(routes: list, trail: tuple[int, ...] = ()):
+    for index, route in enumerate(routes):
+        here = trail + (index,)
+        yield here, route
+        for handler in route.get("handle", []):
+            if handler.get("handler") == "subroute":
+                yield from _walk(handler.get("routes", []), here)
+
+
+def _static_checks(rep: Report, config: dict, lines: list[Line], listen_port: str, upstream: str) -> list[tuple[tuple[int, ...], dict]]:
+    watcher_upstreams = []
+    expected_regex = {line.regex for line in lines}
+    for server in select_servers(config, listen_port):
+        for trail, route in _walk(server.get("routes", [])):
+            for mset in route.get("match") or []:
+                for p in mset.get("path", []):
+                    low = p.lower()
+                    if low in ("/m*", "/m/*", "/m/v1*", "/m/v1/*", "/m/v1/watcher*", "/m/v1/watcher/*"):
+                        rep.fail(f"route {trail}: forbidden wildcard path matcher {p}")
+                    elif low.startswith("/m/v1/watcher") and "*" in low:
+                        rep.fail(f"route {trail}: '*' path matcher {p} is a case-insensitive prefix that crosses segments (ruling: anchored path_regexp, exactly one segment)")
+                rx = mset.get("path_regexp", {}).get("pattern")
+                if rx and "/m/v1/watcher" in rx and rx not in expected_regex:
+                    rep.fail(f"route {trail}: path_regexp {rx} is not a list line (extra or altered route)")
+            for handler in route.get("handle", []):
+                if handler.get("handler") == "reverse_proxy":
+                    if any(d.rsplit(":", 1)[-1] in WATCHER_PORTS for d in _dials(handler)):
+                        watcher_upstreams.append((trail, route))
+    return watcher_upstreams
+
+
+def _parse_sample(text: str) -> tuple[str, str]:
+    method, _, path = text.partition(" ")
+    if not path.startswith("/"):
+        raise SystemExit(f"bad sample {text!r}; use 'METHOD /path'")
+    return method.upper(), path
+
+
+def run_verify(config: dict, lines: list[Line], *, host: str, listen_port: str, upstream: str,
+               mobile_samples, browser_samples, before_deploy: bool = False) -> Report:
+    rep = Report()
+
+    def emu(method: str, path: str) -> Outcome | None:
+        try:
+            return emulate(config, Request(method, path, host), listen_port)
+        except Uncomparable as exc:
+            rep.fail(f"UNCOMPARABLE {method} {path}: {exc}")
+            return None
+
+    for line in lines:
+        if before_deploy:
+            break  # site check before stage C: the per-path routes do not exist yet
+        for method in line.methods:
+            label = f"{method} {line.sample()}"
+            out = emu(method, line.sample())
+            if out is not None:
+                _check_gateway_outcome(rep, label, out, line, upstream)
+    if before_deploy:
+        for line in lines:
+            out = emu(line.methods[0], line.sample())
+            if out is not None and _reaches_gateway(out, upstream):
+                rep.fail(f"before-deploy: {line.methods[0]} {line.sample()} already reaches the gateway (existing /m wildcard or fallback)")
+    negatives: list[tuple[str, str]] = [("GET", WATCHER_PREFIX + "nope"), ("OPTIONS", WATCHER_PREFIX + "status")]
+    all_methods = {"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"}
+    for line in lines:
+        negatives.append(("GET", line.sample() + "/"))
+        missing = sorted(all_methods - set(line.methods))
+        if missing:
+            negatives.append((missing[0], line.sample()))
+        # case-sensitive like the gateway route table: an upper-cased literal segment must not match
+        negatives.append((line.methods[0], line.sample().replace("/watcher/", "/Watcher/", 1)))
+        last_literal = [seg for seg in line.path.split("/") if seg and seg != "*"][-1]
+        negatives.append((line.methods[0], line.sample().replace("/" + last_literal, "/" + last_literal.upper(), 1)))
+        if "*" in line.path:
+            negatives.append((line.methods[0], line.sample("a/b")))
+            negatives.append((line.methods[0], line.sample("")))
+            negatives.append((line.methods[0], line.sample("x1") + "/extra"))
+    for method, path in negatives:
+        out = emu(method, path)
+        if out is None:
+            continue
+        if _reaches_gateway(out, upstream):
+            rep.fail(f"negative {method} {path} reaches the gateway (fallback or over-broad matcher)")
+        else:
+            rep.ok(f"negative {method} {path} does not reach the gateway")
+    for sample in mobile_samples:
+        method, path = _parse_sample(sample)
+        out = emu(method, path)
+        if out is None:
+            continue
+        if not out.responded or upstream not in _dials(out.chain[-1].handler):
+            rep.fail(f"mobile {sample}: does not reach {upstream}")
+            continue
+        strips = [s for s in out.chain if s.handler.get("handler") == "rewrite"]
+        touched = any(_touches(_touched_names(_header_ops(s.handler)), "authorization") for s in out.chain)
+        if len(strips) != 1 or touched:
+            rep.fail(f"mobile {sample}: strips={len(strips)} authorization_touched={touched}")
+        else:
+            rep.ok(f"mobile {sample} -> {upstream}{out.final_path} (one strip, Authorization untouched)")
+    watcher_routes = _static_checks(rep, config, lines, listen_port, upstream)
+    covered: set[tuple[int, ...]] = set()
+    for sample in browser_samples:
+        method, path = _parse_sample(sample)
+        out = emu(method, path)
+        if out is None:
+            continue
+        if before_deploy and out.responded and out.chain[-1].handler.get("handler") == "reverse_proxy" \
+                and any(d.rsplit(":", 1)[-1] in WATCHER_PORTS for d in _dials(out.chain[-1].handler)):
+            auth = any(s.handler.get("handler") == "authentication" for s in out.chain[:-1])
+            if auth:
+                rep.ok(f"before-deploy browser {sample} -> watcher behind basic auth (injection not expected yet)")
+            else:
+                rep.fail(f"before-deploy browser {sample} reaches the watcher WITHOUT basic auth (bypass)")
+            covered.add(out.chain[-1].route_trail)
+            continue
+        if _check_browser_outcome(rep, f"browser {sample}", out):
+            covered.add(out.chain[-1].route_trail)
+        else:
+            last = out.chain[-1].handler.get("handler") if out.chain else "none"
+            print(f"INFO browser {sample} does not reach the watcher (responder={last})")
+    for trail, route in watcher_routes:
+        if trail not in covered:
+            rep.fail(f"route {trail} proxies to the watcher but no browser sample exercised it ({_route_matcher_summary(route.get('match'))}); add --browser-sample")
+    return rep
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    lines, meta = load_list(args.paths)
+    if args.expect_phase_max and meta["_phase_max"] != args.expect_phase_max:
+        print(f"FAIL list phase_max {meta['_phase_max']} != {args.expect_phase_max}")
+        return 1
+    config = json.loads(args.adapted.read_text(encoding="utf-8"))
+    rep = run_verify(
+        config, lines, host=args.host, listen_port=args.listen_port, upstream=args.upstream,
+        mobile_samples=args.mobile_sample or DEFAULT_MOBILE_SAMPLES,
+        browser_samples=args.browser_sample or DEFAULT_BROWSER_SAMPLES,
+        before_deploy=args.before_deploy,
+    )
+    if rep.failures or rep.passes == 0:
+        print(f"CADDY_WATCHER_ROUTES_FAILED failures={len(rep.failures)} passes={rep.passes}")
+        return 1
+    print(f"CADDY_WATCHER_ROUTES_OK lines={len(lines)} passes={rep.passes} yaml_sha256={meta['_yaml_sha256']} phase_max={meta['_phase_max']}")
+    return 0
+
+
+def _handler_summary(h: dict) -> str:
+    kind = h.get("handler")
+    if kind == "reverse_proxy":
+        ops = _header_ops(h)
+        shown = []
+        for op in ("set", "add"):
+            for name, values in (ops.get(op) or {}).items():
+                vals = [v if re.fullmatch(r"\{[A-Za-z0-9_.]+\}", v or "") else f"<literal len={len(v or '')}>" for v in values]
+                shown.append(f"{op}:{name}={'|'.join(vals)}")
+        for name in ops.get("delete") or []:
+            shown.append(f"delete:{name}")
+        return f"reverse_proxy dials={','.join(_dials(h))} {' '.join(shown)}".rstrip()
+    if kind == "rewrite":
+        return "rewrite " + " ".join(f"{k}={v}" for k, v in h.items() if k != "handler")
+    if kind == "authentication":
+        providers = h.get("providers", {})
+        basic = providers.get("http_basic", {})
+        return f"authentication providers={','.join(providers)} accounts={len(basic.get('accounts', []))}"
+    if kind == "headers":
+        req = h.get("request") or {}
+        resp = h.get("response") or {}
+        return "headers " + " ".join(
+            [f"req.{op}:{','.join(req[op])}" for op in ("set", "add", "delete", "replace") if req.get(op)]
+            + [f"resp.{op}:{','.join(resp[op])}" for op in ("set", "add", "delete") if resp.get(op)]
+        )
+    if kind == "static_response":
+        return f"static_response status={h.get('status_code', 200)}"
+    if kind == "subroute":
+        return f"subroute routes={len(h.get('routes', []))}"
+    return str(kind)
+
+
+def cmd_inventory(args: argparse.Namespace) -> int:
+    config = json.loads(args.adapted.read_text(encoding="utf-8"))
+    servers = config.get("apps", {}).get("http", {}).get("servers", {})
+    for name, server in servers.items():
+        print(f"server {name} listen={','.join(server.get('listen', []))}")
+        for trail, route in _walk(server.get("routes", [])):
+            indent = "  " * len(trail)
+            group = f" group={route['group']}" if route.get("group") else ""
+            term = " terminal" if route.get("terminal") else ""
+            print(f"{indent}route {'.'.join(map(str, trail))}{group}{term} match={_route_matcher_summary(route.get('match'))}")
+            for h in route.get("handle", []):
+                if h.get("handler") != "subroute":
+                    print(f"{indent}  - {_handler_summary(h)}")
+    return 0
+
+
+# ---------------------------------------------------------------- selftest
+def _fixture(lines: list[Line]) -> dict:
+    def proxy(dial, headers=None):
+        h = {"handler": "reverse_proxy", "upstreams": [{"dial": dial}]}
+        if headers:
+            h["headers"] = {"request": headers}
+        return h
+
+    site: list = []
+    site.append({"group": "g1", "match": [{"path": ["/api/auth/*"]}], "handle": [proxy("127.0.0.1:8000")]})
+    site.append({"group": "g1", "match": [{"path": ["/m/v1/accounts", "/m/v1/mirror/positions", "/m/v1/operator/orders", "/m/v1/operator/orders/*"]}],
+                 "handle": [{"handler": "subroute", "routes": [
+                     {"handle": [{"handler": "rewrite", "strip_path_prefix": "/m"}]},
+                     {"handle": [proxy("127.0.0.1:8183")]}]}]})
+    for line in lines:
+        site.append({"group": "g1", "match": [{"path_regexp": {"name": line.slug, "pattern": line.regex}, "method": list(line.methods)}],
+                     "handle": [{"handler": "subroute", "routes": [
+                         {"handle": [{"handler": "rewrite", "strip_path_prefix": "/m"}]},
+                         {"handle": [{**proxy("127.0.0.1:8183"), "flush_interval": -1}]}]}]})
+    site.append({"group": "g1", "match": [{"path": ["/v1/*"]}],
+                 "handle": [proxy("127.0.0.1:8183", {"set": {"Authorization": ["Bearer {env.SYSTEM_OBSERVER_TOKEN}"]}})]})
+    site.append({"group": "g1", "match": [{"path": ["/watcher", "/watcher/*", "/api/*", "/media/*", "/healthz"]}],
+                 "handle": [{"handler": "subroute", "routes": [{"handle": [
+                     {"handler": "authentication", "providers": {"http_basic": {"accounts": [{"username": "u", "password": "HASH"}]}}},
+                     {"handler": "headers", "request": {"delete": ["X-Watcher-Actor", "X-Watcher-Token-Fingerprint", "X-Watcher-Proxy-Auth", "Authorization"]}},
+                     proxy("127.0.0.1:9090", {"set": {"X-Watcher-Proxy-Auth": [BROWSER_TOKEN_PLACEHOLDER]}})]}]}]})
+    site.append({"group": "g1", "handle": [{"handler": "file_server"}]})
+    return {"apps": {"http": {"servers": {
+        "srv0": {"listen": [":443"], "routes": [{"match": [{"host": ["jp-bot.balen.wang"]}], "handle": [{"handler": "subroute", "routes": site}], "terminal": True}]},
+        "srv1": {"listen": ["127.0.0.1:8080"], "routes": [{"handle": [proxy("127.0.0.1:8183")]}]},
+    }}}}
+
+
+def _site(cfg: dict) -> list:
+    return cfg["apps"]["http"]["servers"]["srv0"]["routes"][0]["handle"][0]["routes"]
+
+
+def cmd_selftest(args: argparse.Namespace) -> int:
+    import contextlib
+    import io
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from o0_tool import caddy_skeleton  # the structure the site check exports from jp-24
+
+    lines, _meta = load_list(args.paths)
+
+    def verdict(cfg: dict, before_deploy: bool = False) -> tuple[bool, str]:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rep = run_verify(cfg, lines, host="jp-bot.balen.wang", listen_port="443", upstream=DEFAULT_GATEWAY_UPSTREAM,
+                             mobile_samples=DEFAULT_MOBILE_SAMPLES, browser_samples=DEFAULT_BROWSER_SAMPLES,
+                             before_deploy=before_deploy)
+        return (not rep.failures and rep.passes > 0), buf.getvalue()
+
+    good = _fixture(lines)
+    ok, text = verdict(good)
+    assert ok, text
+    passes = text.count("\nPASS ") + text.startswith("PASS ")
+    ok_skel, text_skel = verdict(caddy_skeleton(good))
+    assert ok_skel, "the redacted skeleton must keep everything the verifier needs:\n" + text_skel
+
+    def mutated(fn):
+        cfg = copy.deepcopy(good)
+        fn(_site(cfg))
+        return cfg
+
+    def gw_index(site, needle):
+        for i, r in enumerate(site):
+            for m in r.get("match") or []:
+                if needle in m.get("path_regexp", {}).get("pattern", ""):
+                    return i
+        raise AssertionError(needle)
+
+    def set_pattern(site, needle, pattern):
+        site[gw_index(site, needle)]["match"][0]["path_regexp"]["pattern"] = pattern
+
+    browser = lambda s: s[-2]["handle"][0]["routes"][0]["handle"]  # noqa: E731
+    variants = {
+        "fallback /m/* reverse_proxy": lambda s: s.insert(len(s) - 1, {"group": "g1", "match": [{"path": ["/m/*"]}], "handle": [
+            {"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/m"}]}, {"handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
+        "prefix path matcher instead of anchored regexp": lambda s: s[gw_index(s, "trading/accounts/")]["match"][0].update(
+            {"path": ["/m/v1/watcher/trading/accounts/*"]}) or s[gw_index(s, "trading/accounts/")]["match"][0].pop("path_regexp"),
+        "regexp allows several segments": lambda s: set_pattern(s, "trading/risks/", "^/m/v1/watcher/trading/risks/.+$"),
+        "regexp allows an empty segment": lambda s: set_pattern(s, "trading/channels/", "^/m/v1/watcher/trading/channels/[^/]*$"),
+        "regexp made case-insensitive": lambda s: set_pattern(s, "trading/accounts/", "(?i)^/m/v1/watcher/trading/accounts/[^/]+$"),
+        "regexp not anchored at the end": lambda s: set_pattern(s, "media/", "^/m/v1/watcher/media/[^/]+"),
+        "double strip": lambda s: s[gw_index(s, "watcher/status")]["handle"][0]["routes"].insert(0, {"handle": [{"handler": "rewrite", "strip_path_prefix": "/m"}]}),
+        "panel injection shadows /m": lambda s: s.insert(0, {"group": "g1", "match": [{"path": ["/m/v1/watcher/status"]}], "handle": [
+            {"handler": "rewrite", "strip_path_prefix": "/m"},
+            {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}], "headers": {"request": {"set": {"Authorization": ["Bearer {env.SYSTEM_OBSERVER_TOKEN}"]}}}}]}),
+        "browser route without basic auth": lambda s: browser(s).pop(0),
+        "browser proxy header literal": lambda s: browser(s)[2]["headers"]["request"]["set"].update({"X-Watcher-Proxy-Auth": ["x" * 43]}),
+        "reverse_proxy deletes X-Watcher-* wildcard": lambda s: browser(s)[2]["headers"]["request"].update({"delete": ["X-Watcher-*"]}),
+        "browser does not clear actor header": lambda s: browser(s)[1]["request"].update({"delete": ["Authorization"]}),
+        "browser keeps basic Authorization": lambda s: browser(s)[1]["request"].update({"delete": ["X-Watcher-Actor", "X-Watcher-Token-Fingerprint", "X-Watcher-Proxy-Auth"]}),
+        "wrong upstream port": lambda s: s[gw_index(s, "dialogs")]["handle"][0]["routes"][1]["handle"][0].update({"upstreams": [{"dial": "127.0.0.1:8184"}]}),
+        "expression matcher before gateway": lambda s: s.insert(0, {"group": "g1", "match": [{"expression": "{path}.startsWith('/m/')"}], "handle": [{"handler": "static_response", "status_code": 404}]}),
+        "missing list line": lambda s: s.pop(gw_index(s, "trading/briefings")),
+        "extra method on a line": lambda s: s[gw_index(s, "watcher/status")]["match"][0].update({"method": ["GET", "PATCH"]}),
+        "unlisted /m/v1/watcher route": lambda s: s.insert(2, {"group": "g1", "match": [{"path_regexp": {"name": "x", "pattern": "^/m/v1/watcher/price-alerts$"}}], "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}),
+        "unauthenticated watcher route for /media": lambda s: s.insert(0, {"group": "g1", "match": [{"path": ["/media/*"]}], "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:9090"}]}]}),
+        "case-insensitive path matcher for a static line": lambda s: s.insert(0, {"group": "g1", "match": [{"path": ["/m/v1/watcher/status"], "method": ["GET"]}], "handle": [
+            {"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/m"}]}, {"handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
+    }
+    caught = 0
+    for name, fn in variants.items():
+        cfg = mutated(fn)
+        for form, candidate in (("raw", cfg), ("skeleton", caddy_skeleton(cfg))):
+            ok_variant, text_variant = verdict(candidate)
+            if ok_variant:
+                print(f"SELFTEST_MISSED {name} ({form})")
+                print(text_variant)
+                return 1
+        caught += 1
+    base_cfg = copy.deepcopy(good)
+    site = _site(base_cfg)
+    site[:] = [r for r in site if not any("/m/v1/watcher" in m.get("path_regexp", {}).get("pattern", "") for m in (r.get("match") or []))]
+    site[-2]["handle"][0]["routes"][0]["handle"] = [h for h in site[-2]["handle"][0]["routes"][0]["handle"] if h.get("handler") != "headers"]
+    site[-2]["handle"][0]["routes"][0]["handle"][-1].pop("headers", None)
+    ok_before, text_before = verdict(base_cfg, before_deploy=True)
+    assert ok_before, text_before
+    assert verdict(caddy_skeleton(base_cfg), before_deploy=True)[0], "before-deploy verify must work on the skeleton"
+    wild = copy.deepcopy(base_cfg)
+    _site(wild).insert(0, {"group": "g1", "match": [{"path": ["/m/*"]}], "handle": [{"handler": "subroute", "routes": [
+        {"handle": [{"handler": "rewrite", "strip_path_prefix": "/m"}]}, {"handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]})
+    assert not verdict(wild, before_deploy=True)[0], "before-deploy must flag an existing /m wildcard"
+    noauth = copy.deepcopy(base_cfg)
+    _site(noauth)[-2]["handle"][0]["routes"][0]["handle"].pop(0)
+    assert not verdict(noauth, before_deploy=True)[0], "before-deploy must flag a watcher route without basic auth"
+    print(f"SELFTEST_OK good_passes={passes} variants_caught={caught}/{len(variants)} (raw and skeleton) lines={len(lines)} "
+          "single_segment_strict=ok skeleton_verify=ok before_deploy_mode=ok")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+    default_paths = Path(__file__).resolve().parents[3] / "contracts/generated/caddy-watcher-gateway-paths.txt"
+
+    p = sub.add_parser("render")
+    p.add_argument("--paths", type=Path, default=default_paths)
+    p.add_argument("--upstream", default=DEFAULT_GATEWAY_UPSTREAM)
+    p.set_defaults(func=cmd_render)
+
+    p = sub.add_parser("verify")
+    p.add_argument("--paths", type=Path, default=default_paths)
+    p.add_argument("--adapted", type=Path, required=True, help="JSON from `caddy adapt` or GET :2019/config/")
+    p.add_argument("--host", default="jp-bot.balen.wang")
+    p.add_argument("--listen-port", default="443")
+    p.add_argument("--upstream", default=DEFAULT_GATEWAY_UPSTREAM)
+    p.add_argument("--expect-phase-max", default="P2")
+    p.add_argument("--before-deploy", action="store_true", help="site check S-03/S-04 before stage C: no per-path routes expected, no injection expected")
+    p.add_argument("--mobile-sample", action="append")
+    p.add_argument("--browser-sample", action="append")
+    p.set_defaults(func=cmd_verify)
+
+    p = sub.add_parser("inventory")
+    p.add_argument("--adapted", type=Path, required=True)
+    p.set_defaults(func=cmd_inventory)
+
+    p = sub.add_parser("selftest")
+    p.add_argument("--paths", type=Path, default=default_paths)
+    p.set_defaults(func=cmd_selftest)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,3 +1,4 @@
+const { requireWatcherContext } = require("./request-validation");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -43,7 +44,12 @@ function fail(res, status, code, message, identity) {
 
 function createMediaHandler(mediaDir) {
   return async function mediaHandler(req, res) {
-    const identity = req.watcherAuth.identity;
+    let identity;
+    try {
+      identity = requireWatcherContext(req).auth.identity;
+    } catch {
+      return fail(res, 500, "internal_error", "watcher request context unavailable", null);
+    }
     const filename = req.path.slice(1);
     if (!filename || filename.includes("/") || filename.includes("\\") || filename === "." || filename === "..") {
       return fail(res, 404, "not_found", "media not found", identity);
@@ -115,16 +121,28 @@ function createMediaHandler(mediaDir) {
       }
       const handle = fileHandle;
       const stream = handle.createReadStream({ start, end, highWaterMark: 64 * 1024, autoClose: false });
+      let bytesSent = 0;
+      let truncated = false;
+      stream.on("data", (chunk) => { bytesSent += chunk.length; });
+      function logTruncated(reason) {
+        if (!truncated) {
+          truncated = true;
+          console.error(`[media] truncated filename=${filename} bytes_sent=${bytesSent} reason=${reason}`);
+        }
+      }
       const timer = setTimeout(() => stream.destroy(new Error("media timeout")), 60000);
       stream.on("error", () => {
         if (res.headersSent) {
-          console.error(`[media] truncated filename=${filename} reason=stream_error`);
+          logTruncated("stream_error");
           res.destroy();
         } else {
           fail(res, 503, "watcher_unavailable", "media unavailable", identity);
         }
       });
       res.on("close", () => {
+        if (!res.writableFinished) {
+          logTruncated("client_closed");
+        }
         clearTimeout(timer);
         stream.destroy();
         handle.close().catch(() => {});

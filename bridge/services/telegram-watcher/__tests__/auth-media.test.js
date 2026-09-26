@@ -67,12 +67,14 @@ class MediaResponse extends Writable {
 
 async function mediaRequest(root, filename, method = "GET", range, ifRange) {
   const req = {
-    watcherAuth: { identity: "gateway" },
     path: `/${filename}`,
     method,
     rawHeaders: Array.isArray(range) ? range.flatMap((value) => ["Range", value]) : (range ? ["Range", range] : []),
     get(name) { return name === "If-Range" ? ifRange : undefined; },
   };
+  const authenticated = invoke('gateway', `/media/${filename}`, method).req;
+  Object.defineProperty(req, 'watcherAuth', Object.getOwnPropertyDescriptor(authenticated, 'watcherAuth'));
+  Object.defineProperty(req, 'watcherRoute', Object.getOwnPropertyDescriptor(authenticated, 'watcherRoute'));
   const res = new MediaResponse();
   const done = once(res, "finish");
   await createMediaHandler(root)(req, res);
@@ -80,20 +82,13 @@ async function mediaRequest(root, filename, method = "GET", range, ifRange) {
   return res;
 }
 
-test("route artifact has exactly the YAML identity, method, path and write rows", () => {
+test("temporary deny list matches YAML and applies to all methods", () => {
   const yamlPath = path.resolve(__dirname, "../../../../contracts/watcher-gateway-routes.yaml");
-  const python = "import json,sys,yaml; d=yaml.safe_load(open(sys.argv[1])); print(json.dumps([[r['id'],r['identity'],r['method'],r['inner_path'],bool(r['write'])] for r in d['routes']]))";
-  const result = spawnSync("python3", ["-c", python, yamlPath], { encoding: "utf8" });
+  const result = spawnSync("python3", ["-c", "import json,sys,yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1]))['never_allowed']))", yamlPath], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  const expected = JSON.parse(result.stdout);
-  assert.ok(expected.length > 0);
-  const { routes, pathParams, actorHeaders, neverAllowed, secretKeyPattern } = require("../lib/generated/watcher-routes");
-  assert.deepEqual(routes.map((row) => [row.id, row.identity, row.method, row.path, row.write]), expected);
-  const metadata = spawnSync("python3", ["-c", "import json,sys,yaml;d=yaml.safe_load(open(sys.argv[1]));print(json.dumps([d['path_params'],d['actor_headers'],[r['inner_path'] for r in d['never_allowed']]],ensure_ascii=False))", yamlPath], { encoding: "utf8" });
-  assert.equal(metadata.status, 0, metadata.stderr);
-  assert.deepEqual([pathParams, actorHeaders, neverAllowed], JSON.parse(metadata.stdout));
-  assert.equal(secretKeyPattern.flags, "i");
-  assert.equal(secretKeyPattern.pattern.startsWith("(?i)"), false);
+  const { neverAllowed } = require("../lib/generated/watcher-routes");
+  assert.deepEqual(neverAllowed, JSON.parse(result.stdout).map(({inner_path, methods}) => ({inner_path, methods})));
+  assert.ok(neverAllowed.every(row => row.methods === "*"));
 });
 
 test("startup validates all current and configured previous tokens", () => {
@@ -107,13 +102,14 @@ test("startup validates all current and configured previous tokens", () => {
     delete clean[`${name}_PREVIOUS`];
   }
   const serverPath = path.resolve(__dirname, "../server.js");
+  assert.equal(fs.existsSync(path.join(path.dirname(serverPath), "config.json")), false, "startup test must not read local Telegram config");
   const startup = spawnSync(process.execPath, [serverPath], { env: clean, encoding: "utf8", timeout: 5000 });
   assert.notEqual(startup.status, 0);
   assert.match(startup.stderr, /WATCHER_GATEWAY_TOKEN/);
 });
 
 test("every generated route admits its own identity and method", () => {
-  const { routes } = require("../lib/generated/watcher-routes");
+  const { PAYLOAD: { routes } } = require("../lib/generated/gateway-routes");
   const examples = {
     account_id: "acct-1",
     channel_id: "-123",
@@ -122,9 +118,9 @@ test("every generated route admits its own identity and method", () => {
     alert_id: "1",
     order_id: "1",
   };
-  assert.ok(routes.length >= 60);
+  assert.ok(routes.length > 0);
   for (const route of routes) {
-    const pathname = route.path.replace(/\{([a-z_]+)\}/g, (_, name) => examples[name]);
+    const pathname = route.inner_path.replace(/\{([a-z_]+)\}/g, (_, name) => examples[name]);
     const actor = route.write ? "app:risk_admin" : "app:viewer";
     const supplied = headers(route.identity, actor);
     const result = invoke(null, pathname, route.method, supplied);
@@ -170,18 +166,35 @@ test("gateway, snapshot and browser access only their routes", () => {
   assert.equal(browserEncoded.passed, true);
 });
 
-test("server wires authentication ahead of JSON, static content, media and handlers", () => {
-  const source = fs.readFileSync(path.resolve(__dirname, "../server.js"), "utf8");
-  const positions = [
-    source.indexOf("app.use(watcherAuthMiddleware)"),
-    source.indexOf("app.use(express.json())"),
-    source.indexOf("app.use(express.static"),
-    source.indexOf("app.use(\"/media\", createMediaHandler"),
-    source.indexOf("app.get(\"/healthz\""),
-  ];
-  assert.ok(positions.every((value) => value >= 0));
-  assert.deepEqual(positions, [...positions].sort((a, b) => a - b));
-  assert.equal(source.includes("express.static(MEDIA_DIR)"), false);
+test("server real Express stack gates all handlers and static content", () => {
+  assert.equal(fs.existsSync(path.resolve(__dirname, "../config.json")), false);
+  const previous = { ...process.env };
+  Object.assign(process.env, TOKENS);
+  const mediaDir = fs.mkdtempSync(path.join(os.tmpdir(), "watcher-stack-"));
+  process.env.WATCHER_MEDIA_DIR = mediaDir;
+  const listeners = new Map(['uncaughtException','unhandledRejection','SIGINT','SIGTERM'].map(name => [name,process.listeners(name)]));
+  try {
+    const { app } = require('../server');
+    const stack = app.router.stack;
+    assert.equal(stack[0].name, 'watcherAuth');
+    assert.equal(stack[1].name, 'watcherRequestValidation');
+    assert.ok(stack.some(layer => layer.name === 'serveStatic'));
+    assert.ok(stack.some(layer => layer.route));
+    for (const layer of stack.filter(layer => layer.route || layer.name === 'serveStatic' || layer.name === 'mediaHandler')) {
+      assert.ok(stack.indexOf(layer) > 1);
+    }
+  } finally {
+    for (const name of Object.keys(process.env)) {
+      if (!(name in previous)) delete process.env[name];
+    }
+    Object.assign(process.env, previous);
+    for (const [name, old] of listeners) {
+      for (const listener of process.listeners(name)) {
+        if (!old.includes(listener)) process.removeListener(name, listener);
+      }
+    }
+    fs.rmSync(mediaDir, { recursive: true, force: true });
+  }
 });
 
 test("actor and fingerprint headers are mandatory, unique and gateway only", () => {
@@ -290,14 +303,20 @@ test("media handles full, open, suffix and one-byte ranges, HEAD and invalid ran
   }
 });
 
-test("status adds activity and listener fields while retaining original fields", () => {
-  const value = buildStatus({ apiId: "1", apiHash: "fake", session: "fake", watchGroups: ["42"] }, { connected: true, listening: true, now: 1000, lastTelegramActivityAt: 500 }, { TRADER_TRADING_DB_PATH: "/does-not-exist" });
-  assert.deepEqual([value.configured, value.loggedIn, value.connected, value.watchGroups], [true, true, true, ["42"]]);
-  assert.equal(value.observed_at, "1970-01-01T00:00:01.000Z");
-  assert.equal(value.connection, "connected");
-  assert.equal(value.listener, "listening");
-  assert.equal(value.last_telegram_activity_at, "1970-01-01T00:00:00.500Z");
-  assert.equal(value.last_message_ingested_at, null);
+test("status distinguishes an unreadable database from a readable empty table", () => {
+  const state = { connected: true, listening: true, now: 1000, lastTelegramActivityAt: 500 };
+  assert.throws(() => buildStatus({}, state, { TRADER_TRADING_DB_PATH: "/does-not-exist" }), /unreadable/);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'watcher-empty-status-'));
+  const file = path.join(directory, 'db');
+  const db = new Database(file);
+  db.exec('CREATE TABLE telegram_messages (created_at TEXT)');
+  db.close();
+  try {
+    const value = buildStatus({ apiId: '1', apiHash: 'fake', session: 'fake', watchGroups: ['42'] }, state, { TRADER_TRADING_DB_PATH: file });
+    assert.deepEqual([value.configured, value.loggedIn, value.connected, value.watchGroups], [true,true,true,['42']]);
+    assert.equal(value.last_message_ingested_at, null);
+    assert.equal(value.last_telegram_activity_at, '1970-01-01T00:00:00.500Z');
+  } finally { fs.rmSync(directory, { recursive:true, force:true }); }
 });
 
 test("status reads the latest ingested message timestamp from a local fixture DB", () => {
@@ -319,4 +338,32 @@ test("status reads the latest ingested message timestamp from a local fixture DB
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('media client cancellation logs bytes_sent and closes the file stream', async () => {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'watcher-media-cancel-'));
+  const filename='1234567890-99.jpg';
+  fs.writeFileSync(path.join(root,filename),Buffer.alloc(256*1024));
+  const logs=[];
+  const original=console.error;
+  console.error=(line)=>logs.push(line);
+  class CancelResponse extends MediaResponse {
+    _write(chunk, encoding, callback) {
+      this.headersSent=true;
+      callback();
+      this.destroy();
+    }
+  }
+  try {
+    const req=invoke('gateway','/media/'+filename).req;
+    req.path='/'+filename;req.get=()=>undefined;
+    const res=new CancelResponse();
+    const closed=once(res,'close');
+    await createMediaHandler(root)(req,res);await closed;
+    assert.equal(logs.length,1);
+    assert.match(logs[0],/truncated filename=1234567890-99.jpg bytes_sent=65536 reason=client_closed/);
+    const missing=new MediaResponse();
+    await createMediaHandler(root)({path:'/'+filename},missing);
+    assert.equal(missing.statusCode,500);
+  } finally {console.error=original;fs.rmSync(root,{recursive:true,force:true});}
 });

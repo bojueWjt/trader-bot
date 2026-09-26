@@ -5,6 +5,8 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const test = require("node:test");
+const vm = require('node:vm');
+const { createRequire } = require('node:module');
 
 test("real server exits before listening when trading database initialization fails", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "watcher-init-failure-"));
@@ -16,6 +18,7 @@ test("real server exits before listening when trading database initialization fa
   }
   const [gatewayToken, snapshotToken, browserProxyToken] = tokens;
   try {
+    assert.equal(fs.existsSync(path.join(path.dirname(serverPath), "config.json")), false, "startup test must not read local Telegram config");
     const result = spawnSync(process.execPath, [serverPath], {
       cwd: directory,
       env: {
@@ -33,7 +36,8 @@ test("real server exits before listening when trading database initialization fa
     assert.equal(result.error, undefined);
     assert.equal(result.status, 1, result.stderr || result.stdout);
     assert.equal(result.signal, null);
-    assert.match(result.stdout, /Failed to ensure trading tables/);
+    assert.match(result.stdout + result.stderr, /Failed to ensure trading tables: database_initialization_failed: unable to open database file/);
+    assert.match(result.stdout + result.stderr, /Exiting with code 1: database_initialization_failed/);
     assert.doesNotMatch(result.stdout + result.stderr, /Web UI listening/);
     for (const token of tokens) {
       assert.equal((result.stdout + result.stderr).includes(token), false);
@@ -41,4 +45,27 @@ test("real server exits before listening when trading database initialization fa
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('migration failure logs a useful filtered error while keeping the alert category safe', () => {
+  const filename = path.join(__dirname, '..', 'lib', 'trading-api.js');
+  const source = fs.readFileSync(filename, 'utf8');
+  const nativeRequire = createRequire(filename);
+  const logs = [];
+  const secretSentinel = 'secret-sentinel-should-not-log';
+  class FailingDatabase {
+    pragma() {}
+    prepare() { throw new Error(`migration failed api_key=${secretSentinel}`); }
+    close() {}
+  }
+  const context = {
+    module: { exports:{} },
+    process: { env:{} },
+    console: { error(message) { logs.push(message); } },
+    require(name) { return name === 'better-sqlite3' ? FailingDatabase : nativeRequire(name); },
+  };
+  vm.runInNewContext(source, context, { filename });
+  assert.throws(() => context.module.exports.registerTradingApi({}, {}), /database_initialization_failed/);
+  assert.match(logs.join('\n'), /migration failed api_key=\*\*\*\*/);
+  assert.doesNotMatch(logs.join('\n'), /secret-sentinel-should-not-log/);
 });

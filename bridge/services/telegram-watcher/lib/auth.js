@@ -1,10 +1,12 @@
 const crypto = require("node:crypto");
-const {
-  routes,
-  pathParams,
-  actorHeaders,
-  neverAllowed,
-} = require("./generated/watcher-routes");
+const { PAYLOAD } = require("./generated/gateway-routes");
+const { neverAllowed } = require("./generated/watcher-routes");
+const { routes, path_params: pathParams, actor_headers: actorHeaders } = PAYLOAD;
+
+// Python str.strip(), including the C0 separators omitted by JavaScript trim().
+function stripToken(value) {
+  return value.replace(/^[\t\n\v\f\r \x1c-\x1f\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t\n\v\f\r \x1c-\x1f\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/gu, "");
+}
 
 const TOKEN_ENV = {
   gateway: "WATCHER_GATEWAY_TOKEN",
@@ -16,15 +18,15 @@ function tokenCatalog(env) {
   const catalog = {};
   const seen = new Set();
   for (const [identity, name] of Object.entries(TOKEN_ENV)) {
-    const current = String(env[name] || "").trim();
-    const previous = String(env[`${name}_PREVIOUS`] || "").trim();
-    if (Buffer.byteLength(current, "utf8") < 32) {
-      throw new Error(`${name} must be configured with at least 32 bytes`);
+    const current = String(env[name] || "");
+    const previous = String(env[`${name}_PREVIOUS`] || "");
+    if (!/^[\x21-\x7E]{32,}$/u.test(current)) {
+      throw new Error(`${name} must contain at least 32 printable ASCII bytes without whitespace`);
     }
     const values = [current];
     if (previous) {
-      if (Buffer.byteLength(previous, "utf8") < 32) {
-        throw new Error(`${name}_PREVIOUS must have at least 32 bytes`);
+      if (!/^[\x21-\x7E]{32,}$/u.test(previous)) {
+        throw new Error(`${name}_PREVIOUS must contain at least 32 printable ASCII bytes without whitespace`);
       }
       values.push(previous);
     }
@@ -78,9 +80,11 @@ function regexForPath(template) {
 }
 
 const compiledRoutes = routes.map((route) => ({
-  ...route,
-  regex: regexForPath(route.path),
-  parameterNames: [...route.path.matchAll(/\{([a-z_]+)\}/g)].map((match) => match[1]),
+  row: route,
+  identity: route.identity,
+  method: route.method,
+  regex: regexForPath(route.inner_path),
+  parameterNames: [...route.inner_path.matchAll(/\{([a-z_]+)\}/g)].map((match) => match[1]),
 }));
 
 function routeMatches(route, rawPath, identity) {
@@ -100,7 +104,7 @@ function routeMatches(route, rawPath, identity) {
     }
     const definition = pathParams[name];
     const pattern = identity === "browser" ? definition.browser_pattern : definition.gateway_pattern;
-    if (!pattern || !new RegExp(pattern, name === "account_id" && identity === "browser" ? "u" : "").test(segment)) {
+    if (!pattern || !new RegExp(pattern, "u" + (definition.flags || "")).test(segment)) {
       return false;
     }
   }
@@ -108,7 +112,7 @@ function routeMatches(route, rawPath, identity) {
 }
 
 function isNeverAllowed(pathname) {
-  return neverAllowed.some((pattern) => {
+  return neverAllowed.some(({ inner_path: pattern }) => {
     if (pattern.endsWith("/*")) {
       return pathname.startsWith(pattern.slice(0, -1));
     }
@@ -118,8 +122,8 @@ function isNeverAllowed(pathname) {
 
 function createAuthMiddleware(env = process.env) {
   const catalog = tokenCatalog(env);
-  const actorPattern = new RegExp(actorHeaders.actor_pattern);
-  const fingerprintPattern = new RegExp(actorHeaders.fingerprint_pattern);
+  const actorPattern = new RegExp(actorHeaders.actor_pattern, "u");
+  const fingerprintPattern = new RegExp(actorHeaders.fingerprint_pattern, "u");
 
   return function watcherAuth(req, res, next) {
     const authorization = rawValues(req, "authorization");
@@ -135,17 +139,19 @@ function createAuthMiddleware(env = process.env) {
       if (proxy.length !== 0) {
         return errorResponse(res, null, 401, "unauthenticated", "authentication required");
       }
-      const candidate = authorization[0].slice("Bearer ".length).trim();
+      const candidate = stripToken(authorization[0].slice("Bearer ".length));
       if (!candidate) {
         return errorResponse(res, null, 401, "unauthenticated", "authentication required");
       }
-      if (matchesToken(candidate, catalog.gateway)) {
+      const gatewayMatch = matchesToken(candidate, catalog.gateway);
+      const snapshotMatch = matchesToken(candidate, catalog.snapshot);
+      if (gatewayMatch) {
         identity = "gateway";
-      } else if (matchesToken(candidate, catalog.snapshot)) {
+      } else if (snapshotMatch) {
         identity = "snapshot";
       }
-    } else if (proxy.length === 1 && (authorization.length === 0 || authorization[0].startsWith("Basic "))) {
-      const candidate = proxy[0].trim();
+    } else if (proxy.length === 1 && (authorization.length === 0 || authorization[0].split(" ", 1)[0].toLowerCase() === "basic")) {
+      const candidate = stripToken(proxy[0]);
       if (matchesToken(candidate, catalog.browser)) {
         identity = "browser";
       }
@@ -155,7 +161,7 @@ function createAuthMiddleware(env = process.env) {
     }
 
     const pathname = req.originalUrl.split("?")[0];
-    if (identity !== "browser" && (pathname.includes("%") || pathname.includes("//") || pathname.endsWith("/") || pathname.split("/").some((part) => part === "." || part === ".."))) {
+    if (identity !== "browser" && (pathname.includes("%") || pathname.includes("//") || (pathname !== "/" && pathname.endsWith("/")) || pathname.split("/").some((part) => part === "." || part === ".."))) {
       return errorResponse(res, identity, 404, "route_not_found", "route not found");
     }
     if (identity === "gateway" && isNeverAllowed(pathname)) {
@@ -175,28 +181,31 @@ function createAuthMiddleware(env = process.env) {
       return errorResponse(res, identity, 405, "method_not_allowed", "method not allowed", { Allow: allow });
     }
 
+    let auth;
     if (identity === "gateway") {
       if (actors.length !== 1 || fingerprints.length !== 1 || !actorPattern.test(actors[0]) || !fingerprintPattern.test(fingerprints[0])) {
         return errorResponse(res, identity, 400, "invalid_actor_headers", "invalid actor headers");
       }
       const role = actors[0].slice("app:".length);
-      if (selected.write && role !== "risk_admin") {
+      if (selected.row.write && role !== "risk_admin") {
         return errorResponse(res, identity, 403, "identity_forbidden", "identity forbidden");
       }
-      req.watcherAuth = { identity, role, actor: actors[0], tokenFingerprint: fingerprints[0] };
+      auth = { identity, role, actor: actors[0], tokenFingerprint: fingerprints[0] };
     } else {
       if (actors.length !== 0 || fingerprints.length !== 0) {
         return errorResponse(res, identity, 400, "invalid_actor_headers", "invalid actor headers");
       }
-      req.watcherAuth = {
+      auth = {
         identity,
         role: null,
         actor: identity === "browser" ? "browser" : "snapshot",
         tokenFingerprint: null,
       };
     }
+    Object.defineProperty(req, "watcherAuth", { value: Object.freeze(auth), writable: false, configurable: false, enumerable: true });
+    Object.defineProperty(req, "watcherRoute", { value: selected.row, writable: false, configurable: false, enumerable: true });
     return next();
   };
 }
 
-module.exports = { createAuthMiddleware, tokenCatalog };
+module.exports = { createAuthMiddleware, tokenCatalog, matchesToken, isNeverAllowed, stripToken };

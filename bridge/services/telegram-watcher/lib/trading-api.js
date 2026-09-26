@@ -5,42 +5,12 @@ const {
   sanitizeForResponse,
 } = require("./safe-log");
 
-const DEFAULT_TRADING_DB_PATH = "/var/lib/docker/volumes/trader_signal-data/_data/watcher-trading.db";
-const CANONICAL_TRADING_DB_ENV = "TRADER_TRADING_DB_PATH";
-const LEGACY_TRADING_DB_ENVS = ["WATCHER_TRADING_DB", "TRADING_DB_PATH"];
+const { DEFAULT_TRADING_DB_PATH, resolveTradingDbPath } = require("./db-path");
 const TRADING_DB_PATH = resolveTradingDbPath(process.env);
 const CREDENTIAL_ACCOUNT_ID_PATTERN = /^[^\u0000-\u001F\u007F]{1,128}$/u;
 const EXECUTION_ACCOUNT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const ACCOUNT_TYPES = new Set(["main", "subaccount"]);
 const ACTIVE_ORDER_STATUSES = ["PENDING", "OPEN", "PARTIAL_CLOSED"];
-
-function normalizeDbPath(value) {
-  return String(value || "").trim();
-}
-
-function resolveTradingDbPath(env) {
-  const configured = [];
-  for (const name of [CANONICAL_TRADING_DB_ENV, ...LEGACY_TRADING_DB_ENVS]) {
-    const value = normalizeDbPath(env[name]);
-    if (value) {
-      configured.push({ name, value });
-    }
-  }
-  if (!configured.length) {
-    return DEFAULT_TRADING_DB_PATH;
-  }
-  const canonical = configured[0].value;
-  for (const item of configured.slice(1)) {
-    if (item.value !== canonical) {
-      throw new Error(
-        "conflicting trading DB path environment: "
-        + `${configured[0].name}=${canonical} `
-        + `${item.name}=${item.value}`
-      );
-    }
-  }
-  return canonical;
-}
 
 function getTradingDb() {
   const db = new Database(TRADING_DB_PATH);
@@ -149,8 +119,8 @@ function ensureTradingTables() {
       require("./config-store").ensureConfigTables(db);
     }).immediate();
   } catch (err) {
-    console.log("[db] Failed to ensure trading tables:", safeErrorMessage(err));
-    process.exit(1);
+    console.error("[db] Failed to ensure trading tables: database_initialization_failed: " + safeErrorMessage(err));
+    throw new Error("database_initialization_failed");
   } finally {
     closeDb(db);
   }
@@ -733,6 +703,7 @@ function closeDb(db) {
 
 module.exports = {
   ensureTelegramMessagesTable,
+  getTradingDb,
   registerTradingApi,
   saveTelegramMessage,
   __test: {

@@ -23,6 +23,7 @@ const {
 } = require("./lib/telegram-proxy");
 const {
   ensureTelegramMessagesTable,
+  getTradingDb,
   registerTradingApi,
   saveTelegramMessage,
 } = require("./lib/trading-api");
@@ -33,6 +34,9 @@ const {
 const { createAuthMiddleware } = require("./lib/auth");
 const { createMediaHandler } = require("./lib/media");
 const { buildStatus } = require("./lib/status");
+const { createRequestValidation } = require("./lib/request-validation");
+const { createReentrantWriter } = require("./lib/reentrant-write");
+const reentrantWrite = createReentrantWriter(getTradingDb);
 // Fail process startup before installing the uncaught-exception guardian.
 const watcherAuthMiddleware = createAuthMiddleware(process.env);
 
@@ -75,7 +79,7 @@ if (!fs.existsSync(MEDIA_DIR)) {
 
 // Validate all three service credentials synchronously and gate every request.
 app.use(watcherAuthMiddleware);
-app.use(express.json());
+app.use(createRequestValidation());
 app.use(express.static(path.join(__dirname, "public")));
 app.use("/media", createMediaHandler(MEDIA_DIR));
 
@@ -216,7 +220,6 @@ async function checkWatcherHealth() {
   }
 }
 
-setInterval(checkWatcherHealth, 5000);
 
 // Load persisted messages on startup
 try {
@@ -597,12 +600,21 @@ app.get("/healthz", (req, res) => {
 // Get current status
 app.get("/api/status", (req, res) => {
   const cfg = loadConfig();
-  res.json(buildStatus(cfg, {
-    connected,
-    listening: watcherMonitoring && hasConnected,
-    now: Date.now(),
-    lastTelegramActivityAt,
-  }, process.env));
+  try {
+    res.json(buildStatus(cfg, {
+      connected,
+      listening: watcherMonitoring && hasConnected,
+      now: Date.now(),
+      lastTelegramActivityAt,
+    }, process.env));
+  } catch {
+    const payload = { code: "internal_error", message: "message database unreadable" };
+    if (req.watcherAuth.identity === "browser") {
+      payload.error = payload.message;
+    }
+    console.error("[status] message_database_unreadable");
+    res.status(500).json(payload);
+  }
 });
 
 // Save api credentials
@@ -816,13 +828,13 @@ app.post("/api/login/qr/password", (req, res) => {
 });
 
 // Update watch groups
-app.post("/api/groups", (req, res) => {
+app.post("/api/groups", reentrantWrite(async (req) => {
   const { groups } = req.body; // array of chat id strings
   const cfg = loadConfig();
   cfg.watchGroups = groups || [];
   saveConfig(cfg);
-  res.json({ ok: true, watchGroups: cfg.watchGroups });
-});
+  return { ok: true, watchGroups: loadConfig().watchGroups };
+}));
 
 // Get dialogs (groups/channels list)
 app.get("/api/dialogs", async (req, res) => {
@@ -853,41 +865,52 @@ app.get("/api/messages", (req, res) => {
   res.json({ messages: watchedMessages.slice(-limit).reverse() });
 });
 
-// Disconnect
-app.post("/api/disconnect", async (req, res) => {
+// These external effects are reentrant. Acknowledgement records the request;
+// /api/status is authoritative while Telegram is completing the transition.
+app.post("/api/disconnect", reentrantWrite(async () => {
   watcherMonitoring = false;
   disconnectedSince = false;
   clearInterval(pollTimer);
+  connected = false;
   if (client) {
-    await client.disconnect();
-    connected = false;
+    void client.disconnect().catch(() => console.error("[watcher] disconnect_failed"));
   }
-  res.json({ ok: true });
-});
+  return { ok: true, connected };
+}));
 
-// Reconnect with saved session
-app.post("/api/reconnect", async (req, res) => {
+app.post("/api/reconnect", reentrantWrite(async () => {
+  void startListening().catch(() => console.error("[watcher] reconnect_failed"));
+  return { ok: true, connected };
+}));
+
+function startServer() {
   try {
-    await startListening();
-    res.json({ ok: true, connected });
-  } catch (err) {
-    res.status(500).json({ error: "Internal server error" });
+    registerTradingApi(app, priceMonitor);
+  } catch {
+    exitWatcher("database_initialization_failed");
+    return;
   }
-});
 
-registerTradingApi(app, priceMonitor);
+  setInterval(checkWatcherHealth, 5000);
+  // --- Start ---
+  const PORT = 9100;
+  const HOST = process.env.WATCHER_HOST || "127.0.0.1";
+  app.listen(PORT, HOST, () => {
+    console.log(`[watcher] Web UI listening on configured host, port ${PORT}`);
+    ensureTelegramMessagesTable();
+    // Start price monitor
+    priceMonitor.start();
+    // Auto-connect if session exists
+    const cfg = loadConfig();
+    if (cfg.session) {
+      startListening();
+    }
+  });
 
-// --- Start ---
-const PORT = 9100;
-const HOST = process.env.WATCHER_HOST || "127.0.0.1";
-app.listen(PORT, HOST, () => {
-  console.log(`[watcher] Web UI listening on configured host, port ${PORT}`);
-  ensureTelegramMessagesTable();
-  // Start price monitor
-  priceMonitor.start();
-  // Auto-connect if session exists
-  const cfg = loadConfig();
-  if (cfg.session) {
-    startListening();
-  }
-});
+}
+
+// Importing the app for structural tests must not open a socket or a database.
+if (require.main === module) {
+  startServer();
+}
+module.exports = { app, startServer };

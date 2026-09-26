@@ -28,7 +28,9 @@ assert SPEC
 assert SPEC.loader
 DB_MANAGER_MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(DB_MANAGER_MODULE)
-DatabaseManager = DB_MANAGER_MODULE.DatabaseManager
+
+# Configuration writes and migrations are owned by watcher; corresponding
+# coverage lives in bridge/services/telegram-watcher/__tests__/trading-api.test.js.
 
 BINANCE_TRADE_PATH = DB_MANAGER_PATH.with_name("binance_trade.py")
 BINANCE_TRADE_SPEC = importlib.util.spec_from_file_location(
@@ -62,242 +64,24 @@ def install_fake_binance_client(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
     return constructor_calls
 
 
-def create_legacy_database(db_path: Path) -> None:
-    conn = sqlite3.connect(db_path)
-    conn.executescript(
-        """
-        PRAGMA foreign_keys=ON;
-
-        CREATE TABLE account_configs (
-            account_id          TEXT PRIMARY KEY,
-            api_key             TEXT NOT NULL,
-            api_secret          TEXT NOT NULL,
-            default_risk_ratio  REAL DEFAULT 0.01,
-            is_testnet          INTEGER DEFAULT 1
-        );
-
-        CREATE TABLE channel_routing (
-            channel_id          TEXT PRIMARY KEY,
-            target_account_id   TEXT NOT NULL,
-            FOREIGN KEY (target_account_id) REFERENCES account_configs(account_id)
-        );
-        """
-    )
-    conn.execute(
-        "INSERT INTO account_configs "
-        "(account_id, api_key, api_secret, default_risk_ratio, is_testnet) "
-        "VALUES (?, ?, ?, ?, ?)",
-        ("legacy-main", "legacy-key", "legacy-secret", 0.02, 0),
-    )
-    conn.execute(
-        "INSERT INTO channel_routing (channel_id, target_account_id) "
-        "VALUES (?, ?)",
-        ("legacy-channel", "legacy-main"),
-    )
-    conn.commit()
-    conn.close()
-
-
-def test_init_db_migrates_legacy_accounts_and_preserves_channels(tmp_path: Path) -> None:
-    db_path = tmp_path / "legacy.db"
-    create_legacy_database(db_path)
-    manager = DatabaseManager(str(db_path))
-
-    manager.init_db()
-    manager.init_db()
-
-    columns = {
-        row["name"]
-        for row in manager.conn.execute("PRAGMA table_info(account_configs)").fetchall()
-    }
-    assert {
-        "account_type",
-        "parent_account_id",
-        "risk_capital_multiplier",
-        "execution_account_id",
-        "is_enabled",
-    } <= columns
-    assert manager.list_accounts() == [
-        {
-            "account_id": "legacy-main",
-            "api_key": "legacy-key",
-            "api_secret": "legacy-secret",
-            "default_risk_ratio": 0.02,
-            "is_testnet": 0,
-            "account_type": "main",
-            "parent_account_id": "",
-            "risk_capital_multiplier": None,
-            "execution_account_id": "legacy-main",
-            "is_enabled": 0,
-        }
-    ]
-    assert manager.list_channels() == [
-        {
-            "channel_id": "legacy-channel",
-            "target_account_id": "legacy-main",
-            "channel_name": "",
-        }
-    ]
-
-
-def test_add_account_requires_explicit_multiplier_and_defaults_to_main(
-    tmp_path: Path,
-) -> None:
-    manager = DatabaseManager(str(tmp_path / "legacy-call.db"))
-    manager.init_db()
-
-    missing = manager.add_account("missing", "key", "secret", 0.03, False)
-    result = manager.add_account(
-        "legacy",
-        "key",
-        "secret",
-        0.03,
-        False,
-        risk_capital_multiplier=1.0,
-    )
-
-    assert missing["status"] == "error"
-    assert "required" in missing["message"]
-    assert result == {"status": "ok", "account_id": "legacy"}
-    account = manager.list_accounts()[0]
-    assert account["account_type"] == "main"
-    assert account["parent_account_id"] == ""
-    assert account["is_testnet"] == 0
-    assert account["risk_capital_multiplier"] == 1.0
-    assert account["execution_account_id"] == "legacy"
-    assert account["is_enabled"] == 1
-
-
-def test_migration_preserves_legal_multiplier_and_disables_invalid_values(
-    tmp_path: Path,
-) -> None:
-    db_path = tmp_path / "multiplier-migration.db"
-    conn = sqlite3.connect(db_path)
-    conn.executescript(
-        """
-        CREATE TABLE account_configs (
-            account_id TEXT PRIMARY KEY,
-            api_key TEXT NOT NULL,
-            api_secret TEXT NOT NULL,
-            default_risk_ratio REAL DEFAULT 0.01,
-            is_testnet INTEGER DEFAULT 1,
-            account_type TEXT NOT NULL DEFAULT 'main',
-            parent_account_id TEXT NOT NULL DEFAULT '',
-            execution_account_id TEXT NOT NULL DEFAULT '',
-            risk_capital_multiplier REAL,
-            is_enabled INTEGER NOT NULL DEFAULT 1
-        );
-        """
-    )
-    conn.executemany(
-        """
-        INSERT INTO account_configs (
-            account_id,
-            api_key,
-            api_secret,
-            execution_account_id,
-            risk_capital_multiplier,
-            is_enabled
-        )
-        VALUES (?, 'key', 'secret', ?, ?, ?)
-        """,
-        (
-            ("legal-one", "execution-legal", 1.0, 1),
-            ("disabled-one", "execution-disabled", 1.0, 0),
-            ("invalid-zero", "execution-zero", 0.0, 1),
-            ("invalid-null", "execution-null", None, 1),
-        ),
-    )
-    conn.commit()
-    conn.close()
-
-    manager = DatabaseManager(str(db_path))
-    manager.init_db()
-
-    rows = {
-        row["account_id"]: row
-        for row in manager.list_accounts()
-    }
-    assert rows["legal-one"]["risk_capital_multiplier"] == 1.0
-    assert rows["legal-one"]["is_enabled"] == 1
-    assert rows["disabled-one"]["risk_capital_multiplier"] == 1.0
-    assert rows["disabled-one"]["is_enabled"] == 0
-    assert rows["invalid-zero"]["risk_capital_multiplier"] == 0.0
-    assert rows["invalid-zero"]["is_enabled"] == 0
-    assert rows["invalid-null"]["risk_capital_multiplier"] is None
-    assert rows["invalid-null"]["is_enabled"] == 0
-    assert manager.set_channel(
-        "disabled-channel",
-        "invalid-zero",
-    ) == {
-        "status": "error",
-        "message": "Target account is disabled",
-    }
-
-
-def test_adds_main_and_subaccount_with_independent_credentials(tmp_path: Path) -> None:
-    manager = DatabaseManager(str(tmp_path / "accounts.db"))
-    manager.init_db()
-
-    assert manager.add_account(
-        "main-live",
-        "main-key",
-        "main-secret",
-        0.01,
-        False,
-        risk_capital_multiplier=1.0,
-        execution_account_id="account-main",
-    ) == {
-        "status": "ok",
-        "account_id": "main-live",
-    }
-    assert manager.add_account(
-        "channel-sub",
-        "sub-key",
-        "sub-secret",
-        0.02,
-        False,
-        "subaccount",
-        "main-live",
-        2.0,
-        "account-sub",
-    ) == {"status": "ok", "account_id": "channel-sub"}
-
-    accounts = {row["account_id"]: row for row in manager.list_accounts()}
-    assert accounts["main-live"]["account_type"] == "main"
-    assert accounts["main-live"]["parent_account_id"] == ""
-    assert accounts["channel-sub"]["account_type"] == "subaccount"
-    assert accounts["channel-sub"]["parent_account_id"] == "main-live"
-    assert accounts["channel-sub"]["api_key"] == "sub-key"
-    assert accounts["channel-sub"]["api_secret"] == "sub-secret"
-    assert accounts["main-live"]["risk_capital_multiplier"] == 1.0
-    assert accounts["channel-sub"]["risk_capital_multiplier"] == 2.0
-    assert accounts["main-live"]["execution_account_id"] == "account-main"
-    assert accounts["channel-sub"]["execution_account_id"] == "account-sub"
-
-
 def test_trade_loader_resolves_main_and_subaccount_credentials(tmp_path: Path) -> None:
     db_path = tmp_path / "trade-loader.db"
-    manager = DatabaseManager(str(db_path))
-    manager.init_db()
-    manager.add_account(
-        "main-live",
-        "main-key",
-        "main-secret",
-        0.01,
-        False,
-        risk_capital_multiplier=1.0,
-    )
-    manager.add_account(
-        "channel-sub",
-        "sub-key",
-        "sub-secret",
-        0.02,
-        False,
-        "subaccount",
-        "main-live",
-        1.0,
-    )
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(DB_MANAGER_MODULE.SCHEMA_SQL)
+        conn.executemany(
+            """
+            INSERT INTO account_configs (
+                account_id, api_key, api_secret, default_risk_ratio, is_testnet,
+                account_type, parent_account_id, risk_capital_multiplier
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("main-live", "fake-main-key", "fake-main-secret", 0.01, 0,
+                 "main", "", 1.0),
+                ("channel-sub", "fake-sub-key", "fake-sub-secret", 0.02, 0,
+                 "subaccount", "main-live", 1.0),
+            ],
+        )
 
     main_credentials = BINANCE_TRADE_MODULE._load_credentials_from_db(
         str(db_path),
@@ -308,8 +92,8 @@ def test_trade_loader_resolves_main_and_subaccount_credentials(tmp_path: Path) -
         "channel-sub",
     )
 
-    assert main_credentials == ("main-key", "main-secret", False)
-    assert subaccount_credentials == ("sub-key", "sub-secret", False)
+    assert main_credentials == ("fake-main-key", "fake-main-secret", False)
+    assert subaccount_credentials == ("fake-sub-key", "fake-sub-secret", False)
 
 
 def test_position_size_applies_account_risk_capital_multiplier() -> None:
@@ -595,199 +379,8 @@ def test_get_equity_reads_current_total_margin_balance() -> None:
     assert trader.get_equity() == 4388.75
 
 
-def test_rejects_invalid_subaccount_parent_relationships(tmp_path: Path) -> None:
-    manager = DatabaseManager(str(tmp_path / "invalid-parents.db"))
-    manager.init_db()
-    manager.add_account(
-        "main-live",
-        "key",
-        "secret",
-        is_testnet=False,
-        risk_capital_multiplier=1.0,
-    )
-    manager.add_account(
-        "existing-sub",
-        "key",
-        "secret",
-        is_testnet=False,
-        account_type="subaccount",
-        parent_account_id="main-live",
-        risk_capital_multiplier=1.0,
-    )
-
-    invalid_type = manager.add_account(
-        "invalid-type",
-        "key",
-        "secret",
-        account_type="secondary",
-        risk_capital_multiplier=1.0,
-    )
-    missing_parent = manager.add_account(
-        "missing-parent",
-        "key",
-        "secret",
-        account_type="subaccount",
-        risk_capital_multiplier=1.0,
-    )
-    unknown_parent = manager.add_account(
-        "unknown-parent",
-        "key",
-        "secret",
-        account_type="subaccount",
-        parent_account_id="unknown",
-        risk_capital_multiplier=1.0,
-    )
-    self_parent = manager.add_account(
-        "self-parent",
-        "key",
-        "secret",
-        account_type="subaccount",
-        parent_account_id="self-parent",
-        risk_capital_multiplier=1.0,
-    )
-    nested_subaccount = manager.add_account(
-        "nested-subaccount",
-        "key",
-        "secret",
-        is_testnet=False,
-        account_type="subaccount",
-        parent_account_id="existing-sub",
-        risk_capital_multiplier=1.0,
-    )
-    environment_mismatch = manager.add_account(
-        "testnet-sub",
-        "key",
-        "secret",
-        is_testnet=True,
-        account_type="subaccount",
-        parent_account_id="main-live",
-        risk_capital_multiplier=1.0,
-    )
-    main_with_parent = manager.add_account(
-        "main-with-parent",
-        "key",
-        "secret",
-        account_type="main",
-        parent_account_id="main-live",
-        risk_capital_multiplier=1.0,
-    )
-    invalid_multiplier = manager.add_account(
-        "invalid-multiplier",
-        "key",
-        "secret",
-        risk_capital_multiplier=0,
-    )
-
-    for result in (
-        invalid_type,
-        missing_parent,
-        unknown_parent,
-        self_parent,
-        nested_subaccount,
-        environment_mismatch,
-        main_with_parent,
-        invalid_multiplier,
-    ):
-        assert result["status"] == "error"
-
-
-def test_channels_continue_to_route_to_main_and_subaccounts(tmp_path: Path) -> None:
-    manager = DatabaseManager(str(tmp_path / "channels.db"))
-    manager.init_db()
-    manager.add_account(
-        "main-testnet",
-        "key",
-        "secret",
-        risk_capital_multiplier=1.0,
-    )
-    manager.add_account(
-        "sub-testnet",
-        "sub-key",
-        "sub-secret",
-        account_type="subaccount",
-        parent_account_id="main-testnet",
-        risk_capital_multiplier=1.0,
-    )
-
-    manager.set_channel("main-channel", "main-testnet", "Main Channel")
-    manager.set_channel("sub-channel", "sub-testnet", "Sub Channel")
-
-    channels = {
-        row["channel_id"]: row["target_account_id"]
-        for row in manager.list_channels()
-    }
-    assert channels == {
-        "main-channel": "main-testnet",
-        "sub-channel": "sub-testnet",
-    }
-
-
-def test_existing_unicode_credential_aliases_can_bind_execution_accounts(
-    tmp_path: Path,
-) -> None:
-    manager = DatabaseManager(str(tmp_path / "unicode-accounts.db"))
-    manager.init_db()
-
-    main = manager.add_account(
-        "jiataotx@gmail.com",
-        "main-key",
-        "main-secret",
-        is_testnet=False,
-        execution_account_id="account-a",
-        risk_capital_multiplier=1.0,
-    )
-    subaccount = manager.add_account(
-        "泰山",
-        "sub-key",
-        "sub-secret",
-        is_testnet=False,
-        account_type="subaccount",
-        parent_account_id="jiataotx@gmail.com",
-        execution_account_id="account-c",
-        risk_capital_multiplier=2,
-    )
-
-    assert main == {
-        "status": "ok",
-        "account_id": "jiataotx@gmail.com",
-    }
-    assert subaccount == {"status": "ok", "account_id": "泰山"}
-    accounts = {
-        row["account_id"]: row
-        for row in manager.list_accounts()
-    }
-    assert accounts["泰山"]["parent_account_id"] == (
-        "jiataotx@gmail.com"
-    )
-    assert accounts["泰山"]["execution_account_id"] == "account-c"
-
-
-def test_add_account_cli_supports_subaccount_flags(tmp_path: Path) -> None:
+def test_add_account_cli_rejects_configuration_write(tmp_path: Path) -> None:
     db_path = tmp_path / "cli.db"
-
-    subprocess.run(
-        [sys.executable, str(DB_MANAGER_PATH), "--db", str(db_path), "init-db"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    subprocess.run(
-        [
-            sys.executable,
-            str(DB_MANAGER_PATH),
-            "--db",
-            str(db_path),
-            "add-account",
-            "main",
-            "main-key",
-            "main-secret",
-            "--capital-multiplier",
-            "1",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
     result = subprocess.run(
         [
             sys.executable,
@@ -796,8 +389,8 @@ def test_add_account_cli_supports_subaccount_flags(tmp_path: Path) -> None:
             str(db_path),
             "add-account",
             "sub",
-            "sub-key",
-            "sub-secret",
+            "fake-sub-key",
+            "fake-sub-secret",
             "--type",
             "subaccount",
             "--parent-account",
@@ -807,26 +400,12 @@ def test_add_account_cli_supports_subaccount_flags(tmp_path: Path) -> None:
             "--execution-account",
             "account-sub",
         ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    listed = subprocess.run(
-        [
-            sys.executable,
-            str(DB_MANAGER_PATH),
-            "--db",
-            str(db_path),
-            "list-accounts",
-        ],
-        check=True,
         capture_output=True,
         text=True,
     )
 
-    assert json.loads(result.stdout) == {"status": "ok", "account_id": "sub"}
-    accounts = {row["account_id"]: row for row in json.loads(listed.stdout)}
-    assert accounts["sub"]["account_type"] == "subaccount"
-    assert accounts["sub"]["parent_account_id"] == "main"
-    assert accounts["sub"]["risk_capital_multiplier"] == 2.0
-    assert accounts["sub"]["execution_account_id"] == "account-sub"
+    assert result.returncode == 2
+    assert "watcher site or app" in result.stderr
+    assert "fake-sub-key" not in result.stderr
+    assert "fake-sub-secret" not in result.stderr
+    assert not db_path.exists()
