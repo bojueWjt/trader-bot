@@ -233,7 +233,10 @@ def _query(request, row, request_id):
         if definition["type"] == "integer":
             if re.fullmatch(r"[0-9]+", value) is None:
                 return None, _error(400, "invalid_query", request_id)
-            check_value = int(value)
+            try:
+                check_value = int(value)
+            except ValueError:
+                return None, _error(400, "invalid_query", request_id)
         else:
             check_value = value
         if _value_valid(check_value, definition) is not None:
@@ -305,6 +308,8 @@ class Gateway:
         except TokenCatalogError:
             collision = True
         if not token or collision:
+            reason = "WATCHER_GATEWAY_TOKEN missing" if not token else "WATCHER_GATEWAY_TOKEN collision or token catalog unavailable"
+            LOG.warning("watcher gateway disabled: %s", reason)
             return _error(503, "gateway_disabled", request_id)
         budget = row["budget"]
         try:
@@ -403,7 +408,8 @@ class Gateway:
         else:
             result = _filtered(parsed, frozenset(row["response"]["omit"]))
         headers = self._response_headers(upstream, row)
-        headers["Cache-Control"] = "no-store"
+        headers.pop("content-length", None)
+        headers["cache-control"] = "no-store"
         return JSONResponse(result, status_code=status, headers=headers)
 
     def _response_headers(self, upstream, row):
@@ -491,4 +497,6 @@ def register_routes(app):
 
 
 def install_middleware(app):
+    if any(item.cls is GatewayPathMiddleware for item in app.user_middleware):
+        return
     app.add_middleware(GatewayPathMiddleware)

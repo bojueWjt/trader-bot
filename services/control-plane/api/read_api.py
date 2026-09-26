@@ -10662,6 +10662,7 @@ import watcher_gateway  # noqa: E402
 app.router.routes.extend(v1_mirror_router.routes)
 app.router.routes.extend(operator_queries_router.routes)
 watcher_gateway.register_routes(app)
+watcher_gateway.install_middleware(app)
 
 _install_retryable_db_error_handler(app)
 all_role_app = app
@@ -10671,11 +10672,13 @@ def create_app(role: AppRole | str | None = None) -> FastAPI:
     resolved = resolve_app_role(role)
     role_app = build_role_app(all_role_app, resolved)
     if resolved in (AppRole.ALL, AppRole.OPERATOR_QUERY):
-        role_app.router.on_startup.append(watcher_config_snapshot.start_if_enabled)
-        role_app.router.on_shutdown.append(watcher_config_snapshot.stop_if_started)
+        if watcher_config_snapshot.start_if_enabled not in role_app.router.on_startup:
+            role_app.router.on_startup.append(watcher_config_snapshot.start_if_enabled)
+        if watcher_config_snapshot.stop_if_started not in role_app.router.on_shutdown:
+            role_app.router.on_shutdown.append(watcher_config_snapshot.stop_if_started)
     if role_app is not all_role_app:
         _install_retryable_db_error_handler(role_app)
-    if resolved in (AppRole.ALL, AppRole.OPERATOR_QUERY):
+    if role_app is not all_role_app and resolved is AppRole.OPERATOR_QUERY:
         watcher_gateway.install_middleware(role_app)
     if resolved is not AppRole.ALL:
         role_app.router.on_startup.append(

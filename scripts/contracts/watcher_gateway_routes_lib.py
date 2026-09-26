@@ -140,6 +140,8 @@ def validate(data):
     rows = data["routes"]
     _check(isinstance(rows, list) and bool(rows), 1, "zero routes")
     _check(set(data["secret_key_pattern"]) == {"pattern", "flags"}, 10, "secret regex shape")
+    configured_secrets = set(data["secret_fields"])
+    _check(SECRET_FIELDS <= configured_secrets, 10, "secret_fields baseline")
     secret = re.compile(data["secret_key_pattern"]["pattern"], re.I if "i" in data["secret_key_pattern"]["flags"] else 0)
     ids, inner_keys, outer_keys = set(), set(), set()
     snapshots = []
@@ -167,8 +169,8 @@ def validate(data):
             _check(path == (rest if rest.startswith("/media/") else "/api" + rest), 7, row["id"])
             _check(re.findall(r"\{([^{}]+)\}", outer) == re.findall(r"\{([^{}]+)\}", path), 7, row["id"])
             _check(set(row["roles"]) == set(data["roles"]["all_readers"]) if method in {"GET", "HEAD"} else row["roles"] == data["roles"]["writer"], 9, row["id"])
-            _check(SECRET_FIELDS <= set(row["body"]["deny"]), 10, row["id"])
-            _check(not (set(row["body"]["allow"]) & SECRET_FIELDS), 10, row["id"])
+            _check(configured_secrets <= set(row["body"]["deny"]), 10, row["id"])
+            _check(not (set(row["body"]["allow"]) & configured_secrets), 10, row["id"])
             _check(not any(secret.search(k) for k in row["body"]["allow"] + row["query"]), 10, row["id"])
             _check(row["budget"] == ("media" if path.startswith("/media/") else "config"), 14, row["id"])
             _check(row["response"]["mask"] == [], 16, row["id"])
