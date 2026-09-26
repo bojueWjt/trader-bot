@@ -16,6 +16,8 @@ const dbPath = path.join(tempDir, "trading.db");
 
 let baseUrl = "";
 let server = false;
+let revision = 0;
+let clientRefCounter = 0;
 
 function createLegacyDatabase() {
   const db = new Database(dbPath);
@@ -54,14 +56,26 @@ function createLegacyDatabase() {
 
 async function request(method, pathname, body) {
   const options = { method };
+  if (["POST", "PUT", "DELETE"].includes(method)
+    && /^\/api\/trading\/(accounts|channels|risks)(\/|$)/.test(pathname)) {
+    body = { ...(body || {}), expected_revision: revision,
+      client_ref: `legacy-test-${++clientRefCounter}` };
+  }
   if (body !== undefined) {
     options.headers = { "Content-Type": "application/json" };
     options.body = JSON.stringify(body);
   }
   const response = await fetch(baseUrl + pathname, options);
+  const parsed = await response.json();
+  const revisionHeader = Number(response.headers.get("x-config-revision"));
+  if (response.ok && Number.isSafeInteger(parsed.revision)) {
+    revision = parsed.revision;
+  } else if (response.ok && Number.isSafeInteger(revisionHeader)) {
+    revision = revisionHeader;
+  }
   return {
     status: response.status,
-    body: await response.json(),
+    body: parsed,
   };
 }
 
@@ -75,6 +89,10 @@ test.before(async () => {
   const { registerTradingApi } = require("../lib/trading-api");
   const app = express();
   app.use(express.json());
+  app.use((req, res, next) => {
+    req.watcherAuth = { identity: "browser", role: null, actor: "browser", tokenFingerprint: null };
+    next();
+  });
   registerTradingApi(app, {
     getDb() {
       return new Database(dbPath);
@@ -441,8 +459,8 @@ test("validates addon, subaccount parent, and environment", async () => {
   });
   assert.equal(missingAddon.status, 400);
   assert.equal(
-    missingAddon.body.error,
-    "risk_capital_addon is required and must be >= 0"
+    missingAddon.body.message,
+    "risk_capital_addon is required"
   );
 
   const invalidAddon = await request("POST", "/api/trading/accounts", {
@@ -453,8 +471,8 @@ test("validates addon, subaccount parent, and environment", async () => {
   });
   assert.equal(invalidAddon.status, 400);
   assert.equal(
-    invalidAddon.body.error,
-    "risk_capital_addon is required and must be >= 0"
+    invalidAddon.body.message,
+    "risk_capital_addon is invalid"
   );
 
   const invalidMultiplier = await request("POST", "/api/trading/accounts", {
@@ -563,7 +581,7 @@ test("updates account settings while blank credentials retain current values", a
     risk_capital_addon: -1,
   });
   assert.equal(invalidAddon.status, 400);
-  assert.equal(invalidAddon.body.error, "risk_capital_addon must be >= 0");
+  assert.equal(invalidAddon.body.message, "risk_capital_addon is invalid");
 
   const updated = await request("PUT", "/api/trading/accounts/channel-sub", {
     api_key: "",
@@ -641,11 +659,11 @@ test("retains configured addon and rollback multiplier on unrelated updates", as
 test("protects accounts referenced by children, routes, or active orders", async () => {
   const mainWithChild = await request("DELETE", "/api/trading/accounts/main-live");
   assert.equal(mainWithChild.status, 409);
-  assert.equal(mainWithChild.body.subaccount_count, 1);
+  assert.equal(mainWithChild.body.code, "constraint_conflict");
 
   const routedSubaccount = await request("DELETE", "/api/trading/accounts/channel-sub");
   assert.equal(routedSubaccount.status, 409);
-  assert.equal(routedSubaccount.body.channel_count, 1);
+  assert.equal(routedSubaccount.body.code, "constraint_conflict");
 
   const removedRoute = await request("DELETE", "/api/trading/channels/sub-channel");
   assert.equal(removedRoute.status, 200);
@@ -659,5 +677,5 @@ test("protects accounts referenced by children, routes, or active orders", async
 
   const activeSubaccount = await request("DELETE", "/api/trading/accounts/channel-sub");
   assert.equal(activeSubaccount.status, 409);
-  assert.equal(activeSubaccount.body.active_order_count, 1);
+  assert.equal(activeSubaccount.body.code, "constraint_conflict");
 });
