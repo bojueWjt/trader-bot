@@ -132,5 +132,11 @@ else bad "refused runs created files"; diff <(echo "$before") <(echo "$after") |
 if grep -Eq 'docker (tag|compose|stop|run|rm)' "$DOCKER_LOG"; then bad "a refused run called a state-changing docker verb"; cat "$DOCKER_LOG"; else ok "no state-changing docker call in any refused run"; fi
 grep -q 'script=o0_deploy_watcher.sh phase=apply auth=O0-A07 candidate=' "$S/evidence/authorizations.log" && ok "authorizations.log records script, phase, id and candidate" || bad "authorizations.log format"
 
+# ---------------------------------------------------------------- 4. step order (review wac-032-r2 🟡-2)
+# gate cleared first in preflight/build, gate required first in apply, fleet guard around the
+# restart, graceful dry-run stop, backup-API copy (plan output of the real scripts)
+if bash "$HERE/apply_rollback_test.sh" --structure-only > "$WORK/structure.txt" 2>&1; then ok "step order: $(grep -o 'STRUCTURE_OK.*' "$WORK/structure.txt")"
+else bad "step order"; cat "$WORK/structure.txt"; fi
+
 if [ "$fails" -gt 0 ]; then echo "AUTH_GATE_TEST_FAILED failures=$fails checks=$checks"; exit 1; fi
 echo "AUTH_GATE_TEST_OK checks=$checks"

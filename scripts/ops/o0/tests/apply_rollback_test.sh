@@ -14,7 +14,9 @@
 #   NOT restart/recreate anything; (B) a failure AFTER it must restore and restart/recreate.
 #   In both cases the fleet guard must run after the rollback and its verdict be recorded.
 # All values are fakes generated here; nothing leaves the temporary directory.
+# --structure-only runs part 1 only (auth_gate_test.sh calls it that way).
 set -eo pipefail
+STRUCTURE_ONLY=0; [ "${1:-}" != "--structure-only" ] || STRUCTURE_ONLY=1
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 O0="$(cd "$HERE/.." && pwd)"
 REPO="$(cd "$O0/../../.." && pwd)"
@@ -114,7 +116,8 @@ print("STRUCTURE_OK preflight_gate_clear=4 apply_order=3 build_graceful_stop=ok 
 PY
 
 # ---------------------------------------------------------------- 2. automatic rollback (sandbox)
-if [ -e /srv/trader-v3 ]; then echo "SKIP sandbox part: this host has /srv/trader-v3"; else
+if [ "$STRUCTURE_ONLY" = 1 ]; then :
+elif [ -e /srv/trader-v3 ]; then echo "SKIP sandbox part: this host has /srv/trader-v3"; else
 BIN="$WORK/bin"; mkdir -p "$BIN"
 printf '#!/usr/bin/env bash\n[ "$1" = "-u" ] && echo 0 || /usr/bin/id "$@"\n' > "$BIN/id"
 cat > "$BIN/docker" <<'STUB'
