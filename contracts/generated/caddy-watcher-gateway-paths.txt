@@ -1,0 +1,19 @@
+# _generated_from contracts/watcher-gateway-routes.yaml
+# _yaml_sha256 eb0444cc483e6fb2e1fb1618753df95f55f4b16b59542aec1c9c64f7cdd4db72
+# _phase_max P2
+/m/v1/watcher/dialogs GET
+/m/v1/watcher/disconnect POST
+/m/v1/watcher/groups POST
+/m/v1/watcher/media/* GET HEAD
+/m/v1/watcher/reconnect POST
+/m/v1/watcher/status GET
+/m/v1/watcher/trading/accounts GET
+/m/v1/watcher/trading/accounts/* DELETE PUT
+/m/v1/watcher/trading/briefings GET
+/m/v1/watcher/trading/channels GET POST
+/m/v1/watcher/trading/channels/* DELETE
+/m/v1/watcher/trading/messages GET
+/m/v1/watcher/trading/orders GET
+/m/v1/watcher/trading/orders/active GET
+/m/v1/watcher/trading/risks GET POST
+/m/v1/watcher/trading/risks/* DELETE

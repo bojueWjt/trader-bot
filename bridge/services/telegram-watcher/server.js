@@ -30,6 +30,11 @@ const {
   safeErrorMessage,
   safeErrorStack,
 } = require("./lib/safe-log");
+const { createAuthMiddleware } = require("./lib/auth");
+const { createMediaHandler } = require("./lib/media");
+const { buildStatus } = require("./lib/status");
+// Fail process startup before installing the uncaught-exception guardian.
+const watcherAuthMiddleware = createAuthMiddleware(process.env);
 
 // --- 守护：捕获未处理异常，防止进程崩溃 ---
 process.on("uncaughtException", (err) => {
@@ -57,6 +62,9 @@ function gracefulShutdown() {
 const priceMonitor = require("./price-monitor");
 
 const app = express();
+if (typeof app.disable === "function") {
+  app.disable("x-powered-by");
+}
 
 const CONFIG_PATH = path.join(__dirname, "config.json");
 const MESSAGES_PATH = path.join(__dirname, "messages.json");
@@ -65,9 +73,11 @@ if (!fs.existsSync(MEDIA_DIR)) {
   fs.mkdirSync(MEDIA_DIR, { recursive: true });
 }
 
+// Validate all three service credentials synchronously and gate every request.
+app.use(watcherAuthMiddleware);
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
-app.use("/media", express.static(MEDIA_DIR));
+app.use("/media", createMediaHandler(MEDIA_DIR));
 
 // --- State ---
 let client = null;
@@ -83,6 +93,7 @@ const POLL_MAX_AGE_MS = 30 * 60 * 1000;
 const PROBE_TIMEOUT_MS = 10000;
 const EXIT_ALERT_TIMEOUT_MS = 5000;
 let lastUpdateAt = Date.now();
+let lastTelegramActivityAt = null;
 let disconnectedSince = false;
 let hasConnected = false;
 let watcherMonitoring = false;
@@ -193,6 +204,7 @@ async function checkWatcherHealth() {
     await Promise.race([probeClient.getMessages("me", { limit: 1 }), deadline]);
     if (client === probeClient && watcherMonitoring && !watcherExiting) {
       lastUpdateAt = Date.now();
+      lastTelegramActivityAt = lastUpdateAt;
     }
   } catch (err) {
     if (watcherMonitoring && client === probeClient && Date.now() - lastUpdateAt > STALE_PROBE_MS) {
@@ -323,6 +335,7 @@ async function startListening() {
         return;
       }
       lastUpdateAt = Date.now();
+      lastTelegramActivityAt = lastUpdateAt;
       observeConnection();
       const name = updateName(update);
       if (name !== "UpdateConnectionState" && name !== "UpdateUserStatus") {
@@ -439,6 +452,7 @@ async function startListening() {
     // Fetch dialogs to prime the entity cache and activate updates
     console.log("[watcher] Fetching dialogs to activate updates...");
     const dialogs = await client.getDialogs({ limit: 30 });
+    lastTelegramActivityAt = Date.now();
     console.log(`[watcher] Got ${dialogs.length} dialogs`);
 
     // Force update state sync
@@ -495,6 +509,7 @@ async function startListening() {
             return;
           }
           lastUpdateAt = Date.now();
+          lastTelegramActivityAt = lastUpdateAt;
           
           for (const message of messages.reverse()) {
             const msgKey = `${pollChatId}:${message.id}`;
@@ -582,12 +597,12 @@ app.get("/healthz", (req, res) => {
 // Get current status
 app.get("/api/status", (req, res) => {
   const cfg = loadConfig();
-  res.json({
-    configured: !!(cfg.apiId && cfg.apiHash),
-    loggedIn: !!(cfg.session),
+  res.json(buildStatus(cfg, {
     connected,
-    watchGroups: cfg.watchGroups || [],
-  });
+    listening: watcherMonitoring && hasConnected,
+    now: Date.now(),
+    lastTelegramActivityAt,
+  }, process.env));
 });
 
 // Save api credentials

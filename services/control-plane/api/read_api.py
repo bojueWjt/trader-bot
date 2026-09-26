@@ -99,6 +99,7 @@ from security.principal import (  # noqa: E402
 from intent_trace import load_intent_trace, list_open_incidents  # noqa: E402
 import position_revision  # noqa: E402
 import signal_handoff  # noqa: E402
+import watcher_config_snapshot  # noqa: E402
 from signal_status import load_signal_rows, signal_disposition  # noqa: E402
 
 READER_TOKEN_ENV = {
@@ -6308,10 +6309,31 @@ def _watcher_account_is_enabled(row, account_columns: set[str]) -> bool:
     return not status or status in {"1", "active", "enabled", "true"}
 
 
+def _http_from_snapshot(exc: BaseException) -> HTTPException:
+    if isinstance(exc, watcher_config_snapshot.SnapshotRouteConflict):
+        return HTTPException(
+            status_code=409,
+            detail="watcher channel route conflicts with requested account_id",
+        )
+    if isinstance(exc, watcher_config_snapshot.SnapshotDataRejected):
+        return HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return HTTPException(status_code=503, detail="snapshot_unavailable")
+
+
 def _load_channel_risk_route(
     channel_id: str,
     account_id: str | None = None,
 ) -> dict:
+    if watcher_config_snapshot.enabled():
+        try:
+            lease = watcher_config_snapshot.get_process_cache().require_fresh()
+            return lease.channel_route(channel_id, account_id)
+        except (
+            watcher_config_snapshot.SnapshotRouteConflict,
+            watcher_config_snapshot.SnapshotDataRejected,
+            watcher_config_snapshot.SnapshotUnavailable,
+        ) as exc:
+            raise _http_from_snapshot(exc) from exc
     import sqlite3
 
     normalized_channel_id = str(channel_id or "").strip()
@@ -6484,6 +6506,15 @@ def _channel_risk_capital_addon(channel_id: str, account_id: str) -> float:
 
 
 def _account_risk_capital_addon(account_id: str) -> float:
+    if watcher_config_snapshot.enabled():
+        try:
+            lease = watcher_config_snapshot.get_process_cache().require_fresh()
+            return lease.account_addon(account_id)
+        except (
+            watcher_config_snapshot.SnapshotDataRejected,
+            watcher_config_snapshot.SnapshotUnavailable,
+        ) as exc:
+            raise _http_from_snapshot(exc) from exc
     import sqlite3
 
     try:
@@ -8489,8 +8520,25 @@ def _account_equity(account_id: str) -> float | None:
     return state["real_equity"]
 
 
-def _symbol_risk_ratio(symbol: str, account_id: str) -> float:
+def _symbol_risk_ratio(
+    symbol: str,
+    account_id: str,
+    snapshot_lease: watcher_config_snapshot.SnapshotLease | None = None,
+) -> float:
     """Symbol override, then execution account default, then system default."""
+    if snapshot_lease is None and watcher_config_snapshot.enabled():
+        try:
+            snapshot_lease = watcher_config_snapshot.get_process_cache().require_fresh()
+        except watcher_config_snapshot.SnapshotUnavailable as exc:
+            raise _http_from_snapshot(exc) from exc
+    if snapshot_lease is not None:
+        try:
+            return snapshot_lease.risk_ratio(symbol, account_id)
+        except (
+            watcher_config_snapshot.SnapshotDataRejected,
+            watcher_config_snapshot.SnapshotUnavailable,
+        ) as exc:
+            raise _http_from_snapshot(exc) from exc
     import sqlite3
 
     try:
@@ -8519,7 +8567,8 @@ def _symbol_risk_ratio(symbol: str, account_id: str) -> float:
 
 def _size_entry_batch(explicit_notional, symbol, account_id, side, first_type,
                       first_price, second_price, stop_loss, leverage, caps,
-                      checks, risk_capital_addon, third_price=None):
+                      checks, risk_capital_addon, third_price=None,
+                      snapshot_lease=None):
     if first_type == 'market':
         first_price = _binance_mark_price(symbol)
     try:
@@ -8533,6 +8582,7 @@ def _size_entry_batch(explicit_notional, symbol, account_id, side, first_type,
     total = _size_open_order(
         explicit_notional, symbol, account_id, side, 'limit', float(reference),
         None, None, stop_loss, leverage, caps, checks, risk_capital_addon,
+        snapshot_lease=snapshot_lease,
     )
     batch = build_entry_batch(
         first_type, first_price, second_price, total, stop_loss, third_price,
@@ -8545,7 +8595,7 @@ def _size_entry_batch(explicit_notional, symbol, account_id, side, first_type,
 def _size_open_order(explicit_notional, symbol, account_id, side, entry_type,
                      entry_price, entry_price_min, entry_price_max,
                      stop_loss, leverage, caps, checks,
-                     risk_capital_addon=False) -> float:
+                     risk_capital_addon=False, snapshot_lease=None) -> float:
     """Risk-based sizing: notional = equity * risk_ratio / stop_distance.
     Hard cap (fail closed): loss at stop <= max_risk_fraction of equity.
     Without a stop loss the order cannot be risk-checked, so an explicit
@@ -8623,7 +8673,10 @@ def _size_open_order(explicit_notional, symbol, account_id, side, entry_type,
         if side == "long" and stop_loss >= ref:
             raise HTTPException(status_code=400, detail="long stop_loss must be below entry")
         stop_frac = abs(ref - stop_loss) / ref
-        risk_ratio = _symbol_risk_ratio(symbol, account_id)
+        if snapshot_lease is None:
+            risk_ratio = _symbol_risk_ratio(symbol, account_id)
+        else:
+            risk_ratio = _symbol_risk_ratio(symbol, account_id, snapshot_lease)
         auto = effective_equity * risk_ratio / stop_frac
         allow_canary_override = (
             caps.get("_canary_explicit_notional_override") is True
@@ -9156,6 +9209,7 @@ def operator_order(
     open_raw_channel = "hermes-operator"
     open_has_provenance = False
     open_risk_capital_addon: float | bool = False
+    open_snapshot_lease: watcher_config_snapshot.SnapshotLease | None = None
     intended_action = _normalize_intended_action(body, action)
     signal_intent = str(body.get("signal_intent") or "").strip() or False
     replay_of = None
@@ -9178,7 +9232,22 @@ def operator_order(
             body,
             client_ref,
         )
-        if open_raw_channel not in ("hermes-operator", "operator"):
+        if watcher_config_snapshot.enabled():
+            try:
+                open_snapshot_lease = watcher_config_snapshot.get_process_cache().require_fresh()
+                if open_raw_channel not in ("hermes-operator", "operator"):
+                    open_risk_capital_addon = open_snapshot_lease.channel_addon(
+                        open_raw_channel, account_id,
+                    )
+                else:
+                    open_risk_capital_addon = open_snapshot_lease.account_addon(account_id)
+            except (
+                watcher_config_snapshot.SnapshotRouteConflict,
+                watcher_config_snapshot.SnapshotDataRejected,
+                watcher_config_snapshot.SnapshotUnavailable,
+            ) as exc:
+                raise _http_from_snapshot(exc) from exc
+        elif open_raw_channel not in ("hermes-operator", "operator"):
             open_risk_capital_addon = (
                 _channel_risk_capital_addon(
                     open_raw_channel,
@@ -9194,6 +9263,8 @@ def operator_order(
 
     caps = _operator_caps()
     checks = [{"name": "operator_auth", "passed": True}]
+    if open_snapshot_lease is not None:
+        checks.append(open_snapshot_lease.check)
     entry = dict(body.get("entry") or {"type": "market"})
     entry_type = str(entry.get("type") or "market").lower()
     if entry_type == "none":
@@ -9545,19 +9616,37 @@ def operator_order(
             sizing_caps = dict(caps)
             sizing_caps["_canary_explicit_notional_override"] = True
         if second_price is not None:
-            notional, entry_batch = _size_entry_batch(
-                explicit_notional, symbol, account_id, side, entry_type,
-                entry_price, second_price, stop_loss, leverage, sizing_caps,
-                checks, open_risk_capital_addon, third_price,
-            )
+            if open_snapshot_lease is None:
+                notional, entry_batch = _size_entry_batch(
+                    explicit_notional, symbol, account_id, side, entry_type,
+                    entry_price, second_price, stop_loss, leverage, sizing_caps,
+                    checks, open_risk_capital_addon, third_price,
+                )
+            else:
+                notional, entry_batch = _size_entry_batch(
+                    explicit_notional, symbol, account_id, side, entry_type,
+                    entry_price, second_price, stop_loss, leverage, sizing_caps,
+                    checks, open_risk_capital_addon, third_price,
+                    snapshot_lease=open_snapshot_lease,
+                )
         else:
-            notional = _size_open_order(
-                explicit_notional,
-                symbol, account_id, side, entry_type,
-                entry_price, entry_price_min, entry_price_max,
-                stop_loss, leverage, sizing_caps, checks,
-                open_risk_capital_addon,
-            )
+            if open_snapshot_lease is None:
+                notional = _size_open_order(
+                    explicit_notional,
+                    symbol, account_id, side, entry_type,
+                    entry_price, entry_price_min, entry_price_max,
+                    stop_loss, leverage, sizing_caps, checks,
+                    open_risk_capital_addon,
+                )
+            else:
+                notional = _size_open_order(
+                    explicit_notional,
+                    symbol, account_id, side, entry_type,
+                    entry_price, entry_price_min, entry_price_max,
+                    stop_loss, leverage, sizing_caps, checks,
+                    open_risk_capital_addon,
+                    snapshot_lease=open_snapshot_lease,
+                )
     elif action == "partial_close":
         raw_quantity = body.get("quantity")
         raw_fraction = body.get("fraction")
@@ -10577,9 +10666,12 @@ def role_database_health():
 
 from v1_mirror import router as v1_mirror_router  # noqa: E402
 from operator_queries import router as operator_queries_router  # noqa: E402
+import watcher_gateway  # noqa: E402
 
 app.router.routes.extend(v1_mirror_router.routes)
 app.router.routes.extend(operator_queries_router.routes)
+watcher_gateway.register_routes(app)
+watcher_gateway.install_middleware(app)
 
 _install_retryable_db_error_handler(app)
 all_role_app = app
@@ -10588,8 +10680,15 @@ all_role_app = app
 def create_app(role: AppRole | str | None = None) -> FastAPI:
     resolved = resolve_app_role(role)
     role_app = build_role_app(all_role_app, resolved)
+    if resolved in (AppRole.ALL, AppRole.OPERATOR_QUERY):
+        if watcher_config_snapshot.start_if_enabled not in role_app.router.on_startup:
+            role_app.router.on_startup.append(watcher_config_snapshot.start_if_enabled)
+        if watcher_config_snapshot.stop_if_started not in role_app.router.on_shutdown:
+            role_app.router.on_shutdown.append(watcher_config_snapshot.stop_if_started)
     if role_app is not all_role_app:
         _install_retryable_db_error_handler(role_app)
+    if role_app is not all_role_app and resolved is AppRole.OPERATOR_QUERY:
+        watcher_gateway.install_middleware(role_app)
     if resolved is not AppRole.ALL:
         role_app.router.on_startup.append(
             lambda: _verify_role_database_on_startup(role_app, resolved)

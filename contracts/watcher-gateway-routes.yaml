@@ -5,11 +5,13 @@
 # 与 contracts/backend-api.md §9 冲突时：路由字段（method/path/identity/roles/query/body/response/phase/budget/write）
 # 以本文件为准，语义（错误码、状态机、事务顺序）以 backend-api.md §9 为准。
 # 生成物（网关路由表、watcher 身份路由表、Caddy 路径清单）只能由本文件生成，禁止手写第二份矩阵。
-# 校验规格见 contracts/backend-api.md §9.14。
+# 校验规格见 contracts/backend-api.md §9.14。运行时不解析本文件（R9）：watcher 与控制面只加载 §9.14.3 的已提交生成物。
+# 勘误：WGW-1.0.1（2026-09-26）改动见 backend-api.md §9.16。
 
 schema_version: watcher-gateway-routes.v1
-contract_version: WGW-1.0
+contract_version: WGW-1.0.1
 frozen_at: "2026-09-26"
+amended_at: "2026-09-26"          # WGW-1.0.1 勘误日期（backend-api.md §9.16）
 source_plan: "docs/plans/2026-09-11-watcher-to-app-migration.md@v0.6"
 
 # ---------------------------------------------------------------------------
@@ -61,8 +63,30 @@ actor_headers:
   fingerprint_pattern: '^[0-9a-f]{12}$'
 
 # ---------------------------------------------------------------------------
+# 正则方言（R5）：本文件所有 *_pattern 与 secret_key_pattern.pattern 必须同时在 Python re 与 ECMAScript（u 标志）下同义。
+# ---------------------------------------------------------------------------
+regex_dialect:
+  # 标志不写进 pattern（禁止 (?i) 等内联标志，JS 会 SyntaxError），只放在 secret_key_pattern.flags
+  allowed_flags: [i]
+  python:
+    anchored: "re.fullmatch(pattern, value, flags)；禁止 re.match/re.search 配 $（Python 的 $ 可匹配结尾换行前）"
+    search: "re.search(pattern, key, flags)（仅 secret_key_pattern）"
+    flag_map: {i: re.IGNORECASE}
+  javascript:
+    anchored: "new RegExp(pattern, 'u' + flags).test(value)；u 恒加（码点计数与 Python 一致）"
+    search: "new RegExp(pattern, 'u' + flags).test(key)（仅 secret_key_pattern）"
+    forbidden_flags: [g, y, m, s]         # g/y 有 lastIndex 状态；m/s 改变 ^ $ . 语义
+  # 可移植子集：禁止下列构造（S-20 检查）
+  forbidden_constructs:
+    - "(?        内联标志、命名组、前后瞻（(?: 非捕获组除外）"
+    - "\\d \\w \\s \\b \\D \\W \\S \\B（Python str 模式下匹配 Unicode，JS 只匹配 ASCII；一律写显式字符类）"
+    - "字符类之外未转义的 .（两边对行终止符的定义不同）"
+  # 先类型后正则：pattern 只作用于已确认为 string 的值（JS RegExp.test 会把数字转成字符串）
+  applies_to: string_only
+
+# ---------------------------------------------------------------------------
 # 秘密字段：gateway 行 body.deny 必须包含全部 secret_fields；gateway 行 allow/query 不得命中 secret_key_pattern；
-# gateway 响应递归删除命中 secret_key_pattern 的键（不是掩码，是删除）。
+# gateway 响应递归删除命中 secret_key_pattern 的键（不是掩码，是删除），错误体的整个 details 同样处理（R8）。
 # ---------------------------------------------------------------------------
 secret_fields:
   - api_key
@@ -80,8 +104,12 @@ secret_fields:
   - phone
   - code
   - token
-# safe-log.js:1 的 SENSITIVE_KEY_PATTERN 的超集（另含 api_id / phone）
-secret_key_pattern: '(?i)(api[_-]?key|api[_-]?secret|apisecret|api[_-]?hash|api[_-]?id|token|session|password|phone)'
+# safe-log.js:1 的 SENSITIVE_KEY_PATTERN 的超集（另含 api_id / phone）。未锚定，按"键名包含"判定（search 语义）；
+# 误伤只会多拒/多删（安全方向），例如 rapid_* 会命中 api[_-]?id（§9.15 执行期注意事项）。
+# WGW-1.0.1（R5）：由单个字符串改为 {pattern, flags}，去掉只在 Python 生效的 (?i)。
+secret_key_pattern:
+  pattern: '(api[_-]?key|api[_-]?secret|apisecret|api[_-]?hash|api[_-]?id|token|session|password|phone)'
+  flags: i
 
 # ---------------------------------------------------------------------------
 # 预算（三份互不挤占；每 operator-query worker 计；舰队在途上限 = (config+media) × worker 数）
@@ -205,23 +233,24 @@ invariants:
   - "snapshot 身份只有 GET /api/trading/config-snapshot 一行；该行不出现在 gateway 身份（不向 app 暴露 snapshot）"
   - "HEAD 只在显式列出的行允许（仅媒体）；其余已注册路径的 HEAD/OPTIONS → 405"
   - "所有 gateway 写行响应带 revision 与 replay"
-  - "never_allowed 与 gateway_excluded 中的 inner_path 不得被任何 gateway 行映射"
+  - "never_allowed 中的 inner_path 不得被任何 gateway 行映射（与方法无关，R6）；gateway_excluded 中的 (method, inner_path) 不得被任何 gateway 行映射（methods 为 \"*\" 时与方法无关）"
+  - "所有 pattern 满足 regex_dialect（S-20）"
 
 # ---------------------------------------------------------------------------
-# 永不经网关放行（计划 §3 末行，凭据面）
+# 永不经网关放行（计划 §3 末行，凭据面）。WGW-1.0.1（R6）：与方法无关，methods 恒为 "*"（覆盖所有方法，含将来新增的）。
 # ---------------------------------------------------------------------------
 never_allowed:
-  - {inner_path: /api/config, methods: [POST], reason: "Telegram api id/hash（凭据面）"}
-  - {inner_path: "/api/login/*", methods: [GET, POST], reason: "Telegram 登录/2FA（凭据面，D4）"}
-  - {inner_path: "/api/login/qr/*", methods: [GET, POST], reason: "Telegram 扫码登录（凭据面，D4）"}
-  - {inner_path: /, methods: [GET, HEAD], reason: "站点静态入口"}
-  - {inner_path: /index.html, methods: [GET, HEAD], reason: "站点静态入口"}
-  - {inner_path: /healthz, methods: [GET], reason: "容器健康探针，不经网关"}
+  - {inner_path: /api/config, methods: "*", reason: "Telegram api id/hash（凭据面）"}
+  - {inner_path: "/api/login/*", methods: "*", reason: "Telegram 登录/2FA（凭据面，D4）"}
+  - {inner_path: "/api/login/qr/*", methods: "*", reason: "Telegram 扫码登录（凭据面，D4）"}
+  - {inner_path: /, methods: "*", reason: "站点静态入口"}
+  - {inner_path: /index.html, methods: "*", reason: "站点静态入口"}
+  - {inner_path: /healthz, methods: "*", reason: "容器健康探针，不经网关"}
 
-# 计划明确不对 gateway 开放、但对其他身份存在的端点
+# 计划明确不对 gateway 开放、但对其他身份存在的端点（methods 为列表时只排除所列方法；"*" 表示所有方法）
 gateway_excluded:
   - {inner_path: /api/trading/accounts, methods: [POST], reason: "D7：账号创建含 Binance 密钥，留在站点"}
-  - {inner_path: /api/trading/config-snapshot, methods: [GET], reason: "§3 P2：不向 app 暴露 snapshot"}
+  - {inner_path: /api/trading/config-snapshot, methods: "*", reason: "§3 P2：不向 app 暴露 snapshot（WGW-1.0.1 起与方法无关）"}
   - {inner_path: "/api/price-alerts/order/{order_id}", methods: [DELETE], reason: "§3 P3：待站点订单身份改造后放行"}
   - {inner_path: /api/messages, methods: [GET], reason: "内存 ring；app 只用 DB 读模型 /api/trading/messages（§5.1）"}
 

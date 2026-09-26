@@ -3,6 +3,7 @@
 > 状态：**frozen（2026-08-30，G0 裁决）**——已吸收 codex 落地前 review 的 19 条阻断项（各条标注 review #N）。
 > G2 以本文件 schema 造 fixtures 开工；G1 实现必须逐字段一致，偏差走 block 仲裁。
 > 完整语义见设计文档 v1.1 对应小节；本文件只写死接缝形状。
+> §9（watcher 网关与配置快照）单独版本化：当前 **WGW-1.0.1**（2026-09-26 勘误，勘误记录见 §9.16）；§1–§8 不受其影响。
 
 ## 通用
 
@@ -124,7 +125,7 @@
 
 ## 9. watcher 网关与配置快照（2026-09-26 冻结）
 
-> 状态：**frozen（WGW-1.0，2026-09-26）**。设计真相：`docs/plans/2026-09-11-watcher-to-app-migration.md` v0.6 §2.1–§2.3、§3、§4.2/§4.3（含附录 E 吸收的 v0.3 review P1-12..P1-19、P2-03）。
+> 状态：**frozen（WGW-1.0.1，2026-09-26）**——WGW-1.0（同日冻结、审查 wac-001 PASS、合入 `90e96d0`）的勘误版，写入 Planner 裁定 R1–R9 与审查 🟡-1..🟡-11，逐条见 §9.16。WGW-1.0 尚无实现，本勘误不构成对已发布接口的破坏性变更。设计真相：`docs/plans/2026-09-11-watcher-to-app-migration.md` v0.6 §2.1–§2.3、§3、§4.2/§4.3（含附录 E 吸收的 v0.3 review P1-12..P1-19、P2-03）。
 > **路由字段以 `contracts/watcher-gateway-routes.yaml` 为准**（method、outer/inner path、identity、roles、query、body allow/deny/required、response omit/mask/headers、phase、budget、write 元数据）；本节规定语义（鉴权顺序、错误码、事务顺序、状态机、媒体规则）。两者冲突时路由字段听 YAML、语义听本节；任一与计划冲突，停工并由 Planner 召回 Architect。
 > 本节只新增 `/v1/watcher/*` 与 watcher 内部契约；§1–§8 既有端点的字段、状态码、错误体一律不变（见 §9.13）。
 
@@ -154,6 +155,13 @@
 | 容器监听 `0.0.0.0:9100`，宿主映射 `127.0.0.1:9090`；健康检查无凭据调 `/healthz` | `bridge/docker-compose.yml:157`、`:178`、`:160-176`；`server.js:866-867` |
 | app 请求 = `${baseUrl}${path}`，path 常量以 `/v1/` 起；头 `Accept`、`Authorization: Bearer`、写时 `X-Request-Id=client_ref`；12s 超时在拿到头后清除；非 JSON → `invalid_json`；仅 401 置 `writeDisabled`；其余非 2xx → `request_failed` | app `apps/attention-android/src/services/tradingApi.ts:370`、`:657-668`、`:759-768`、`:773`、`:793`、`:797-807`、`:810-817`、`:819-825` |
 | app 存储键只有 `trading.config.v1`、`trading.write-ops.v1` | app `src/services/tradingStorage.ts:5-8`、`:28-31` |
+| （WGW-1.0.1 补）`resolve_principal`：非 `"Bearer "` 开头 → `AuthRequired`；去前缀后 `strip()` 为空 → `AuthRequired`；token 目录互异校验 `assert_token_catalog_unique` 不含 `WATCHER_*` | `principal.py:111-115`、`:67-97` |
+| （WGW-1.0.1 补）站点编辑账号 PUT 的 payload 含 `account_id`；编辑表单清空密钥输入（不回填掩码）；风险删除直接 `fetch`、不经 `api()` | `public/index.html:1513-1524`、`:1383-1384`、`:1806`；账号/路由删除 `:1584`、`:1745` |
+| （WGW-1.0.1 补）现行 PUT 对合并后的整行重算校验（执行账号格式与唯一、子账号计数等） | `trading-api.js:496-600` |
+| （WGW-1.0.1 补）watcher 镜像按显式白名单收文件 | `scripts/build_immutable_watcher_image.py:34`（`WATCHER_RUNTIME_RELATIVE_PATHS`） |
+| （WGW-1.0.1 补）控制面发布把 `services/control-plane/api/*.py` 平铺到 `host/`，兄弟模块以顶层名 import | `scripts/make_account_stall_release.py:93-99`、`:217`；`read_api.py:100`（`import position_revision`） |
+| （WGW-1.0.1 补）旧 reader 宽松比较：`account_type` 用 `lower(trim())`，启用值接受 `1/active/enabled/true`；执行账号 `default_risk_ratio` 为 NULL 时 `float(None)` → 503，不回落 env 默认 | `read_api.py:6298-6308`、`:6370`、`:8509-8517` |
+| （WGW-1.0.1 补）控制面 `.venv-arch` 无 PyYAML | 审查 wac-001 🟡-11 实测 |
 
 ### 9.2 拓扑与三种服务端身份
 
@@ -171,21 +179,61 @@ operator-query 快照 reader ──Bearer snapshot──▶ watcher GET /api/tra
   | `snapshot` | `WATCHER_SNAPSHOT_TOKEN`、`WATCHER_SNAPSHOT_TOKEN_PREVIOUS` | operator-query：`WATCHER_SNAPSHOT_TOKEN` | `Authorization: Bearer <token>` |
   | `browser` | `WATCHER_BROWSER_PROXY_TOKEN`、`WATCHER_BROWSER_PROXY_TOKEN_PREVIOUS` | Caddy | `X-Watcher-Proxy-Auth: <token>` |
 
-- **watcher 启动**：三个当前值任一缺失、长度 < 32、或六个已配置值中任意两个相等 → 进程非零退出。watcher 环境里不放任何控制面 reader token。
+- **"已配置"的定义（R2）**：环境变量存在且值不是空串。未设置或为空串的 `*_TOKEN_PREVIOUS` 视为未配置，**永不参与匹配**。
+- **watcher 启动**（R2）：三个当前值必须已配置；每个已配置值（含已配置的 `*_PREVIOUS`）必须匹配 `^[\x21-\x7E]{32,}$`（可打印 ASCII、无空白、≥ 32 字节）；全部已配置值（最多六个）两两互异。任一不满足 → 进程非零退出，错误信息只列变量名，不打印值。watcher 环境里不放任何控制面 reader token。
+- **跨服务互异**（审查 💭-4）：O-0 发行侧校验 `WATCHER_*` 六个值与控制面 token 目录（`configured_token_values`，`principal.py:67-97`：四个 reader token、signal token、节点 token 等）两两互异。operator-query 启动时再做一次纵深检查：`WATCHER_GATEWAY_TOKEN` 或 `WATCHER_SNAPSHOT_TOKEN` 与 `configured_token_values` 任一相等 → 视同未配置（网关 503 `gateway_disabled`；快照开关打开时启动失败）并告警，告警只写变量名。
 - **operator-query 启动**：缺 `WATCHER_GATEWAY_TOKEN` → 网关路由照常注册，但一律 503 `gateway_disabled` 并打告警日志；**不得**让交易端点启动失败。快照开关（§9.11）打开且缺 `WATCHER_SNAPSHOT_TOKEN` → 按计划 §2.1 启动失败（上线前配置校验锁定，开关默认关）。
 - **轮换**：`*_TOKEN_PREVIOUS` 双值。顺序：watcher 先接受新旧两值 → 持有方切新值 → 确认请求与审计正常 → 清空 `*_PREVIOUS`。不是时钟过期。
-- **watcher 身份判定**（每个请求，在 `server.js:68` 的 `express.json` 与全部 static/handler 之前；比较用恒定时间）：
+- **watcher 身份判定**（每个请求，在 `server.js:68` 的 `express.json` 与全部 static/handler 之前）：
   1. 用 `req.rawHeaders` 计数（Node 会合并/丢弃重复头，不能用 `req.headers`）：`Authorization` 或 `X-Watcher-Proxy-Auth` 出现多于一条 → 401。
-  2. `Authorization` 以 `Bearer ` 开头：规范化（去前缀 + trim）后命中 gateway 当前/上一值 → `gateway`；命中 snapshot → `snapshot`；否则 401。此时若同时带 `X-Watcher-Proxy-Auth` → 401（身份歧义）。
-  3. 否则若带 `X-Watcher-Proxy-Auth` 且命中 browser 当前/上一值 → `browser`（`Authorization: Basic …` 是 Caddy basicauth 残留，忽略不参与判定；Caddy 宜在注入前删除它）。
+  2. `Authorization` 按 scheme（第一个空格之前的部分；Node 已剥掉头值首尾空白，所以 `Bearer␠` 到达时就是 `Bearer`）分流（R2）：
+     - 没有 `Authorization` → 第 3 步。
+     - scheme 按 ASCII 不区分大小写等于 `basic` → 忽略该头（Caddy basicauth 残留，Caddy 宜在注入前删除），进入第 3 步。
+     - scheme 按 ASCII 不区分大小写等于 `bearer`：值必须恰为 `Bearer`（区分大小写）后跟一个空格（与 `principal.py:111` 相同），否则 401；去掉 `Bearer ` 后按 Python `str.strip()` 的空白集合剥离两端（与 `principal.py:113` 相同；对 latin1 头值等价于剥离 `[\t\n\v\f\r \x1C-\x1F\x85\xA0]`）。值恰为 `Bearer`、或剥离后为空串 → 401 `unauthenticated`，**不进入比较**。非空时与 gateway、snapshot 的**已配置**值逐一做恒定时间比较（对双方的 SHA-256 摘要用 `crypto.timingSafeEqual`，遍历全部已配置值、不短路）：命中 gateway → `gateway`；命中 snapshot → `snapshot`；否则 401。此时若同时带 `X-Watcher-Proxy-Auth` → 401（身份歧义）。
+     - 其他 scheme → 401。
+  3. 否则若带 `X-Watcher-Proxy-Auth`：按第 2 步同一规则剥离；为空 → 401；与 browser 的已配置值恒定时间比较，命中 → `browser`。
   4. 其余 → 401 `unauthenticated`。
   5. 路径规范化：`gateway`、`snapshot` 身份用原始请求路径（`req.originalUrl` 的 path 部分，未解码）匹配，含 `%`、`//`、点段、尾斜杠或路径参数不合 `gateway_pattern` → 404 `route_not_found`（与网关同规则）；`browser` 身份沿用 Express 单次解码（站点用 `encodeURIComponent`），参数按 `browser_pattern` 校验。
   6. 身份确定后查该身份的生成路由表：路径与方法都在 → 放行；路径在本身份表内但方法不在 → 405（`Allow` 头列本身份的方法）；路径只属于其他身份 → 403 `identity_forbidden`；任何身份都没有的路径 → 404 `route_not_found`。鉴权先于 404，未认证请求探测不到路由存在性。
   7. actor 头检查见 §9.8；之后才进入 body 解析与 handler。
-- `/healthz` 也受身份校验：它只有 `browser` 行（YAML `br.healthz.get`），容器健康检查（`docker-compose.yml:160-176`）需改为携带 `X-Watcher-Proxy-Auth: $WATCHER_BROWSER_PROXY_TOKEN`（取自容器自身环境）。它在 `never_allowed` 中，永不经网关（见 §9.15 待裁决 A-1）。
+- **watcher 处理顺序（规范性，WGW-1.0.1 写全）**：W1 `rawHeaders` 计数（401）→ W2 身份（401）→ W3 路径规范化与本身份路由表匹配（404 `route_not_found` / 405 `method_not_allowed` / 403 `identity_forbidden`）→ W4 actor 与指纹头（400 `invalid_actor_headers`；gateway 写行 actor ≠ `app:risk_admin` → 403 `identity_forbidden`）→ W5 挂载 `req.watcherAuth` 与 `req.watcherRoute` → W6 query 校验（400 `invalid_query`）→ W7 body：GET/HEAD 带 body → 400 `invalid_body`；超过 64 KiB（按 `Content-Length` 或流式计数）→ 413 `payload_too_large`；再按 §9.4 同一顺序做 content-type/JSON object、秘密字段、未知键、缺键、类型检查（gateway 行用 `gateway_enum`/`gateway_pattern`，browser 行用 `type` 定义），规则取自该行的生成物条目 → W8 handler（业务校验与写，§9.12）。静态文件与媒体也是路由表中的行，在 W5 之后才交给 static。任一步失败即返回。与网关（§9.3 R3）的差别是有意的：watcher 是内部服务，身份先于路由，未认证请求探测不到路由存在性；网关的路由集合公开在 YAML 中，先做路由匹配不泄露信息。
+- **W-0 两个子任务之间的接口（规范性）**：子任务 A（身份与请求校验中间件）负责 W1–W7；子任务 B（写路径 handler，§9.12）只负责 W8。两者唯一的耦合是 A 在 `req` 上挂的两个只读属性：
+
+  ```js
+  // 用 Object.defineProperty(req, name, { value: Object.freeze(v), writable: false, configurable: false, enumerable: true }) 挂载
+  req.watcherAuth = {
+    identity: 'gateway' | 'snapshot' | 'browser',
+    role: 'system_observer' | 'viewer' | 'risk_admin' | 'reviewer' | null, // 仅 gateway：取自 W4 已校验的 X-Watcher-Actor；其余身份为 null
+    actor: string,               // gateway: 'app:<role>'；browser: 'browser'；snapshot: 'snapshot'
+    tokenFingerprint: string | null, // 仅 gateway：W4 已校验的 X-Watcher-Token-Fingerprint（12 位小写 hex）；其余为 null
+  };
+  req.watcherRoute = /* 生成物 §9.14.3 中匹配到的那一行（深冻结）：id、identity、method、inner_path、query、body、response、write */;
+  ```
+
+  - B 只读这两个属性：不重新解析 `Authorization`、`X-Watcher-*` 头，不从 body 或 query 推断身份。两者缺失或形状不符 → 500 `internal_error`（fail-closed，不取默认值）。
+  - B 写审计时：`config_audit.actor = watcherAuth.actor`，`source = watcherAuth.identity`，`token_fingerprint = watcherAuth.tokenFingerprint`，`operation = watcherRoute.write.operation`。`snapshot` 身份没有写行。
+  - B 收到的 `req.body` 已经过 W7 校验（只含该行 `allow` 内的键）；B 只做业务校验（§9.12 第 3 步与 R7）。
+  - B 的单元测试用同样的 `defineProperty` 方式构造这两个属性；A 的测试断言挂载出的对象与上面的形状逐键相等（不多不少）。
+- `/healthz` 也受身份校验：它只有 `browser` 行（YAML `br.healthz.get`），它在 `never_allowed` 中，永不经网关。容器健康检查（`docker-compose.yml:160-176`）按 A-1 的条件改造（Planner 已接受）：健康检查是一段 node 脚本，在脚本内读取 `process.env.WATCHER_BROWSER_PROXY_TOKEN` 并以 `X-Watcher-Proxy-Auth` 头发出；**不得**在 compose 的 `test:` 中写 `$VAR`/`${VAR}` 插值（插值结果会以明文出现在 `docker inspect` 的 Healthcheck 字段）；脚本不打印响应体、请求头或 token，只以退出码表示结果。
 
 ### 9.3 网关鉴权与角色 scope
 
+- **网关处理顺序（R3，规范性）**。每个 `/v1/watcher/*` 请求按下列顺序处理，任一步失败即返回，后续步骤不执行：
+
+  | 步 | 内容 | 失败响应 |
+  |---|---|---|
+  | G1 | 路由匹配（§9.4 前缀中间件）：raw path 规则、phase 门、路径参数、方法 | 404 `route_not_found`；405 `method_not_allowed`（含 OPTIONS、非媒体 HEAD） |
+  | G2 | 身份认证（`resolve_principal`，映射见下表） | 401 `unauthenticated`；403 `invalid_token`；403 `insufficient_scope`（signal token）；503 `auth_unavailable` |
+  | G3 | 角色（YAML 行 `roles`） | 403 `insufficient_scope` |
+  | G4 | 请求校验：先 query，再 body（先大小，再 content-type/JSON object，再秘密字段、未知键、缺键、类型，顺序见 §9.4） | 400 `invalid_query`；413 `payload_too_large`；400 `secret_field_rejected` / `invalid_body` |
+  | G5 | 网关就绪：`WATCHER_GATEWAY_TOKEN` 已配置且通过 §9.2 跨服务互异检查 | 503 `gateway_disabled` |
+  | G6 | 准入（§9.7） | 503 `gateway_busy` |
+  | G7 | 请求头清洗与 actor/指纹注入（§9.4、§9.8） | 503 `watcher_unavailable`（`details.reason=actor_injection_failed`） |
+  | G8 | 上游请求与响应映射（§9.6、§9.9） | 见 §9.6 |
+
+  - G1 不读 body；G2、G3 未通过的请求，网关**不读取 body**（不 `await request.body()`、不解析 JSON），因此未认证或无权限的调用方拿不到 `secret_field_rejected`、`invalid_body`、`payload_too_large` 这类反馈。"viewer 带 `api_key` 调写行"稳定返回 403 `insufficient_scope`。
+  - 实现约束：网关 endpoint 的签名只接收 `Request`，**不得**声明 `Body`/`Form`/Pydantic 模型参数，也不得挂会读取 body 的依赖（FastAPI 会在执行依赖与 handler 之前读取并解析这类参数，并可能返回 422，破坏上述顺序）。§9.14.4 的运行时测试断言每个网关路由 `route.dependant.body_params == []` 且 `route.body_field is None`。
+- **空 bearer（R2）**：网关侧沿用 `resolve_principal`：`Authorization` 不以 `"Bearer "` 开头、或去前缀后 `strip()` 为空 → `AuthRequired` → 401 `unauthenticated`（`principal.py:111-115`）。uvicorn 同样会剥掉头值尾随空白，`Bearer␠` 到达时为 `Bearer`，落入"不以 `Bearer ` 开头"分支。网关不另写一套 token 解析。
 - 网关路由鉴权沿用 `resolve_principal` 的判定（不修改 `require_reader` 及既有端点），但按下表映射为结构码（网关实现可直接调用 `resolve_principal` 并按异常类型映射）：
 
   | 情形（证据 §9.1） | HTTP | `code` |
@@ -204,14 +252,20 @@ operator-query 快照 reader ──Bearer snapshot──▶ watcher GET /api/tra
 ### 9.4 路径、方法与请求规范化（网关）
 
 - **路径**：app 请求 `baseUrl + outer_path`，`baseUrl` 已以 `/m` 结尾，app 常量只写 `/v1/watcher/...`。Caddy 外部路径 = `/m` + outer_path，逐路径追加（`{param}` 段在 Caddy 中写 `*`），禁止 `/m/v1/*` 通配。
-- **匹配基于 `scope["raw_path"]`**（未解码），规则：raw path 含 `%`、`//`、`.`/`..` 段、尾斜杠、大小写不符，或路径参数不匹配 YAML `path_params.*.gateway_pattern` → 404 `route_not_found`。**禁止尾斜杠 307 重定向**（operator-query 的角色 app 是新建的 FastAPI 实例，`redirect_slashes` 默认开启，C-1 必须显式处理并有测试）。
-- **未注册路径 404、已注册路径未列方法 405**（`Allow` 头列 YAML 中该路径的方法），与 FastAPI 默认一致；这两类判定先于鉴权。`OPTIONS` 一律 405（无 CORS）。`HEAD` 只在 YAML 显式列出的行允许（仅媒体）；其余路径的 HEAD → 405。
-- `/v1/watcher/` 前缀下的 404/405 响应体使用 §9.5 统一形状；该前缀以外的 404/405/422 响应体保持 FastAPI 现状。实现提示：异常处理器必须同时安装到 `create_app()` 生成的角色 app 上（`app_roles.py:145-178` 不复制处理器）。
+- **匹配基于 `scope["raw_path"]`**（未解码），规则：raw path 含 `%`、`//`、`.`/`..` 段、尾斜杠、大小写不符，或路径参数不匹配 YAML `path_params.*.gateway_pattern` → 404 `route_not_found`。**禁止尾斜杠 307 重定向**。
+- **未注册路径 404、已注册路径未列方法 405**（`Allow` 头列 YAML 中该路径的方法），与 FastAPI 默认一致；这两类判定先于鉴权（§9.3 G1）。`OPTIONS` 一律 405（无 CORS）。`HEAD` 只在 YAML 显式列出的行允许（仅媒体）；其余路径的 HEAD → 405。
+- **前缀中间件（R4，规范性；替代 WGW-1.0 的"实现提示"）**：
+  - G1 由一个纯 ASGI 中间件实现，它与 §9.5 错误体处理器一起，显式安装到 `create_app()` 返回的角色 app 上（`app_roles.py:145-178` 只复制 `APIRoute`，不复制中间件与异常处理器）。operator-query 必须安装；node-control、event-ingest 无论是否安装，都不得出现网关路由。
+  - 触发条件：对 `scope["path"]`（已解码）和 `scope["raw_path"]`（未解码，按 latin1 解码为文本）各判定一次，按 ASCII 不区分大小写比较；任一等于 `/v1/watcher`，或以 `/v1/watcher/`、`/v1/watcher%` 开头 → 由中间件判定。未触发的请求原样交给 FastAPI 路由，既有 `/v1/*` 行为不变。
+  - 中间件按生成物（§9.14.3）匹配 `(method, raw_path)`。不匹配时由中间件直接返回 404/405（§9.5 形状），**不交给 Starlette 路由**，因此 `redirect_slashes` 不会产生 307。匹配成功时把行 id 写入 `scope["state"]["watcher_gateway_route_id"]` 再交给路由；网关 endpoint 第一步断言该值等于自身行 id，不等（中间件未安装或被绕过）→ 404 `route_not_found`（fail-closed）。
+  - **禁止**：在角色 app 或全局设置 `redirect_slashes=False`（会把既有 `/v1/*` 的尾斜杠 307 变成 404，违反 §9.13）；用 catch-all `APIRoute`（如 `/v1/watcher/{rest:path}`）实现（会破坏 §9.14.4 的运行时路由集合相等）。
+  - 回归测试（C-1 验收）：`/v1/accounts/`（尾斜杠）的状态码、`Location` 头、响应体与改动前逐字节一致；`/v1/watcher/status/` → 404 `route_not_found` 且无 `Location`；`/v1%2Fwatcher/status`、`/V1/Watcher/status`、`/v1/watcher` → 404 `route_not_found`（§9.5 形状）。
+- `/v1/watcher/` 前缀（按上面的触发条件）下的 404/405 响应体使用 §9.5 统一形状；该前缀以外的 404/405/422 响应体保持 FastAPI 现状。
 - **路由名**：`watcher_gateway__<YAML id 中的 . 换成 _>`；必须出现在 operator-query 角色 app，不出现在 node-control / event-ingest。
 - **阶段门**：生成时带 `phase_max`（P0..P3），只注册 `phase ≤ phase_max` 的行；未注册行按 404 处理。`phase_max` 写入生成物并参与 §9.14 diff。
 - **query**：只接受该行 `query` 列出的键，定义见 YAML `query_params`；未列键、同键重复、值不合规、`before_created_at` 与 `before_id` 不成对 → 400 `invalid_query`。媒体行不接受任何 query（token 禁止入 query）。
 - **body**：
-  - GET/HEAD 行带 body → 400 `invalid_body`。写行必须 `Content-Type: application/json` 且为 JSON object，否则 400 `invalid_body`；大于 64 KiB → 413 `payload_too_large`。
+  - GET/HEAD 行带 body → 400 `invalid_body`。大于 64 KiB（`Content-Length` 超限立即拒绝，不读 body；无 `Content-Length` 时流式计数，超限即停止读取）→ 413 `payload_too_large`。写行必须 `Content-Type: application/json` 且为 JSON object，否则 400 `invalid_body`。
   - 判定顺序：键命中 `secret_fields` 或 `secret_key_pattern` → 400 `secret_field_rejected`（`details.fields` 只列键名，不回显值）；键不在 `allow`（含 `deny` 中非秘密键）→ 400 `invalid_body`（`details.unknown_fields`）；缺 `required` → 400 `invalid_body`（`details.missing_fields`）；类型/格式不符 YAML `body_fields`（gateway 行用 `gateway_enum`/`gateway_pattern`；数字必须是 JSON number、布尔必须是 JSON boolean）→ 400 `invalid_body`（`details.field`、`details.rule`）。
   - 通过后网关只转发 allow 内字段（重新序列化的 JSON）。未知字段拒绝而不是静默丢弃。
 - **请求头清洗**：丢弃来访的 `Authorization`、`Cookie`、全部 `X-Watcher-*`（含重复）、hop-by-hop 头与 `X-Request-Id`；转发给 watcher 的头只有：`Authorization: Bearer <gateway>`、`X-Watcher-Actor`、`X-Watcher-Token-Fingerprint`、`Accept: application/json`、写行的 `Content-Type: application/json`、媒体行的 `Range`/`If-Range`。
@@ -252,7 +306,7 @@ watcher 对 `browser` 身份的错误体额外保留 `error`（= `message`），
 | 409 | `revision_conflict` | watcher | 条件写版本不符（§9.12） | 展示最新差异，重新确认 |
 | 409 | `idempotency_conflict` | watcher | 同键异摘要（§9.12） | 显示错误，不自动重试 |
 | 409 | `constraint_conflict` | watcher | 既有业务冲突（有子账号、被路由引用、有活动单、执行账号已存在、主子环境不一致）；保留原计数字段 | 显示错误 |
-| 413 | `payload_too_large` | 网关 | body > 64 KiB | 显示错误 |
+| 413 | `payload_too_large` | 网关、watcher | body > 64 KiB | 显示错误 |
 | 416 | `range_not_satisfiable` | 网关、watcher | 多段/畸形/越界 Range | 缺图不阻塞文本 |
 | 500 | `snapshot_invalid` / `snapshot_unreadable` | watcher（snapshot 身份） | §9.10 | app 不可达 |
 | 500 | `internal_error` | watcher | 未分类异常（替换现有 `Internal server error`） | 经网关时映射为 503 |
@@ -263,18 +317,25 @@ watcher 对 `browser` 身份的错误体额外保留 `error`（= `message`），
 | 503 | `db_busy` | watcher | SQLite 锁等待超过 `busy_timeout`；事务已回滚 | 用**同一** `client_ref` 重试 |
 | 503 | `media_too_large` | 网关、watcher | 整文件 > 20 MB，发头前拒绝 | 缺图不阻塞文本 |
 
+- **未识别的 `code`（A-3 条件，规范性）**：app 收到 503 且 `code` 不在上表 → 一律按 `watcher_unavailable` 处理（写请求用同一 `client_ref` 回读或重放）；收到其他非 2xx 且 `code` 不在上表 → 显示错误，不自动重试、不换 `client_ref`。401 仍是唯一触发"交易服务连接失效"的状态。
+- **`message` 的来源（R8，规范性）**：watcher 的 `message` 只取自固定文案表（按 `code`，必要时按 `details.rule`），不得拼接异常文本（`err.message`）、输入值、文件路径或 SQL。`internal_error` 的 body 不含任何异常信息，堆栈只写经 `safe-log` 过滤的日志。`details` 只含本节与 §9.6、§9.9–§9.12 为该 `code` 定义的键。
+
 ### 9.6 上游响应映射（网关）
 
 - 原样透传状态码（body 经下述过滤）的只有：`200`、`206`（媒体）、`400`（`code ≠ invalid_actor_headers`）、`404`（`code ≠ route_not_found`）、`409`、`416`，以及 `503` 且 `code ∈ {db_busy, media_too_large}`。
 - 其余一律 503 `watcher_unavailable`：上游 401、403、405、413、400 `invalid_actor_headers` 与 404 `route_not_found`（网关自身缺陷或契约漂移）、其他 5xx、3xx（`follow_redirects=False`）、连接/读/总超时、JSON 行返回非 JSON 或超 8 MiB、错误体缺 `code`。`details.reason` ∈ `upstream_status`、`timeout`、`connect_error`、`redirect`、`malformed_response`、`response_too_large`，可带 `upstream_status`，**不回显上游 body**。上游 401 绝不透传。
-- 错误体：从上游取 `code`/`message`/`details`，丢弃其他键（含 `error`），加网关 `request_id`。
-- 成功体过滤：按行 `response.omit` 删除键；再对整个 JSON 递归删除命中 `secret_key_pattern` 的键（删除而非掩码）；`details.current` 同样过滤。
+- 错误体（R8）：从上游只取 `code`/`message`/`details`，丢弃其他键（含 `error`），加网关 `request_id`。
+  - `code` 必须是匹配 `^[a-z][a-z0-9_]{0,63}$` 的字符串，否则按"错误体缺 `code`"处理（503 `watcher_unavailable`，`details.reason=malformed_response`）。
+  - `message` 必须是不超过 200 个字符、不含控制字符的字符串，否则替换为 `code` 本身。
+  - `details` 必须是 JSON object，否则删除。对**整个** `details` 递归删除键名命中 `secret_key_pattern` 的键（任意深度，数组里的对象同样处理；删除而非掩码），不只 `details.current`。
+- 成功体过滤：按行 `response.omit` 删除键（数组响应对每个元素生效）；再对整个 JSON 递归删除键名命中 `secret_key_pattern` 的键（删除而非掩码）。
+- 过滤用的正则按 YAML `regex_dialect` 编译（`secret_key_pattern.pattern` + `flags`；Python 用 `re.search(pattern, key, re.IGNORECASE)`），与 watcher 的 JS 编译结果同义（R5）。
 - 响应头：只回 YAML `response_headers.<行的 headers>` 中的头，并删除 `Connection` 声明的逐跳头。JSON 行由网关设置 `Cache-Control: no-store`。配置读行（accounts/channels/risks GET）回传 watcher 的 `X-Config-Revision`。
 
 ### 9.7 async、准入与超时（P1-12）
 
 - 网关路由全部 `async def`，使用异步 HTTP 客户端与异步流；禁止同步 `def` 转发、禁止同步 handler 等待 future、禁止在线程池内获取准入。
-- 准入：每个 worker 在事件循环上非阻塞 try-acquire 对应预算的信号量，取不到立即 503 `gateway_busy`；在 `finally` 中关闭上游并释放槽（含客户端取消）。准入发生在 §9.3/§9.4 校验之后、发起上游请求之前。
+- 准入：每个 worker 在事件循环上非阻塞 try-acquire 对应预算的信号量，取不到立即 503 `gateway_busy`；在 `finally` 中关闭上游并释放槽（含客户端取消）。准入发生在 §9.3 的 G1–G5 之后、G7 与上游请求之前（G6）。
 - 三份预算互不挤占，各自独立的 HTTP 客户端与连接池（数值以 YAML `budgets` 为准）：
 
   | 预算 | 每 worker 槽 | 配置项 | 超时 connect/read/write/pool/total（秒） |
@@ -295,6 +356,7 @@ watcher 对 `browser` 身份的错误体额外保留 `error`（= `message`），
 - watcher（`req.rawHeaders` 计数）：
   - `gateway` 身份：两个头必须各恰好一条且匹配 YAML `actor_headers.*_pattern`，否则 400 `invalid_actor_headers`；不合并、不取第一条、不默认。写行另校验 actor 为 `app:risk_admin`，否则 403 `identity_forbidden`（纵深防御）。
   - `snapshot` / `browser` 身份：出现任一 `X-Watcher-Actor` 或 `X-Watcher-Token-Fingerprint` → 400 `invalid_actor_headers`。`browser` 写入的 actor 固定为 `browser`。
+  - 校验通过的 actor、role、指纹只经 `req.watcherAuth`（§9.2）交给 handler，handler 不再读这两个头。
 - 指纹只是审计标签，不是授权依据，也不是唯一身份；`role` 不是自然人。双层白名单挡不住网关进程本身失陷（计划 §8 风险表）。
 
 ### 9.9 媒体（P1-16）
@@ -348,13 +410,21 @@ watcher 对 `browser` 身份的错误体额外保留 `error`（= `message`），
 
 - 开关 `WATCHER_CONFIG_SNAPSHOT_ENABLED`，缺省 `0`（沿用旧 SQLite reader，`read_api.py:6214-6244` 的路径解析与旧 reader 保留到影子对照通过）。其他配置：`WATCHER_SNAPSHOT_URL`（缺省 `http://127.0.0.1:9090/api/trading/config-snapshot`）、`WATCHER_SNAPSHOT_TOKEN`。
 - 参数：`refresh_interval = 30s`、`max_age = 60s`、单次请求总时限 2s、单飞（每 worker 同时最多一个在途刷新）。失败退避 1s、2s、4s、8s，此后每 15s，无抖动；成功后回到 30s 周期。刷新由后台任务驱动，不依赖请求触发。
-- 状态（每 worker 独立）：
+- 成功验证 = HTTP 200 ∧ `schema_version == "watcher-config-snapshot.v1"`（否则 `schema_mismatch`）∧ 重算 `content_sha256` 相等 ∧ 字段白名单与类型合规 ∧ 非"同 revision 异摘要"（后三者不满足记 `invalid`）。无效快照永不替换已缓存的有效快照。`revision` 小于缓存值时接受并记 `snapshot_revision_regressed` 告警（真库回滚场景）。
+- 状态（每 worker 独立；WGW-1.0.1 按 R1 修订）：
   - `cold`：从未成功验证过（启动预热失败时 worker 仍就绪，但处于 `cold`）。
-  - `fresh`：距最近一次成功验证 `age ≤ max_age`。刷新失败不改变状态，只让 age 增长；**不设宽限态**。
-  - `expired`：`age > max_age`。
-  - 最近一次失败原因另记 `last_refresh_error ∈ {null, timeout, unavailable, unauthorized, invalid, schema_mismatch}`；对外的 `snapshot_state` 在非 fresh 时优先报告 `unauthorized`（上游 401）或 `invalid`（校验失败），否则报 `cold`/`expired`。
-- 成功验证 = HTTP 200 ∧ `schema_version == "watcher-config-snapshot.v1"`（否则 `schema_mismatch`）∧ 重算 `content_sha256` 相等 ∧ 字段白名单与类型合规 ∧ 非"同 revision 异摘要"（否则 `invalid`）。无效快照永不替换已缓存的有效快照。`revision` 小于缓存值时接受并记 `snapshot_revision_regressed` 告警（真库回滚场景）。
-- 使用：`open_position`（含 dry_run）在状态非 `fresh` 时一律拒绝，HTTP 503、body 保持既有形状 `{"detail": "snapshot_unavailable"}`。非开仓路径不引入快照依赖（回归测试锁定）。展示类读取若使用快照，须带 `stale: true`。
+  - `fresh`：距最近一次成功验证 `age ≤ max_age`，且不处于下面两个锁存态。**不设宽限态**。
+  - `expired`：`age > max_age`，且不处于锁存态。
+  - `invalid`（锁存）：一次完成的刷新拿到 HTTP 200，但未通过成功验证（`schema_mismatch`，或摘要不符、白名单/类型不合规、同 revision 异摘要）。
+  - `unauthorized`（锁存）：一次完成的刷新拿到 HTTP 401 或 403。403 与 401 同类处理（例如 snapshot token 被识别为其他身份，说明信任关系已变）。
+  - **锁存规则**：进入 `invalid` 或 `unauthorized` 后，只有下一次**成功验证**才能离开（回到 `fresh`）。其间的超时、连接失败、5xx 都不解除锁存；即使已缓存的有效快照 `age ≤ max_age`，也不回到 `fresh`（R1：不得继续使用旧快照）。两种锁存条件先后出现时，状态取最近一次。
+  - **不锁存的失败**：超时、连接失败、5xx、3xx、401/403 以外的 4xx（例如 watcher 回滚到没有该端点的版本而得到 404）、非 JSON、超过 4 MiB。这些只记 `last_refresh_error`，状态按 age 演进（R1："fresh 的定义不变"），刷新失败只让 age 增长。
+  - `last_refresh_error ∈ {null, timeout, unavailable, unauthorized, invalid, schema_mismatch}` 保留为细分原因；对外 `snapshot_state ∈ {cold, fresh, expired, invalid, unauthorized}`，锁存态优先于按 age 得出的状态。
+- 使用：`open_position`（含 dry_run）在状态 ≠ `fresh` 时一律拒绝，HTTP 503、body 保持既有形状 `{"detail": "snapshot_unavailable"}`。`invalid` 与 `unauthorized` 一出现就立即拒绝，不等 60 秒（R1）。非开仓路径不引入快照依赖（回归测试锁定）。展示类读取若使用快照，须带 `stale: true`。
+- **消费语义（C-0，审查 💭-2）**：快照路径与旧 SQLite reader（`_load_channel_risk_route` `read_api.py:6311-6420`、`_symbol_risk_ratio` `:8492-8519`）对同一份数据必须得出同一类结果，影子对照（B/C）以此为预言：
+  - 风险取值顺序不变：`risks[symbol]` → 执行账号（在 accounts 中按 `execution_account_id` 查找）的 `default_risk` → 环境变量 `OPERATOR_DEFAULT_RISK_RATIO`（缺省 `"0.01"`）；结果须在 `(0, 0.1]`，否则 503 `{"detail": "account risk ratio configuration is unavailable or invalid"}`。
+  - 执行账号存在但 `default_risk` 为 `null` → 同一个 503（与旧 reader `float(None)` 的结果一致，`:8509-8517`），**不**回落到环境变量默认值；只有执行账号不存在时才用环境变量默认值。
+  - 已知的有意差异：旧 reader 宽松比较 `account_type`（`lower(trim())`，`:6370`）与启用值（`1/active/enabled/true`，`:6298-6308`）；快照一侧由 watcher 严格校验（§9.10），任一行不合规会让整份快照 `snapshot_invalid`，而不是逐行宽松放行。打开 `WATCHER_CONFIG_SNAPSHOT_ENABLED` 的前置条件是 O-0 数据基线证明现存所有行通过 §9.10 的服务端校验，并列出：非精确 `main`/`subaccount` 的 `account_type`、非 0/1 的 `is_enabled`、依赖旧 `enabled`/`status` 列的行、`default_risk_ratio` 为 NULL 或越出 `(0, 0.1]` 的行、`risk_ratio` 越界的行、不匹配 `path_params.account_id.gateway_pattern` 的 `account_id`（这些账号在 app 中无法编辑，审查 💭-3）。B/C 对照报告把这些逐条列为预期差异并核实。
 - 单次订单从同一不可变快照对象取路由、addon、risk，不跨版本；dry_run 与正式提交的 `checks` 追加一项（只增）：`{"name": "config_snapshot", "passed": true, "revision": 42, "content_sha256": "…", "age_ms": 1234, "snapshot_state": "fresh"}`。
 - 恢复：watcher 恢复后 30s 内回到 `fresh`（退避上限 15s + 请求 2s 保证）。
 
@@ -410,6 +480,14 @@ CREATE TABLE IF NOT EXISTS config_audit (
 - **503 `db_busy`**：`details: {"busy_timeout_ms": 5000, "retryable": true}`，事务已回滚，用**同一** `client_ref` 重试。
 - **客户端重试规则**（A-0）：只有确定性 4xx 之后才允许换新 `client_ref`；超时、`status 0`、`watcher_unavailable`、`gateway_busy`、`db_busy` 一律结果未知或未执行，必须用同一 `client_ref` 回读或重放。
 - **配置读的 revision**：accounts/channels/risks 的 GET 在同一读事务里读 `config_revision`，以响应头 `X-Config-Revision: <int>` 返回（body 仍为数组，站点兼容），网关透传该头。
+- **客户端取用 revision 的规则**（站点与 app 相同）：按资源（accounts、channels、risks）各存一份 revision，取自该资源最近一次 GET 的 `X-Config-Revision`；写某资源时用它作 `expected_revision`，不得用其他资源读到的更大值（那会让用户没看到的账号改动被覆盖）。写成功后用响应里的 `revision` 更新该资源的值，并重新 GET 该资源列表。因为 `config_revision` 是全局的，其他资源的改动也会让本资源的写得到 409，这是预期行为。
+- **部分更新（R7，审查 🟡-9，规范性）**：
+  - PUT（两种身份）只对**本次提交的键**做字段级校验（类型、范围、枚举、格式）。未提交的键沿用存量值；存量值越界（例如 `default_risk_ratio` 大于 0.1 或为 NULL）**不阻止**本次修改，例如只改 `is_enabled`。browser 的 `api_key`/`api_secret` 为空串视同未提交。
+  - 跨行约束只在它的输入键被提交时评估，并按合并后的行判定：执行账号唯一（提交了 `execution_account_id`）；主子账号结构，即父存在、父为 main、主子环境一致、改为 subaccount 时没有子账号（提交了 `account_type`、`parent_account_id` 或 browser 的 `is_testnet` 之一）。
+  - 这是对现状的有意改变：现行 PUT 对合并后的整行重算（`trading-api.js:496-600`）；W-0 按本条改。
+  - SQLite 自身的 CHECK 与 UNIQUE 约束照常生效（`trading-api.js:55-74`、`:199-200`）。违反时返回 409 `constraint_conflict`（UNIQUE）或 400 `validation_failed`（CHECK），不得返回 500。
+  - DELETE、POST 不受本条影响（POST 是整行创建，校验全部提交的键）。
+  - 客户端：app 只提交用户改动过的键（外加 `expected_revision` 与 `client_ref`）。站点沿用整表单提交，因此在站点编辑一个存量越界的账号时，须在同一次保存中改正该值；这是站点表单的行为，不是契约例外。
 - **browser 密钥**：`br.account.put` 的 `api_key`/`api_secret` 为空 → 保留原值（现状 `trading-api.js:581-590`）；值等于当前掩码或匹配 `^\*{4}$`、`^.{4}\.\.\..{4}$` → 400 `masked_value_rejected`。gateway 身份对任何秘密字段 → 400 `secret_field_rejected`，DB 不变（watcher 第二层，不依赖网关）。
 - **保留期**：`config_audit` 至少保留 30 天；幂等保证只在保留期内成立（过期后重放按新请求处理，conditional 行会因版本不符得到 409）。
 - **写入者**：watcher 是三张配置表唯一写入者（D1）；`db_manager.py` 写命令停用或改走本服务。任何绕过者会造成"同 revision 异摘要"，被 §9.11 判为 `invalid`。
@@ -418,18 +496,39 @@ CREATE TABLE IF NOT EXISTS config_audit (
 
 - 既有 `/v1/*`、`/api/system/snapshot` 等端点的字段、状态码、错误体（`{"detail": …}`）一律不变；错 token 仍 403。`/v1/watcher/*` 是新增前缀，统一错误体只作用于此前缀。
 - `/v1/operator/orders` 只增：新 `checks` 项 `config_snapshot`；快照不可用时 503 `{"detail":"snapshot_unavailable"}`（仅开关打开后、仅开仓路径）。
-- watcher 站点：GET 响应形状不变（数组）；新增 `X-Config-Revision` 头；错误体新增 `code/message/details` 并保留 `error`；写请求新增必填 `client_ref` 与 `expected_revision`（站点 JS 随 W-0 同步改）；风险比例校验从"非负"收紧为 `(0, 0.1]`（计划 §6.1）。
+- watcher 站点：GET 响应形状不变（数组）；新增 `X-Config-Revision` 头；错误体新增 `code/message/details` 并保留 `error`；写请求新增必填 `client_ref` 与 `expected_revision`；风险比例校验从"非负"收紧为 `(0, 0.1]`（计划 §6.1）。
+- **站点 JS 改动清单**（W-0 与站点后端改动同批交付，逐项作为验收；审查 🟡-8）：
+  1. `api()`（`public/index.html:910-929`）读取 accounts/channels/risks 的 GET 响应头 `X-Config-Revision`，按资源各存一份（§9.12 客户端规则）。
+  2. 所有写请求带 `client_ref`：用户每次确认生成一个新值，同一次操作的重试复用它。配置写（账号 POST/PUT/DELETE、路由 POST/DELETE、风险 POST/DELETE）另带 `expected_revision`。
+  3. 账号 PUT 的 payload **不再包含 `account_id`**（现状 `:1513-1524` 会发送，而 `br.account.put` 的 deny 含它，会得到 400）；账号 POST 照常发送 `account_id`。
+  4. 编辑账号时密钥输入框保持为空，**不回填** GET 返回的掩码值（现状 `:1383-1384` 已清空，改造后锁为回归测试）；空值表示"不改密钥"，回填掩码会触发 400 `masked_value_rejected`。
+  5. DELETE（账号 `:1584`、路由 `:1745`、风险 `:1806`、价格提醒）改为带 JSON body `{client_ref, expected_revision?}` 与 `Content-Type: application/json`；风险删除（`:1806`）现在直接用 `fetch`，须改为走 `api()`。
+  6. `groups`、`disconnect`、`reconnect`、价格提醒的写请求带 `client_ref`。
+  7. 409 `revision_conflict`：提示"配置已被修改"，重新 GET 并展示最新数据，用户重新确认时用新的 `client_ref`；503 `db_busy` 用同一个 `client_ref` 重试。
+  8. 错误展示继续读 `error`（等于 `message`）。
 - app 不新增存储键与设置项；watcher 服务层独立实例，其写禁用不传给交易 `TradingApi`。
 
-### 9.14 路由真源校验脚本规格（C-1 实现，本节只定规格）
+### 9.14 路由真源生成与校验规格（C-1 实现，本节只定规格）
 
-**入口**：`scripts/check_watcher_gateway_routes.py`（Python 3.12，`.venv-arch`，依赖 PyYAML），三种模式：`--self-check`、`--generate --phase-max P<n>`、`--check`（缺省：self-check + 生成物 diff + 运行时 diff）。所有测试夹具 token 由脚本随机生成，不读取任何真实环境值。任何检查比较了 0 行即判失败。输出最后一行 `ROUTES_DIFF_EMPTY rows=<n> yaml_sha256=<hex> phase_max=<Pn>`，退出码 0；否则逐条列出差异，退出码 1。
+**原则（R9）**：运行时不解析 YAML。路由真源在开发期由生成器生成**已提交**的 JS 与 Python 产物，watcher 只加载 JS 产物，控制面只加载 Python 产物；校验脚本判定"重新生成 == 已提交"。生成器与校验脚本只在开发环境（本机、CI）运行。
 
-**9.14.1 真源自洽检查（S-01..S-19）**
+**入口**（全部位于 `scripts/contracts/`）：
+
+| 文件 | 作用 |
+|---|---|
+| `scripts/contracts/watcher_gateway_routes_lib.py` | 共享实现：加载 YAML、自洽检查、规范化、渲染三份生成物（纯函数，不写文件） |
+| `scripts/contracts/gen_watcher_gateway_routes.py --phase-max P<n>` | 生成器：调用 lib 渲染，覆盖写出 §9.14.3 的三份生成物；不做其他事 |
+| `scripts/contracts/check_watcher_gateway_routes.py [--self-check]` | 校验：`--self-check` 只跑 9.14.1；缺省模式 = 9.14.1 + 9.14.4 第 1 项（以已提交生成物中的 `phase_max` 在内存重新生成并逐字节比对） |
+
+**运行环境（R9，审查 🟡-11）**：系统 `python3`（≥ 3.10）加 PyYAML，另需 `node`（S-20 的 JS 编译与同义检查）。安装方式：`python3 -m pip install --user pyyaml` 或系统包管理器。**不得**把 PyYAML 加入 `.venv-arch`、控制面生产 venv 或 watcher `package.json`；watcher 与 operator-query 运行时不 import yaml、不打开 YAML 文件。PyYAML import 失败或找不到 `node` 时，脚本打印 `ENVIRONMENT_ERROR <原因>` 并以退出码 2 结束，不得跳过检查，也不得输出 `ROUTES_DIFF_EMPTY`。
+
+**输出与退出码**：成功时最后一行为 `ROUTES_DIFF_EMPTY rows=<n> yaml_sha256=<hex> phase_max=<Pn>`，退出码 0；有差异时逐条列出，退出码 1；环境错误退出码 2。任何检查比较了 0 行即判失败（退出码 1）。所有测试夹具 token 由脚本随机生成，不读取任何真实环境值。
+
+**9.14.1 真源自洽检查（S-01..S-20；WGW-1.0.1 修订 S-01、S-10、S-18，新增 S-20）**
 
 | 编号 | 检查 |
 |---|---|
-| S-01 | `yaml.safe_load` 成功；顶层键齐全；`schema_version == watcher-gateway-routes.v1`；`frozen_at` 为 ISO 日期 |
+| S-01 | `yaml.safe_load` 成功；顶层键恰为 `schema_version, contract_version, frozen_at, amended_at, source_plan, paths, roles, identities, actor_headers, regex_dialect, secret_fields, secret_key_pattern, budgets, path_params, query_params, body_fields, response_headers, media_request_headers, invariants, never_allowed, gateway_excluded, routes`；`schema_version == watcher-gateway-routes.v1`；`contract_version` 形如 `WGW-<主>.<次>[.<勘误>]`；`frozen_at`、`amended_at` 为 ISO 日期 |
 | S-02 | 每行键集合恰为 `id, phase, identity, method, outer_path, inner_path, roles, query, body, response, budget, write`；`body` 含 `allow/deny/required`（可选 `field_overrides`）；`response` 含 `omit/mask/headers`（snapshot 行另含 `fields`） |
 | S-03 | `id` 唯一，形如 `^(gw\|snap\|br)\.[a-z0-9_]+\.(get\|head\|post\|put\|delete)$`，前缀与 identity 对应、后缀与 method 对应 |
 | S-04 | identity ∈ {gateway, snapshot, browser}，三者各至少一行 |
@@ -438,7 +537,7 @@ CREATE TABLE IF NOT EXISTS config_audit (
 | S-07 | gateway 行：outer_path 以 `paths.app_outer_prefix + "/"` 开头；设 `rest = outer_path[len(prefix):]`，若 `rest` 以 `/media/` 开头则 `inner_path == rest`，否则 `inner_path == "/api" + rest`；两侧路径参数名与顺序一致 |
 | S-08 | 非 gateway 行：`outer_path`、`roles` 为 null；browser 行 `budget` 为 null；snapshot 行 `budget == snapshot` |
 | S-09 | gateway GET/HEAD 行 `roles` 与 `roles.all_readers` 集合相等；POST/PUT/DELETE 行 `roles == [risk_admin]` |
-| S-10 | gateway 行：`secret_fields ⊆ body.deny`；`body.allow ∩ secret_fields = ∅`；`body.allow` 与 `query` 的每个名字都不匹配 `secret_key_pattern`；所有行 `allow ∩ deny = ∅`、`required ⊆ allow` |
+| S-10 | `secret_key_pattern` 是恰含 `pattern`、`flags` 两键的映射；gateway 行：`secret_fields ⊆ body.deny`；`body.allow ∩ secret_fields = ∅`；`body.allow` 与 `query` 的每个名字都不被 `secret_key_pattern`（按 `flags` 编译，search 语义）命中；所有行 `allow ∩ deny = ∅`、`required ⊆ allow` |
 | S-11 | `body.allow`（经 `field_overrides`）全部定义在 `body_fields`；gateway 行不得引用 `secret: true` 或 `browser_only: true` 的定义；`query` 全部定义在 `query_params`；每个 `{param}` 在 `path_params` 中有该身份的非 null pattern |
 | S-12 | GET/HEAD 行 `body.allow == []` 且 `write == null`；inner_path 命中 `never_allowed` 的 browser 凭据面写行（`/api/config`、`/api/login/*`）`write == null`（不审计、不带 client_ref，站点登录流程不变）；其余写行 `write` 非 null、`client_ref ∈ required`；`conditional` → `expected_revision ∈ required`；`bumps_revision` → `conditional`；`idempotency ∈ {transactional, reentrant}` |
 | S-13 | HEAD 只出现在 inner_path 以 `/media/` 开头的行，且每个 HEAD 行都有同身份同路径的 GET 行；媒体行 `response.headers == media` |
@@ -446,8 +545,9 @@ CREATE TABLE IF NOT EXISTS config_audit (
 | S-15 | `response.headers` 是 `response_headers` 的键；`json_config_read` 只用于 accounts/channels/risks 的 GET |
 | S-16 | gateway 行 `response.mask == []`（网关只删不掩）；gateway 与 browser 的 accounts 读写行分别 `omit ⊇` / `mask ⊇ [api_key, api_secret]` |
 | S-17 | snapshot 恰一行 `GET /api/trading/config-snapshot`，`response.fields` 与 §9.10 白名单逐项相等 |
-| S-18 | 没有 gateway 行的 `(method, inner_path)` 命中 `never_allowed` 或 `gateway_excluded`（`*` 匹配一个或多个段，`{x}` 匹配一个段） |
+| S-18 | `never_allowed` 每项 `methods == "*"`（R6）；没有 gateway 行的 `inner_path` 命中 `never_allowed`（**与方法无关**）；没有 gateway 行的 `(method, inner_path)` 命中 `gateway_excluded`（`methods` 为 `"*"` 时与方法无关）。路径匹配：`*` 匹配一个或多个段，`{x}` 匹配一个段 |
 | S-19 | 覆盖预言（独立于 YAML 手写在脚本里，来源计划 §3）：gateway `(method, outer_path, phase)` 集合恰为 9.14.2 的 24 行 |
+| S-20 | 正则方言（R5）。对象为 `path_params.*.*_pattern`、`query_params.*.pattern`、`body_fields.*.pattern`/`gateway_pattern`、`actor_headers.*_pattern` 与 `secret_key_pattern.pattern`：(a) 不含 `(?`，`(?:` 除外；(b) 不含 `\d \w \s \b \D \W \S \B`；(c) 字符类之外没有未转义的 `.`；(d) `secret_key_pattern.flags` 的每个字符属于 `regex_dialect.allowed_flags`；(e) 除 `secret_key_pattern` 外全部以 `^` 开头、以 `$` 结尾；(f) Python `re.compile(p, flags)` 与 node `new RegExp(p, 'u' + flags)` 都能编译；(g) 同义探针：对固定探针集（至少含 `""`、`"a"`、`"A"`、`"0"`、`"abc\n"`、`"\n"`、`"a b"`、`"%2F"`、`".."`、`"ſ"`（U+017F）、`"K"`（U+212A）、`"ſession"`、`"toKen"`（K 为 U+212A）、一个星平面字符、`"api_key"`、`"API_KEY"`、`"rapid_x"`，外加 YAML 中出现的全部枚举值）逐一比较 Python（锚定模式用 `re.fullmatch`，`secret_key_pattern` 用 `re.search`）与 node（`.test`）的结果，任一不一致即失败 |
 
 **9.14.2 覆盖预言（计划 §3 → gateway 24 行）**
 
@@ -460,31 +560,82 @@ CREATE TABLE IF NOT EXISTS config_audit (
 
 （均省略前缀 `/v1/watcher/`；另有 snapshot 1 行、browser 38 行。）
 
-**9.14.3 生成物**（`--generate` 写出并提交；`--check` 在内存重新生成并逐字节比对）
+**9.14.3 生成物**（R9；`gen` 写出并提交；`check` 在内存重新生成并逐字节比对）
 
-| 生成物 | 内容 |
+| 生成物 | 消费方 |
 |---|---|
-| `services/control-plane/api/watcher_gateway_routes.json` | `phase ≤ phase_max` 的 gateway 行 + snapshot 行，及 `budgets`、`secret_*`、`path_params`/`query_params`/`body_fields`、`response_headers` |
-| `bridge/services/telegram-watcher/lib/watcher-routes.generated.json` | 三身份全部行（gateway 行按 `phase_max` 过滤）的 `(identity, method, inner_path, path 参数正则, query, body allow/deny/required, write)`，供 watcher 身份中间件使用 |
-| `contracts/generated/caddy-watcher-gateway-paths.txt` | 每个唯一外部路径一行：`/m` + outer_path（`{param}` → `*`）与方法列表，字典序 |
+| `bridge/services/telegram-watcher/lib/generated/gateway-routes.js` | watcher 身份与请求校验中间件（§9.2 W1–W7） |
+| `services/control-plane/api/generated/watcher_gateway_routes.py`，外加手写的空文件 `services/control-plane/api/generated/__init__.py` | operator-query 网关（§9.3–§9.9）；import 名 `generated.watcher_gateway_routes`（与 `read_api.py:100` 的兄弟模块 import 方式一致） |
+| `contracts/generated/caddy-watcher-gateway-paths.txt` | O-0 核对 Caddy 逐路径配置 |
 
-规范化：JSON 键排序、2 空格缩进、结尾换行；行按 `(identity, inner_path, method)` 排序；每个文件带 `_generated_from`、`_yaml_sha256`、`_phase_max`。
+- **payload**：两份代码生成物内嵌**同一个** payload。它由 YAML 顶层键中除 `invariants`、`never_allowed`、`gateway_excluded` 之外的全部内容组成，其中 `routes` = snapshot 行 + browser 行 + `phase ≤ phase_max` 的 gateway 行，按 `(identity, inner_path, method)` 排序；另加 `_meta: {contract_version, schema_version, yaml_sha256, phase_max, generator: "scripts/contracts/gen_watcher_gateway_routes.py"}`，其中 `yaml_sha256` 是 YAML 文件字节的 SHA-256。
+- **规范化**：`payload_text = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)`；以 `json.dumps(payload_text)` 得到的字符串字面量嵌入两份文件（ASCII-only 的 JSON 字符串字面量同时是合法的 Python 与 JS 字符串字面量），因此两份文件里的 payload 字面量逐字节相同。`payload_sha256 = sha256(payload_text 的 UTF-8)`。
+- **文件形状**：首行注释 `GENERATED by scripts/contracts/gen_watcher_gateway_routes.py from contracts/watcher-gateway-routes.yaml — DO NOT EDIT`；LF 换行；结尾一个换行。除解析 payload、核对摘要、冻结、编译正则外不含任何逻辑。
+  - JS（CommonJS）导出 `{ PAYLOAD, PAYLOAD_SHA256, SECRET_KEY_REGEX }`：`PAYLOAD` 为 `JSON.parse` 后深冻结的对象（键沿用 YAML 的 snake_case）；`SECRET_KEY_REGEX = new RegExp(pattern, 'u' + flags)`（按 `regex_dialect`，不带 `g`/`y`）。
+  - Python 导出 `PAYLOAD`、`PAYLOAD_SHA256`、`SECRET_KEY_REGEX = re.compile(pattern, re.IGNORECASE)`（按 `flags` 映射）；只 import `json`、`hashlib`、`re`。
+  - 两者在加载时重算 payload 摘要，与 `PAYLOAD_SHA256` 不等即抛错（防手改）。其他路径参数、query、body 正则由消费方按 `regex_dialect` 编译：JS 恒加 `u` 标志，Python 用 `re.fullmatch`；pattern 只作用于已确认是字符串的值（先类型后正则）。
+- **Caddy 清单**：头部三行注释 `# _generated_from`、`# _yaml_sha256`、`# _phase_max`；之后每个唯一外部路径一行（`/m` + outer_path，`{param}` → `*`，后接空格分隔、字典序的方法列表），整体字典序。
+- **打包**（审查补充，W-0 / C-1 / O-0 验收）：watcher 镜像白名单 `WATCHER_RUNTIME_RELATIVE_PATHS`（`scripts/build_immutable_watcher_image.py:34`）必须加入 `lib/generated/gateway-routes.js`；控制面发布若把 `api/*.py` 平铺到 `host/`（`scripts/make_account_stall_release.py:93-99`、`:217`），须保留子目录，打入 `host/generated/__init__.py` 与 `host/generated/watcher_gateway_routes.py`。部署门禁核对两份产物的 `_meta.yaml_sha256` 与 `_meta.phase_max` 等于本次发布的已审定值。
 
-**9.14.4 "生成路由与真源 diff 为空"的判定**
+**9.14.4 "生成路由与真源 diff 为空"的判定**（R9：按运行环境拆成三项，由传递性合成）
 
-1. **生成物 diff**：三份生成物与内存重新生成的结果逐字节相同。
-2. **控制面运行时 diff**：用夹具环境构造 `create_app("operator-query")`，枚举路径以 `/v1/watcher/` 开头的 `APIRoute`，得到 `{(method, path, name)}`；与 YAML 中 `phase ≤ phase_max` 的 gateway 行 `{(method, outer_path, watcher_gateway__<id>)}` 对称差为空；每个 endpoint 满足 `inspect.iscoroutinefunction`；同一集合不得出现在 `create_app("node-control")`、`create_app("event-ingest")`。
-3. **watcher 运行时 diff**：`node bridge/services/telegram-watcher/scripts/dump-route-table.js` 输出 watcher 实际加载的身份路由表（W-0 须让 `server.js` 在 `require.main === module` 时才 `listen`，以便无副作用加载 `app`），得到 `{(identity, method, inner_path)}`，与 YAML 对称差为空；另枚举 Express 实际注册的 handler，每条 YAML inner 路由都有 handler，且不存在 YAML 之外的 `/api/*` 或 `/media/*` handler。
-4. 三项全部为空且比较行数 > 0 → diff 为空。逐行属性（roles、query、body、write、budget）在集合相等后逐字段比较，任何不等都算非空。
+1. **生成物 diff**（`scripts/contracts/check_watcher_gateway_routes.py`，系统 `python3` + PyYAML）：三份生成物与内存重新生成的结果逐字节相同；三份的 `phase_max` 与 `yaml_sha256` 相同。
+2. **控制面运行时 diff**（pytest，`.venv-arch`，**不** import yaml，只 import 已提交的 Python 生成物）：用夹具环境构造 `create_app("operator-query")`，枚举路径以 `/v1/watcher/` 开头的 `APIRoute`，得到 `{(method, path, name)}`，与 payload 中 gateway 行的 `{(method, outer_path, watcher_gateway__<id>)}` 对称差为空；每个 endpoint 满足 `inspect.iscoroutinefunction`、`route.dependant.body_params == []`、`route.body_field is None`（§9.3 G4）；同一集合不得出现在 `create_app("node-control")`、`create_app("event-ingest")`；operator-query 角色 app 上装有前缀中间件（探针 `/v1/watcher/status/` 得到 404 `route_not_found` 且无 `Location`）。
+3. **watcher 运行时 diff**（node 测试，不读 YAML，只 require 已提交的 JS 生成物）：`node bridge/services/telegram-watcher/scripts/dump-route-table.js` 输出 watcher 实际加载的身份路由表（W-0 须让 `server.js` 只在 `require.main === module` 时 `listen`，以便无副作用加载 `app`），得到 `{(identity, method, inner_path)}`，与 payload 对称差为空；另枚举 Express 实际注册的 handler，每条 payload inner 路由都有 handler，且不存在 payload 之外的 `/api/*` 或 `/media/*` handler。
+4. 第 1 项证明 YAML == 生成物，第 2、3 项证明生成物 == 运行时，三项全部为空且比较行数 > 0 → diff 为空。逐行属性（roles、query、body、write、budget）在集合相等后逐字段比较，任何不等都算非空。
 
 **9.14.5 独立负例（T0-4，不从真源生成）**：百分号编码的斜杠与点（`%2F`、`%2e`）、双重编码（`%252F`）、尾斜杠、`//`、大小写（`/V1/Watcher/status`）、重复 query、未列 query、OPTIONS、非媒体 HEAD、未注册 404、未列方法 405；经网关遍历矩阵外请求时 watcher 请求计数不变；用 `gateway` token 直连 watcher 遍历矩阵外端点，第二层同样拒绝；`browser` 调 snapshot、`snapshot` 调网关写行被拒。
 
-### 9.15 冻结时留待裁决的点（Planner / 用户）
+### 9.15 裁决状态、召回待办与执行期注意事项
 
-- A-1 `/healthz` 改为要求 `browser` 代理凭证（容器健康检查带该头）——计划要求"每个请求都先校验"，但未说明健康检查如何带凭据。
-- A-2 网关每 worker 8 槽按 config 4 + media 4 切分；snapshot 独立 1 槽不计入 8。
-- A-3 watcher 503 `db_busy`/`media_too_large` 透传给 app，是对计划"上游 5xx 一律 `watcher_unavailable`"的收窄例外（否则 app 无法区分"未执行可重试"）。
-- A-4 `default_risk_ratio` 与品种风险同样收紧到 `(0, 0.1]`（控制面 `read_api.py:8510-8512` 已对二者同一范围执行）。
-- A-5 DELETE 的 `client_ref`/`expected_revision` 放 JSON body；`config_audit` 增加计划表外的 `token_fingerprint` 列（计划 §8、review P1-14 要求审计带指纹）。
-- A-6 P3 价格提醒的 body/query 字段（`source/account_id/position_ref/environment`）依赖计划 §7.1 的表扩展，A-3 开工前如需调整由 Planner 召回 Architect。
-- A-7 空数组 `groups` 沿用现状视为合法（停止监听全部群组），只靠 UI 确认拦截。
+**已裁决**（Planner 2026-09-26，依据审查 wac-001 复核；条件已写进正文）：
+
+| # | 内容 | 裁决 | 条件落点 |
+|---|---|---|---|
+| A-1 | `/healthz` 要求 `browser` 代理凭证，容器健康检查带该头 | 接受（有条件） | §9.2：node 脚本在脚本内读 `process.env`，不经 compose `$VAR` 插值，不打印响应 |
+| A-2 | 网关每 worker 8 槽 = config 4 + media 4；snapshot 独立 1 槽不计入 | 接受 | §9.7、YAML `budgets` |
+| A-3 | watcher 503 `db_busy` / `media_too_large` 透传给 app（对"上游 5xx 一律 `watcher_unavailable`"的收窄例外） | 接受（有条件） | §9.5：app 把未识别的 503 `code` 一律当作 `watcher_unavailable`；§9.6：只透传 `code`/`message`/`details` 并按 R8 过滤 |
+| A-4 | `default_risk_ratio` 与品种风险同样收紧到 `(0, 0.1]`（`read_api.py:8510-8512`） | 接受（有条件） | §9.12 R7 只校验提交的键；§9.11 O-0 数据基线列出存量越界或 NULL 的行 |
+| A-5 | DELETE 的 `client_ref`/`expected_revision` 放 JSON body；`config_audit.token_fingerprint` | 接受 | §9.12 |
+| A-6 | P3 价格提醒字段依赖计划 §7.1 表扩展 | 记录；召回待办见下 | — |
+| A-7 | 空数组 `groups` 合法（停止监听全部群组） | 接受（有条件） | app 必须二次确认并写明"将停止监听全部群组"；T2-5 覆盖空选路径；app 截断到 100 条时不丢已选（审查 💭-6，A-2 验收） |
+| A-8 | 快照 `invalid` / `401` 何时拒绝开仓 | R1：立即拒绝 | §9.11 |
+
+**召回待办**（A-3 开工前由 Planner 召回 Architect 处理；本版不定字段）：
+
+- **A-6 / 审查 🟡-7：价格提醒删除按身份限定**。计划 §7.1 要求"列表/删除均按身份限定"。WGW-1.0.1 的 `gw.price_alert.delete` 只带 `client_ref`，app 可以按 id 删掉站点创建的 `source=watcher` 提醒。召回时要定下：gateway 删除时 watcher 校验该行 `source=v3`；body 是否带 `account_id`、`position_ref`、`environment` 并与行内值比对（不一致按 404 处理）；`gw.price_alerts.get` 是否默认按 `source=v3` 过滤。P3 受 `phase_max` 门控，当前生成物不注册这些行，因此不阻塞 P0–P2。
+
+**执行期注意事项**（不改契约，由对应任务书写进验收）：
+
+- 审查 💭-1：`secret_key_pattern` 未锚定，按"键名包含"判定，`api[_-]?id` 会命中 `rapid_*` 之类的键。误伤只会多拒、多删（安全方向）。将来加列时注意命名。
+- 审查 💭-7：review P1-16 提到的"全局/每 token 带宽预算"，计划 §2.1 未采纳，本契约也不写，按计划为准。
+- 审查 💭-6：`groups` 没有条件写，站点与 app 同时编辑会互相覆盖（计划 §2.3 已接受：可重入，以回读为准）。
+- 打包白名单与部署门禁见 §9.14.3（watcher 镜像、控制面平铺发布）。
+- R5 的跨语言差异：Python `re.IGNORECASE` 与 JS `iu` 都做 Unicode 简单大小写折叠；万一两边对某个键名结论不同，只会让其中一层多拒或多删（安全方向）。S-20(g) 用固定探针锁定当前一致性。
+
+### 9.16 勘误记录
+
+**WGW-1.0 → WGW-1.0.1（2026-09-26）**。来源：Planner 裁定 R1–R9（附 A-1..A-7 条件）、审查报告 `docs/agent-team/reviews/wac-001.md`（11 条 🟡、7 条 💭）。WGW-1.0 尚无实现，本次改动不涉及已发布接口；§1–§8 未改动。
+
+| # | 来源 | 改动 | 位置 |
+|---|---|---|---|
+| E-01 | R1 / 🟡-1（A-8） | 快照新增锁存态 `invalid`、`unauthorized`（401 与 403），出现即拒绝开仓，只有下一次成功验证才能解除；超时、5xx 等不锁存，`fresh` 定义不变；`schema_mismatch` 归入 `invalid` | §9.11 |
+| E-02 | R2 / 🟡-2 | "已配置"定义；空 bearer（含 Node/uvicorn 剥掉尾随空白后的 `Bearer`）一律 401 且不进入比较；未配置的 `*_PREVIOUS` 永不参与匹配；已配置值（含 `_PREVIOUS`）须 ≥ 32 字节、可打印 ASCII、两两互异；剥离规则与 `principal.py:111-115` 相同；摘要恒定时间比较 | §9.2、§9.3 |
+| E-03 | R3 / 🟡-3 | 网关处理顺序 G1–G8 写死；G2/G3 未通过不读 body；endpoint 不得声明 Body 参数；watcher 顺序 W1–W8 同时写全 | §9.3、§9.2、§9.4、§9.7 |
+| E-04 | R4 / 🟡-4 | 前缀中间件规范化：触发条件、自行返回 404/405、`scope.state` 行 id 断言、禁止全局 `redirect_slashes=False` 与 catch-all 路由、`/v1/accounts/` 回归测试；"实现提示"改为规范性要求 | §9.4 |
+| E-05 | R5 / 🟡-5 | `secret_key_pattern` 改为 `{pattern, flags}`，去掉 `(?i)`；新增 `regex_dialect`（JS 恒加 `u`、Python 用 `re.fullmatch`、禁用构造、先类型后正则）；新增 S-20 | YAML `regex_dialect`、`secret_key_pattern`；§9.6、§9.14.1、§9.14.3 |
+| E-06 | R6 / 🟡-6 | `never_allowed` 与方法无关（`methods: "*"`）；`gateway_excluded` 中 config-snapshot 也改为 `"*"`；S-18 同步 | YAML `never_allowed`、`gateway_excluded`、`invariants`；§9.14.1 |
+| E-07 | R7 / 🟡-9 | 部分更新只校验提交的键；跨行约束只在其输入键被提交时评估；app 只提交改动的键 | §9.12 |
+| E-08 | R8 / 🟡-10 | 网关对整个上游 `details` 递归删除秘密键；`code`/`message`/`details` 形状校验；watcher `message` 只取固定文案 | §9.5、§9.6 |
+| E-09 | R9 / 🟡-11 | 运行时不解析 YAML；生成器、校验与共享实现放在 `scripts/contracts/`，用系统 `python3` + PyYAML，环境错误退出码 2；生成物改为 `lib/generated/gateway-routes.js` 与 `api/generated/watcher_gateway_routes.py`（同一 payload）；运行时 diff 拆到 `.venv-arch` pytest 与 node 测试；打包白名单与部署门禁 | §9.14 |
+| E-10 | 🟡-7 | 价格提醒删除按身份限定：记为 A-6 召回待办，本版不定字段 | §9.15 |
+| E-11 | 🟡-8 | 站点 JS 改动清单 8 项（PUT 不发 `account_id`、不回填掩码、`expected_revision` + `client_ref`、读 `X-Config-Revision`、DELETE 带 body 等）；客户端按资源保存 revision | §9.13、§9.12 |
+| E-12 | 任务 wac-007 第 3 项 | W-0 两个子任务的接口：`req.watcherAuth = {identity, role, actor, tokenFingerprint}` 与 `req.watcherRoute`，只读、缺失即 500 | §9.2、§9.8 |
+| E-13 | A-1..A-7 条件 | 条件写进正文；§9.15 由"待裁决"改为"裁决状态" | §9.2、§9.5、§9.15 |
+| E-14 | 💭-2、💭-3 | C-0 消费语义（风险取值顺序、NULL `default_risk` → 503、宽松比较差异）与打开快照开关前的 O-0 数据基线 | §9.11 |
+| E-15 | 💭-4 | `WATCHER_*` 与控制面 token 目录跨服务互异（O-0 发行侧 + operator-query 启动纵深检查） | §9.2 |
+| E-16 | 💭-5 | 健康检查不经 compose 插值、不打印（A-1 条件） | §9.2 |
+| E-17 | 💭-1、💭-6、💭-7 | 记为执行期注意事项 | §9.15 |
+| E-18 | 自查 | watcher 侧 413 `payload_too_large`（W7）；body 大小检查先于解析；§9.1 补充事实（`principal.py`、`index.html`、镜像白名单、平铺发布、旧 reader 宽松比较） | §9.1、§9.4、§9.5 |
+
+审查 11 条 🟡 的去向：🟡-1 → E-01；🟡-2 → E-02；🟡-3 → E-03；🟡-4 → E-04；🟡-5 → E-05；🟡-6 → E-06；🟡-7 → E-10；🟡-8 → E-11；🟡-9 → E-07；🟡-10 → E-08；🟡-11 → E-09。
