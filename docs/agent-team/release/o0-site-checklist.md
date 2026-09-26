@@ -1,0 +1,79 @@
+# O-0 jp-24 现场只读核对清单（wac-032 草案）
+
+> **每一条执行前都需要用户授权（授权项 O0-A01）。只读核对也不例外。** 本文件里的命令一条都没有执行过；本地只做了语法检查与桩化泄露测试。
+> 目的：在任何部署动作之前，把计划 §9 O-0 的 Caddy 现场清单和部署门禁需要的现场事实一次核清，并留下不含凭据的证据。
+> 要求出处见 `o0-requirements.md`（R-xx）；前置见同文件 §1（P-xx）。
+
+## 0. 怎么跑
+
+1. 本地先生成 bundle（只在本机，见 `o0-runbook-deploy.md` §2 第 1 步），用于基线比对：`bash scripts/ops/o0/o0_package.sh --candidate <候选提交> --out <本机目录> --report-only`。
+2. 用户授权 O0-A01 后，执行（脚本从 stdin 进入，**不在主机上写任何文件**，输出只落本机）：
+
+   ```bash
+   ssh -p 53222 root@100.89.58.40 'bash -s -- --execute --auth-id O0-A01' \
+     < scripts/ops/o0/o0_site_check.sh > o0-site-check-<UTC>.txt
+   ```
+
+   不加 `--execute` 时脚本只打印命令（`bash scripts/ops/o0/o0_site_check.sh` 即为本清单的命令全集）。
+3. 本地分析（不连 jp-24）见 §3。
+4. 输出卫生：env 文件只打印变量名；配置文本经脚本内联脱敏（bcrypt、Bearer 值、疑似密钥的 `KEY=VALUE`、长随机串）；`Environment=` 行只列变量名；adapt 后的 JSON 把 basic auth 密码与字面头值替换为 `<redacted>` / `<literal len=N>`，`{env.X}` 这类占位符保留。`scripts/ops/o0/tests/site_check_leak_test.sh` 用 9 个哨兵值实测 0 泄露。
+
+**发现不符时的统一原则**：只记录、不修；任何一条判为"阻断"时，O-0 的所有生产阶段都不开始，由 Planner 转用户决定。不因为核对结果去动服务、改配置或发 RESUME。
+
+## 1. 远端只读项（`o0_site_check.sh` 的 S-00 … S-18）
+
+| ID | 核对什么（要求） | 命令要点 | 预期 | 不符时处置 |
+|---|---|---|---|---|
+| S-00 | 舰队基线：各节点状态、心跳年龄、`/ready`（R19、R83） | `docs/agent-operations.md` §0 的 SQL + 8081–8084 `/ready` | 每节点一行，`hb_age` < 5 秒；记下 ACTIVE/HALTED 原样 | 心跳冻结或节点崩溃：**阻断**，先按 `docs/agent-operations.md` 排障，不进入 O-0。HALTED 不是阻断，但部署后必须仍是 HALTED |
+| S-01 | Caddy 版本、单元、EnvironmentFile 变量名（R71、R80） | `caddy version`；`systemctl show/cat caddy`；`v3.env` 只列变量名 | v2.x；`EnvironmentFile=/etc/caddy/v3.env`；变量名含 `WATCHER_BASIC_AUTH_HASH`，此时**不含** `WATCHER_BROWSER_PROXY_TOKEN` | 版本早于 path cleaning（caddyserver/caddy#4407 所在版本）：按 wac-026 🟡-1 第 2 点重核规范化行为，记为阻断直到复核完成。EnvironmentFile 不是 v3.env：更新阶段 C 脚本参数 |
+| S-02 | Caddyfile 的 `import` 与 handler 书写顺序（R06） | `grep` import 行与指令大纲（脱敏） | 能看到 jp-bot 站点块、`/m` 移动端四路径 handle（08-31 记录：`uri strip_prefix /m` → `127.0.0.1:8183`）、面板 `/v1/*` 注入 system_observer 的块、watcher basicauth 块 | 有 `import`：把被 import 的文件也纳入 S-03 的 adapt 结果审阅（adapt 会展开 import）。书写顺序不能代表生效顺序，以 §3 的 L-A1 为准 |
+| S-03 | 磁盘上 Caddyfile 的 adapt 结果（带 env、无 shell 展开、脱敏）（R06–R12） | 内联 python 读 `v3.env` 后 `caddy adapt` | 输出夹在 `-----BEGIN O0 ADAPTED FILE JSON-----` 与 END 行之间；无 `<literal len=` 出现在 `X-Watcher-*` 头上 | adapt 失败：阻断（说明 validate 也会失败，任何 Caddy 变更都不能做）。出现字面 `Authorization` 值：记录（面板注入若用 `{$VAR}` 解析期替换，明文已在 admin API 可读，属 R44 同类问题，报用户） |
+| S-04 | 运行中配置（admin API `/config/`，脱敏）（R06） | `curl 127.0.0.1:2019/config/` | 与 S-03 逐字相同（L-A2） | 不同：说明有人改了文件未重启，或反之。**阻断**，先查清谁改的（不采信转述） |
+| S-05 | watcher 容器：镜像、标签、端口映射、重启次数、健康、env 变量名、DB 路径值、挂载（R03、R13） | `docker inspect`（env 只取名字，路径类变量取值） | `PortBindings` = `{"9100/tcp":[{"HostIp":"127.0.0.1","HostPort":"9090"}]}`；三个 DB 路径变量都等于 `/data/watcher-trading.db`；env 名中没有任何控制面 token 名；`config_image` 记下（阶段 W 的 `--compose-image`） | 端口映射不是宿主 127.0.0.1:9090 → 容器 9100：阻断（计划 §9 O-0 要记录的事实不成立，网关上游默认值要改）。三个 DB 变量不一致：阻断（W-0b 的路径解析会直接抛错退出） |
+| S-06 | 监听端口（R08、R11、R13） | `ss -ltnp` | 9090 只在 127.0.0.1；8181/8182/8183 在 127.0.0.1；2019 只在 127.0.0.1；9100 不在宿主上监听 | 9090 或 9100 暴露在非回环地址：**阻断**（公网或 tailnet 可绕过 Caddy 直连 watcher），报用户 |
+| S-07 | watcher 源码树与 compose 的 sha（R84 同类，P-15）；构建上下文里有没有 `config.json`（R60） | 源码逐文件 `sha256sum`；compose sha 与 watcher 服务块（脱敏） | L-A4 比对全部等于 `67b401a`；`config.json absent from build context` | 源码漂移：阻断，先把线上文件取回本地做差异审阅，不覆盖未知代码。`config.json` 存在：阻断（镜像会烤进 Telegram 会话，任何演练容器都有双活风险） |
+| S-08 | watcher 真库（只读打开）：表清单、三表行数、`config_revision` 是否存在、account_configs 列与 CHECK（R26、R57） | python `mode=ro` | 此时应无 `config_revision`/`config_audit`（W-0b 未上线）；三表行数记下 | 已有 `config_revision`：说明有人提前上线过 W-0b 代码，阻断并查审计 |
+| S-09 | 副本与同步工具；`sync_operator_risk_db.py --check` 只读比对（R26、P-17） | stat 副本；看脚本与 timer 是否存在；`--check`（退出 3 = 有差异） | 副本 `root:trader-v3-cp-operator-query 0640`；timer 未安装或未启用（计划 §1.2"无同步单元"）；`--check` 给出差异摘要 | timer 已启用：记录并报 Planner（副本并非"无同步"，A/B 对照口径要改）。脚本不存在：切换回滚要从 bundle 带过去（P-17） |
+| S-10 | 三个控制面单元：状态、MainPID、启动时间、NRestarts、WorkingDirectory、User、EnvironmentFiles、ExecStart（worker 数）（R78、R79、R85） | `systemctl show/cat` | 三个单元同一 `WorkingDirectory`（预期 `/srv/trader-v3/services/control-plane/api`）；记下 `--workers N` | WorkingDirectory 不同于预期：更新阶段 O 的 `--cp-root`。不共用目录：D-04 的"混合版本"风险消失，记录即可 |
+| S-11 | operator-query env：只列变量名，外加三个 DB 别名的路径值与开关值（R25、R26） | 逐个 EnvironmentFile | 有 `RISK_ADMIN_TOKEN`/`VIEWER_TOKEN`/`REVIEWER_TOKEN`/`SYSTEM_OBSERVER_TOKEN` 等名字；`WATCHER_TRADING_DB` 等指向副本；**没有** `WATCHER_CONFIG_SNAPSHOT_ENABLED` 或其值为 0；没有 `WATCHER_*_TOKEN` | 开关已为 1：阻断并查审计（不应存在）。env 文件路径不是 `/srv/trader-v3/secrets/control-plane/operator-query.env`：更新阶段 O 参数 |
+| S-12 | `.venv-cp`：Python ≥ 3.11、`httpx` 可导入（R64、P-13） | `python -c import httpx…; assert >= 3.11` | 打印版本，退出 0 | Python < 3.11：**阻断**阶段 O（网关每个请求会 500）。由执行者改为兼容写法或升级 venv（后者另需授权） |
+| S-13 | 控制面代码 sha：`api/*.py`、`api/generated/*.py`、`security/*.py`（R84、P-14） | `sha256sum` | L-A3 比对全部等于 `67b401a`；`api/generated/` 不存在 | 任何漂移：**阻断**阶段 O，把线上文件取回本地审阅（09-22 热挂载、09-24 发布都可能改过 read_api）；由 Planner 决定是重做基线还是先收编线上改动 |
+| S-14 | staging 与磁盘（R76） | `ls -ld /srv/trader-staging`；`df -h`；备份目录大小 | `/srv/trader-staging` 存在；`/srv` 剩余 ≥ 5 GB（镜像构建 + 两份库副本） | 空间不足：先报用户处理磁盘（历史上备份只存不删），不在 `/tmp` 凑合 |
+| S-15 | `db_manager.py` 的调用者（R27、R56、P-03） | cron、systemd、进程表 | 无 cron/systemd 引用，无进程 | 有调用者：阻断阶段 W（首次迁移拿锁超过 5 秒会让新 watcher 起不来），报用户 |
+| S-16 | hermes-feeder 直读真库的方式（不受 O-0 影响，但要记录） | `systemctl show/cat trader-v3-hermes-feeder`（脱敏） | root 运行，直读卷里的 `watcher-trading.db` | 与预期不同：记录，报 Planner（D1 写入者清单要更新） |
+| S-17 | 最近一小时错误基线（计数） | operator-query 日志、watcher `[db] Failed`、24 小时内退出次数、caddy error 计数 | 记下数值，作为部署后对照 | 基线本身就高：记录，部署后用"变化量"判断 |
+| S-18 | 宿主内无凭据 HTTP 探针 | `127.0.0.1:9090/api/status`、`/healthz`、`127.0.0.1:8183/v1/accounts`、`/v1/watcher/status` | 旧 watcher 无鉴权：9090 两项为 200；8183 `/v1/accounts` 401；`/v1/watcher/status` 404（旧代码无此路由） | 9090 已经 401：说明线上已是 W-0a 之后的代码，与 S-07 对照查清来源，阻断 |
+
+## 2. 公网只读探针（从本机发，不带任何凭据；同属 O0-A01）
+
+| ID | 命令（本机） | 预期 | 不符时处置 |
+|---|---|---|---|
+| L-P1 | `curl -s -o /dev/null -w '%{http_code}\n' https://jp-bot.balen.wang/m/v1/accounts` | 401（移动端不被注入凭据，R09） | 200：面板的 `system_observer` 注入覆盖了移动端路径，**阻断**并报用户（这是现存的越权读） |
+| L-P2 | 同上，加 `-H 'Authorization: Bearer o0-probe-not-a-token-000000000000000000000000'` | 403 | 200：同上 |
+| L-P3 | `…/m/v1/watcher/status` | 非 200，且不是控制面 JSON 200；当前预期 SPA HTML 200 或 404 | 若返回控制面的 404 JSON：说明 `/m` 下有兜底转发（R69），阶段 C 必须同时删除 |
+| L-P4 | `…/m/v1/commands` | SPA（08-31 记录"越界路径返回 SPA HTML，从未触达控制面"） | 返回控制面 JSON：`/m` 有兜底转发，同上 |
+| L-P5 | `…/watcher/`、`…/api/status` | 401（basic auth 质询） | 200：浏览器入口没有 basic auth，**阻断** |
+| L-P6 | `curl -s -o /dev/null -w '%{http_code} %{content_type}\n' https://jp-bot.balen.wang/media/<任一真实文件名>`（文件名从 S-08 之外取不到时用假名） | 401 或 SPA，**绝不能**是 200 + `image/*` | 无认证拿到图片：`/media` 公网绕过（R11），阻断 |
+
+## 3. 本地分析（不连 jp-24）
+
+| ID | 做法 | 预期 | 不符时处置 |
+|---|---|---|---|
+| L-A1 | 从抓取文件取出 S-03 的 JSON：`sed -n '/^-----BEGIN O0 ADAPTED FILE JSON-----$/,/^-----END O0 ADAPTED FILE JSON-----$/p' o0-site-check-<UTC>.txt \| sed '1d;$d' > file.json`；然后 `python3 scripts/ops/o0/o0_caddy_watcher_routes.py inventory --adapted file.json` 与 `verify --adapted file.json --before-deploy` | inventory 列出 jp-bot 站点的路由顺序；before-deploy 模式：移动端样本一次 strip、到 8183、不动 Authorization；浏览器样本到 9090 前都有 basic auth；任何 `/m/v1/watcher/*` 样本都不到达网关 | `UNCOMPARABLE`（遇到模拟器不认识的匹配器，如 `expression`、`header`、`remote_ip`）：人工逐条审阅该路由，不能当作通过。任何 FAIL：记入阻断项 |
+| L-A2 | 同法取出 S-04，`diff file.json running.json` | 无差异 | 见 S-04 |
+| L-A3 | 把 S-13 的 `sha256sum` 段存为 `cp.sums`，`python3 scripts/ops/o0/o0_tool.py sums-compare --manifest <bundle>/controlplane-context.baseline.sha256 --sums cp.sums --prefix <S-10 的 WorkingDirectory 的上一级>` | `SUMS_OK` | `SUMS_DRIFT`：见 S-13。`SUMS_UNCOMPARABLE`（0 行或前缀不对）：不算通过，修正前缀重跑 |
+| L-A4 | S-07 的 watcher 段与 compose 行分别对 `watcher.baseline.sha256`、`compose.baseline.sha256` 做 `sums-compare`（前缀 `/srv/trader/services/telegram-watcher`、`/srv/trader`） | `SUMS_OK` | 见 S-07 |
+| L-A5 | 汇总成一页现场事实：Caddy 版本、`/m` 块形态与 strip 次数、上游端口、面板注入块的匹配器、浏览器块、watcher 端口映射、三处 sha 结论、Python 版本、worker 数、副本差异摘要、阻断项清单 | — | 交 Planner 转用户；阻断项清零之前不申请 O0-A02 之后的授权 |
+
+## 4. 与计划 §9 O-0 Caddy 清单的逐项对应
+
+| 计划 §9 O-0 原文 | 现场核对 | 部署后复核 |
+|---|---|---|
+| 确认 import 与 handler 顺序 | S-02、S-03、L-A1（按 adapt 结果模拟生效顺序） | 阶段 C preflight 对候选 adapt、verify 对运行中配置各做一次 |
+| `/m` 只 strip 一次 | L-A1 移动端样本 | verify：每条 `/m/v1/watcher/*` 样本恰好一次 |
+| 上游仍是 8183 | L-A1、S-06 | verify：dial 恰为 `127.0.0.1:8183` |
+| 移动端 `Authorization` 保留且不被面板注入的 `system_observer` 覆盖 | L-A1、L-P1、L-P2 | 阶段 C 探针 r1/r2；阶段 O 公网探针 |
+| 浏览器 basicauth 后先清头再注入 | L-A1（部署前只查 basic auth） | verify 浏览器样本；阶段 W 用注入凭据 200 |
+| `/media` 与其他公网入口没有绕过 | S-06、L-A1、L-P6 | verify 覆盖检查；阶段 C 探针 r6 |
+| 按路由真源逐路径追加 | —（部署前不存在） | `render` 片段 + verify |
+| 记录 watcher 端口映射为宿主 9090 对容器 9100 | S-05、S-06 | 阶段 W verify |
