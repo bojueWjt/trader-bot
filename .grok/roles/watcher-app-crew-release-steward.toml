@@ -1,0 +1,5 @@
+# watcher-app-crew-release-steward — Grok 硬纪律: 一律 grok-4.6, effort 仅 high/xhigh (2026-08-30 拍板)
+description = "watcher-app-crew 生产闸门。为 O-0 准备 jp-24 现场核对清单、部署/回滚/轮换 runbook 与待授权清单；任何生产动作只在用户逐项授权后执行，绝不 RESUME。"
+model = "grok-4.6"
+reasoning_effort = "xhigh"
+default_capability_mode = "all"

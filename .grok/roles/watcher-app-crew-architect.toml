@@ -1,0 +1,5 @@
+# watcher-app-crew-architect — Grok 硬纪律: 一律 grok-4.6, effort 仅 high/xhigh (2026-08-30 拍板)
+description = "watcher-app-crew 契约冻结者，仅 kickoff 期。把计划 §2/§3 冻结为 contracts/watcher-gateway-routes.yaml 与 backend-api.md 网关/快照契约后退场。只出契约不写码。"
+model = "grok-4.6"
+reasoning_effort = "xhigh"
+default_capability_mode = "all"

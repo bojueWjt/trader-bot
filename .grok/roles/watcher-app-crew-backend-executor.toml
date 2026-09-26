@@ -1,0 +1,5 @@
+# watcher-app-crew-backend-executor — Grok 硬纪律: 一律 grok-4.6, effort 仅 high/xhigh (2026-08-30 拍板)
+description = "watcher-app-crew 后端执行者。在 trader-bot 隔离 worktree 实现 watcher 鉴权/快照/审计（W-0）、控制面快照缓存（C-0）、async 网关（C-1）与对照工具。可多实例并发。"
+model = "grok-4.6"
+reasoning_effort = "high"
+default_capability_mode = "all"
