@@ -162,7 +162,20 @@
 | `bash scripts/ops/o0/tests/fleet_guard_test.sh`（审查的 fleet-a…d 复现文件） | `FLEET_GUARD_TEST_OK cases=7`：空对空 → 退出 2；`hb_age 1.0 → 412.7` → 退出 3；第 3 次采样才出现的 HALT → 退出 3 |
 | `bash scripts/ops/o0/tests/auth_gate_test.sh` | `AUTH_GATE_TEST_OK checks=17`：绑定矩阵 475 组合 0 误判；runbook 示例 33 条全部通过绑定表；沙箱内 apply 无门禁、候选镜像缺失、凭据变了、候选变了都在写入前被拒，无状态变更类 docker 调用 |
 | 五个脚本 plan 模式 | 退出 0，不执行任何动作 |
-| 打包门禁 `o0_package.sh --report-only --run-tests`（未带 --execute） | 见 §6.1 |
+| 打包门禁 `o0_package.sh --report-only --run-tests`（未带 --execute） | 见 §6.1：G4、G7、G9-pytest 失败，`deploy_candidate: false` |
+
+### 6.1 打包门禁（本机，`--report-only --run-tests`，未带 --execute）
+
+命令：`bash scripts/ops/o0/o0_package.sh --candidate 2c86aef --out <scratchpad>/pkg-wac045 --report-only --run-tests`（候选必须是带 `scripts/ops/o0` 的提交，G11；`2c86aef` = 本任务提交，其中集成分支部分为 `f7641cb`）。
+
+| 门禁 | 结果 |
+|---|---|
+| G1、G2（`ROUTES_DIFF_EMPTY rows=63 … phase_max=P2`）、G3、G5（`COMPOSE_OK env_file=True`）、G6、G8（5 个文件）、G10（17 个候选工具与 runbook 文件）、G11（14 个工具文件取自候选）、G12（`RUNTIME_MANIFEST_OK files=33`） | PASS |
+| G9 watcher | PASS：`tests 107 / pass 107 / fail 0 / skipped 0` |
+| G4 | **FAIL**：`CLOSURE_NOT_WHITELISTED lib/config-store.js`（P-05 余项） |
+| G9 pytest | **FAIL**：`1 failed, 25 passed`；失败的是 wac-040 自己的 `test_watcher_runtime_require_closure_is_packaged`，原因同 G4 |
+| G7 | **FAIL**：wac-015 未合入（P-02） |
+| 结论 | `deploy_candidate: false`，`failed_gates=3`；不能申请 O0-A02 之后的授权 |
 
 ## 7. 审查 wac-032 的逐条处置
 

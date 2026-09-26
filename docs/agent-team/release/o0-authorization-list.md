@@ -4,7 +4,7 @@
 > **授权号与脚本阶段绑定**（审查 wac-032 🔴-2）：每个脚本阶段只接受下表"脚本阶段"列里写明的那一个授权号，别的号（包括格式正确的号）一律拒绝；绑定表在 `scripts/ops/o0/o0_common.sh` 的 `o0_expected_auth`，`tests/auth_gate_test.sh` 逐条核对表中组合与三份 runbook 里的每一条示例命令。执行记录写入 `evidence/authorizations.log`：时间、脚本、阶段、授权号、候选提交、是否带 `--i-understand-data-loss`。
 > 所有项都**不包含 RESUME**。部署前后节点保持原授权状态：HALTED 保持 HALTED。某一步之后舰队有任何变化（状态、release、`/ready`、心跳冻结），脚本以退出码 3 停下并报告；是否恢复交易只由用户决定（O0-A06）。
 > 编号 O0-A09、O0-A19 保留未用（验证并入 A08，清理并入 A18）。
-> 目前**不能**开始申请生产授权：打包门禁 G4（`lib/config-store.js` 不在镜像白名单）、G7（wac-015 未合入）未通过，见 `o0-requirements.md` §1 与 §6。本清单先给出完整顺序，让用户提前看到每一步的影响。
+> 目前**不能**开始申请生产授权：打包门禁 G4 与 G9-pytest（`lib/config-store.js` 不在镜像白名单）、G7（wac-015 未合入）未通过，见 `o0-requirements.md` §1 与 §6。本清单先给出完整顺序，让用户提前看到每一步的影响。
 
 ## 一、决策状态
 
