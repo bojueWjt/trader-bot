@@ -1,6 +1,6 @@
 # watcher-app-crew 任务看板
 
-> 四个平台共用的唯一任务表。Codex 派发自 2026-09-26 起走独立 app-server（dispatch.sh 版本门 ≥ 0.158.0-alpha.2、CODEX_BIN、禁用旧 broker），sol 探测正常；此前 sol 400 系复用旧 broker 所致。状态：pending / in_progress / review / testing / done / blocked。设计真相：`docs/plans/2026-09-11-watcher-to-app-migration.md`；协议：`docs/agent-team/watcher-app-crew-workflow-protocol.md`。
+> 四个平台共用的唯一任务表。凡触及 watcher 或其 skills 的任务，验证须包含 `pytest tests/bridge tests/ingress` 并与基线对比（wac-071 教训）。Codex 派发自 2026-09-26 起走独立 app-server（dispatch.sh 版本门 ≥ 0.158.0-alpha.2、CODEX_BIN、禁用旧 broker），sol 探测正常；此前 sol 400 系复用旧 broker 所致。状态：pending / in_progress / review / testing / done / blocked。设计真相：`docs/plans/2026-09-11-watcher-to-app-migration.md`；协议：`docs/agent-team/watcher-app-crew-workflow-protocol.md`。
 > 集成分支：trader-bot `integ/watcher-app-crew`（基线 `67b401a`，worktree `.worktrees/wac-integ`）；alert-personal `integ/watcher-app-crew`（基线 `0f7d26d`，worktree `.worktrees/wac-integ`）。
 
 ## 里程碑
@@ -94,7 +94,9 @@
 | wac-067 | [Reviewer] O-0 第 3 轮复审 | trader-bot | — | 全队铁律、红线 1、2 | run_all.sh、门禁 report-only | wac-059 | watcher-app-crew-reviewer（Opus 子代理） | done | PASS，0 🔴 4 🟡；run_all 全过、门禁仅 G7；🟡-1 路径令牌碎片挡 O0-A01；报告 reviews/wac-032-r3.md |
 | wac-068 | [Reviewer] wac-065 R18 | alert-personal | — | 协议红线 7 | test:android | wac-065 | watcher-app-crew-reviewer（Opus 子代理） | done | PASS，0 🔴；37/370；变异 67 抓 60；R21 空轮询清空；报告 reviews/wac-065.md |
 | wac-069 | [Executor] WGW-1.0.2 文字修正 F-13：编码形式探针、Caddy 顶层 rewrite 约束与遮蔽检查白名单、`..` 经 strip_prefix 规范化后 200 | trader-bot | `.worktrees/wac-049` 的 contracts/ | reviews/wac-058.md 🟡1–3 | 自检 | wac-064 | watcher-app-crew-architect（Opus 子代理） | done | f747bce（auto/wac-049）；F-13；YAML 未变；随 wac-015b 合并时一并复审 |
-| wac-070 | [Executor] W-0 集成补齐修复：🔴 可重入写 409 details；R19 断开/重连二次确认；R20 db_manager 只停配置三表写命令；7 个缺失测试；browser 账号 ID 规则读 field_overrides；启动失败日志带过滤后的错误信息 | trader-bot | `.worktrees/wac-015` | reviews/wac-015.md；R19、R20 | watcher test、deployment -k watcher、db_manager 测试 | wac-048 | watcher-app-crew-backend-executor（Codex gpt-6-sol high） | in_progress | |
-| wac-071 | [Reviewer] W-0 集成补齐修复复审 | trader-bot | — | 协议红线 2、3、6、7 | 同上 | wac-070 | watcher-app-crew-reviewer（Opus 子代理） | pending | |
+| wac-070 | [Executor] W-0 集成补齐修复：🔴 可重入写 409 details；R19 断开/重连二次确认；R20 db_manager 只停配置三表写命令；7 个缺失测试；browser 账号 ID 规则读 field_overrides；启动失败日志带过滤后的错误信息 | trader-bot | `.worktrees/wac-015` | reviews/wac-015.md；R19、R20 | watcher test、deployment -k watcher、db_manager 测试 | wac-048 | watcher-app-crew-backend-executor（Codex gpt-6-sol high） | blocked | 80a787a；复审 FAIL 第 2 轮：tests/bridge 中旧 db_manager 测试 9 个失败（任务书与首轮审查均未覆盖 tests/bridge）；修复见 wac-074（最后一轮） |
+| wac-071 | [Reviewer] W-0 集成补齐修复复审 | trader-bot | — | 协议红线 2、3、6、7 | 同上 | wac-070 | watcher-app-crew-reviewer（Opus 子代理） | done | FAIL 1 🔴 2 🟡；上轮全部修复；HTTP 探针 123/124（剩 wac-066 的 datetime bug）；变异 72 抓 68；报告 reviews/wac-015-r2.md |
 | wac-072 | [Release] O-0 加固：🟡-1 路径令牌碎片（转义符、`.`、`+`、裸 base64）两份实现同步；🟡-3 十六进制规则与 ABSENT 行测试；上轮 🟡-5 restore-db 失败恢复与属主；上轮 🟡-6 S-10 隔离检查进阶段 O preflight | trader-bot | O-0 脚本与测试 | reviews/wac-032-r3.md §7 | run_all.sh、门禁 report-only | wac-067 | watcher-app-crew-release-steward（Opus 子代理） | in_progress | 挡 O0-A01、A07R、A08 |
 | wac-073 | [Reviewer] O-0 加固 | trader-bot | — | 全队铁律、红线 1、2 | 同上 | wac-072 | watcher-app-crew-reviewer（Opus 子代理） | pending | |
+| wac-074 | [Executor] W-0 第 3 轮（最后一轮）：tests/bridge/test_telegram_watcher_db_manager.py 删 7 个已由 JS 覆盖的配置写测试、:765 改断言 CLI 退出 2、:279 凭据加载测试改用直接 SQL 夹具；crypto-trader references 两份文档更正 | trader-bot | 该测试文件与 skills/crypto-trader/references/ | reviews/wac-015-r2.md 🔴-1、🟡-1 | tests/bridge、tests/ingress、watcher test、生成物校验 | wac-071 | watcher-app-crew-backend-executor（Codex gpt-6-sol medium） | in_progress | |
+| wac-075 | [Reviewer] W-0 第 3 轮复审 | trader-bot | — | 协议红线 7 | 同上 | wac-074 | watcher-app-crew-reviewer（Opus 子代理） | pending | |
