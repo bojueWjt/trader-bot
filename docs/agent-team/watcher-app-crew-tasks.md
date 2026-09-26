@@ -8,7 +8,7 @@
 | 里程碑 | 模块 | 状态 |
 |--------|------|------|
 | M0 契约冻结 | 路由真源 YAML、backend-api.md 新节 | done（WGW-1.0 → 1.0.1，4464ff5） |
-| M1 watcher 地基 | W-0（拆为 W-0a 鉴权层 wac-009、W-0b 配置写路径 wac-011） | W-0a done（05e9013）；W-0b 第 3 次 FAIL，等待用户裁决 |
+| M1 watcher 地基 | W-0（拆为 W-0a 鉴权层 wac-009、W-0b 配置写路径 wac-011） | W-0a done（05e9013）；W-0b 用户选方案 A，第 4 轮修复 wac-043 |
 | M2 控制面快照 | C-0 | done（d5e269b + 校准 eaf333d，开关默认关）；打开开关只剩 O-0 数据基线 |
 | M3 平板基础设施 | T-0 | done（代码合入 91f6c8e；真机与键盘避让待 Tester） |
 | M4 网关 | C-1 | done（cb4c5c8）；O-0 门禁须跑 P2 断言测试并核对 phase_max=P2 |
@@ -44,7 +44,7 @@
 | wac-018 | [Executor] W-0b 修复：🔴1 R7 跨行规则仅在相关字段提交时执行；🔴2 站点按资源保存 revision；补漏变异测试（跨进程幂等、快照排序）；恢复被削弱断言；CHECK 违反 400；未知异常记日志；DB 初始化失败非零退出 | trader-bot | 同 wac-011（在 `.worktrees/wac-011` 分支 auto/wac-011 上继续） | reviews/wac-011.md 🔴1/🔴2 与指定 🟡 | watcher test | wac-012 | watcher-app-crew-backend-executor（Codex gpt-6-sol high） | blocked | 7edcf6e；复审 FAIL 第 2 轮（上轮 2 🔴 已修；新 🔴：DB 初始化失败时 server.js 成僵尸进程）；修复见 wac-020 |
 | wac-019 | [Reviewer] W-0b 修复复审 | trader-bot | — | 协议红线 6、7 | watcher test | wac-018 | watcher-app-crew-reviewer（Opus 子代理） | done | FAIL，1 🔴 4 🟡；Gap Analysis：根因为上轮测量误判，建议再修一轮（最后一轮）；报告 reviews/wac-011-r2.md |
 | wac-020 | [Executor] W-0b 第 3 轮修复：DB 初始化失败显式 process.exit(1)，测试改为隔离环境真实启动 server.js；补 🟡1–4 测试 | trader-bot | `lib/trading-api.js`、`__tests__/` | reviews/wac-011-r2.md 🔴-1、🟡1–4 | watcher test | wac-019 | watcher-app-crew-backend-executor（Codex gpt-6-sol high） | blocked | 59e5a59；产品代码已修对；FAIL 第 3 次：启动测试缺 W-0a 的三个假 token，合入集成分支后变红 |
-| wac-021 | [Reviewer] W-0b 第 3 轮复审 | trader-bot | — | 协议红线 6、7 | watcher test | wac-020 | watcher-app-crew-reviewer（Opus 子代理） | done | FAIL 第 3 次，1 🔴（测试环境缺三个假 token，源于任务书遗漏）；退出并重启的取舍可接受；推荐方案 A 第 4 轮小修；**等待用户裁决**；报告 reviews/wac-011-r3.md |
+| wac-021 | [Reviewer] W-0b 第 3 轮复审 | trader-bot | — | 协议红线 6、7 | watcher test | wac-020 | watcher-app-crew-reviewer（Opus 子代理） | done | FAIL 第 3 次，1 🔴（测试环境缺三个假 token，源于任务书遗漏）；退出并重启的取舍可接受；推荐方案 A 第 4 轮小修；用户裁决（2026-09-26）：方案 A；报告 reviews/wac-011-r3.md |
 | wac-022 | [Executor] C-0 校准（开关打开前置）：403 锁为 unauthorized；非 JSON 与超 1 MiB 不锁、上限 4 MiB；R12 channel-route 归开仓依赖；E-14 拒绝原因与旧 reader 等价；补 7 个漏变异测试 | trader-bot | `services/control-plane/api/watcher_config_snapshot.py`、read_api 相关调用点、`tests/control-plane/` | reviews/wac-013.md 🟡1–5；契约 §9.11、§9.16 E-01/E-14；R1、R12 | control-plane pytest | wac-014 | watcher-app-crew-backend-executor（Codex gpt-6-sol high） | done | 94a2911 → 集成 eaf333d |
 | wac-023 | [Reviewer] C-0 校准 | trader-bot | — | 协议红线 1、6、7 | control-plane pytest | wac-022 | watcher-app-crew-reviewer（Opus 子代理） | done | PASS，0 🔴 3 🟡；合并后全量 855/5；变异 43 抓 41；控制面代码满足开关前置，剩 O-0 数据基线；报告 reviews/wac-022.md |
 | wac-024 | [Executor] C-1 修复：🔴1 中间件只装一次且可重复调用；🔴2 R13 phase_max=P2 重新生成；🔴3 媒体错误响应长度；🔴4 补 5 组安全验收测试；🟡：双 Cache-Control、超长整数 500、G5 停用告警日志、S-10 读 YAML secret_fields、JS 摘要自检测试、路由集合断言改到 operator-query app | trader-bot | 同 wac-016（`.worktrees/wac-016`，先合入最新集成分支） | reviews/wac-016.md 第 10 节 | control-plane pytest、生成器校验、watcher test | wac-017 | watcher-app-crew-backend-executor（Codex gpt-6-sol high） | done | 5e54023 → 集成 cb4c5c8 |
@@ -63,6 +63,8 @@
 | wac-037 | [Executor] A-1 修复：R15 媒体内存规则、R16 状态条四态、🟡1 轮询不截断已翻页、🟡2 瞬时失败不替换列表、🟡4 返回键与轮询按焦点、🟡5 瞬时媒体失败可重试、🟡6 八个测试缺口、断开重连 5 秒下限测试 | alert-personal | 同 wac-034（`.worktrees/wac-034`） | reviews/wac-034.md；R15、R16 | typecheck/lint/test:android | wac-035 | watcher-app-crew-app-executor（Codex gpt-6-sol medium） | in_progress | |
 | wac-038 | [Reviewer] A-1 修复复审 | alert-personal | — | 协议红线 7、8 | 同上 | wac-037 | watcher-app-crew-reviewer（Opus 子代理） | pending | |
 | wac-039 | [Reviewer] O-0 发行准备草案与脚本 | trader-bot | — | 协议全队铁律、红线 1、2 | bash -n、selftest | wac-032 | watcher-app-crew-reviewer（Opus 子代理） | in_progress | |
-| wac-040 | [Executor] watcher 打包：镜像白名单补齐当前运行时依赖、依赖闭包测试、compose 用 env_file 传六个 WATCHER_* 凭据（不含值） | trader-bot | `scripts/build_immutable_watcher_image.py`、`tests/deployment/`、`bridge/docker-compose.yml` watcher 段 | wac-032 门禁 G4、G5；契约 E-09 | pytest tests/deployment、watcher test | wac-032 | watcher-app-crew-backend-executor（Codex gpt-6-sol medium） | in_progress | |
-| wac-041 | [Executor] C-0 预热与锁存日志：每个进程预热成功/失败与状态锁存各打一行（含 revision、pid，不含秘密） | trader-bot | `services/control-plane/api/watcher_config_snapshot.py`、`tests/control-plane/` | wac-032 D-05；计划 §4.1 第 3 步 | control-plane pytest | wac-032 | watcher-app-crew-backend-executor（Codex gpt-6-sol medium） | in_progress | |
-| wac-042 | [Reviewer] wac-040 与 wac-041 | trader-bot | — | 协议红线 2、7 | 同上 | wac-040、wac-041 | watcher-app-crew-reviewer（Opus 子代理） | pending | |
+| wac-040 | [Executor] watcher 打包：镜像白名单补齐当前运行时依赖、依赖闭包测试、compose 用 env_file 传六个 WATCHER_* 凭据（不含值） | trader-bot | `scripts/build_immutable_watcher_image.py`、`tests/deployment/`、`bridge/docker-compose.yml` watcher 段 | wac-032 门禁 G4、G5；契约 E-09 | pytest tests/deployment、watcher test | wac-032 | watcher-app-crew-backend-executor（Codex gpt-6-sol medium） | review | c9bfbf1；相关测试 10 passed；deployment 全量在沙箱 174 fail 未归因，交 Reviewer 本机对比基线 |
+| wac-041 | [Executor] C-0 预热与锁存日志：每个进程预热成功/失败与状态锁存各打一行（含 revision、pid，不含秘密） | trader-bot | `services/control-plane/api/watcher_config_snapshot.py`、`tests/control-plane/` | wac-032 D-05；计划 §4.1 第 3 步 | control-plane pytest | wac-032 | watcher-app-crew-backend-executor（Codex gpt-6-sol medium） | review | c9b1e3f；61 passed + 1 PG 夹具 error（沙箱） |
+| wac-042 | [Reviewer] wac-040 与 wac-041 | trader-bot | — | 协议红线 2、7 | 同上 | wac-040、wac-041 | watcher-app-crew-reviewer（Opus 子代理） | in_progress | 2026-09-26 派发 |
+| wac-043 | [Executor] W-0b 第 4 轮小修（用户授权方案 A）：先合入集成分支，启动测试补三个测试专用随机假 token 并断言日志不含它们 | trader-bot | `.worktrees/wac-011` 的 `__tests__/startup-failure.test.js` | reviews/wac-011-r3.md 🔴-1 与方案 A | watcher test | 用户裁决 | watcher-app-crew-backend-executor（Codex gpt-6-sol medium） | in_progress | |
+| wac-044 | [Reviewer] W-0b 第 4 轮复审 | trader-bot | — | 协议红线 6、7 | watcher test | wac-043 | watcher-app-crew-reviewer（Opus 子代理） | pending | |
