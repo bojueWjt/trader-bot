@@ -16,6 +16,7 @@ test("real server exits before listening when trading database initialization fa
   }
   const [gatewayToken, snapshotToken, browserProxyToken] = tokens;
   try {
+    assert.equal(fs.existsSync(path.join(path.dirname(serverPath), "config.json")), false, "startup test must not read local Telegram config");
     const result = spawnSync(process.execPath, [serverPath], {
       cwd: directory,
       env: {
@@ -33,7 +34,8 @@ test("real server exits before listening when trading database initialization fa
     assert.equal(result.error, undefined);
     assert.equal(result.status, 1, result.stderr || result.stdout);
     assert.equal(result.signal, null);
-    assert.match(result.stdout, /Failed to ensure trading tables/);
+    assert.match(result.stdout + result.stderr, /Failed to ensure trading tables/);
+    assert.match(result.stdout + result.stderr, /Exiting with code 1: database_initialization_failed/);
     assert.doesNotMatch(result.stdout + result.stderr, /Web UI listening/);
     for (const token of tokens) {
       assert.equal((result.stdout + result.stderr).includes(token), false);

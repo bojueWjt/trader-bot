@@ -4,12 +4,7 @@ const { maskSecret } = require("./safe-log");
 const SCHEMA_VERSION = "watcher-config-snapshot.v1";
 const CLIENT_REF = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 const EXECUTION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const SECRET_KEY = /(?:api[_-]?(?:key|secret|id|hash)|session|password|phone|code|token)/i;
-const SECRET_FIELDS = new Set([
-  "api_key", "api_secret", "apiKey", "apiSecret", "api_id", "api_hash",
-  "apiId", "apiHash", "session", "sessionString", "password", "phoneNumber",
-  "phone", "code", "token",
-]);
+const { collectSecretFields, requireWatcherContext } = require("./request-validation");
 const ACCOUNT_FIELDS = new Set([
   "account_id", "api_key", "api_secret", "account_type", "parent_account_id",
   "execution_account_id", "is_testnet", "default_risk_ratio",
@@ -124,19 +119,6 @@ function sendError(res, error, defaultCode) {
     response.error = response.message;
   }
   return res.status(500).json(response);
-}
-
-function collectSecretFields(value, found = []) {
-  if (!value || typeof value !== "object") {
-    return found;
-  }
-  for (const [key, child] of Object.entries(value)) {
-    if (SECRET_FIELDS.has(key) || SECRET_KEY.test(key)) {
-      found.push(key);
-    }
-    collectSecretFields(child, found);
-  }
-  return found;
 }
 
 function validateFields(body, allowed, identity) {
@@ -425,13 +407,17 @@ function writeBusiness(db, resource, action, key, body, identity) {
 
 function transactWrite(db, req, resource, action, key) {
   const body = req.body;
-  const identity = req.watcherAuth && req.watcherAuth.identity;
+  const { auth, route } = requireWatcherContext(req);
+  const identity = auth.identity;
+  if (!route.write) {
+    fail(500, "internal_error", "write route context unavailable");
+  }
   if (identity !== "gateway" && identity !== "browser") {
     fail(identity ? 403 : 401, identity ? "identity_forbidden" : "unauthenticated",
       "configuration identity required");
   }
   if (identity === "gateway" && req.watcherAuth.role !== "risk_admin") {
-    fail(403, "insufficient_scope", "risk_admin required");
+    fail(403, "identity_forbidden", "identity forbidden");
   }
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     fail(400, "invalid_body", "JSON object required");
@@ -448,9 +434,8 @@ function transactWrite(db, req, resource, action, key) {
   if (action === "delete" && Object.keys(body).some((name) => !META_FIELDS.has(name))) {
     fail(400, "invalid_body", "unexpected delete field");
   }
-  const operation = resource + "." + action;
-  const auth = req.watcherAuth;
-  const actor = identity === "gateway" ? auth.actor : "browser";
+  const operation = route.write.operation;
+  const actor = auth.actor;
   if (!actor || typeof actor !== "string") {
     fail(400, "invalid_body", "actor required");
   }
@@ -504,6 +489,7 @@ function transactWrite(db, req, resource, action, key) {
 function withDb(dbFactory, res, work, defaultCode = "internal_error") {
   let db;
   try {
+    requireWatcherContext(res.req);
     db = dbFactory();
     db.pragma("busy_timeout = 5000");
     work(db);
@@ -674,7 +660,12 @@ function makeSnapshot(db) {
 
 function registerConfigRoutes(app, dbFactory) {
   app.get("/api/trading/config-snapshot", (req, res) => {
-    const identity = req.watcherAuth && req.watcherAuth.identity;
+    try {
+      requireWatcherContext(req);
+    } catch (error) {
+      return sendError(res, error, "internal_error");
+    }
+    const identity = req.watcherAuth.identity;
     if (identity !== "snapshot") {
       return res.status(identity ? 403 : 401).json({
         code: identity ? "identity_forbidden" : "unauthenticated",
@@ -727,5 +718,7 @@ function registerConfigRoutes(app, dbFactory) {
 module.exports = {
   ensureConfigTables,
   registerConfigRoutes,
+  sendError,
+  digest,
   __test: { makeSnapshot, digest, transactWrite },
 };

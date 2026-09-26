@@ -18,6 +18,11 @@ async function settle() {
 }
 
 async function boot(options = {}) {
+  const Database = require('better-sqlite3');
+  const db = new Database(':memory:');
+  require('../lib/config-store').ensureConfigTables(db);
+  test.after(() => Database.prototype.close.call(db));
+  db.close = () => {};
   let now = START;
   let timerId = 0;
   const timers = new Map();
@@ -108,7 +113,9 @@ async function boot(options = {}) {
       }
       return "[]";
     },
-    writeFileSync() {},
+    writeFileSync(filename, data) {
+      if (filename.endsWith('config.json')) Object.assign(cfg, JSON.parse(data));
+    },
   };
   class ClockDate extends Date {
     static now() {
@@ -117,6 +124,7 @@ async function boot(options = {}) {
   }
   const context = vm.createContext({
     __dirname: path.dirname(serverPath),
+    module: { exports: {} },
     Date: ClockDate,
     AbortSignal,
     process: { env: {
@@ -171,11 +179,12 @@ async function boot(options = {}) {
         return { start() {}, stop() {} };
       }
       if (name === "./lib/trading-api") {
-        return { ensureTelegramMessagesTable() {}, registerTradingApi() {}, saveTelegramMessage(entry) { saved.push(entry); } };
+        return { getTradingDb() { return db; }, ensureTelegramMessagesTable() {}, registerTradingApi() { if (options.dbFailure) throw new Error("fake-secret-must-not-leak"); }, saveTelegramMessage(entry) { saved.push(entry); } };
       }
       return serverRequire(name);
     },
   });
+  context.require.main = context.module;
   vm.runInContext(source, context, { filename: serverPath });
   await settle();
   return {
@@ -199,11 +208,18 @@ async function boot(options = {}) {
       await Promise.all(handlers.map((handler) => handler(update)));
       await settle();
     },
-    async request(route) {
+    audits() { return db.prepare("SELECT * FROM config_audit ORDER BY id").all(); },
+    async request(route, body = {}) {
       const handler = routes.get(route);
       assert.equal(typeof handler, "function", `${route} must be registered`);
       const response = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; } };
-      await handler({ body: {} }, response);
+      const [method, pathname] = route.split(' ');
+      const { PAYLOAD } = require('../lib/generated/gateway-routes');
+      const req = { method, path: pathname, body: { client_ref: 'resilience-' + timerId, ...body } };
+      Object.defineProperty(req, 'watcherAuth', { value: Object.freeze({ identity:'browser',role:null,actor:'browser',tokenFingerprint:null }) });
+      Object.defineProperty(req, 'watcherRoute', { value: PAYLOAD.routes.find(row => row.identity === 'browser' && row.method === method && row.inner_path === pathname) });
+      response.req = req;
+      await handler(req, response);
       await settle();
       return response;
     },
@@ -446,4 +462,41 @@ test("repeated API reconnects retire the old client and retain one poll timer", 
   assert.equal(watcher.state.destroyCalls, 1);
   const pollingTimers = [...watcher.timers.values()].filter((timer) => timer.repeat && timer.delay === 15000);
   assert.equal(pollingTimers.length, 1);
+});
+
+test('D-07 initialization failure sends a safe alert before exit', async () => {
+  const watcher = await boot({ dbFailure: true, env: { WATCHER_ALERT_BOT_TOKEN:'fake-alert-token',WATCHER_ALERT_CHAT_ID:'fake-chat' } });
+  assert.deepEqual(watcher.exits, [1]);
+  assert.equal(watcher.alerts.length, 1);
+  assert.match(watcher.alerts[0].text, /database_initialization_failed/);
+  assert.ok(!watcher.alerts[0].text.includes('fake-secret'));
+  assert.ok(!watcher.logs.join(' ').includes('fake-secret'));
+  assert.equal(watcher.state.connectCalls, 0);
+});
+test('D-07 alert rejection and stalled delivery cannot prevent exit', async () => {
+  for (const fetch of [async () => { throw new Error('fake-secret'); }, () => new Promise(() => {})]) {
+    const watcher = await boot({ dbFailure:true, fetch, env:{WATCHER_ALERT_BOT_TOKEN:'fake-alert-token',WATCHER_ALERT_CHAT_ID:'fake-chat'} });
+    await watcher.advance(5000);
+    assert.deepEqual(watcher.exits,[1]);
+    assert.ok(!watcher.logs.join(' ').includes('fake-secret'));
+  }
+});
+
+test('server wires groups, disconnect and reconnect through audited reentrant writes', async () => {
+  const watcher = await boot();
+  for (const [path, fields, operation] of [
+    ['/api/groups',{groups:['-100']},'groups.save'],
+    ['/api/disconnect',{},'telegram.disconnect'],
+    ['/api/reconnect',{},'telegram.reconnect'],
+  ]) {
+    const body = {...fields,client_ref:'server-wiring-001'};
+    const first = await watcher.request('POST '+path,body);
+    assert.equal(first.statusCode,200);
+    assert.equal(first.body.replay,false);
+    assert.equal(first.body.revision,0);
+    const replay = await watcher.request('POST '+path,body);
+    assert.equal(replay.body.replay,true);
+    assert.equal(watcher.audits().filter(row=>row.operation===operation).length,1);
+  }
+  assert.deepEqual(watcher.cfg.watchGroups,['-100']);
 });
