@@ -152,6 +152,15 @@ o0_host_roots() {
   fi
 }
 
+# O0_SANDBOX only: host paths that have no command-line flag (e.g. /etc/caddy/Caddyfile)
+# move under the sandbox root. No effect without O0_SANDBOX; refused on jp-24.
+o0_sandbox_paths() {
+  [ -n "${O0_SANDBOX:-}" ] || return 0
+  [ ! -e /srv/trader-v3 ] || o0_die "O0_SANDBOX is refused on a host that has /srv/trader-v3"
+  local v
+  for v in "$@"; do printf -v "$v" '%s' "$O0_SANDBOX${!v}"; done
+}
+
 o0_require_stage_dir() {
   local dir="$1"
   o0_host_roots
@@ -250,6 +259,57 @@ o0_fleet_settle_compare() {
      done
      echo FLEET_UNCHANGED_ALL_SAMPLES samples=$O0_FLEET_SAMPLES window_s=\$(( $O0_FLEET_SETTLE_S + ($O0_FLEET_SAMPLES - 1) * $O0_FLEET_INTERVAL_S ))"
   o0_sh "fleet after $label: wait ${O0_FLEET_SETTLE_S}s, then $O0_FLEET_SAMPLES samples every ${O0_FLEET_INTERVAL_S}s vs $before (any change = exit 3: stop, report, never RESUME)" "$text"
+}
+
+# ---------------------------------------------------------------- automatic rollback
+# Review wac-032-r2 🟡-1. An apply first changes FILES, then replaces the RUNNING service
+# (Caddy restart, watcher recreate, operator-query restart). If it fails before the
+# replacement, the running service never changed: restoring the files is enough, and a
+# restart would only add risk (D-02: a Caddy restart has HALTed the whole fleet before).
+# O0_RUNTIME_REPLACED is set immediately BEFORE the replacing step (a failed restart may
+# already have changed the service, so "attempted" is what counts).
+O0_RUNTIME_REPLACED=0
+
+o0_mark_runtime_replaced() {
+  O0_RUNTIME_REPLACED=1
+  o0_note "RUNTIME_REPLACEMENT_BEGINS: from here on the automatic rollback also restarts/recreates"
+}
+
+# o0_arm_auto_rollback <what> <files-fn> <runtime-fn> <fleet-baseline-label>
+o0_arm_auto_rollback() {
+  if [ "$O0_MODE" = "execute" ]; then
+    # shellcheck disable=SC2064
+    trap "o0_auto_rollback $(o0_quote "$1" "$2" "$3" "$4")" ERR
+  else
+    o0_note "AUTO_ROLLBACK_ARMED ($1): on any failure below restore files ($2); run $3 only after RUNTIME_REPLACEMENT_BEGINS; then fleet guard vs $4 (report only)"
+  fi
+}
+
+# ERR-trap body. Files are always restored (fail-fast: if that fails nothing is restarted);
+# the runtime is restarted/recreated only when O0_RUNTIME_REPLACED=1. Afterwards the fleet
+# is sampled against the apply baseline and the verdict is recorded in evidence (report
+# only: never RESUME, never a second rollback). Always exits 1.
+o0_auto_rollback() {
+  local what="$1" files_fn="$2" runtime_fn="$3" before="$4" rc=0 frc=0 restarted=no
+  trap - ERR
+  set +e
+  o0_log "apply failed: automatic rollback of $what (runtime_replaced=$O0_RUNTIME_REPLACED)"
+  ( set -e; "$files_fn" )
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ "$O0_RUNTIME_REPLACED" = 1 ]; then
+    restarted=yes
+    ( set -e; "$runtime_fn" )
+    rc=$?
+  elif [ "$rc" -eq 0 ]; then
+    o0_log "running $what was never replaced: files restored, NO restart/recreate"
+  fi
+  [ "$rc" -eq 0 ] || o0_log "ROLLBACK FAILED rc=$rc: escalate to user now"
+  ( set -e; o0_fleet_settle_compare "$before" "after-auto-rollback" )
+  frc=$?
+  printf '%s what=%s runtime_replaced=%s runtime_rolled_back=%s rollback_rc=%s fleet_rc=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$what" "$O0_RUNTIME_REPLACED" "$restarted" "$rc" "$frc" >> "$O0_STAGE_DIR/evidence/auto-rollback.log"
+  o0_log "AUTO_ROLLBACK_DONE what=$what runtime_rolled_back=$restarted rollback_rc=$rc fleet_rc=$frc (0 unchanged, 2 uncomparable, 3 CHANGED: report to the user; never RESUME)"
+  exit 1
 }
 
 # ---------------------------------------------------------------- gates

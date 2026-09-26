@@ -14,6 +14,7 @@ python3 "$O0/o0_watcher_config_baseline.py" selftest ${O0_WAL_REPRO_DB:+--repro-
 bash "$HERE/site_check_leak_test.sh"
 bash "$HERE/fleet_guard_test.sh" | tail -n 1
 bash "$HERE/auth_gate_test.sh" | tail -n 1
+bash "$HERE/apply_rollback_test.sh" | tail -n 1
 for s in o0_deploy_caddy.sh o0_deploy_watcher.sh o0_deploy_operator_query.sh o0_fleet_guard.sh o0_site_check.sh; do
   bash "$O0/$s" >/dev/null
 done

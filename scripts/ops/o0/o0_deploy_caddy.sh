@@ -8,6 +8,8 @@
 #              live files; re-runs the cheap gates; then backup, install, verify the
 #              INSTALLED file, validate, restart (never reload), fleet guard
 #   verify     read-only; rollback: restore backups, validate, restart
+#   automatic rollback (apply fails): restore files + validate; restart ONLY if apply had
+#              reached the restart; then fleet guard vs the apply baseline, recorded
 # Execute: bash o0_deploy_caddy.sh --execute --auth-id O0-A05 --phase apply --stage-dir ... \
 #            [--candidate <stage>/caddy/Caddyfile.candidate] [--cred-set <stage>/creds/set-initial]
 #
@@ -35,6 +37,7 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+o0_sandbox_paths CADDYFILE CADDY_ENV
 [ "${#CATALOG_ENVS[@]}" -gt 0 ] || CATALOG_ENVS=("/srv/trader-v3/secrets/control-plane/operator-query.env")
 O0_STAGE_DIR="${O0_STAGE_DIR:-/srv/trader-staging/o0-YYYYMMDDTHHMMSSZ}"
 CANDIDATE="${CANDIDATE:-$O0_STAGE_DIR/caddy/Caddyfile.candidate}"
@@ -96,6 +99,10 @@ rollback_files() {
   o0_step "restore v3.env from backup (mode/owner preserved)" cp -p "$BK/v3.env.bak" "$CADDY_ENV"
   o0_sh "restored files equal the recorded pre-deploy sha256" "sha256sum -c '$EV/caddy-live.sha256'"
   o0_step "validate restored config with env" "$O0_PY" "$TOOLS/o0_tool.py" env-exec --env-file "$CADDY_ENV" -- caddy validate --adapter caddyfile --config "$CADDYFILE"
+}
+
+# only after the running Caddy was (or may have been) restarted with the new files
+rollback_runtime() {
   o0_step "restart caddy (restart only; reload is forbidden)" systemctl restart caddy
   o0_step "caddy active" systemctl is-active --quiet caddy
 }
@@ -110,9 +117,7 @@ phase_apply() {
   # ---- changes
   o0_sh "backup Caddyfile and v3.env into a 0700 dir, mode/owner preserved" \
     "umask 077; mkdir -p '$BK'; chmod 700 '$BK'; cp -p '$CADDYFILE' '$BK/Caddyfile.bak'; cp -p '$CADDY_ENV' '$BK/v3.env.bak'; sha256sum '$BK'/*.bak | tee '$EV/caddy-backup.sha256'"
-  if [ "$O0_MODE" = "execute" ]; then
-    trap 'o0_log "apply failed: automatic rollback of Caddy files"; rollback_files || o0_log "ROLLBACK FAILED: escalate to user now"; exit 1' ERR
-  fi
+  o0_arm_auto_rollback caddy rollback_files rollback_runtime before-caddy
   o0_step "add WATCHER_BROWSER_PROXY_TOKEN to v3.env (value never printed)" \
     "$O0_PY" "$TOOLS/o0_watcher_credentials.py" apply --fragment "$CRED_SET/caddy.env" --target "$CADDY_ENV" --execute --backup-dir "$BK/env-apply"
   o0_step "v3.env now holds the watcher CURRENT browser value (digest compare, names only)" \
@@ -125,6 +130,7 @@ phase_apply() {
   o0_sh "adapt the INSTALLED file with the INSTALLED env and verify routes again BEFORE the restart" \
     "umask 077; $(o0_quote "$O0_PY" "$TOOLS/o0_tool.py") env-exec --env-file '$CADDY_ENV' -- caddy adapt --adapter caddyfile --config '$CADDYFILE' > '$O0_STAGE_DIR/caddy/installed.adapted.json'
      $(o0_quote "$O0_PY" "$TOOLS/o0_caddy_watcher_routes.py") verify --adapted '$O0_STAGE_DIR/caddy/installed.adapted.json' --paths '$BUNDLE/caddy/caddy-watcher-gateway-paths.txt' --host '$HOST'"
+  o0_mark_runtime_replaced
   o0_step "restart caddy (restart only; reload is forbidden)" systemctl restart caddy
   o0_step "caddy active" systemctl is-active --quiet caddy
   trap - ERR
@@ -144,6 +150,7 @@ phase_rollback() {
   o0_note "rollback = restore the two backed-up files, validate, restart; fleet sampled; no RESUME"
   o0_fleet_record before-caddy-rollback
   rollback_files
+  rollback_runtime
   probe_public after-rollback
   o0_fleet_settle_compare before-caddy-rollback after-caddy-rollback
 }

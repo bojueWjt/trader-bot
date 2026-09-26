@@ -13,7 +13,9 @@
 #   apply            O0-A07  refuses unless both gates match this bundle and the candidate
 #                            image exists with the gated ID; then backups, install, recreate
 #                            with the tested image (--no-build), inline checks incl. Telegram
-#                            reconnect, automatic rollback on failure, fleet guard
+#                            reconnect, automatic rollback on failure, fleet guard; the automatic
+#                            rollback restores files and the image tag, and recreates the
+#                            container ONLY if apply had reached the recreate; then fleet guard
 #   verify           O0-A07  read-only post checks
 #   rollback         O0-A07  previous image + source + compose + env_file state
 #   restore-db       O0-A07R + --i-understand-data-loss (destructive for data written after apply)
@@ -43,6 +45,7 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+o0_sandbox_paths WATCHER_DB OQ_ENV
 [ "${#CATALOG_ENVS[@]}" -gt 0 ] || CATALOG_ENVS=("$OQ_ENV")
 O0_STAGE_DIR="${O0_STAGE_DIR:-/srv/trader-staging/o0-YYYYMMDDTHHMMSSZ}"
 CRED_SET="${CRED_SET:-$O0_STAGE_DIR/creds/set-initial}"
@@ -148,7 +151,7 @@ for t in (\"accounts\",\"channels\",\"risks\"):
        --file-sha 'dryrun_log=$EV/watcher-dryrun.log'"
 }
 
-rollback_runtime() {
+rollback_files() {
   o0_sh "restore watcher source files (overwritten ones from tar, new ones removed)" \
     "tar -C '$SRC' -xpf '$BK/source-overwritten.tar'
      while read -r rel; do if [ -n \"\$rel\" ]; then rm -f -- '$SRC'/\"\$rel\"; fi; done < '$BK/source-new-files.txt'"
@@ -159,7 +162,11 @@ rollback_runtime() {
      else echo 'env_file state before apply unknown: left in place (not referenced by the restored compose)'; fi"
   o0_sh "live source and compose equal the baseline again" \
     "$(o0_quote "${TOOL[@]}") manifest-verify --root '$SRC' --manifest '$BUNDLE/watcher.baseline.sha256' && $(o0_quote "${TOOL[@]}") manifest-verify --root '$WATCHER_ROOT' --manifest '$BUNDLE/compose.baseline.sha256'"
-  o0_step "point the compose image name back at the previous image" docker tag "$ROLLBACK_IMAGE" "$COMPOSE_IMAGE"
+  o0_step "point the compose image name back at the previous image (a tag only; the running container is not touched)" docker tag "$ROLLBACK_IMAGE" "$COMPOSE_IMAGE"
+}
+
+# only after the running watcher was (or may have been) recreated from the candidate
+rollback_runtime() {
   o0_step "recreate watcher with the previous image (no build)" "${DC[@]}" up -d --no-deps --force-recreate --no-build "$SERVICE"
   o0_sh "old watcher answers (pre-W-0 code is unauthenticated: /api/status 200)" \
     "i=0; c=000; while [ \$i -lt 60 ]; do c=\$(curl -s -o /dev/null -w '%{http_code}' -m 3 http://127.0.0.1:9090/api/status || true); [ \"\$c\" = 200 ] && break; sleep 2; i=\$((i + 1)); done; echo \"api/status=\$c\"; [ \"\$c\" = 200 ]"
@@ -194,9 +201,7 @@ phase_apply() {
      if [ -e '$ENV_TARGET' ]; then cp -p '$ENV_TARGET' '$BK/watcher-gateway.env.bak'; else : > '$BK/watcher-gateway.env.absent'; fi
      $(o0_quote "${TOOL[@]}") sqlite-backup --source '$WATCHER_DB' --dest '$BK/watcher-trading.pre-o0.db' | tee '$EV/watcher-db-backup.txt'
      sha256sum '$BK/watcher-trading.pre-o0.db' > '$EV/watcher-db-backup.sha256'"
-  if [ "$O0_MODE" = "execute" ]; then
-    trap 'o0_log "apply failed: automatic watcher rollback"; rollback_runtime || o0_log "ROLLBACK FAILED: escalate to user now"; exit 1' ERR
-  fi
+  o0_arm_auto_rollback watcher rollback_files rollback_runtime before-watcher
   o0_step "install the watcher env_file (six WATCHER_* names, values never printed)" \
     "$O0_PY" "$TOOLS/o0_watcher_credentials.py" apply --fragment "$CRED_SET/watcher.env" --target "$ENV_TARGET" --create --execute --backup-dir "$BK/env-apply"
   o0_sh "env_file is root 0600" "chown root:root '$ENV_TARGET'; chmod 600 '$ENV_TARGET'; stat -c '%a %U:%G %n' '$ENV_TARGET'"
@@ -205,7 +210,8 @@ phase_apply() {
     --holder-env "$CRED_SET/operator-query.env" --holder-env "$CRED_SET/caddy.env" "${CATALOG_ARGS[@]}" --require-catalog
   o0_sh "install candidate watcher files into the live source tree; remove whitelisted files the candidate no longer ships" \
     "cd '$BUNDLE/watcher' && find . -type f | sed 's|^\\./||' | while read -r rel; do install -D -m 0644 \"\$rel\" '$SRC'/\"\$rel\"; done
-     grep '^ABSENT  ' '$BUNDLE/watcher.candidate.sha256' | sed -E 's/^ABSENT  //' | while read -r rel; do rm -f -- '$SRC'/\"\$rel\"; done"
+     # awk, not grep: 0 ABSENT lines is the normal case and must not fail the step under pipefail
+     awk '/^ABSENT  /{ sub(/^ABSENT  /, \"\"); print }' '$BUNDLE/watcher.candidate.sha256' | while read -r rel; do rm -f -- '$SRC'/\"\$rel\"; done"
   o0_step "live source now equals the candidate manifest" \
     "${TOOL[@]}" manifest-verify --root "$SRC" --manifest "$BUNDLE/watcher.candidate.sha256" --label watcher-live-vs-candidate
   o0_step "install candidate compose (env_file wiring, wac-040)" install -m 0644 "$BUNDLE/compose/docker-compose.yml" "$COMPOSE"
@@ -214,6 +220,7 @@ phase_apply() {
   o0_step "compose config parses (quiet: never print resolved values)" "${DC[@]}" config --quiet
   o0_step "point the compose image name at the TESTED candidate image" docker tag "$CAND_IMAGE" "$COMPOSE_IMAGE"
   o0_sh "record the recreate time (log window for every check below)" "date -u +%Y-%m-%dT%H:%M:%SZ | tee '$EV/watcher-recreate.at'"
+  o0_mark_runtime_replaced
   o0_step "recreate watcher with the tested image (no rebuild)" "${DC[@]}" up -d --no-deps --force-recreate --no-build "$SERVICE"
   o0_sh "startup: 'Web UI listening', no '[db] Failed', no credential error, restart count stays 0 for 90s" \
     "since=\$(cat '$EV/watcher-recreate.at'); lg() { docker logs --since \"\$since\" '$CONTAINER' 2>&1; }
@@ -256,6 +263,7 @@ phase_verify() {
 
 phase_rollback() {
   o0_fleet_record before-watcher-rollback
+  rollback_files
   rollback_runtime
   o0_fleet_settle_compare before-watcher-rollback after-watcher-rollback
 }

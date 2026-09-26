@@ -96,6 +96,23 @@ REDACTIONS = (
 SENSITIVE_HANDLERS = {"vars", "static_response", "forward_auth", "authentication", "map", "templates", "push"}
 LONG_OPAQUE = re.compile(r"(?<![A-Za-z0-9_./-])(?=[A-Za-z0-9_+=-]*[0-9])(?=[A-Za-z0-9_+=-]*[A-Za-z])[A-Za-z0-9_+=-]{28,}(?![A-Za-z0-9_./-])")
 KV = re.compile(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*[=:]\s*)(.*)$")
+# "Path as a secret" (review wac-032-r2 🔴-1): probe tokens, webhook tokens, bot tokens and
+# rewrite targets sit INSIDE paths, where LONG_OPAQUE (it does not look behind '/') cannot
+# see them. Paths are split at '/' and regex metacharacters; a segment that is >= 12 chars
+# with a letter and a digit, or >= 16 hex digits, becomes <seg len=N>; other segments stay.
+PATH_SEG_SPLIT = re.compile(r"([/^$.*+?()\[\]{}|\\]+)")
+PATH_WORD = re.compile(r"[^\s\"']*/[^\s\"']*")
+
+
+def _token_segment(seg: str) -> bool:
+    if len(seg) >= 12 and re.search(r"[A-Za-z]", seg) and re.search(r"[0-9]", seg):
+        return True
+    return re.fullmatch(r"[0-9A-Fa-f]{16,}", seg) is not None
+
+
+def redact_path(value: str) -> str:
+    parts = PATH_SEG_SPLIT.split(value)
+    return "".join(f"<seg len={len(p)}>" if i % 2 == 0 and p and _token_segment(p) else p for i, p in enumerate(parts))
 
 
 def redact_line(line: str) -> str:
@@ -107,7 +124,9 @@ def redact_line(line: str) -> str:
         line = f"{match.group(1)}{match.group(2)}{match.group(3)}<redacted len={len(match.group(4).strip())}>"
     for pattern, repl in REDACTIONS:
         line = pattern.sub(repl, line)
-    return LONG_OPAQUE.sub("<redacted-opaque>", line)
+    line = LONG_OPAQUE.sub("<redacted-opaque>", line)
+    # every word that contains '/' is treated as a path (Caddyfile diff lines, URLs, globs)
+    return PATH_WORD.sub(lambda m: redact_path(m.group(0)), line)
 
 
 def cmd_redact(_args: argparse.Namespace) -> int:
@@ -366,7 +385,11 @@ def _redact_json(node, sensitive: bool = False, parent: str = ""):
                 return node  # header NAMES to delete are structure, not values
             return _literal(node)
         red = redact_line(node)
-        return red if red == node else _literal(node)
+        if red == node:
+            return node
+        if parent in SKELETON_PATH_KEYS and red == redact_path(node):
+            return red  # only token-shaped path segments were replaced: keep the route shape
+        return _literal(node)
     return node
 
 
@@ -384,6 +407,8 @@ SKELETON_STRING_KEYS = {
     "strip_path_suffix", "group", "protocol", "name", "pattern", "@id", "root",
     "flush_interval", "uri",
 }
+# path-like values: token-shaped segments are replaced by <seg len=N>, the rest is kept
+SKELETON_PATH_KEYS = {"path", "pattern", "uri", "root", "strip_path_prefix", "strip_path_suffix"}
 
 
 def caddy_skeleton(node, ctx: tuple = ()):
@@ -416,6 +441,8 @@ def caddy_skeleton(node, ctx: tuple = ()):
         if parent == "delete" and HEADER_NAME_RE.match(node) and redact_line(node) == node:
             return node
         return _literal(node)
+    if parent in SKELETON_PATH_KEYS:
+        node = redact_path(node)
     if parent in SKELETON_STRING_KEYS and redact_line(node) == node and len(node) <= 256:
         return node
     return _literal(node)
@@ -718,14 +745,24 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
         (bundle / "SHA256SUMS").write_text("x  a\n", encoding="utf-8")
         (bundle / "RELEASE.json").write_text(json.dumps({"candidate": "d" * 40, "deploy_candidate": True}), encoding="utf-8")
         assert not gate_check(gate, "caddy-preflight", bundle, 3600, exp)[0], "different candidate accepted"
-        failed = json.loads(gate.read_text())
+        # review wac-032-r2 🟡-3: put the bundle back first, so the ONLY difference is ok:false
+        (bundle / "RELEASE.json").write_text(json.dumps({"candidate": "c" * 40, "deploy_candidate": True}), encoding="utf-8")
+        assert gate_check(gate, "caddy-preflight", bundle, 3600, exp)[0], "the restored bundle must pass again (else the next check is vacuous)"
+        good_record = gate.read_text()
+        failed = json.loads(good_record)
         failed["ok"] = False
         gate.write_text(json.dumps(failed))
-        assert not gate_check(gate, "caddy-preflight", bundle, 3600, exp)[0], "failed gate accepted"
+        ok_false, why = gate_check(gate, "caddy-preflight", bundle, 3600, exp)
+        assert not ok_false and "not a passed" in why, ("failed gate accepted", why)
+        for bad_ok in ("true", 1, None):
+            failed["ok"] = bad_ok
+            gate.write_text(json.dumps(failed))
+            assert not gate_check(gate, "caddy-preflight", bundle, 3600, exp)[0], f"gate with ok={bad_ok!r} accepted"
+        gate.write_text(good_record)
         (bundle / "RELEASE.json").write_text(json.dumps({"candidate": "c" * 40, "deploy_candidate": False}), encoding="utf-8")
         with contextlib.redirect_stdout(io.StringIO()):
             assert cmd_gate_write(argparse.Namespace(bundle=bundle, stage="s", out=base / "g2.json", field=[], file_sha=[])) == 1, "gate written for a non-candidate"
-        checks += 10
+        checks += 14
         # JSON redaction: the three shapes from review wac-032 🔴-5 plus the old ones
         s1, s2, s3, s4, s5 = ("SENTINELmatcherBEARERxyz0123456789abcdefgh", "SENTINELreplaceOP", "SENTINELstaticBODY",
                               "$2a$14$SENTINELbcryptHASHabcdefghijklmnopqrstuvwxyzABCDEFGH01", "shortpw")
@@ -744,6 +781,35 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
                 assert sentinel not in text, (fn.__name__, sentinel)
             assert "{env.WATCHER_BROWSER_PROXY_TOKEN}" in text and "X-Watcher-Actor" in text and "127.0.0.1:9090" in text, fn.__name__
             checks += 1
+        # review wac-032-r2 🔴-1: secrets inside paths (probe token, 40-hex webhook token,
+        # bot token in a path_regexp, token in a rewrite uri) + legitimate paths kept as is
+        p1, p2, p3, p4 = ("qctbhy0a32hucub", "9f8e7d6c5b4a39281706f5e4d3c2b1a0ffeeddcc",
+                          "bot7654321098:AAHpathBOTsentinel0123456789abcd", "SENTINELpathsecretXYZ0123456789abcdef")
+        good_re = "^/m/v1/watcher/trading/risks/[^/]+$"
+        pcfg = {"apps": {"http": {"servers": {"srv0": {"listen": [":443"], "routes": [
+            {"match": [{"path": ["/" + p1]}], "handle": [{"handler": "static_response", "status_code": 200}]},
+            {"match": [{"path": [f"/hook/{p2}/*", "/m/v1/watcher/media/*"]}], "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:7000"}]}]},
+            {"match": [{"path_regexp": {"name": "tg", "pattern": f"^/{p3}/.*$"}}], "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:7001"}]}]},
+            {"match": [{"path_regexp": {"name": "wgw_risk", "pattern": good_re}}], "handle": [{"handler": "rewrite", "uri": "/api/" + p4, "strip_path_prefix": "/m"}]},
+        ]}}}}}
+        for fn in (_redact_json, caddy_skeleton):
+            out = fn(pcfg)
+            text = json.dumps(out)
+            for needle in (p1, p2, p3, p4, "qctbhy", "9f8e7d6c5b4a", "AAHpathBOT", "SENTINELpath", "7654321098"):
+                assert needle not in text, (fn.__name__, "path secret leaked", needle)
+            routes = out["apps"]["http"]["servers"]["srv0"]["routes"]
+            assert routes[0]["match"][0]["path"] == ["/<seg len=15>"], (fn.__name__, routes[0])
+            assert routes[1]["match"][0]["path"] == ["/hook/<seg len=40>/*", "/m/v1/watcher/media/*"], (fn.__name__, routes[1])
+            assert routes[2]["match"][0]["path_regexp"]["pattern"] == "^/<seg len=46>/.*$", (fn.__name__, routes[2])
+            assert routes[3]["match"][0]["path_regexp"]["pattern"] == good_re, (fn.__name__, "legitimate pattern over-redacted")
+            assert routes[3]["handle"][0]["uri"] == "/api/<seg len=37>" and routes[3]["handle"][0]["strip_path_prefix"] == "/m", (fn.__name__, routes[3])
+            checks += 1
+        for line, needle in ((f"	handle /{p1} {{", p1), (f"+	handle /hook/{p2}/* {{", p2), (f"	@tg path_regexp ^/{p3}/.*$", "AAHpath"),
+                             (f"	rewrite * /api/{p4}", p4)):
+            assert needle not in redact_line(line), ("redact (Caddyfile diff lines)", line)
+        for keep in (f"	@wgw_risk path_regexp {good_re}", "	reverse_proxy 127.0.0.1:8183", "	handle_path /m/v1/watcher/media/* {"):
+            assert redact_line(keep) == keep, ("over-redaction", keep)
+        checks += 1
         # warm-up
         j = ("Sep 26 x uvicorn[11]: INFO snapshot_warmup result=success revision=7 content_sha256=abcdefabcdef pid=11 role=operator-query duration_ms=40\n"
              "Sep 26 x uvicorn[12]: INFO snapshot_warmup result=success revision=7 content_sha256=abcdefabcdef pid=12 role=operator-query duration_ms=41\n")
@@ -758,7 +824,7 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
         for path in sorted(base.rglob("*"), reverse=True):
             path.unlink() if path.is_file() else path.rmdir()
         base.rmdir()
-    print(f"SELFTEST_OK checks={checks} fleet_cases={len(cases)} redaction_shapes=3+2 gates=10 warmup=6")
+    print(f"SELFTEST_OK checks={checks} fleet_cases={len(cases)} redaction_shapes=3+2 path_shapes=4 gates=14 warmup=6")
     return 0
 
 

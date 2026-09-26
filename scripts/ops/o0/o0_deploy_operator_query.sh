@@ -9,6 +9,8 @@
 #              gateway probe with the system_observer identity (failure = automatic rollback)
 #   verify     read-only (reader token read in-process; prints status codes only)
 #   rollback   restore files and env, restart operator-query only
+#   automatic rollback (apply fails): restore files and env; restart ONLY if apply had
+#              reached the restart; then fleet guard vs the apply baseline, recorded
 #
 # Only trader-v3-controlplane-operator-query is restarted. node-control and event-ingest
 # are NEVER restarted here (restarting node-control HALTs the whole fleet). They share the
@@ -38,6 +40,7 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+o0_sandbox_paths VENV_PY
 [ "${#CATALOG_ENVS[@]}" -gt 0 ] || CATALOG_ENVS=("$OQ_ENV")
 O0_STAGE_DIR="${O0_STAGE_DIR:-/srv/trader-staging/o0-YYYYMMDDTHHMMSSZ}"
 CRED_SET="${CRED_SET:-$O0_STAGE_DIR/creds/set-initial}"
@@ -107,6 +110,10 @@ rollback_files() {
   o0_step "code equals the baseline again" "$O0_PY" "$TOOLS/o0_tool.py" manifest-verify --root "$CP_ROOT" --manifest "$BUNDLE/controlplane.baseline.sha256" --label cp-restored
   o0_step "restore operator-query env file (mode/owner preserved)" cp -p "$BK/operator-query.env.bak" "$OQ_ENV"
   o0_sh "restored env equals the pre-deploy sha" "sha256sum -c '$EV/oq-env-backup.sha256' | sed 's|.*: |operator-query.env backup check: |'"
+}
+
+# only after the running operator-query was (or may have been) restarted with the new code
+rollback_runtime() {
   o0_step "restart operator-query only" systemctl restart "$UNIT"
   o0_sh "operator-query answers (no token -> 401) within 60s" \
     "i=0; c=000; while [ \$i -lt 30 ]; do c=\$(curl -s -o /dev/null -w '%{http_code}' -m 3 $OQ_URL/v1/accounts || true); [ \"\$c\" = 401 ] && break; sleep 2; i=\$((i + 1)); done; echo \"/v1/accounts -> \$c\"; [ \"\$c\" = 401 ]"
@@ -128,9 +135,7 @@ phase_apply() {
      sed -E 's/^[^ ]+  //' '$BUNDLE/controlplane.candidate.sha256' | while read -r rel; do if [ ! -e '$CP_ROOT'/\"\$rel\" ]; then echo \"\$rel\"; fi; done > '$BK/cp-new-files.txt'
      tar -C '$CP_ROOT' -cpf '$BK/cp-overwritten.tar' -T '$BK/cp-overwritten.txt'
      cp -p '$OQ_ENV' '$BK/operator-query.env.bak'; sha256sum '$OQ_ENV' > '$EV/oq-env-backup.sha256'"
-  if [ "$O0_MODE" = "execute" ]; then
-    trap 'o0_log "apply failed: automatic operator-query rollback"; rollback_files || o0_log "ROLLBACK FAILED: escalate to user now"; exit 1' ERR
-  fi
+  o0_arm_auto_rollback operator-query rollback_files rollback_runtime before-oq
   o0_step "add WATCHER_GATEWAY_TOKEN and WATCHER_SNAPSHOT_TOKEN to the operator-query env (values never printed; switch stays OFF)" \
     "$O0_PY" "$TOOLS/o0_watcher_credentials.py" apply --fragment "$CRED_SET/operator-query.env" --target "$OQ_ENV" --execute --backup-dir "$BK/env-apply"
   o0_step "the live env now holds the watcher CURRENT gateway/snapshot values and still no collision with the catalog" \
@@ -141,6 +146,7 @@ phase_apply() {
   o0_step "installed files equal the candidate manifest" \
     "$O0_PY" "$TOOLS/o0_tool.py" manifest-verify --root "$CP_ROOT" --manifest "$BUNDLE/controlplane.candidate.sha256" --label cp-installed
   o0_sh "record the restart time (journal window)" "date +%s | tee '$EV/oq-restart.epoch'"
+  o0_mark_runtime_replaced
   o0_step "restart operator-query ONLY (code on disk is not live until restart)" systemctl restart "$UNIT"
   o0_sh "operator-query answers (no token -> 401) within 60s" \
     "i=0; c=000; while [ \$i -lt 30 ]; do c=\$(curl -s -o /dev/null -w '%{http_code}' -m 3 $OQ_URL/v1/accounts || true); [ \"\$c\" = 401 ] && break; sleep 2; i=\$((i + 1)); done; echo \"/v1/accounts -> \$c\"; [ \"\$c\" = 401 ]"
@@ -174,6 +180,7 @@ phase_verify() {
 phase_rollback() {
   o0_fleet_record before-oq-rollback
   rollback_files
+  rollback_runtime
   o0_fleet_settle_compare before-oq-rollback after-oq-rollback
 }
 

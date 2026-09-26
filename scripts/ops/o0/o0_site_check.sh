@@ -71,11 +71,23 @@ REDACTIONS = (
 )
 LONG_OPAQUE = re.compile(r"(?<![A-Za-z0-9_./-])(?=[A-Za-z0-9_+=-]*[0-9])(?=[A-Za-z0-9_+=-]*[A-Za-z])[A-Za-z0-9_+=-]{28,}(?![A-Za-z0-9_./-])")
 KV = re.compile(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*[=:]\s*)(.*)$")
+PATH_SEG_SPLIT = re.compile(r"([/^$.*+?()\[\]{}|\\]+)")
+PATH_WORD = re.compile(r"[^\s\"']*/[^\s\"']*")
 PLACEHOLDER_RE = re.compile(r"^(Bearer |Basic )?\{[A-Za-z0-9_.$:-]+\}$")
 HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")
 SAFE_KEY_RE = re.compile(r"^[A-Za-z0-9_@.:*/+-]{1,64}$")
 SKELETON_STRING_KEYS = {"handler", "dial", "listen", "host", "path", "method", "strip_path_prefix", "strip_path_suffix",
                         "group", "protocol", "name", "pattern", "@id", "root", "flush_interval", "uri"}
+SKELETON_PATH_KEYS = {"path", "pattern", "uri", "root", "strip_path_prefix", "strip_path_suffix"}
+
+def _token_segment(seg):
+    if len(seg) >= 12 and re.search(r"[A-Za-z]", seg) and re.search(r"[0-9]", seg):
+        return True
+    return re.fullmatch(r"[0-9A-Fa-f]{16,}", seg) is not None
+
+def redact_path(value):
+    parts = PATH_SEG_SPLIT.split(value)
+    return "".join(f"<seg len={len(p)}>" if i % 2 == 0 and p and _token_segment(p) else p for i, p in enumerate(parts))
 
 def redact_line(line):
     if line.lstrip().startswith("Environment="):
@@ -86,7 +98,8 @@ def redact_line(line):
         line = f"{m.group(1)}{m.group(2)}{m.group(3)}<redacted len={len(m.group(4).strip())}>"
     for pattern, repl in REDACTIONS:
         line = pattern.sub(repl, line)
-    return LONG_OPAQUE.sub("<redacted-opaque>", line)
+    line = LONG_OPAQUE.sub("<redacted-opaque>", line)
+    return PATH_WORD.sub(lambda m: redact_path(m.group(0)), line)
 
 def _literal(value):
     return f"<literal len={len(str(value))}>"
@@ -120,6 +133,8 @@ def caddy_skeleton(node, ctx=()):
         if parent == "delete" and HEADER_NAME_RE.match(node) and redact_line(node) == node:
             return node
         return _literal(node)
+    if parent in SKELETON_PATH_KEYS:
+        node = redact_path(node)
     if parent in SKELETON_STRING_KEYS and redact_line(node) == node and len(node) <= 256:
         return node
     return _literal(node)
@@ -191,7 +206,7 @@ SAFE_ARG = re.compile(r"^(/[A-Za-z0-9_./*{}-]*|\^/[^\s]*|@[A-Za-z0-9_-]+|\{[A-Za
 def classify(tok):
     t = tok.strip('"')
     if t in SAFE_WORDS or SAFE_ARG.match(t):
-        return tok
+        return redact_path(tok) if "/" in t else tok
     return _literal(t)
 
 def outline_tokens(toks):
@@ -295,7 +310,7 @@ run "S-00 fleet state before any O-0 action (docs/agent-operations.md §0); node
   "docker exec trader-v3-postgres psql -U postgres -d trader -Atc \"SELECT node_id||' '||coalesce(status::text,'NULL')||' '||coalesce(release_id::varchar(12),'NULL')||' hb_age='||coalesce(round(extract(epoch from now()-last_seen_at)::numeric,1)::text,'NULL') FROM node_heartbeats ORDER BY node_id\"; for p in 8081 8082 8083 8084; do printf 'ready:%s %s\n' \$p \"\$(curl -s -o /dev/null -w '%{http_code}' -m 3 http://127.0.0.1:\$p/ready || true)\"; done"
 
 run "S-01 caddy version, unit, EnvironmentFile key names" \
-  "caddy version; systemctl show caddy -p ActiveState,SubState,ExecMainStartTimestamp,NRestarts,EnvironmentFiles; systemctl cat caddy | grep -E '^(ExecStart|ExecReload|EnvironmentFile)'; echo '--- keys in $CADDY_ENV'; $(keys_of "'$CADDY_ENV'"); stat -c '%a %U:%G %s %y %n' '$CADDY_ENV' '$CADDYFILE'"
+  "caddy version; systemctl show caddy -p ActiveState,SubState,ExecMainStartTimestamp,NRestarts,EnvironmentFiles; systemctl cat caddy | grep -E '^(ExecStart|ExecReload|EnvironmentFile)' | $REDACT; echo '--- keys in $CADDY_ENV'; $(keys_of "'$CADDY_ENV'"); stat -c '%a %U:%G %s %y %n' '$CADDY_ENV' '$CADDYFILE'"
 
 run "S-02 Caddyfile imports and directive outline (arguments classified; literals shown as <literal len=N>)" \
   "sha256sum '$CADDYFILE' | cut -c1-16; ${PYRUN}caddyfile_outline(sys.argv[1])\" '$CADDYFILE'"
