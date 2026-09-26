@@ -68,28 +68,31 @@ ALLOWED_GOLD_ENTRY = {'lo', 'hi', 'kind', 'levels', 'raw', 'unit_unspecified', '
 
 
 def entry_shape(value, *, predicted=False):
-    """(priced anchors, market_leg). market_leg=None means the gold label does not say."""
+    """(priced anchors, market_leg); market_leg=None means the gold label does not say.
+
+    Anchors are prices (or a two-sided zone) regardless of whether the price is a quoted CMP or a limit:
+    gold levels like ["104", "95"] for "CMP(104) + DCA 95" cannot say which one is the CMP, so the CMP
+    distinction is carried only by market_leg, which is compared wherever gold states it."""
     if value is None:
         return frozenset(), False
     if predicted:
         kind = value['kind']
         if kind == 'ladder':
-            anchors = {('market' if p['kind'] == 'market_ref' else 'limit', atom(p.get('price')))
-                       for p in value['levels'] if not (p['kind'] == 'market_ref' and p.get('price') is None)}
+            anchors = {('px', atom(p.get('price'))) for p in value['levels'] if not (p['kind'] == 'market_ref' and p.get('price') is None)}
             return frozenset(anchors), any(p['kind'] == 'market_ref' for p in value['levels'])
         if kind == 'zone':
             lo, hi = atom(value.get('lo')), atom(value.get('hi'))
             if lo is not None and hi is not None:
                 return frozenset({('zone', *sorted([lo, hi], key=Decimal))}), False
-            return frozenset({('limit', lo if lo is not None else hi)}), False
+            return frozenset({('px', lo if lo is not None else hi)}), False
         price = atom(value.get('price'))
         if kind == 'market_ref':
-            return frozenset({('market', price)} if price is not None else set()), True
-        return frozenset({('limit', price)}), False
+            return frozenset({('px', price)} if price is not None else set()), True
+        return frozenset({('px', price)}), False
     if set(value) - ALLOWED_GOLD_ENTRY:
         raise ValueError('entry_semantics_require_review')
     if 'levels' in value:
-        return frozenset(('limit', decimal(v)) for v in value['levels']), None
+        return frozenset(('px', decimal(v)) for v in value['levels']), None
     lo, hi = value.get('lo'), value.get('hi')
     kind = value.get('kind', 'limit')
     if kind == 'market_ref':
@@ -97,14 +100,14 @@ def entry_shape(value, *, predicted=False):
             return frozenset(), True
         if lo != hi:
             raise ValueError('market_range_requires_review')
-        return frozenset({('market', decimal(lo))}), True
+        return frozenset({('px', decimal(lo))}), True
     if lo is None and hi is None:
         return frozenset(), None
     if lo is None or hi is None:
-        return frozenset({('limit', decimal(lo if lo is not None else hi))}), None
+        return frozenset({('px', decimal(lo if lo is not None else hi))}), None
     if kind == 'zone' or lo != hi:
         return frozenset({('zone', *sorted([decimal(lo), decimal(hi)], key=Decimal))}), None
-    return frozenset({('limit', decimal(lo))}), None
+    return frozenset({('px', decimal(lo))}), None
 
 
 def signature(field, value, *, predicted=False):

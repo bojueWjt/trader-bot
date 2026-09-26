@@ -125,3 +125,16 @@ def test_cmp_leg_compared_only_where_gold_states_it():
     grouped = dict(entry=dict(by_symbol={'BTC': dict(levels=['95'])}), entry_market_leg=dict(by_symbol={'BTC': True}))
     assert regression.compare_field('entry', grouped, [ladder]) == (True, None) and grouped['_leg_seen'] == [True]
     assert regression.compare_field('symbol', dict(symbol='UNI'), [action(symbol_raw='#UNI/USDT')]) == (True, None)
+
+
+def test_quoted_cmp_price_matches_gold_levels_through_the_leg_flag():
+    quoted = action(entry=dict(kind='ladder', price=None, lo=None, hi=None, levels=[
+        dict(kind='market_ref', price=number(104), fraction=None), dict(kind='limit', price=number(95), fraction=None)]))
+    gold = dict(entry=dict(levels=['104', '95']), entry_market_leg=True)
+    assert regression.compare_field('entry', dict(gold), [quoted]) == (True, None)
+    # Same prices without any CMP leg is still wrong when gold says there is one.
+    both_limits = deepcopy(quoted)
+    both_limits['entry']['levels'][0]['kind'] = 'limit'
+    assert regression.compare_field('entry', dict(gold), [both_limits]) == (False, None)
+    assert regression.compare_field('entry', dict(entry=dict(kind='market_ref', lo='459', hi='459')),
+                                    [action(entry=dict(kind='limit', price=number(459), lo=None, hi=None, levels=[]))]) == (False, None)
