@@ -310,6 +310,27 @@ test("R7 gateway may disable a child after its main account is disabled", async 
   db.close();
 });
 
+test("R7 browser may disable a child after its main account is disabled", async () => {
+  const { main, child } = await createHierarchyPair("browser-disable");
+  assert.equal((await write("PUT", "/api/trading/accounts/" + main,
+    { is_enabled: false }, { identity: "browser" })).status, 200);
+  const result = await write("PUT", "/api/trading/accounts/" + child,
+    { is_enabled: false }, { identity: "browser" });
+  assert.equal(result.status, 200);
+  const db = database();
+  assert.equal(db.prepare("SELECT is_enabled FROM account_configs WHERE account_id = ?").get(child).is_enabled, 0);
+  db.close();
+});
+
+test("R7 browser is_testnet change checks existing child environment", async () => {
+  const { main } = await createHierarchyPair("browser-testnet");
+  const result = await write("PUT", "/api/trading/accounts/" + main,
+    { is_testnet: true }, { identity: "browser" });
+  assert.equal(result.status, 409);
+  assert.equal(result.body.code, "constraint_conflict");
+  assert.equal(result.body.message, "move or update child accounts first");
+});
+
 test("R7 gateway may change child addon with a disabled main account", async () => {
   const { main, child } = await createHierarchyPair("addon");
   assert.equal((await write("PUT", "/api/trading/accounts/" + main,
@@ -324,6 +345,7 @@ test("R7 gateway may change child addon with a disabled main account", async () 
     { account_type: "subaccount" }, { identity: "gateway" });
   assert.equal(structural.status, 400);
   assert.equal(structural.body.code, "invalid_body");
+  assert.equal(structural.body.message, "parent must be an enabled main account");
 });
 
 test("R7 gateway enable toggle ignores stored parent environment mismatch", async () => {
@@ -338,6 +360,7 @@ test("R7 gateway enable toggle ignores stored parent environment mismatch", asyn
     { parent_account_id: main }, { identity: "gateway" });
   assert.equal(structural.status, 400);
   assert.equal(structural.body.code, "invalid_body");
+  assert.equal(structural.body.message, "subaccount environment must match parent");
 });
 
 test("T0-2 snapshot order and content hash ignore account insertion order", async () => {
@@ -360,6 +383,52 @@ test("T0-2 snapshot order and content hash ignore account insertion order", asyn
   assert.equal(first.content_sha256, second.content_sha256);
   const cleanup = database();
   ids.forEach((id) => cleanup.prepare("DELETE FROM account_configs WHERE account_id = ?").run(id));
+  cleanup.close();
+});
+
+test("T0-2 snapshot channel order and hash ignore insertion order", async () => {
+  const ids = ["频道α", "a-lower", "S", "M"];
+  const insert = (db, id) => db.prepare(
+    "INSERT INTO channel_routing (channel_id, target_account_id) VALUES (?, ?)"
+  ).run(id, "main-a");
+  const firstDb = database();
+  ids.forEach((id) => insert(firstDb, id));
+  firstDb.close();
+  const first = (await request("GET", "/api/trading/config-snapshot", undefined, "snapshot")).body;
+  assert.deepEqual(first.channels.filter((row) => ids.includes(row.channel_id)).map((row) => row.channel_id),
+    ["M", "S", "a-lower", "频道α"]);
+  const secondDb = database();
+  ids.forEach((id) => secondDb.prepare("DELETE FROM channel_routing WHERE channel_id = ?").run(id));
+  ids.slice().reverse().forEach((id) => insert(secondDb, id));
+  secondDb.close();
+  const second = (await request("GET", "/api/trading/config-snapshot", undefined, "snapshot")).body;
+  assert.deepEqual(first.channels, second.channels);
+  assert.equal(first.content_sha256, second.content_sha256);
+  const cleanup = database();
+  ids.forEach((id) => cleanup.prepare("DELETE FROM channel_routing WHERE channel_id = ?").run(id));
+  cleanup.close();
+});
+
+test("T0-2 snapshot risk order and hash ignore insertion order", async () => {
+  const ids = ["风险α", "a-lower", "S", "M"];
+  const insert = (db, id, index) => db.prepare(
+    "INSERT INTO symbol_risk_configs (symbol, risk_ratio) VALUES (?, ?)"
+  ).run(id, (index + 1) / 100);
+  const firstDb = database();
+  ids.forEach((id, index) => insert(firstDb, id, index));
+  firstDb.close();
+  const first = (await request("GET", "/api/trading/config-snapshot", undefined, "snapshot")).body;
+  assert.deepEqual(first.risks.filter((row) => ids.includes(row.symbol)).map((row) => row.symbol),
+    ["M", "S", "a-lower", "风险α"]);
+  const secondDb = database();
+  ids.forEach((id) => secondDb.prepare("DELETE FROM symbol_risk_configs WHERE symbol = ?").run(id));
+  ids.slice().reverse().forEach((id) => insert(secondDb, id, ids.indexOf(id)));
+  secondDb.close();
+  const second = (await request("GET", "/api/trading/config-snapshot", undefined, "snapshot")).body;
+  assert.deepEqual(first.risks, second.risks);
+  assert.equal(first.content_sha256, second.content_sha256);
+  const cleanup = database();
+  ids.forEach((id) => cleanup.prepare("DELETE FROM symbol_risk_configs WHERE symbol = ?").run(id));
   cleanup.close();
 });
 

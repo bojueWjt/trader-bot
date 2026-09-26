@@ -5,29 +5,27 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 
-test("trading database initialization failure exits process nonzero despite exception guard", () => {
+test("real server exits before listening when trading database initialization fails", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "watcher-init-failure-"));
-  const modulePath = require.resolve("../lib/trading-api");
-  const script = `
-    process.on("uncaughtException", () => {});
-    const express = require(${JSON.stringify(require.resolve("express"))});
-    const { registerTradingApi } = require(${JSON.stringify(modulePath)});
-    registerTradingApi(express(), { getDb() { throw new Error("must not reach"); }, getStatus() { return {}; } });
-  `;
+  const mediaDirectory = path.join(directory, "media");
+  const serverPath = path.join(__dirname, "..", "server.js");
   try {
-    const result = spawnSync(process.execPath, ["-e", script], {
+    const result = spawnSync(process.execPath, [serverPath], {
+      cwd: directory,
       env: {
-        ...process.env,
+        PATH: process.env.PATH,
         TRADER_TRADING_DB_PATH: directory,
-        WATCHER_TRADING_DB: "",
-        TRADING_DB_PATH: "",
+        WATCHER_MEDIA_DIR: mediaDirectory,
+        WATCHER_HOST: "127.0.0.1",
       },
       encoding: "utf8",
       timeout: 10000,
     });
     assert.equal(result.error, undefined);
     assert.equal(result.status, 1, result.stderr || result.stdout);
+    assert.equal(result.signal, null);
     assert.match(result.stdout, /Failed to ensure trading tables/);
+    assert.doesNotMatch(result.stdout + result.stderr, /Web UI listening/);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
