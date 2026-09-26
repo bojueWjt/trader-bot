@@ -30,7 +30,10 @@ DEFAULT_URL = "http://127.0.0.1:9090/api/trading/config-snapshot"
 REFRESH_INTERVAL = 30.0
 MAX_AGE = 60.0
 REQUEST_TIMEOUT = 2.0
+MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
+_READ_CHUNK = 65536
 _BACKOFF = (1.0, 2.0, 4.0, 8.0, 15.0)
+_RISK_UNAVAILABLE = "account risk ratio configuration is unavailable or invalid"
 _TOP_FIELDS = frozenset({
     "schema_version", "revision", "content_sha256", "generated_at",
     "accounts", "channels", "risks",
@@ -53,6 +56,15 @@ class SnapshotUnavailable(Exception):
 
 class SnapshotRouteConflict(Exception):
     """The requested execution account conflicts with a channel route."""
+
+
+class SnapshotDataRejected(Exception):
+    """A fresh snapshot produced the same business rejection as the SQLite reader."""
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
 
 
 class _InvalidSnapshot(Exception):
@@ -102,32 +114,70 @@ class SnapshotLease:
 
     def account_addon(self, execution_account_id: str) -> float:
         account = self.snapshot.execution_accounts.get(execution_account_id)
-        if account is None or not account.enabled:
-            raise SnapshotUnavailable()
+        if account is None:
+            raise SnapshotDataRejected(
+                503,
+                f"execution account {execution_account_id} must resolve to exactly "
+                "one risk configuration",
+            )
+        if not account.enabled:
+            raise SnapshotDataRejected(
+                503,
+                "watcher account risk configuration is disabled",
+            )
         return account.risk_capital_addon
 
-    def channel_addon(self, channel_id: str, execution_account_id: str) -> float:
-        target_id = self.snapshot.channels.get(str(channel_id).strip())
+    def channel_route(self, channel_id: str | None, account_id: str | None = None) -> dict:
+        normalized = str(channel_id or "").strip()
+        if not normalized:
+            raise SnapshotDataRejected(503, "channel risk route has no channel_id")
+        target_id = self.snapshot.channels.get(normalized)
         if target_id is None:
-            raise SnapshotUnavailable()
-        account = self.snapshot.accounts[target_id]
-        if account.execution_account_id != execution_account_id:
+            raise SnapshotDataRejected(
+                503,
+                f"channel {normalized} must resolve to exactly one execution account",
+            )
+        account = self.snapshot.accounts.get(target_id)
+        if account is None:
+            raise SnapshotDataRejected(
+                503,
+                "watcher channel route target account is invalid",
+            )
+        if account_id is not None and account.execution_account_id != account_id:
             raise SnapshotRouteConflict()
         if not account.enabled:
-            raise SnapshotUnavailable()
-        return account.risk_capital_addon
+            raise SnapshotDataRejected(
+                503,
+                "watcher channel route target account is disabled",
+            )
+        return {
+            "execution_account_id": account.execution_account_id,
+            "risk_capital_addon": account.risk_capital_addon,
+        }
+
+    def channel_addon(self, channel_id: str, execution_account_id: str) -> float:
+        return self.channel_route(channel_id, execution_account_id)["risk_capital_addon"]
 
     def risk_ratio(self, symbol: str, execution_account_id: str) -> float:
         ratio = self.snapshot.risks.get(symbol)
         if ratio is None:
             account = self.snapshot.execution_accounts.get(execution_account_id)
-            if account is None or not account.enabled:
-                raise SnapshotUnavailable()
-            ratio = account.default_risk
-        if ratio is None:
-            raise SnapshotUnavailable()
-        if not math.isfinite(ratio) or not 0 < ratio <= 0.1:
-            raise SnapshotUnavailable()
+            if account is None:
+                raw = os.environ.get("OPERATOR_DEFAULT_RISK_RATIO", "0.01")
+                try:
+                    ratio = float(raw)
+                except (TypeError, ValueError) as exc:
+                    raise SnapshotDataRejected(503, _RISK_UNAVAILABLE) from exc
+            else:
+                ratio = account.default_risk
+        try:
+            if ratio is None:
+                raise TypeError("default risk is null")
+            ratio = float(ratio)
+            if not math.isfinite(ratio) or not 0 < ratio <= 0.1:
+                raise ValueError("risk ratio must be in (0, 0.1]")
+        except (TypeError, ValueError) as exc:
+            raise SnapshotDataRejected(503, _RISK_UNAVAILABLE) from exc
         return ratio
 
 
@@ -285,12 +335,12 @@ def _http_fetch(url: str, token: str, timeout: float) -> tuple[int, object]:
                 raise TimeoutError()
             if connection.sock is not None:
                 connection.sock.settimeout(max(0.001, deadline - time.monotonic()))
-            chunk = response.read(min(65536, 1_048_577 - size))
+            chunk = response.read(min(_READ_CHUNK, MAX_SNAPSHOT_BYTES + 1 - size))
             if not chunk:
                 break
             size += len(chunk)
-            if size > 1_048_576:
-                raise _InvalidSnapshot()
+            if size > MAX_SNAPSHOT_BYTES:
+                raise OSError("snapshot exceeds 4 MiB")
             chunks.append(chunk)
         if time.monotonic() >= deadline:
             raise TimeoutError()
@@ -359,8 +409,8 @@ class SnapshotCache:
             except (TimeoutError, socket.timeout):
                 self._failure("timeout")
                 return False
-            except (json.JSONDecodeError, UnicodeError, _InvalidSnapshot):
-                self._failure("invalid")
+            except (json.JSONDecodeError, UnicodeError):
+                self._failure("unavailable")
                 return False
             except (OSError, http.client.HTTPException, ValueError):
                 self._failure("unavailable")
@@ -368,7 +418,7 @@ class SnapshotCache:
             except Exception:
                 self._failure("unavailable")
                 return False
-            if status == 401:
+            if status in (401, 403):
                 self._failure("unauthorized")
                 return False
             if status != 200:

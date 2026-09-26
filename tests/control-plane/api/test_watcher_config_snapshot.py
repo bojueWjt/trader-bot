@@ -71,6 +71,7 @@ def test_t0_3_cold_fresh_boundary_expired_and_recovery():
 
 @pytest.mark.parametrize("bad_response,error", [
     ((401, {}), "unauthorized"),
+    ((403, {}), "unauthorized"),
     ((200, {**payload(), "schema_version": "wrong"}), "schema_mismatch"),
     ((200, {**payload(), "content_sha256": "0" * 64}), "invalid"),
     ((200, {**payload(), "api_secret": "leak"}), "invalid"),
@@ -222,8 +223,16 @@ def test_t0_3_missing_risk_does_not_read_mutable_environment(monkeypatch):
     subject = cache(Clock(), lambda *_: (200, raw))
     subject.refresh()
     monkeypatch.setenv("OPERATOR_DEFAULT_RISK_RATIO", "0.05")
-    with pytest.raises(snapshot.SnapshotUnavailable):
+    with pytest.raises(snapshot.SnapshotDataRejected) as data_exc:
         subject.require_fresh().risk_ratio("BTCUSDT", "account-a")
+    assert data_exc.value.status_code == 503
+    assert data_exc.value.detail == "account risk ratio configuration is unavailable or invalid"
+    monkeypatch.setenv("WATCHER_CONFIG_SNAPSHOT_ENABLED", "1")
+    monkeypatch.setattr(snapshot, "get_process_cache", lambda: subject)
+    with pytest.raises(HTTPException) as exc:
+        read_api._symbol_risk_ratio("BTCUSDT", "account-a")
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "account risk ratio configuration is unavailable or invalid"
 
 
 def test_t0_3_background_retries_without_request():
