@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-25T05:10:07Z",
+  "updatedAt": "2026-09-26T02:47:19Z",
   "phase": "P2",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -665,10 +665,17 @@
         "file": "taskList.json integration.blockers",
         "summary": "G-ACCOUNT-SCOPE：舒琴/TraderCash 授权本人账号限速脚本拉取；数据根定在黑苹果 /Volumes/G/quant-lab-data。",
         "by": "用户会话 0f23fe43"
+      },
+      {
+        "n": 91,
+        "at": "2026-09-26T02:47:19Z",
+        "file": "taskList.json integration.blockers G-RETENTION-CLOUD",
+        "summary": "登记一次经用户授权的上云：峰哥 100 条抽查样本原文交 Codex(OpenAI) 核对。",
+        "by": "用户会话 0f23fe43"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.67",
+    "version": "v1.68",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -2739,7 +2746,17 @@
         "addedAt": "2026-09-10T18:10:25Z",
         "decidedAt": "2026-09-24T07:46:51Z",
         "decision": "用户原话「2. 可以传到home-mini 有外挂硬盘」。批准的范围：真实聊天记录与派生数据存放在 home-mini 的外挂硬盘（本地研究目录），保留期限与撤回按合并稿 H.1 默认表执行。第三方云上传未获批准，仍默认不上传；若日后要用云端模型处理正文，须另行逐对象批准。 实际存放：用户把导出放在黑苹果（家中）/Volumes/G；研究数据根定为同盘 /Volumes/G/quant-lab-data（本地、家中，不上云）。",
-        "decidedBy": "用户（会话 0f23fe43）"
+        "decidedBy": "用户（会话 0f23fe43）",
+        "uploads": [
+          {
+            "at": "2026-09-26T02:47:19Z",
+            "what": "峰哥 100 条消息原文（抽查样本，含 24 条带图消息的文字部分，不含图片）",
+            "to": "Codex（OpenAI，gpt-6-astra）",
+            "why": "提取准确率抽查",
+            "authorized_by": "用户原话「抽查可以用codex(gpt-6-sol(high)) 开始吧」",
+            "copy_on_laptop": "scratchpad/review/，会话结束即丢弃"
+          }
+        ]
       },
       {
         "gate": "G-OC-200-3",
