@@ -1,7 +1,7 @@
 {
   "project": "quant-lab",
   "createdAt": "2026-09-11",
-  "updatedAt": "2026-09-26T02:47:19Z",
+  "updatedAt": "2026-09-26T06:53:37Z",
   "phase": "P2",
   "note": "所有窗口通过本文件沟通，只用 scripts/task.py 读写，只改自己的 modules.<name> 子树；contracts/integration 只有 G0 可写。cwd 一律 quant-lab/。",
   "contracts": {
@@ -672,10 +672,17 @@
         "file": "taskList.json integration.blockers G-RETENTION-CLOUD",
         "summary": "登记一次经用户授权的上云：峰哥 100 条抽查样本原文交 Codex(OpenAI) 核对。",
         "by": "用户会话 0f23fe43"
+      },
+      {
+        "n": 92,
+        "at": "2026-09-26T06:53:37Z",
+        "file": "taskList.json integration.blockers",
+        "summary": "登记用户授权：全部目标频道消息文字经 Codex(OpenAI) 解析；抽取器由 grok 改为 Codex。",
+        "by": "用户会话 0f23fe43"
       }
     ],
     "frozenAt": "2026-09-11T03:20:00Z",
-    "version": "v1.68",
+    "version": "v1.69",
     "lastAmended": "2026-09-11 OR-02 R5 (changeLog #17-#24)"
   },
   "modules": {
@@ -2755,6 +2762,14 @@
             "why": "提取准确率抽查",
             "authorized_by": "用户原话「抽查可以用codex(gpt-6-sol(high)) 开始吧」",
             "copy_on_laptop": "scratchpad/review/，会话结束即丢弃"
+          },
+          {
+            "at": "2026-09-26T06:53:37Z",
+            "what": "6 个目标频道全部消息的文字（先小批量约 300 条抽查，达标后全量约 2.6 万条；图片暂不上传）",
+            "to": "Codex CLI（OpenAI，gpt-6-astra），经本机 codex exec",
+            "why": "用 Codex 把消息解析成交易操作（替代规则解析 + grok）",
+            "authorized_by": "用户原话「直接使用codex。做分析文本分析成操作和抽查。先做小批量保障正确解析比率后，再全量刷。完成所有频道信号分析。」",
+            "copy_on_laptop": "批次文件在会话 scratchpad，解析完成后删除；结果回写黑苹果"
           }
         ]
       },
@@ -2784,7 +2799,7 @@
         "desc": "真值人力与预算：主审核/独立复核、≤80 人时、API ≤300 美元、45 工程日为规划量。未批：不发起付费 API 批量调用与人工标注排产",
         "addedAt": "2026-09-10T18:10:25Z",
         "decidedAt": "2026-09-24T07:49:57Z",
-        "decision": "用户选择：提取用的大模型改为「调用本机的 grok」（grok CLI，走用户自己的 grok 账号；消息原文会发给 grok 的服务商，这是用户对该处理路径的明确选择，服务商的留存与训练条款未核），API 花费上限仍按 300 美元规划；人工抽查「暂时不做」（0 人时）。后果：真实数据只做到提取与描述统计，不做金标、准确率验收和批次放行（D-09 放行、D-11 的 200/3 批验收不能执行），也就没有基于真实数据的准确率结论。",
+        "decision": "用户选择：提取用的大模型改为「调用本机的 grok」（grok CLI，走用户自己的 grok 账号；消息原文会发给 grok 的服务商，这是用户对该处理路径的明确选择，服务商的留存与训练条款未核），API 花费上限仍按 300 美元规划；人工抽查「暂时不做」（0 人时）。后果：真实数据只做到提取与描述统计，不做金标、准确率验收和批次放行（D-09 放行、D-11 的 200/3 批验收不能执行），也就没有基于真实数据的准确率结论。 2026-09-26 更新：抽取改由 Codex（gpt-6-astra）执行，走用户 ChatGPT 订阅，不按 API 计费；grok 暂不使用。",
         "decidedBy": "用户（会话 0f23fe43）"
       },
       {
