@@ -33,10 +33,16 @@ class ImmutableWatcherBuildError(ValueError):
 
 WATCHER_RUNTIME_RELATIVE_PATHS = (
     "ecosystem.config.js",
+    "lib/auth.js",
+    "lib/config-store.js",
     "lib/env-flags.js",
+    "lib/generated/gateway-routes.js",
+    "lib/generated/watcher-routes.js",
     "lib/hermes-cron.js",
+    "lib/media.js",
     "lib/safe-log.js",
     "lib/signal-importer.js",
+    "lib/status.js",
     "lib/telegram-proxy.js",
     "lib/telegram-utils.js",
     "lib/trading-api.js",

@@ -761,7 +761,7 @@
             </div>
             <div class="form-field">
               <label for="acc-risk">默认风险比例</label>
-              <input id="acc-risk" type="number" min="0" step="0.001" value="0.01">
+              <input id="acc-risk" type="number" min="0.0001" max="0.1" step="0.001" value="0.01">
             </div>
             <div class="form-field">
               <label for="acc-capital-addon">风险资金加权额 (USDT)</label>
@@ -849,7 +849,7 @@
           <div class="card-title">添加品种风控</div>
           <div class="input-group">
             <input id="risk-symbol" placeholder="品种 (如: BTCUSDT)" style="flex:1">
-            <input id="risk-ratio" type="number" step="0.001" value="0.01" placeholder="风险比例" style="width:120px">
+            <input id="risk-ratio" type="number" min="0.0001" max="0.1" step="0.001" value="0.01" placeholder="风险比例" style="width:120px">
             <button class="btn btn-primary" onclick="addRisk()">添加</button>
           </div>
         </div>
@@ -897,6 +897,8 @@
     let channelCache = [];
     let editingAccountId = false;
     let selectedAccountType = 'main';
+    const configRevisions = { accounts: null, channels: null, risks: null };
+    const pendingConfigWrites = new Map();
 
     /* ====== Helpers ====== */
     function toast(msg) {
@@ -908,14 +910,38 @@
     }
 
     async function api(path, opts = {}) {
+      const method = opts.method || 'GET';
+      const configMatch = /^\/trading\/(accounts|channels|risks)(?:\/|$)/.exec(path);
+      const configResource = configMatch ? configMatch[1] : null;
+      let pendingKey = null;
+      let body = opts.body;
+      if (configResource && method !== 'GET') {
+        if (!Number.isSafeInteger(configRevisions[configResource])) {
+          throw new Error('配置版本尚未加载，请刷新后重试');
+        }
+        pendingKey = method + ':' + path + ':' + JSON.stringify(body || {});
+        let pending = pendingConfigWrites.get(pendingKey);
+        if (!pending) {
+          pending = { expected_revision: configRevisions[configResource], client_ref: crypto.randomUUID() };
+          pendingConfigWrites.set(pendingKey, pending);
+        }
+        body = { ...(body || {}), ...pending };
+      }
       const requestOptions = {
         headers: { 'Content-Type': 'application/json' },
         ...opts,
       };
-      if (opts.body !== undefined) {
-        requestOptions.body = JSON.stringify(opts.body);
+      if (body !== undefined) {
+        requestOptions.body = JSON.stringify(body);
       }
       const res = await fetch('/api' + path, requestOptions);
+      const revisionHeader = res.headers.get('X-Config-Revision');
+      if (configResource && method === 'GET' && revisionHeader !== null) {
+        const observed = Number(revisionHeader);
+        if (Number.isSafeInteger(observed)) {
+          configRevisions[configResource] = observed;
+        }
+      }
       let payload = {};
       try {
         payload = await res.json();
@@ -923,7 +949,24 @@
         payload = {};
       }
       if (!res.ok && !payload.error) {
-        payload.error = `请求失败 (${res.status})`;
+        payload.error = payload.message || `请求失败 (${res.status})`;
+      }
+      if (configResource && res.ok && Number.isSafeInteger(payload.revision)) {
+        configRevisions[configResource] = payload.revision;
+      }
+      if (pendingKey && (res.ok || res.status < 500)) {
+        pendingConfigWrites.delete(pendingKey);
+      }
+      if (pendingKey && res.status === 409 && payload.code === 'revision_conflict') {
+        toast('配置已被其他操作修改，已刷新最新值，请核对后重新提交');
+        if (path.startsWith('/trading/accounts')) await loadAccounts();
+        if (path.startsWith('/trading/channels')) await loadChannels();
+        if (path.startsWith('/trading/risks')) await loadRisks();
+      }
+      if (pendingKey && res.ok) {
+        if (configResource === 'accounts') await loadAccounts();
+        if (configResource === 'channels') await loadChannels();
+        if (configResource === 'risks') await loadRisks();
       }
       return payload;
     }
@@ -1490,8 +1533,8 @@
         document.getElementById('acc-key').focus();
         return;
       }
-      if (!Number.isFinite(default_risk_ratio) || default_risk_ratio < 0) {
-        showAccountFormError('默认风险比例需要填写非负数字。');
+      if (!Number.isFinite(default_risk_ratio) || default_risk_ratio <= 0 || default_risk_ratio > 0.1) {
+        showAccountFormError('默认风险比例须大于 0 且不超过 0.1。');
         document.getElementById('acc-risk').focus();
         return;
       }
@@ -1527,6 +1570,7 @@
       if (isEditing) {
         path += '/' + encodeURIComponent(editingAccountId);
         method = 'PUT';
+        delete payload.account_id;
       }
 
       const button = document.getElementById('saveAccountButton');
@@ -1794,8 +1838,8 @@
 
     async function addRisk() {
       const symbol = document.getElementById('risk-symbol').value.trim().toUpperCase();
-      const risk_ratio = parseFloat(document.getElementById('risk-ratio').value);
-      if (!symbol || isNaN(risk_ratio)) { toast('请填写品种和风险比例'); return; }
+      const risk_ratio = Number(document.getElementById('risk-ratio').value);
+      if (!symbol || !Number.isFinite(risk_ratio) || risk_ratio <= 0 || risk_ratio > 0.1) { toast('风险比例须大于 0 且不超过 0.1'); return; }
       const r = await api('/trading/risks', { method: 'POST', body: { symbol, risk_ratio } });
       if (r.ok) { toast('风控已设置'); document.getElementById('risk-symbol').value = ''; document.getElementById('risk-ratio').value = '0.01'; loadRisks(); }
       else toast(r.error || '设置失败');
@@ -1803,7 +1847,7 @@
 
     async function deleteRisk(symbol) {
       if (!confirm(`确定删除 ${symbol} 的风控配置?`)) return;
-      const r = await (await fetch(`/api/trading/risks/${encodeURIComponent(symbol)}`, { method: 'DELETE' })).json();
+      const r = await api('/trading/risks/' + encodeURIComponent(symbol), { method: 'DELETE', body: {} });
       if (r.ok) { toast('已删除'); loadRisks(); }
       else toast(r.error || '删除失败');
     }

@@ -125,6 +125,9 @@ services:
     build:
       context: .
       dockerfile: docker/watcher/Dockerfile
+    # O-0 creates this untracked deployment file with mode 0600.
+    env_file:
+      - /srv/trader-secrets/watcher-gateway.env
     volumes:
       # rw: a fresh Telegram login persists its new session back into this file
       - /srv/trader-secrets/telegram-watcher.config.json:/app/config.json
