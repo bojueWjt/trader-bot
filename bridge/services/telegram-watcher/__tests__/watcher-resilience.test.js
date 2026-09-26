@@ -119,7 +119,12 @@ async function boot(options = {}) {
     __dirname: path.dirname(serverPath),
     Date: ClockDate,
     AbortSignal,
-    process: { env: options.env || {}, on() {}, exit(code) { exits.push(code); } },
+    process: { env: {
+      WATCHER_GATEWAY_TOKEN: "g".repeat(40),
+      WATCHER_SNAPSHOT_TOKEN: "s".repeat(40),
+      WATCHER_BROWSER_PROXY_TOKEN: "b".repeat(40),
+      ...(options.env || {}),
+    }, on() {}, exit(code) { exits.push(code); } },
     console: Object.fromEntries(["log", "error", "debug", "warn"].map((name) => [name, (...args) => logs.push(args.join(" "))])),
     setInterval(callback, delay) {
       return schedule(callback, delay, true);
