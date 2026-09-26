@@ -170,6 +170,8 @@ def _order_plan(root: dict[str, Any], stop: float | None, tps: list[dict], expir
         return None
     if e is None:
         entries = [{"kind": "market_ref", "price_lo": None, "price_hi": None, "fraction": None, "tif": "IOC", "post_only": False}]
+    elif e["kind"] == "market_ref":
+        entries = [{"kind": "market_ref", "price_lo": e["lo"], "price_hi": e["hi"], "fraction": None, "tif": "IOC", "post_only": False}]
     elif e["kind"] == "ladder" and root["entries"]:
         entries = [{"kind": "limit", "price_lo": x, "price_hi": x, "fraction": None, "tif": "GTC", "post_only": False} for x in root["entries"]]
     elif e["kind"] == "zone":
@@ -184,10 +186,12 @@ def _order_plan(root: dict[str, Any], stop: float | None, tps: list[dict], expir
 
 def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.DataFrame, dg: pl.DataFrame | None, *, graph_version: str, registry_version: str = "",
                 processing_delay_s: int = DEFAULT_PROCESSING_DELAY_S, horizon_s: int = HORIZON_S, ingested_at: datetime | None = None,
-                observation_end: datetime | None = None) -> tuple[pl.DataFrame, pl.DataFrame, list[dict], dict[tuple[int, str], LayerLedger], dict[str, Any]]:
+                observation_end: datetime | None = None, plan_source: str = "parser", extracted_event: pl.DataFrame | None = None) -> tuple[pl.DataFrame, pl.DataFrame, list[dict], dict[tuple[int, str], LayerLedger], dict[str, Any]]:
     ingested_at = ingested_at or now_utc()
     batch_id = cp["batch_id"][0] if cp.height else "tg-empty"
-    plans = {r["plan_id"]: r for r in cp.filter(pl.col("extractor_name") == "parser").iter_rows(named=True)}
+    from .plan_source import select_plans, disagreements
+    plans = {r["plan_id"]: r for r in select_plans(cp, plan_source, extracted_event).iter_rows(named=True)}
+    conflicts = disagreements(cp, extracted_event)
     mvd = {r["source_version_id"]: r for r in mv.iter_rows(named=True)}
     dg_rows = {r["source_version_id"]: r for r in dg.iter_rows(named=True)} if dg is not None and dg.height else {}
     dg_members: dict[str, list[str]] = {}
@@ -516,6 +520,22 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
                "claim_states": {k: v for k, v in sorted(episodes.group_by("author_claim_state").len().iter_rows())} if episodes.height else {},
                "n_invalid_transitions": int(episodes["n_invalid_transitions"].sum()) if episodes.height else 0, "n_decision_roots": int(episodes["t_dec"].is_not_null().sum()) if episodes.height else 0,
                "processing_delay_s": processing_delay_s, "observation_end": obs_end.isoformat(), "rule_versions": rule_versions, "batch_id": batch_id}
+    episode_sources = {}
+    conflict_episodes = []
+    used_by_episode = {}
+    for event in ev_rows:
+        used_by_episode.setdefault(event["episode_id"], set()).add(event["plan_id"])
+    for episode in ep_rows:
+        eid = episode["episode_id"]
+        root_id = episode["root_plan_id"]
+        used = used_by_episode.get(eid, {root_id})
+        sources = sorted({plans[pid]["extractor_name"] for pid in used})
+        episode_sources[eid] = {"root": plans[root_id]["extractor_name"], "sources": sources}
+        if any(plans[pid]["source_version_id"] in conflicts for pid in used):
+            conflict_episodes.append(eid)
+    summary.update(plan_source=plan_source, episode_sources=episode_sources,
+                   n_disagreements=len(conflicts), disagreements=conflicts,
+                   n_disagreement_episodes=len(conflict_episodes), disagreement_episode_ids=sorted(conflict_episodes))
     return episodes, events, qrows, ledgers, summary
 
 
@@ -539,8 +559,11 @@ def input_hash_of(layout: Layout, *, ingested_at: datetime | None = None, regist
         registry_version = cp["registry_version"][0] or ""
     rule_versions = {"normalize": _normalize.RULE_VERSION, "dedup": _dedup.RULE_VERSION, "extract": _extract.RULE_VERSION, "validate": _validate.RULE_VERSION, "linker": _linker.RULE_VERSION, "lifecycle": RULE_VERSION, "registry": registry_version}
     obs_end = kw.get("observation_end") or max((t for t in cp["available_at"].to_list() if t is not None), default=ingested_at)
-    return stable_id("gin", _sig(cp, "plan_id"), _sig(cb, "candidate_id"), _sig(jd, "request_id"), _sig(dg, "source_version_id") if dg is not None else 0, _sig(mv_used, "source_version_id"), _sig(ex, "extract_id") if ex.height else "",
+    signature = stable_id("gin", _sig(cp, "plan_id"), _sig(cb, "candidate_id"), _sig(jd, "request_id"), _sig(dg, "source_version_id") if dg is not None else 0, _sig(mv_used, "source_version_id"), _sig(ex, "extract_id") if ex.height else "",
                      rule_versions, kw.get("processing_delay_s", DEFAULT_PROCESSING_DELAY_S), obs_end.isoformat(), kw.get("horizon_s", HORIZON_S))
+    if kw.get("plan_source", "parser") != "parser":
+        signature = stable_id(signature, "plan-source-v1", kw["plan_source"])
+    return signature
 
 
 def run(layout: Layout, *, graph_version: str, ingested_at: datetime | None = None, registry_version: str = "registry-synthetic-v1", **kw) -> dict[str, Any]:
@@ -556,7 +579,8 @@ def run(layout: Layout, *, graph_version: str, ingested_at: datetime | None = No
     old = read_manifest(layout, graph_version)
     if old is not None and old.get("input_hash") != input_hash:
         raise RuntimeError(f"graph_version={graph_version} 已发布且输入不同（不可变派生版本）：换新版本号；不提供 force")
-    episodes, events, qrows, ledgers, summary = build_graph(cp, mv, cb, jd, dg, graph_version=graph_version, registry_version=registry_version, ingested_at=ingested_at, **kw)
+    ex = pl.read_parquet(layout.extracted_event) if layout.extracted_event.exists() else None
+    episodes, events, qrows, ledgers, summary = build_graph(cp, mv, cb, jd, dg, graph_version=graph_version, registry_version=registry_version, ingested_at=ingested_at, extracted_event=ex, **kw)
     layout.ensure()
     old_ep = pl.read_parquet(layout.episode(graph_version)) if layout.episode(graph_version).exists() else None
     old_ev = pl.read_parquet(layout.episode_event(graph_version)) if layout.episode_event(graph_version).exists() else None
@@ -575,22 +599,26 @@ def run(layout: Layout, *, graph_version: str, ingested_at: datetime | None = No
     for episode in episodes.iter_rows(named=True):
         if episode["migration_reason"] == "reopen":
             record_migration(layout, old_graph_version=graph_version, new_graph_version=graph_version, predecessor_ids=episode["predecessor_ids"], successor_ids=[episode["episode_id"]], reason="reopen", approved_by=RULE_VERSION, at=episode["t_dec"] or ingested_at)
-    publish_manifest(layout, graph_version, input_hash=input_hash, rule_versions=summary["rule_versions"], assumptions={"processing_delay_s": summary["processing_delay_s"], "observation_end": summary["observation_end"], "horizon_s": kw.get("horizon_s", HORIZON_S)},
-                     counts={"episodes": episodes.height, "events": events.height, "decision_roots": summary["n_decision_roots"]}, built_at=ingested_at)
+    from .cx_batch import save_build_review, write_json
+    save_build_review(layout, graph_version, cp, mv, episodes, kw.get("plan_source", "parser"), events=events)
     summary["input_hash"] = input_hash
+    write_json(layout.gold_dir / f"plan_source__{graph_version}.json", summary)
+    publish_manifest(layout, graph_version, input_hash=input_hash, rule_versions=summary["rule_versions"], assumptions={"processing_delay_s": summary["processing_delay_s"], "observation_end": summary["observation_end"], "horizon_s": kw.get("horizon_s", HORIZON_S), "plan_source": kw.get("plan_source", "parser")},
+                     counts={"episodes": episodes.height, "events": events.height, "decision_roots": summary["n_decision_roots"]}, built_at=ingested_at)
     summary["paths"] = {"episode": str(layout.episode(graph_version)), "episode_event": str(layout.episode_event(graph_version))}
     return summary
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="链接后重放双轨状态机，落 gold/episode 与 episode_event 并发布 manifest")
+    ap.add_argument("--plan-source", choices=["parser", "llm", "reconciled"], default="parser")
     ap.add_argument("--graph-version", required=True)
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--out")
     g.add_argument("--lake-root")
     a = ap.parse_args(argv)
     layout = Layout.flat(a.out) if a.out else Layout.from_root(a.lake_root)
-    print(json.dumps(run(layout, graph_version=a.graph_version), ensure_ascii=False, indent=2, default=str))
+    print(json.dumps(run(layout, graph_version=a.graph_version, plan_source=a.plan_source), ensure_ascii=False, indent=2, default=str))
     return 0
 
 

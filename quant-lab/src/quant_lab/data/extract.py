@@ -182,6 +182,8 @@ class ParseResult:
     def entry_mode(self) -> str:
         """price | market_ref | unknown（无原文依据不猜市价）。"""
         if self.entry is not None:
+            if self.entry.get("kind") == "market_ref":
+                return "market_ref"
             return "price"
         return "market_ref" if "market_ref" in self.notes else "unknown"
 
@@ -711,6 +713,10 @@ def llm_extract(text: str, *, client: LLMClient, channel_name: str, message_date
         reason_codes=[r for r in p.get("reason_codes") or [] if r in set(Reason)],
         confidence_bucket="mid",
     )
+    res.checks["llm_evidence_valid"] = True
+    if "op" in p:
+        res.checks["op"] = p["op"]
+        res.checks["refers_to_previous"] = p.get("refers_to_previous", False)
     return res, None, {"usage": out.usage, "model": out.model, "response_hash": out.response_hash, "attempts": attempts}
 
 

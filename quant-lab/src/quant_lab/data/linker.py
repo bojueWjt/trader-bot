@@ -22,6 +22,7 @@ from typing import Any
 import polars as pl
 
 from .lake import Layout, now_utc, preserve_ingested_at, schema_hash, stable_id, write_parquet_atomic
+from .plan_source import select_plans
 from .llm import AdjudicationRequest, LLMClient, adjudicate
 from .reasons import Reason
 
@@ -64,10 +65,10 @@ class Plan:
     row: dict[str, Any] = field(default_factory=dict)
 
 
-def _plans(cp: pl.DataFrame, mv: pl.DataFrame, ex: pl.DataFrame | None) -> list[Plan]:
+def _plans(cp: pl.DataFrame, mv: pl.DataFrame, ex: pl.DataFrame | None, plan_source: str = "parser") -> list[Plan]:
     if "author_id" not in mv.columns:
         mv = mv.with_columns(pl.lit(None, dtype=pl.String).alias("author_id"))
-    j = cp.filter(pl.col("extractor_name") == "parser").join(
+    j = select_plans(cp, plan_source, ex).join(
         mv.select("source_version_id", "reply_to_message_id", "sequence", "version_no", "text", "author_id"), on="source_version_id", how="left")
     pref = dict(zip(ex["extract_id"].to_list(), ex["plan_ref"].to_list())) if ex is not None and "plan_ref" in ex.columns else {}
     return [Plan(r["plan_id"], r["source_version_id"], r["channel_id"], r["message_id"], r["kind"], r["instrument_id"], r["symbol_raw"], r["side"], r["available_at"], r["event_time"],
@@ -80,9 +81,9 @@ def _max_or_none(times: list[datetime | None]) -> datetime | None:
     return max(times)
 
 
-def build_candidates(cp: pl.DataFrame, mv: pl.DataFrame, ex: pl.DataFrame | None = None, *, adjudicator: LLMClient | None = None, ingested_at: datetime | None = None) -> tuple[pl.DataFrame, pl.DataFrame, dict[str, Any]]:
+def build_candidates(cp: pl.DataFrame, mv: pl.DataFrame, ex: pl.DataFrame | None = None, *, plan_source: str = "parser", adjudicator: LLMClient | None = None, ingested_at: datetime | None = None) -> tuple[pl.DataFrame, pl.DataFrame, dict[str, Any]]:
     ingested_at = ingested_at or now_utc()
-    plans = _plans(cp, mv, ex)
+    plans = _plans(cp, mv, ex, plan_source)
     versions = {r["source_version_id"]: r for r in mv.iter_rows(named=True)}
     # A projected MV may omit its clock; CP retains that same source clock.
     # An explicitly unknown MV clock must remain unknown.
@@ -274,12 +275,12 @@ def build_candidates(cp: pl.DataFrame, mv: pl.DataFrame, ex: pl.DataFrame | None
     return cb, jd, summary
 
 
-def run(layout: Layout, *, adjudicator: LLMClient | None = None, ingested_at: datetime | None = None) -> dict[str, Any]:
+def run(layout: Layout, *, plan_source: str = "parser", adjudicator: LLMClient | None = None, ingested_at: datetime | None = None) -> dict[str, Any]:
     ingested_at = ingested_at or now_utc()
     cp = pl.read_parquet(layout.canonical_plan)
     mv = pl.read_parquet(layout.message_version)
     ex = pl.read_parquet(layout.extracted_event) if layout.extracted_event.exists() else None
-    cb, jd, summary = build_candidates(cp, mv, ex, adjudicator=adjudicator, ingested_at=ingested_at)
+    cb, jd, summary = build_candidates(cp, mv, ex, plan_source=plan_source, adjudicator=adjudicator, ingested_at=ingested_at)
     layout.ensure()
     p_cb, p_jd = layout.silver_dir / "candidate_edges.parquet", layout.silver_dir / "adjudications.parquet"
     write_parquet_atomic(preserve_ingested_at(cb, pl.read_parquet(p_cb) if p_cb.exists() else None, "candidate_id"), p_cb)

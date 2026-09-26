@@ -108,7 +108,7 @@ def quarantine(flow: str, *, status: str | None = None) -> pl.DataFrame:
 def build(fixture_dir: str | os.PathLike | None, layout: Layout, *, graph_version: str, llm_fixture: str | os.PathLike | None = None, ocr_fixture: str | os.PathLike | None = None,
           adjudicator_fixture: str | os.PathLike | None = None, ingested_at: datetime | None = None, alias: bool = False, llm: str | None = None,
           market_lake: str | os.PathLike | None = None, market: str = "fixture",
-          export_dir: str | os.PathLike | None = None, channel: int | None = None) -> dict[str, Any]:
+          export_dir: str | os.PathLike | None = None, channel: int | None = None, plan_source: str = "parser") -> dict[str, Any]:
     """端到端：归一 → 去重 → 抽取 → 行情校验 → 链接 → 生命周期 + 发布。
     仅显式 market=real 或 market_lake 启用真实行情，默认保持夹具行为。
     alias=True：把 graph_version 当别名，实际发布不可变版本 `<alias>@<input_hash[:8]>` 并把别名指过去；旧版本原样保留，不删除（T04）。"""
@@ -116,6 +116,9 @@ def build(fixture_dir: str | os.PathLike | None, layout: Layout, *, graph_versio
     from .graph import set_alias
     from .llm import RecordedClient, extraction_client
 
+    from .plan_source import MODES
+    if plan_source not in MODES:
+        raise ValueError(f"invalid plan_source: {plan_source}")
     if llm is not None:
         extraction_client(llm=llm, llm_fixture=llm_fixture)  # 闸门先于归一写盘。
     from .lake import stable_id
@@ -154,7 +157,7 @@ def build(fixture_dir: str | os.PathLike | None, layout: Layout, *, graph_versio
                         work / "_loss", layout.quarantine_path)
         layout = scoped
     provider = None
-    lifecycle_kwargs = {}
+    lifecycle_kwargs = {"plan_source": plan_source}
     if real:
         from .market_lake import LakeMarket
         provider = LakeMarket(market_lake if market_lake is not None else root / "lake" / "market")
@@ -167,7 +170,7 @@ def build(fixture_dir: str | os.PathLike | None, layout: Layout, *, graph_versio
         out["validate"] = validate.run(layout, ingested_at=ingested_at, synthetic=True)
     else:
         out["validate"] = validate.run(layout, ingested_at=ingested_at, marks=provider, registry=provider.registry)
-    out["linker"] = linker.run(layout, adjudicator=RecordedClient.from_file(adjudicator_fixture) if adjudicator_fixture else None, ingested_at=ingested_at)
+    out["linker"] = linker.run(layout, plan_source=plan_source, adjudicator=RecordedClient.from_file(adjudicator_fixture) if adjudicator_fixture else None, ingested_at=ingested_at)
     if alias:
         ih = lifecycle.input_hash_of(layout, ingested_at=ingested_at, **lifecycle_kwargs)
         gv = f"{graph_version}@{ih[:8]}"
@@ -188,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--market", choices=["fixture", "real"], default="fixture")
     ap.add_argument("--market-lake", help="显式启用真实行情；--market real 缺省取 DATA_ROOT/lake/market")
     ap.add_argument("--channel", type=int, help="只构建该频道（白名单内的 Telegram peer id）")
+    ap.add_argument("--plan-source", choices=["parser", "llm", "reconciled"], default="parser")
     ap.add_argument("--graph-version", default="fixture-v1")
     providers = ap.add_mutually_exclusive_group()
     providers.add_argument("--llm-fixture")
@@ -208,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
             ap.error("--build 需要 --fixture、--export-dir 或显式真实行情模式")
         try:
             res = build(a.fixture, layout, graph_version=a.graph_version, llm_fixture=a.llm_fixture, ocr_fixture=a.ocr_fixture, adjudicator_fixture=a.adjudicator_fixture, alias=a.alias, llm=a.llm,
-                        market_lake=a.market_lake, market=a.market, export_dir=a.export_dir, channel=a.channel)
+                        market_lake=a.market_lake, market=a.market, export_dir=a.export_dir, channel=a.channel, plan_source=a.plan_source)
         except (PermissionError, ValueError) as exc:
             ap.error(str(exc))
         print(json.dumps({k: {kk: vv for kk, vv in v.items() if kk not in ("paths", "inputs", "raw_hashes", "items")} for k, v in res.items()}, ensure_ascii=False, indent=2, default=str))
