@@ -3,10 +3,11 @@ const { digest, sendError } = require('./config-store');
 const { PAYLOAD } = require('./generated/gateway-routes');
 const clientRefPattern = new RegExp(PAYLOAD.body_fields.client_ref.pattern, 'u');
 
-function failure(status, code, message) {
+function failure(status, code, message, details) {
   const error = new Error(message);
   error.status = status;
   error.code = code;
+  error.details = details;
   throw error;
 }
 
@@ -23,13 +24,13 @@ function createReentrantWriter(dbFactory) {
       db.close();
     }
   }
-  function replay(db, key, hash) {
+  function replay(db, key, hash, clientRef, operation) {
     const prior = db.prepare('SELECT * FROM config_audit WHERE idempotency_key = ?').get(key);
     if (!prior) {
       return false;
     }
     if (prior.request_sha256 !== hash) {
-      failure(409, 'idempotency_conflict', 'client_ref used with different request');
+      failure(409, 'idempotency_conflict', 'client_ref used with different request', { client_ref: clientRef, operation });
     }
     return { ...JSON.parse(prior.response_json), replay: true };
   }
@@ -53,14 +54,14 @@ function createReentrantWriter(dbFactory) {
         const requestBody = { ...body };
         delete requestBody.client_ref;
         const hash = digest({ method: req.method, path: decodeURIComponent(req.path), body: requestBody });
-        const prior = withDb(db => replay(db, key, hash));
+        const prior = withDb(db => replay(db, key, hash, body.client_ref, operation));
         if (prior) {
           return res.json(prior);
         }
         const running = pending.get(key);
         if (running) {
           if (running.hash !== hash) {
-            failure(409, 'idempotency_conflict', 'client_ref used with different request');
+            failure(409, 'idempotency_conflict', 'client_ref used with different request', { client_ref: body.client_ref, operation });
           }
           const payload = await running.promise;
           return res.json({ ...payload, replay: true });
@@ -69,7 +70,7 @@ function createReentrantWriter(dbFactory) {
         const promise = (async () => {
           const response = await effect(req);
           return withDb(db => db.transaction(() => {
-            const raced = replay(db, key, hash);
+            const raced = replay(db, key, hash, body.client_ref, operation);
             if (raced) {
               return raced;
             }

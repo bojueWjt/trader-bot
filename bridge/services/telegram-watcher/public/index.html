@@ -1177,6 +1177,12 @@
     }
 
     async function changeWatcherConnection(action) {
+      const message = action === 'disconnect'
+        ? '确定断开监听吗？断开后会停止信号采集与断流告警，直到重新连接。'
+        : '确定重新连接监听吗？';
+      if (!confirm(message)) {
+        return;
+      }
       try {
         const result = await api('/' + action, { method: 'POST' });
         if (!result.ok) {

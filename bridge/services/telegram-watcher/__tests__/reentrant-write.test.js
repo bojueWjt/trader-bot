@@ -46,6 +46,74 @@ test('T0-2 all three reentrant writes audit, replay, conflict and keep revision 
     assert.equal(db.prepare('SELECT revision FROM config_revision').get().revision,0);
   } finally {close();}
 });
+test('T0-2 gateway and browser reentrant conflicts include only client_ref and operation details', async () => {
+  const db = new Database(':memory:');
+  ensureConfigTables(db);
+  const close = db.close.bind(db);
+  db.close = () => {};
+  const wrap = createReentrantWriter(() => db);
+  try {
+    for (const identity of ['gateway', 'browser']) {
+      for (const operation of ['groups.save', 'telegram.disconnect', 'telegram.reconnect']) {
+        const ref = `${identity}-${operation.replaceAll('.', '-')}-ref`;
+        const first = request(operation, ref, { marker:'original-request-sentinel' }, identity);
+        const changed = request(operation, ref, { marker:'changed-request-sentinel' }, identity);
+        const handler = wrap(async () => ({ ok:true, private:'original-response-sentinel' }));
+        assert.equal((await invoke(handler, first)).statusCode, 200);
+        const conflict = await invoke(handler, changed);
+        assert.equal(conflict.statusCode, 409);
+        assert.equal(conflict.body.code, 'idempotency_conflict');
+        assert.deepEqual(conflict.body.details, { client_ref:ref, operation });
+        assert.deepEqual(Object.keys(conflict.body.details).sort(), ['client_ref', 'operation']);
+        assert.doesNotMatch(JSON.stringify(conflict.body), /original-request-sentinel|changed-request-sentinel|original-response-sentinel/);
+      }
+    }
+  } finally { close(); }
+});
+
+test('T0-2 conflict with an in-flight request also includes contract details', async () => {
+  const db = new Database(':memory:');
+  ensureConfigTables(db);
+  const close = db.close.bind(db);
+  db.close = () => {};
+  const wrap = createReentrantWriter(() => db);
+  let release;
+  const handler = wrap(async () => {
+    await new Promise(resolve => { release = resolve; });
+    return { ok:true };
+  });
+  try {
+    for (const identity of ['gateway', 'browser']) {
+      const ref = `inflight-${identity}-ref`;
+      const first = invoke(handler, request('groups.save', ref, { groups:['-100'] }, identity));
+      const conflict = await invoke(handler, request('groups.save', ref, { groups:['-200'] }, identity));
+      assert.equal(conflict.statusCode, 409);
+      assert.deepEqual(conflict.body.details, { client_ref:ref, operation:'groups.save' });
+      release();
+      await first;
+    }
+  } finally { close(); }
+});
+
+test('T0-2 actor is part of the idempotency key for identical browser and gateway writes', async () => {
+  const db = new Database(':memory:');
+  ensureConfigTables(db);
+  const close = db.close.bind(db);
+  db.close = () => {};
+  const wrap = createReentrantWriter(() => db);
+  let effects = 0;
+  const handler = wrap(async () => { effects += 1; return { ok:true }; });
+  try {
+    const ref = 'cross-actor-ref-0001';
+    for (const identity of ['gateway', 'browser']) {
+      const response = await invoke(handler, request('groups.save', ref, { groups:['-100'] }, identity));
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.body.replay, false);
+    }
+    assert.equal(effects, 2);
+    assert.deepEqual(db.prepare('SELECT actor FROM config_audit ORDER BY id').all().map(row => row.actor), ['app:risk_admin', 'browser']);
+  } finally { close(); }
+});
 test('T0-2 in-flight duplicates join; failures do not reserve a client_ref', async () => {
   const db = new Database(':memory:');
   ensureConfigTables(db);

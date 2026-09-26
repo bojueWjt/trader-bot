@@ -197,7 +197,8 @@ function createRequestValidation() {
       return reject(res, req, 400, 'invalid_body', { missing_fields: missing });
     }
     for (const [key, value] of Object.entries(body)) {
-      const definitionKey = key === 'account_id' && auth.identity === 'browser' ? 'account_id_credential' : key;
+      const overrides = route.body.field_overrides || {};
+      const definitionKey = overrides[key] || key;
       if (!validValue(value, PAYLOAD.body_fields[definitionKey], auth.identity)) {
         return reject(res, req, 400, 'invalid_body', { field: key, rule: 'type_or_format' });
       }

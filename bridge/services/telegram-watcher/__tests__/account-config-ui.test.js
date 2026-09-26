@@ -222,3 +222,34 @@ test('groups/disconnect/reconnect send client_ref and reuse it after transport o
     assert.notEqual(sent.at(-1).body.client_ref,first.client_ref);
   }
 });
+
+test('disconnect and reconnect require Chinese confirmation before any request', async () => {
+  const start = pageSource.indexOf('    async function changeWatcherConnection(action) {');
+  const end = pageSource.indexOf('    async function saveGroups()', start);
+  assert.ok(start > 0 && end > start);
+  assert.match(pageSource, /changeWatcherConnection\('disconnect'\)/);
+  assert.match(pageSource, /changeWatcherConnection\('reconnect'\)/);
+  const sent = [];
+  const prompts = [];
+  let approved = false;
+  const context = {
+    confirm(message) { prompts.push(message); return approved; },
+    api: async (route, options) => { sent.push({ route, options }); return { ok:true }; },
+    checkStatus: async () => {},
+    toast() {},
+  };
+  vm.runInNewContext(pageSource.slice(start, end), context);
+  for (const action of ['disconnect', 'reconnect']) {
+    await context.changeWatcherConnection(action);
+    assert.equal(sent.length, 0, `${action} sent a request after cancellation`);
+  }
+  assert.match(prompts[0], /断开监听/);
+  assert.match(prompts[0], /停止信号采集/);
+  assert.match(prompts[0], /断流告警/);
+  assert.match(prompts[1], /重新连接/);
+  approved = true;
+  for (const action of ['disconnect', 'reconnect']) {
+    await context.changeWatcherConnection(action);
+  }
+  assert.deepEqual(sent.map(item => item.route), ['/disconnect', '/reconnect']);
+});

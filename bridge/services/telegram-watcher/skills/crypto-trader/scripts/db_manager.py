@@ -558,8 +558,7 @@ def main() -> None:
     prefix = argparse.ArgumentParser(add_help=False)
     prefix.add_argument("--db")
     _, remaining = prefix.parse_known_args()
-    disabled = {"init-db", "add-account", "set-channel", "set-risk", "create-order",
-                "update-order", "update-sl", "add-briefing", "record-signal"}
+    disabled = {"init-db", "add-account", "set-channel", "set-risk"}
     if remaining and remaining[0] in disabled:
         parser.exit(2, CONFIG_WRITES_DISABLED + "\n")
     args = parser.parse_args()
@@ -568,10 +567,9 @@ def main() -> None:
         parser.print_help()
         sys.exit(1)
 
-    if args.command not in {"list-accounts", "list-channels", "list-risks", "get-risk", "list-orders", "list-briefings", "check-signal", "list-signal-ops"}:
-        parser.exit(2, CONFIG_WRITES_DISABLED + "\n")
-
-    db = DatabaseManager(db_path=args.db, readonly=True)
+    db = DatabaseManager(db_path=args.db, readonly=args.command not in {
+        "create-order", "update-order", "update-sl", "add-briefing", "record-signal"
+    })
 
     match args.command:
         case "init-db":

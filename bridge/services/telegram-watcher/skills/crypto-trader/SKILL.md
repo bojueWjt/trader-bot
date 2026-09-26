@@ -11,22 +11,7 @@ description: 自动化加密货币合约交易 Skill。接收 Telegram 信号后
 
 ## Quick Start
 
-首次使用需初始化数据库、添加账户、配置频道路由和风险参数：
-
-```bash
-# 1. 初始化数据库
-python3 scripts/db_manager.py init-db
-
-# 2. 添加 Binance 账户
-python3 scripts/db_manager.py add-account main "YOUR_API_KEY" "YOUR_API_SECRET" --risk 0.01
-
-# 3. 设置频道路由（Telegram channel_id → Binance 账户）
-python3 scripts/db_manager.py set-channel "channel_123" main --name "VIP信号群"
-
-# 4. 设置品种风险比例
-python3 scripts/db_manager.py set-risk BTCUSDT 0.02
-python3 scripts/db_manager.py set-risk ETHUSDT 0.015
-```
+首次使用时，在 watcher 站点或 app 中添加账户、配置频道路由和品种风险。`db_manager.py` 的 `init-db`、`add-account`、`set-channel`、`set-risk` 已停用，不能用于写入这三张配置表；读取命令和信号、订单、简报操作命令仍可使用。
 
 ## 图片信号处理
 
@@ -585,14 +570,16 @@ for p in positions:
 
 ### db_manager.py — 数据库管理
 
+账号、频道路由、品种风险配置仅通过 watcher 站点或 app 修改。下表标为“已停用”的命令会报错并提示使用站点或 app。
+
 | 子命令 | 用途 | 示例 |
 |--------|------|------|
-| `init-db` | 初始化数据库表 | `python3 scripts/db_manager.py init-db` |
-| `add-account` | 添加 Binance 账户 | `python3 scripts/db_manager.py add-account main KEY SECRET --risk 0.01 --capital-multiplier 2 --testnet` |
+| `init-db` | 已停用（包含配置表初始化） | 使用 watcher 站点或 app |
+| `add-account` | 已停用（添加账号配置） | 使用 watcher 站点或 app |
 | `list-accounts` | 列出所有账户 | `python3 scripts/db_manager.py list-accounts` |
-| `set-channel` | 设置频道路由 | `python3 scripts/db_manager.py set-channel ch_123 main --name "VIP群"` |
+| `set-channel` | 已停用（设置频道路由） | 使用 watcher 站点或 app |
 | `list-channels` | 列出所有频道路由 | `python3 scripts/db_manager.py list-channels` |
-| `set-risk` | 设置品种风险比例 | `python3 scripts/db_manager.py set-risk BTCUSDT 0.02` |
+| `set-risk` | 已停用（设置品种风险比例） | 使用 watcher 站点或 app |
 | `list-risks` | 列出所有风险配置 | `python3 scripts/db_manager.py list-risks` |
 | `get-risk` | 查询品种风险比例 | `python3 scripts/db_manager.py get-risk BTCUSDT --account main` |
 | `create-order` | 创建订单记录 | `python3 scripts/db_manager.py create-order ch_123 main BTCUSDT BUY 65000 --sl 64000 --tp 68000 --qty 0.015` |

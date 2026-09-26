@@ -21,8 +21,6 @@ class ReadOnlyCommands(unittest.TestCase):
             missing = Path(directory) / 'must-not-exist.db'
             for command in [
                 ['init-db'],
-                ['create-order'], ['update-order'], ['update-sl'],
-                ['add-briefing'], ['record-signal'],
                 ['add-account', 'fixture', 'fake-key', 'fake-secret'],
                 ['set-channel', '-100', 'fixture'],
                 ['set-risk', 'BTCUSDT', '0.02'],
@@ -54,6 +52,36 @@ class ReadOnlyCommands(unittest.TestCase):
                 json.loads(result.stdout)
                 self.assertEqual(hashlib.sha256(file.read_bytes()).hexdigest(),before)
             self.assertFalse(Path(str(file) + '-wal').exists())
+
+    def test_signal_and_order_writes_still_work_without_config_table_mutations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory) / 'fixture.db'
+            with sqlite3.connect(file) as db:
+                db.executescript(module.SCHEMA_SQL)
+                db.execute("INSERT INTO account_configs(account_id,api_key,api_secret,risk_capital_multiplier,is_enabled) VALUES ('fixture','fake','fake',1,1)")
+                db.execute("INSERT INTO channel_routing(channel_id,target_account_id) VALUES ('-100','fixture')")
+                db.execute("INSERT INTO symbol_risk_configs(symbol,risk_ratio) VALUES ('BTCUSDT',0.02)")
+            def run(*args):
+                result = subprocess.run([sys.executable, str(SCRIPT), '--db', str(file), *args], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return json.loads(result.stdout)
+            first = run('record-signal', 'signal-1', 'entry', '--symbol', 'BTCUSDT')
+            self.assertEqual(first['status'], 'ok')
+            self.assertEqual(run('record-signal', 'signal-1', 'entry')['status'], 'duplicate')
+            self.assertTrue(run('check-signal', 'signal-1', 'entry')['exists'])
+            order = run('create-order', '-100', 'fixture', 'BTCUSDT', 'BUY', '65000')
+            self.assertEqual(order['status'], 'ok')
+            order_id = str(order['order_id'])
+            self.assertEqual(run('update-order', order_id, 'OPEN')['status'], 'ok')
+            self.assertEqual(run('update-sl', order_id, '64000')['status'], 'ok')
+            self.assertEqual(run('add-briefing', '-100', 'fixture briefing')['status'], 'ok')
+            with sqlite3.connect(file) as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM signal_operations').fetchone()[0], 1)
+                self.assertEqual(db.execute('SELECT count(*) FROM active_orders').fetchone()[0], 1)
+                self.assertEqual(db.execute('SELECT count(*) FROM briefings').fetchone()[0], 1)
+                self.assertEqual(db.execute('SELECT count(*) FROM account_configs').fetchone()[0], 1)
+                self.assertEqual(db.execute('SELECT count(*) FROM channel_routing').fetchone()[0], 1)
+                self.assertEqual(db.execute('SELECT count(*) FROM symbol_risk_configs').fetchone()[0], 1)
 
 
 if __name__ == '__main__':

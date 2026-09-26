@@ -119,7 +119,7 @@ function ensureTradingTables() {
       require("./config-store").ensureConfigTables(db);
     }).immediate();
   } catch (err) {
-    console.error("[db] Failed to ensure trading tables: database_initialization_failed");
+    console.error("[db] Failed to ensure trading tables: database_initialization_failed: " + safeErrorMessage(err));
     throw new Error("database_initialization_failed");
   } finally {
     closeDb(db);

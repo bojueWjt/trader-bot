@@ -52,6 +52,9 @@ async function boot(options = {}) {
       }
     },
     async disconnect() {
+      if (options.disconnect) {
+        return options.disconnect(client);
+      }
       client.connected = false;
     },
     async destroy() {
@@ -454,6 +457,27 @@ test("explicit disconnect disables watchdog and ignores an outstanding failed pr
   await settle();
   await watcher.advance(2 * MINUTE);
   assert.deepEqual(watcher.exits, []);
+});
+
+test('disconnect and reconnect answer within five seconds even when Telegram stalls', async () => {
+  let connectCalls = 0;
+  const watcher = await boot({
+    disconnect: () => new Promise(() => {}),
+    connect: client => {
+      connectCalls += 1;
+      if (connectCalls > 1) {
+        return new Promise(() => {});
+      }
+      client.connected = true;
+    },
+  });
+  for (const route of ['POST /api/disconnect', 'POST /api/reconnect']) {
+    const result = await Promise.race([
+      watcher.request(route),
+      new Promise((resolve) => setTimeout(() => resolve({ statusCode:0 }), 1000)),
+    ]);
+    assert.equal(result.statusCode, 200, `${route} waited for Telegram`);
+  }
 });
 
 test("repeated API reconnects retire the old client and retain one poll timer", async () => {
