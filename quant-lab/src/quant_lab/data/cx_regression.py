@@ -14,6 +14,8 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
+import unicodedata
 
 from . import cx_batch as cx, cx_v2
 from .extract import canonical_symbol
@@ -120,11 +122,11 @@ def signature(field, value, *, predicted=False):
             return None
         if predicted:
             if value['kind'] == 'condition':
-                return ('condition', value.get('condition'), atom(value.get('price')))
+                return ('condition', condition_numbers(value.get('condition')))
             return atom(value.get('price'))
         if isinstance(value, dict):
             if set(value) == {'condition'}:
-                return ('condition', value['condition'], None)
+                return ('condition', condition_numbers(value['condition']))
             raise ValueError('stop_semantics_require_review')
         return decimal(value)
     if field == 'tps':
@@ -138,6 +140,23 @@ def signature(field, value, *, predicted=False):
             raise ValueError('tp_semantics_require_review')
         return sorted({('price', decimal(v)) for v in value})
     raise ValueError('unknown_field')
+
+
+def condition_numbers(text):
+    """A condition stop is judged by the levels it cites, not by exact wording or the model's extra price field."""
+    if not text:
+        return frozenset()
+    norm = unicodedata.normalize('NFKC', text)
+    return frozenset(str(Decimal(n.replace(',', '')).normalize()) for n in re.findall(r'\d[\d,]*(?:\.\d+)?', norm))
+
+
+def _merge_entries(actions):
+    """One idea split into several now-open actions for the same symbol (e.g. 10.8万 and 10.6万) is judged
+    on the union of its prices and whether any leg is at market."""
+    groups = {}
+    for a in actions:
+        groups.setdefault(symbol(a.get('symbol_raw')), []).append(entry_shape(a.get('entry'), predicted=True))
+    return [(frozenset().union(*(g[0] for g in shapes)), any(g[1] for g in shapes)) for shapes in groups.values()]
 
 
 def _leg_for(gold, name, identity):
@@ -177,7 +196,7 @@ def compare_field(field, gold, actions):
             explicit = gold.get('entry_market_leg')
             if isinstance(explicit, bool):
                 leg = explicit
-            got = [entry_shape(a.get(key), predicted=True) for a in actions]
+            got = _merge_entries(actions)
             gold.setdefault('_leg_seen', []).append(leg is not None)
             # A shared gold value applies to every action unless explicitly grouped.
             return all(g[0] == anchors and (leg is None or g[1] == leg) for g in got), None

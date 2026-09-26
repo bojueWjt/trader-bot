@@ -16,8 +16,10 @@ RULES = """你是交易消息抽取器，只返回 schema JSON，每个 key 恰�
 动作是否明确与参数是否齐全分开：明确动作必须保留，缺失字段 null/[]，field_issues 写字段与原因。
 actions 可以为空（确实无动作）；只有整条无法确定任何动作时才给唯一 op=undecidable。已有明确动作时，不用 undecidable 代替局部疑点。
 time_ref: now=本条新发出，past=回顾/转述此前订单，conditional=等待额外确认的设想。
-回复只有明确说「再开/重新入场」才算 now open；展示旧单、重复引用是 past；previous_text 仅用于辨别指向，绝不可作数字证据。
-「挂单 X」「X 附近入」是 now open；「如果到 X 再开」「若反应好我会考虑空」是 conditional。
+past 只用于叙述已经成交/已经持有/之前开过的单。本条（含回复、重发、「现在再喊一次」）给出当前可执行的入场（现价、挂单价、区间、「这里多一手」）就是 now open，即使同一计划以前发过；previous_text 仅用于辨别指向，绝不可作数字证据。
+只等价格到位的计划就是挂单：「挂单 X」「X 附近入」「回落到 X 做多」「到 X 附近空」「X 下方接」都是 now open，entry=limit X。conditional 只用于价格之外还要额外确认（收线/突破回踩确认、看反应、等消息落地）。
+宣布刚开的仓或叫人现在进（「刚开了」「卡了点多单」「这里布局」「上车」）且没写价格：entry.kind=market_ref，price=null。
+方向没写 long/short 时，买入/抄底/接多/现货买入就是 long，逢高空/卖出做空就是 short；确实无法判断才留 null。
 「现价 X」entry.kind=market_ref，price.value=X；没有数字的 CMP 不补数字。
 「CMP 和 X」「CMP 至 X」「现价到 X」「从当前价格 DCA 到 X」都是 ladder：两档分别 kind=market_ref 与 limit，未知 CMP price=null 并说明原因；分批边界绝不是现价。
 zone 只用于两端都有数字的区间（lo/hi 都非 null）；ladder 的 levels 是离散档，每档可带 fraction（比例以百分数表示，50 表示 50%）。
@@ -25,6 +27,7 @@ stop.kind=price 或 condition；条件止损保留完整 condition 文字和其�
 tps 每项 kind=price/percent；percent 是相对入场的百分数（5 表示 5%），不是收益杠杆倍数，禁止在抽取时换算成目标价。
 每个数字对象 {value,quote} 都必须引用当前 text 中逐字连续片段，并含完整数字及明确单位。
 value 为十进制字符串；显式 万/w=10000、k/K=1000，全角/千分位/数字中的空格可等值规范化；换算后严格相等。
+区间末尾的单位作用于两端：「7.28-7.32万」两端分别是 72800、73200（quote 用整个区间）；「5-10%」两端都是百分数。
 不能猜省略单位、传播相邻数字单位、修正疑似笔误或补小数点。11.97 没有明确单位就保留 11.97 并记录疑点。
 op: open/add/reduce/take_profit/stop_loss_hit/stop_move/close/cancel/result/analysis/chatter。
 普通教学、活动、交流是 chatter；具体行情/价位观察是 analysis；收益展示 result；触发止损 stop_loss_hit 与主动 close 分开。
@@ -68,7 +71,9 @@ def output_schema():
 # Preserve original offsets while normalizing only compatibility width and whitespace.
 # Spaces are allowed in grouped thousands and around decimal/unit separators, not
 # arbitrary concatenation of adjacent prices ("100 200" is a grouped 100200 token).
-NUMBER = re.compile(r"(?<![\w.,+\-])(?P<num>[+\-]?(?:\d{1,3}(?:(?:\s*,\s*| )\d{3})+|\d+)(?:\s*\.\s*\d+)?)(?:\s*(?P<unit>万|[wWkK]))?(?P<pct>\s*%)?(?![\w万]|[.,]\d)", re.ASCII)
+# A hyphen directly after a digit, letter or unit is a range separator ("527-540", "CMP-3290", "9万-10万"),
+# not a sign, so the right end must still tokenize.
+NUMBER = re.compile(r"(?:(?<![\w.,+\-万])|(?<=[\w万]-))(?P<num>[+\-]?(?:\d{1,3}(?:(?:\s*,\s*| )\d{3})+|\d+)(?:\s*\.\s*\d+)?)(?:\s*(?P<unit>万|[wWkK]))?(?P<pct>\s*%)?(?![\w万]|[.,]\d)", re.ASCII)
 
 
 def normalized(text):
@@ -80,13 +85,31 @@ def normalized(text):
     return "".join(chars), offsets
 
 
+RANGE_SEPARATOR = re.compile(r"\s*(?:-|~|—|–|至|到)\s*")
+
+
+def _scale(unit):
+    return Decimal(1000 if unit.lower() == "k" else 10000)
+
+
 def tokens(text):
     norm, offsets = normalized(text)
-    for match in NUMBER.finditer(norm):
+    matches = list(NUMBER.finditer(norm))
+    for index, match in enumerate(matches):
         value = Decimal(re.sub(r"[,\s]", "", match["num"]))
         if match["unit"]:
-            value *= Decimal(1000 if match["unit"].lower() == "k" else 10000)
-        yield value, offsets[match.start()], offsets[match.end() - 1] + 1, bool(match["pct"])
+            value *= _scale(match["unit"])
+        span = offsets[match.start()], offsets[match.end() - 1] + 1
+        yield value, *span, bool(match["pct"])
+        # "7.28-7.32万" / "5-10%": the trailing unit belongs to the whole range, so the bare left end
+        # also reads as 72800 / 5%. The literal reading above stays available; nothing is inferred
+        # without an explicit unit on the same range.
+        following = matches[index + 1] if index + 1 < len(matches) else None
+        if (following and not match["unit"] and not match["pct"] and (following["unit"] or following["pct"])
+                and RANGE_SEPARATOR.fullmatch(norm[match.end():following.start()])):
+            ranged = value * _scale(following["unit"]) if following["unit"] else value
+            # The span runs to the unit, so a quote of the bare left end cannot claim the scaled value.
+            yield ranged, span[0], offsets[following.end() - 1] + 1, bool(following["pct"])
 
 
 def exact_number(atom, text, *, percent=False):

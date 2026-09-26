@@ -138,3 +138,17 @@ def test_quoted_cmp_price_matches_gold_levels_through_the_leg_flag():
     assert regression.compare_field('entry', dict(gold), [both_limits]) == (False, None)
     assert regression.compare_field('entry', dict(entry=dict(kind='market_ref', lo='459', hi='459')),
                                     [action(entry=dict(kind='limit', price=number(459), lo=None, hi=None, levels=[]))]) == (False, None)
+
+
+def test_condition_stops_compare_cited_levels_and_split_entries_merge():
+    cond = action(stop=dict(kind='condition', price=number(6.36), condition='小幅跌破6.36一点。'))
+    assert regression.compare_field('stop', dict(stop=dict(condition='小幅跌破6.36一点')), [cond]) == (True, None)
+    assert regression.compare_field('stop', dict(stop=dict(condition='小幅跌破6.3一点')), [cond]) == (False, None)
+    a = action(entry=dict(kind='limit', price=number(108000), lo=None, hi=None, levels=[]))
+    b = action(entry=dict(kind='limit', price=number(106000), lo=None, hi=None, levels=[]))
+    gold = dict(entry=dict(levels=['108000', '106000']), entry_market_leg=False)
+    assert regression.compare_field('entry', dict(gold), [a, b]) == (True, None)
+    assert regression.compare_field('entry', dict(gold), [a]) == (False, None)
+    other = action(symbol_raw='ETH', entry=dict(kind='limit', price=number(106000), lo=None, hi=None, levels=[]))
+    # Different symbols never pool their prices.
+    assert regression.compare_field('entry', dict(gold), [a, other]) == (False, None)

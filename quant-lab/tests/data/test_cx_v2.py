@@ -275,6 +275,23 @@ def test_numberless_cmp_open_is_a_market_entry_not_a_missing_one(tmp_path):
 
 
 @pytest.mark.parametrize('raw,code', [('$ENA', 'ENA'), ('#UNI/USDT', 'UNI'), ('INJ/USDT', 'INJ'), ('near', 'NEAR'),
-                                      ('大饼', 'BTC'), ('BTCUSDT.P', 'BTC'), ('ＥＴＨ', 'ETH'), ('原油', 'CL'), (None, None)])
+                                      ('大饼', 'BTC'), ('BTCUSDT.P', 'BTC'), ('ＥＴＨ', 'ETH'), ('原油', 'CL'), ('比特幣', 'BTC'), (None, None)])
 def test_canonical_symbol(raw, code):
     assert extract.canonical_symbol(raw) == code
+
+
+@pytest.mark.parametrize('text,quote,value', [('止盈 527-540', '527-540', '540'), ('止盈 527-540', '540', '540'),
+                                             ('入场 CMP-3290', 'CMP-3290', '3290'), ('区间 9万-10万', '10万', '100000'),
+                                             ('入场 7.28-7.32万附近', '7.28-7.32万', '72800'), ('入场 7.28-7.32万附近', '7.28-7.32万', '73200'),
+                                             ('入场 7.28-7.32万附近', '7.28', '7.28'), ('区间 91-93k', '91-93k', '91000')])
+def test_range_ends_and_range_units_are_evidence(text, quote, value):
+    atom, span = v2.exact_number(dict(value=value, quote=quote), text)
+    assert atom['value'] == value and text[span['start']:span['end']].strip()
+
+
+@pytest.mark.parametrize('text,quote,value', [('入场 7.28-7.32万附近', '7.28', '72800'), ('入场 7.28-7.32万附近', '7.28-7.32', '72800'),
+                                             ('跌 -540', '-540', '540'), ('入场 7.28 和 7.32万', '7.28 和 7.32万', '72800'),
+                                             ('止盈 527-540', '527-540', '527540')])
+def test_range_unit_needs_the_unit_in_the_quote_and_a_real_range(text, quote, value):
+    with pytest.raises(ValueError):
+        v2.exact_number(dict(value=value, quote=quote), text)

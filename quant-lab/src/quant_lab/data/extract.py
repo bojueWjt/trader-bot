@@ -121,7 +121,7 @@ def find_numbers(text: str, lo: int = 0, hi: int | None = None) -> list[Num]:
 
 # ---------------------------------------------------------------- 词典
 SYMBOL_ALIASES: dict[str, str] = {
-    "比特币": "BTC", "大饼": "BTC", "饼": "BTC", "以太坊": "ETH", "以太": "ETH", "姨太": "ETH", "索拉": "SOL", "谷歌": "GOOGL",
+    "比特币": "BTC", "比特幣": "BTC", "大饼": "BTC", "大餅": "BTC", "饼": "BTC", "以太幣": "ETH", "以太坊": "ETH", "以太": "ETH", "姨太": "ETH", "索拉": "SOL", "谷歌": "GOOGL",
     "美光": "MU", "原油": "CL", "美油": "CL", "布伦特": "BZ", "黄金": "XAU", "白银": "XAG",
 }
 _QUOTE_SUFFIX_RE = re.compile(r"(?:[/\-_]?USDT(?:\.P)?|\.P|PERP)$")
