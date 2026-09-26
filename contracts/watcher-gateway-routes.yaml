@@ -1,0 +1,1103 @@
+# watcher 网关路由唯一真源（machine-readable single source of truth）
+#
+# 设计真相：docs/plans/2026-09-11-watcher-to-app-migration.md v0.6 §2.1–§2.3、§3
+# （含附录 E：v0.3 review P1-12..P1-19、P2-03）。本文件与计划冲突时以计划为准并召回 Architect；
+# 与 contracts/backend-api.md §9 冲突时：路由字段（method/path/identity/roles/query/body/response/phase/budget/write）
+# 以本文件为准，语义（错误码、状态机、事务顺序）以 backend-api.md §9 为准。
+# 生成物（网关路由表、watcher 身份路由表、Caddy 路径清单）只能由本文件生成，禁止手写第二份矩阵。
+# 校验规格见 contracts/backend-api.md §9.14。
+
+schema_version: watcher-gateway-routes.v1
+contract_version: WGW-1.0
+frozen_at: "2026-09-26"
+source_plan: "docs/plans/2026-09-11-watcher-to-app-migration.md@v0.6"
+
+# ---------------------------------------------------------------------------
+# 路径前缀
+# ---------------------------------------------------------------------------
+paths:
+  # app 请求 = trading.config.v1 的 baseUrl（已以 /m 结尾）+ outer_path；app 代码常量里不得出现 /m（§2.1 P1-18）
+  app_outer_prefix: /v1/watcher
+  # Caddy 外部路径 = caddy_external_prefix + outer_path；Caddy 只 strip 一次 /m，按本文件逐路径追加，禁止 /m/v1/* 通配
+  caddy_external_prefix: /m
+  # operator-query 访问 watcher 的固定上游（宿主 127.0.0.1:9090 → 容器 9100）；host 不可由请求改变，不跟随重定向
+  watcher_upstream_default: "http://127.0.0.1:9090"
+
+# ---------------------------------------------------------------------------
+# 角色（require_reader 只会返回这四个；read_api.py:104-109，security/session_auth.py:13）
+# ---------------------------------------------------------------------------
+roles:
+  all_readers: [system_observer, viewer, risk_admin, reviewer]
+  writer: [risk_admin]
+
+# ---------------------------------------------------------------------------
+# 三种服务端身份（watcher 只认这三种；每个请求在所有 handler 与静态文件之前校验）
+# ---------------------------------------------------------------------------
+identities:
+  gateway:
+    holder: operator-query watcher 网关
+    presented_as: "Authorization: Bearer <WATCHER_GATEWAY_TOKEN>"
+    watcher_env: [WATCHER_GATEWAY_TOKEN, WATCHER_GATEWAY_TOKEN_PREVIOUS]
+    requires_actor_headers: true
+    actor: "app:<role>"
+  snapshot:
+    holder: operator-query 快照 reader（独立 client 与槽）
+    presented_as: "Authorization: Bearer <WATCHER_SNAPSHOT_TOKEN>"
+    watcher_env: [WATCHER_SNAPSHOT_TOKEN, WATCHER_SNAPSHOT_TOKEN_PREVIOUS]
+    requires_actor_headers: false
+    actor: null
+  browser:
+    holder: Caddy（basicauth 通过后，先清除全部外来 X-Watcher-* 再注入）
+    presented_as: "X-Watcher-Proxy-Auth: <WATCHER_BROWSER_PROXY_TOKEN>"
+    watcher_env: [WATCHER_BROWSER_PROXY_TOKEN, WATCHER_BROWSER_PROXY_TOKEN_PREVIOUS]
+    requires_actor_headers: false
+    actor: browser
+
+# 网关注入、watcher 仅在 gateway 身份下接受的头（恰好各一条；缺或多 → 400 invalid_actor_headers）
+actor_headers:
+  actor: X-Watcher-Actor
+  actor_pattern: '^app:(system_observer|viewer|risk_admin|reviewer)$'
+  fingerprint: X-Watcher-Token-Fingerprint
+  fingerprint_pattern: '^[0-9a-f]{12}$'
+
+# ---------------------------------------------------------------------------
+# 秘密字段：gateway 行 body.deny 必须包含全部 secret_fields；gateway 行 allow/query 不得命中 secret_key_pattern；
+# gateway 响应递归删除命中 secret_key_pattern 的键（不是掩码，是删除）。
+# ---------------------------------------------------------------------------
+secret_fields:
+  - api_key
+  - api_secret
+  - apiKey
+  - apiSecret
+  - api_id
+  - api_hash
+  - apiId
+  - apiHash
+  - session
+  - sessionString
+  - password
+  - phoneNumber
+  - phone
+  - code
+  - token
+# safe-log.js:1 的 SENSITIVE_KEY_PATTERN 的超集（另含 api_id / phone）
+secret_key_pattern: '(?i)(api[_-]?key|api[_-]?secret|apisecret|api[_-]?hash|api[_-]?id|token|session|password|phone)'
+
+# ---------------------------------------------------------------------------
+# 预算（三份互不挤占；每 operator-query worker 计；舰队在途上限 = (config+media) × worker 数）
+# ---------------------------------------------------------------------------
+budgets:
+  config:
+    slots_per_worker: 4
+    env: WATCHER_GATEWAY_CONFIG_SLOTS
+    timeouts_s: {connect: 1.0, read: 6.0, write: 2.0, pool: 0.5, total: 8.0}
+    max_request_body_bytes: 65536
+    max_response_body_bytes: 8388608
+  media:
+    slots_per_worker: 4
+    env: WATCHER_GATEWAY_MEDIA_SLOTS
+    timeouts_s: {connect: 1.0, read: 10.0, write: 10.0, pool: 0.5, total: 60.0}
+    max_file_bytes: 20971520
+    max_chunk_bytes: 65536
+  snapshot:
+    slots_per_worker: 1
+    env: null
+    timeouts_s: {connect: 1.0, read: 2.0, write: 1.0, pool: 0.5, total: 2.0}
+    max_response_body_bytes: 4194304
+
+# ---------------------------------------------------------------------------
+# 路径参数（gateway 按 raw_path 匹配；raw_path 含 '%'、'//'、尾斜杠、大小写不符 → 404 route_not_found）
+# ---------------------------------------------------------------------------
+path_params:
+  account_id:
+    gateway_pattern: '^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$'
+    browser_pattern: '^[^\u0000-\u001F\u007F]{1,128}$'   # trading-api.js:12 CREDENTIAL_ACCOUNT_ID_PATTERN（Express 解码一次）
+  channel_id:
+    gateway_pattern: '^-?[0-9]{1,24}$'                     # telegram-utils.js:54-70 chatIdFromPeerId
+    browser_pattern: '^-?[0-9]{1,24}$'
+  symbol:
+    gateway_pattern: '^[A-Z0-9]{2,32}$'
+    browser_pattern: '^[A-Za-z0-9]{1,32}$'
+  filename:
+    gateway_pattern: '^[0-9]{10,16}-[0-9]{1,20}\.(jpg|jpeg|png|gif|webp)$'   # server.js:249-251 命名；仅图片
+    browser_pattern: '^[0-9]{10,16}-[0-9]{1,20}\.[A-Za-z0-9.+-]{1,127}$'
+  alert_id:
+    gateway_pattern: '^[1-9][0-9]{0,18}$'
+    browser_pattern: '^[1-9][0-9]{0,18}$'
+  order_id:
+    gateway_pattern: null                                  # 不对 gateway 开放
+    browser_pattern: '^[1-9][0-9]{0,18}$'
+
+# ---------------------------------------------------------------------------
+# query 参数定义（未列出的键 → 400 invalid_query；同键重复 → 400 invalid_query）
+# ---------------------------------------------------------------------------
+query_params:
+  channel: {type: string, pattern: '^-?[0-9]{1,24}$'}
+  hours: {type: integer, min: 1, max: 168}          # 缺省 24（trading-api.js:888、:906 现状）
+  limit: {type: integer, min: 1, max: 500}          # 缺省：trading/messages 与 briefings 为 500；/api/messages 为 100（server.js:836）
+  before_created_at: {type: string, pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$', requires: before_id}
+  before_id: {type: integer, min: 1, requires: before_created_at}
+  status: {type: string, pattern: '^[A-Z_]{1,32}$'}
+  triggered: {type: string, enum: ["true", "false"]}
+  source: {type: string, enum: [watcher, v3]}
+  account_id: {type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'}
+  environment: {type: string, enum: [mainnet, testnet]}
+  position_ref: {type: string, max_length: 128}
+
+# ---------------------------------------------------------------------------
+# body 字段定义（gateway 做结构/类型校验；业务规则在 watcher。gateway 数字必须是 JSON number，布尔必须是 JSON boolean）
+# ---------------------------------------------------------------------------
+body_fields:
+  client_ref: {type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$'}
+  expected_revision: {type: integer, min: 0}
+  is_enabled: {type: boolean}
+  account_type: {type: string, enum: [main, subaccount]}
+  parent_account_id: {type: string, max_length: 128}
+  execution_account_id: {type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'}   # trading-api.js:13
+  default_risk_ratio: {type: number, exclusive_min: 0, max: 0.1}
+  risk_capital_addon: {type: number, min: 0}
+  channel_id: {type: string, pattern: '^-?[0-9]{1,24}$'}
+  target_account_id: {type: string, min_length: 1, max_length: 128}
+  channel_name: {type: string, max_length: 128}
+  symbol: {type: string, pattern: '^[A-Z0-9]{2,32}$'}
+  risk_ratio: {type: number, exclusive_min: 0, max: 0.1}
+  groups: {type: array, items: channel_id, max_items: 500, unique: true}
+  source: {type: string, enum: [watcher, v3], gateway_enum: [v3]}
+  account_id: {type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'}
+  # v3：<symbol>:<position_side>:<account_id>；watcher：站点 active_orders.id
+  position_ref: {type: string, pattern: '^([A-Z0-9]{2,32}:(LONG|SHORT|BOTH):[A-Za-z0-9][A-Za-z0-9._-]{0,63}|[1-9][0-9]{0,18})$', gateway_pattern: '^[A-Z0-9]{2,32}:(LONG|SHORT|BOTH):[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'}
+  environment: {type: string, enum: [mainnet, testnet]}
+  target_price: {type: number, exclusive_min: 0}
+  direction: {type: string, enum: [above, below]}
+  note: {type: string, max_length: 200}
+  # ---- 仅 browser 行出现的字段（沿用站点现有宽松归一化：trading-api.js:1010-1099）----
+  account_id_credential: {type: string, pattern: '^[^\u0000-\u001F\u007F]{1,128}$', browser_only: true}
+  api_key: {type: string, secret: true, browser_only: true}
+  api_secret: {type: string, secret: true, browser_only: true}
+  is_testnet: {type: boolean_like, browser_only: true}
+  risk_capital_multiplier: {type: number_like, browser_only: true}
+  order_id: {type: integer_like, browser_only: true}
+  alert_type: {type: string, browser_only: true}
+  quantity: {type: number_like, browser_only: true}
+  apiId: {type: string_or_integer, secret: true, browser_only: true}
+  apiHash: {type: string, secret: true, browser_only: true}
+  phoneNumber: {type: string, secret: true, browser_only: true}
+  code: {type: string, secret: true, browser_only: true}
+  password: {type: string, secret: true, browser_only: true}
+
+# ---------------------------------------------------------------------------
+# 响应头白名单（gateway 只回传这些；其余一律丢弃，并移除 Connection 声明的逐跳头）
+# ---------------------------------------------------------------------------
+response_headers:
+  json: [Content-Type, Cache-Control]
+  json_config_read: [Content-Type, Cache-Control, X-Config-Revision]
+  # static 只用于 browser 行（无网关过滤，watcher 自身输出，列出以便生成物完整）
+  static: [Content-Type, Content-Length, Cache-Control, ETag, Last-Modified]
+  media: [Content-Range, Accept-Ranges, Content-Length, Content-Type, ETag, Last-Modified, Cache-Control]
+media_request_headers: [Range, If-Range]
+
+# ---------------------------------------------------------------------------
+# 全局不变式（校验脚本逐条检查，见 backend-api.md §9.14）
+# ---------------------------------------------------------------------------
+invariants:
+  - "gateway 写行（method ∈ POST/PUT/DELETE）roles 恰为 [risk_admin]；gateway 读行 roles 恰为四角色"
+  - "gateway 行 body.deny ⊇ secret_fields；body.allow 与 query 不命中 secret_key_pattern"
+  - "snapshot 身份只有 GET /api/trading/config-snapshot 一行；该行不出现在 gateway 身份（不向 app 暴露 snapshot）"
+  - "HEAD 只在显式列出的行允许（仅媒体）；其余已注册路径的 HEAD/OPTIONS → 405"
+  - "所有 gateway 写行响应带 revision 与 replay"
+  - "never_allowed 与 gateway_excluded 中的 inner_path 不得被任何 gateway 行映射"
+
+# ---------------------------------------------------------------------------
+# 永不经网关放行（计划 §3 末行，凭据面）
+# ---------------------------------------------------------------------------
+never_allowed:
+  - {inner_path: /api/config, methods: [POST], reason: "Telegram api id/hash（凭据面）"}
+  - {inner_path: "/api/login/*", methods: [GET, POST], reason: "Telegram 登录/2FA（凭据面，D4）"}
+  - {inner_path: "/api/login/qr/*", methods: [GET, POST], reason: "Telegram 扫码登录（凭据面，D4）"}
+  - {inner_path: /, methods: [GET, HEAD], reason: "站点静态入口"}
+  - {inner_path: /index.html, methods: [GET, HEAD], reason: "站点静态入口"}
+  - {inner_path: /healthz, methods: [GET], reason: "容器健康探针，不经网关"}
+
+# 计划明确不对 gateway 开放、但对其他身份存在的端点
+gateway_excluded:
+  - {inner_path: /api/trading/accounts, methods: [POST], reason: "D7：账号创建含 Binance 密钥，留在站点"}
+  - {inner_path: /api/trading/config-snapshot, methods: [GET], reason: "§3 P2：不向 app 暴露 snapshot"}
+  - {inner_path: "/api/price-alerts/order/{order_id}", methods: [DELETE], reason: "§3 P3：待站点订单身份改造后放行"}
+  - {inner_path: /api/messages, methods: [GET], reason: "内存 ring；app 只用 DB 读模型 /api/trading/messages（§5.1）"}
+
+# ---------------------------------------------------------------------------
+# 路由表
+#   write: null 表示只读。写行字段：
+#     operation        审计 operation 名（config_audit.operation）
+#     conditional      true = 必须带 expected_revision，不匹配 409 revision_conflict
+#     bumps_revision   true = 与业务写同一事务 config_revision+1
+#     idempotency      transactional = 查重/校验/业务写/revision/审计同一 SQLite 事务；
+#                      reentrant    = 非 SQLite 副作用（JSON 文件、Telegram 连接），可重入，成功以回读状态为准
+#   body.field_overrides（可选）：本行某字段改用 body_fields 中另一个定义（仅 br.accounts.post 使用）
+#   roles / budget：只对 gateway 行有意义；snapshot 与 browser 行为 null
+#   browser 凭据面写行（/api/config、/api/login/*）write 为 null：不进 config_audit、不带 client_ref，站点登录流程不变
+# ---------------------------------------------------------------------------
+routes:
+
+  # ========================= gateway：P0 =========================
+  - id: gw.status.get
+    phase: P0
+    identity: gateway
+    method: GET
+    outer_path: /v1/watcher/status
+    inner_path: /api/status
+    roles: [system_observer, viewer, risk_admin, reviewer]
+    query: []
+    body: {allow: [], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: config
+    write: null
+
+  # ========================= gateway：P1 =========================
+  - id: gw.trading_messages.get
+    phase: P1
+    identity: gateway
+    method: GET
+    outer_path: /v1/watcher/trading/messages
+    inner_path: /api/trading/messages
+    roles: [system_observer, viewer, risk_admin, reviewer]
+    query: [channel, hours, limit, before_created_at, before_id]
+    body: {allow: [], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: config
+    write: null
+
+  - id: gw.briefings.get
+    phase: P1
+    identity: gateway
+    method: GET
+    outer_path: /v1/watcher/trading/briefings
+    inner_path: /api/trading/briefings
+    roles: [system_observer, viewer, risk_admin, reviewer]
+    query: [hours, limit, before_created_at, before_id]
+    body: {allow: [], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: config
+    write: null
+
+  - id: gw.media.get
+    phase: P1
+    identity: gateway
+    method: GET
+    outer_path: /v1/watcher/media/{filename}
+    inner_path: /media/{filename}
+    roles: [system_observer, viewer, risk_admin, reviewer]
+    query: []
+    body: {allow: [], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: []}
+    response: {omit: [], mask: [], headers: media}
+    budget: media
+    write: null
+
+  - id: gw.media.head
+    phase: P1
+    identity: gateway
+    method: HEAD
+    outer_path: /v1/watcher/media/{filename}
+    inner_path: /media/{filename}
+    roles: [system_observer, viewer, risk_admin, reviewer]
+    query: []
+    body: {allow: [], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: []}
+    response: {omit: [], mask: [], headers: media}
+    budget: media
+    write: null
+
+  - id: gw.disconnect.post
+    phase: P1
+    identity: gateway
+    method: POST
+    outer_path: /v1/watcher/disconnect
+    inner_path: /api/disconnect
+    roles: [risk_admin]
+    query: []
+    body: {allow: [client_ref], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: [client_ref]}
+    response: {omit: [], mask: [], headers: json}
+    budget: config
+    write: {operation: telegram.disconnect, conditional: false, bumps_revision: false, idempotency: reentrant}
+
+  - id: gw.reconnect.post
+    phase: P1
+    identity: gateway
+    method: POST
+    outer_path: /v1/watcher/reconnect
+    inner_path: /api/reconnect
+    roles: [risk_admin]
+    query: []
+    body: {allow: [client_ref], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: [client_ref]}
+    response: {omit: [], mask: [], headers: json}
+    budget: config
+    write: {operation: telegram.reconnect, conditional: false, bumps_revision: false, idempotency: reentrant}
+
+  - id: gw.orders.get
+    phase: P1
+    identity: gateway
+    method: GET
+    outer_path: /v1/watcher/trading/orders
+    inner_path: /api/trading/orders
+    roles: [system_observer, viewer, risk_admin, reviewer]
+    query: [status, channel]
+    body: {allow: [], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: config
+    write: null
+
+  - id: gw.orders_active.get
+    phase: P1
+    identity: gateway
+    method: GET
+    outer_path: /v1/watcher/trading/orders/active
+    inner_path: /api/trading/orders/active
+    roles: [system_observer, viewer, risk_admin, reviewer]
+    query: []
+    body: {allow: [], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: config
+    write: null
+
+  # ========================= gateway：P2 =========================
+  - id: gw.dialogs.get
+    phase: P2
+    identity: gateway
+    method: GET
+    outer_path: /v1/watcher/dialogs
+    inner_path: /api/dialogs
+    roles: [system_observer, viewer, risk_admin, reviewer]
+    query: []
+    body: {allow: [], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: config
+    write: null
+
+  - id: gw.groups.post
+    phase: P2
+    identity: gateway
+    method: POST
+    outer_path: /v1/watcher/groups
+    inner_path: /api/groups
+    roles: [risk_admin]
+    query: []
+    body: {allow: [groups, client_ref], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: [groups, client_ref]}
+    response: {omit: [], mask: [], headers: json}
+    budget: config
+    write: {operation: groups.save, conditional: false, bumps_revision: false, idempotency: reentrant}
+
+  - id: gw.accounts.get
+    phase: P2
+    identity: gateway
+    method: GET
+    outer_path: /v1/watcher/trading/accounts
+    inner_path: /api/trading/accounts
+    roles: [system_observer, viewer, risk_admin, reviewer]
+    query: []
+    body: {allow: [], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: []}
+    response: {omit: [api_key, api_secret], mask: [], headers: json_config_read}
+    budget: config
+    write: null
+
+  - id: gw.account.put
+    phase: P2
+    identity: gateway
+    method: PUT
+    outer_path: /v1/watcher/trading/accounts/{account_id}
+    inner_path: /api/trading/accounts/{account_id}
+    roles: [risk_admin]
+    query: []
+    body:
+      allow: [is_enabled, account_type, parent_account_id, execution_account_id, default_risk_ratio, risk_capital_addon, expected_revision, client_ref]
+      deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token, account_id, is_testnet, risk_capital_multiplier]
+      required: [expected_revision, client_ref]
+    response: {omit: [api_key, api_secret], mask: [], headers: json}
+    budget: config
+    write: {operation: account.update, conditional: true, bumps_revision: true, idempotency: transactional}
+
+  - id: gw.account.delete
+    phase: P2
+    identity: gateway
+    method: DELETE
+    outer_path: /v1/watcher/trading/accounts/{account_id}
+    inner_path: /api/trading/accounts/{account_id}
+    roles: [risk_admin]
+    query: []
+    body: {allow: [expected_revision, client_ref], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: [expected_revision, client_ref]}
+    response: {omit: [api_key, api_secret], mask: [], headers: json}
+    budget: config
+    write: {operation: account.delete, conditional: true, bumps_revision: true, idempotency: transactional}
+
+  - id: gw.channels.get
+    phase: P2
+    identity: gateway
+    method: GET
+    outer_path: /v1/watcher/trading/channels
+    inner_path: /api/trading/channels
+    roles: [system_observer, viewer, risk_admin, reviewer]
+    query: []
+    body: {allow: [], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: []}
+    response: {omit: [], mask: [], headers: json_config_read}
+    budget: config
+    write: null
+
+  - id: gw.channels.post
+    phase: P2
+    identity: gateway
+    method: POST
+    outer_path: /v1/watcher/trading/channels
+    inner_path: /api/trading/channels
+    roles: [risk_admin]
+    query: []
+    body:
+      allow: [channel_id, target_account_id, channel_name, expected_revision, client_ref]
+      deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token]
+      required: [channel_id, target_account_id, expected_revision, client_ref]
+    response: {omit: [], mask: [], headers: json}
+    budget: config
+    write: {operation: channel.upsert, conditional: true, bumps_revision: true, idempotency: transactional}
+
+  - id: gw.channel.delete
+    phase: P2
+    identity: gateway
+    method: DELETE
+    outer_path: /v1/watcher/trading/channels/{channel_id}
+    inner_path: /api/trading/channels/{channel_id}
+    roles: [risk_admin]
+    query: []
+    body: {allow: [expected_revision, client_ref], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: [expected_revision, client_ref]}
+    response: {omit: [], mask: [], headers: json}
+    budget: config
+    write: {operation: channel.delete, conditional: true, bumps_revision: true, idempotency: transactional}
+
+  - id: gw.risks.get
+    phase: P2
+    identity: gateway
+    method: GET
+    outer_path: /v1/watcher/trading/risks
+    inner_path: /api/trading/risks
+    roles: [system_observer, viewer, risk_admin, reviewer]
+    query: []
+    body: {allow: [], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: []}
+    response: {omit: [], mask: [], headers: json_config_read}
+    budget: config
+    write: null
+
+  - id: gw.risks.post
+    phase: P2
+    identity: gateway
+    method: POST
+    outer_path: /v1/watcher/trading/risks
+    inner_path: /api/trading/risks
+    roles: [risk_admin]
+    query: []
+    body:
+      allow: [symbol, risk_ratio, expected_revision, client_ref]
+      deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token]
+      required: [symbol, risk_ratio, expected_revision, client_ref]
+    response: {omit: [], mask: [], headers: json}
+    budget: config
+    write: {operation: risk.upsert, conditional: true, bumps_revision: true, idempotency: transactional}
+
+  - id: gw.risk.delete
+    phase: P2
+    identity: gateway
+    method: DELETE
+    outer_path: /v1/watcher/trading/risks/{symbol}
+    inner_path: /api/trading/risks/{symbol}
+    roles: [risk_admin]
+    query: []
+    body: {allow: [expected_revision, client_ref], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: [expected_revision, client_ref]}
+    response: {omit: [], mask: [], headers: json}
+    budget: config
+    write: {operation: risk.delete, conditional: true, bumps_revision: true, idempotency: transactional}
+
+  # ========================= gateway：P3（D8：只记录与展示触发）=========================
+  - id: gw.price_alerts.get
+    phase: P3
+    identity: gateway
+    method: GET
+    outer_path: /v1/watcher/price-alerts
+    inner_path: /api/price-alerts
+    roles: [system_observer, viewer, risk_admin, reviewer]
+    query: [source, account_id, environment, position_ref, triggered]
+    body: {allow: [], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: config
+    write: null
+
+  - id: gw.price_alerts.post
+    phase: P3
+    identity: gateway
+    method: POST
+    outer_path: /v1/watcher/price-alerts
+    inner_path: /api/price-alerts
+    roles: [risk_admin]
+    query: []
+    body:
+      allow: [source, account_id, position_ref, environment, symbol, target_price, direction, note, client_ref]
+      deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token, order_id, alert_type, quantity]
+      required: [source, account_id, position_ref, environment, symbol, target_price, direction, client_ref]
+    response: {omit: [], mask: [], headers: json}
+    budget: config
+    write: {operation: price_alert.create, conditional: false, bumps_revision: false, idempotency: transactional}
+
+  - id: gw.price_alert.delete
+    phase: P3
+    identity: gateway
+    method: DELETE
+    outer_path: /v1/watcher/price-alerts/{alert_id}
+    inner_path: /api/price-alerts/{alert_id}
+    roles: [risk_admin]
+    query: []
+    body: {allow: [client_ref], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: [client_ref]}
+    response: {omit: [], mask: [], headers: json}
+    budget: config
+    write: {operation: price_alert.delete, conditional: false, bumps_revision: false, idempotency: transactional}
+
+  - id: gw.price_monitor_status.get
+    phase: P3
+    identity: gateway
+    method: GET
+    outer_path: /v1/watcher/price-monitor/status
+    inner_path: /api/price-monitor/status
+    roles: [system_observer, viewer, risk_admin, reviewer]
+    query: []
+    body: {allow: [], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: config
+    write: null
+
+  # ========================= snapshot（内网，不经网关，app 不可达）=========================
+  - id: snap.config_snapshot.get
+    phase: P0
+    identity: snapshot
+    method: GET
+    outer_path: null
+    inner_path: /api/trading/config-snapshot
+    roles: null
+    query: []
+    body: {allow: [], deny: [], required: []}
+    response:
+      omit: []
+      mask: []
+      headers: json
+      # 白名单构造：只输出下列字段（backend-api.md §9.10），不是"全列减去黑名单"
+      fields:
+        envelope: [schema_version, revision, content_sha256, generated_at, accounts, channels, risks]
+        accounts: [account_id, kind, parent_account_id, execution_account_id, enabled, risk_capital_addon, default_risk]
+        channels: [channel_id, target_account_id]
+        risks: [symbol, risk_ratio]
+    budget: snapshot
+    write: null
+
+  # ========================= browser（Caddy basicauth + 代理凭证；保留站点现有能力）=========================
+  # outer_path 为 null：浏览器外部路径由现行 Caddy @watcher matcher 决定（O-0 现场核对），不由本文件生成。
+  - id: br.healthz.get
+    phase: P0
+    identity: browser
+    method: GET
+    outer_path: null
+    inner_path: /healthz
+    roles: null
+    query: []
+    body: {allow: [], deny: [], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: null
+
+  - id: br.static_root.get
+    phase: P0
+    identity: browser
+    method: GET
+    outer_path: null
+    inner_path: /
+    roles: null
+    query: []
+    body: {allow: [], deny: [], required: []}
+    response: {omit: [], mask: [], headers: static}
+    budget: null
+    write: null
+
+  - id: br.static_index.get
+    phase: P0
+    identity: browser
+    method: GET
+    outer_path: null
+    inner_path: /index.html
+    roles: null
+    query: []
+    body: {allow: [], deny: [], required: []}
+    response: {omit: [], mask: [], headers: static}
+    budget: null
+    write: null
+
+  - id: br.status.get
+    phase: P0
+    identity: browser
+    method: GET
+    outer_path: null
+    inner_path: /api/status
+    roles: null
+    query: []
+    body: {allow: [], deny: [], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: null
+
+  - id: br.config.post
+    phase: P0
+    identity: browser
+    method: POST
+    outer_path: null
+    inner_path: /api/config
+    roles: null
+    query: []
+    body: {allow: [apiId, apiHash], deny: [session, sessionString], required: [apiId, apiHash]}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: null
+
+  - id: br.login_start.post
+    phase: P0
+    identity: browser
+    method: POST
+    outer_path: null
+    inner_path: /api/login/start
+    roles: null
+    query: []
+    body: {allow: [phoneNumber], deny: [session, sessionString], required: [phoneNumber]}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: null
+
+  - id: br.login_code.post
+    phase: P0
+    identity: browser
+    method: POST
+    outer_path: null
+    inner_path: /api/login/code
+    roles: null
+    query: []
+    body: {allow: [code], deny: [session, sessionString], required: [code]}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: null
+
+  - id: br.login_password.post
+    phase: P0
+    identity: browser
+    method: POST
+    outer_path: null
+    inner_path: /api/login/password
+    roles: null
+    query: []
+    body: {allow: [password], deny: [session, sessionString], required: [password]}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: null
+
+  - id: br.login_status.get
+    phase: P0
+    identity: browser
+    method: GET
+    outer_path: null
+    inner_path: /api/login/status
+    roles: null
+    query: []
+    body: {allow: [], deny: [], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: null
+
+  - id: br.login_qr_start.post
+    phase: P0
+    identity: browser
+    method: POST
+    outer_path: null
+    inner_path: /api/login/qr/start
+    roles: null
+    query: []
+    body: {allow: [], deny: [session, sessionString], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: null
+
+  - id: br.login_qr_status.get
+    phase: P0
+    identity: browser
+    method: GET
+    outer_path: null
+    inner_path: /api/login/qr/status
+    roles: null
+    query: []
+    body: {allow: [], deny: [], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: null
+
+  - id: br.login_qr_password.post
+    phase: P0
+    identity: browser
+    method: POST
+    outer_path: null
+    inner_path: /api/login/qr/password
+    roles: null
+    query: []
+    body: {allow: [password], deny: [session, sessionString], required: [password]}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: null
+
+  - id: br.groups.post
+    phase: P0
+    identity: browser
+    method: POST
+    outer_path: null
+    inner_path: /api/groups
+    roles: null
+    query: []
+    body: {allow: [groups, client_ref], deny: [session, sessionString], required: [groups, client_ref]}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: {operation: groups.save, conditional: false, bumps_revision: false, idempotency: reentrant}
+
+  - id: br.dialogs.get
+    phase: P0
+    identity: browser
+    method: GET
+    outer_path: null
+    inner_path: /api/dialogs
+    roles: null
+    query: []
+    body: {allow: [], deny: [], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: null
+
+  - id: br.messages_ring.get
+    phase: P0
+    identity: browser
+    method: GET
+    outer_path: null
+    inner_path: /api/messages
+    roles: null
+    query: [limit]
+    body: {allow: [], deny: [], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: null
+
+  - id: br.disconnect.post
+    phase: P0
+    identity: browser
+    method: POST
+    outer_path: null
+    inner_path: /api/disconnect
+    roles: null
+    query: []
+    body: {allow: [client_ref], deny: [session, sessionString], required: [client_ref]}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: {operation: telegram.disconnect, conditional: false, bumps_revision: false, idempotency: reentrant}
+
+  - id: br.reconnect.post
+    phase: P0
+    identity: browser
+    method: POST
+    outer_path: null
+    inner_path: /api/reconnect
+    roles: null
+    query: []
+    body: {allow: [client_ref], deny: [session, sessionString], required: [client_ref]}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: {operation: telegram.reconnect, conditional: false, bumps_revision: false, idempotency: reentrant}
+
+  - id: br.media.get
+    phase: P0
+    identity: browser
+    method: GET
+    outer_path: null
+    inner_path: /media/{filename}
+    roles: null
+    query: []
+    body: {allow: [], deny: [], required: []}
+    response: {omit: [], mask: [], headers: media}
+    budget: null
+    write: null
+
+  - id: br.media.head
+    phase: P0
+    identity: browser
+    method: HEAD
+    outer_path: null
+    inner_path: /media/{filename}
+    roles: null
+    query: []
+    body: {allow: [], deny: [], required: []}
+    response: {omit: [], mask: [], headers: media}
+    budget: null
+    write: null
+
+  - id: br.accounts.get
+    phase: P0
+    identity: browser
+    method: GET
+    outer_path: null
+    inner_path: /api/trading/accounts
+    roles: null
+    query: []
+    body: {allow: [], deny: [], required: []}
+    response: {omit: [], mask: [api_key, api_secret], headers: json_config_read}
+    budget: null
+    write: null
+
+  - id: br.accounts.post
+    phase: P0
+    identity: browser
+    method: POST
+    outer_path: null
+    inner_path: /api/trading/accounts
+    roles: null
+    query: []
+    body:
+      allow: [account_id, api_key, api_secret, account_type, parent_account_id, execution_account_id, is_testnet, default_risk_ratio, risk_capital_multiplier, risk_capital_addon, is_enabled, expected_revision, client_ref]
+      deny: [session, sessionString]
+      required: [account_id, api_key, api_secret, risk_capital_addon, expected_revision, client_ref]
+      field_overrides: {account_id: account_id_credential}
+    response: {omit: [], mask: [api_key, api_secret], headers: json}
+    budget: null
+    write: {operation: account.create, conditional: true, bumps_revision: true, idempotency: transactional}
+
+  - id: br.account.put
+    phase: P0
+    identity: browser
+    method: PUT
+    outer_path: null
+    inner_path: /api/trading/accounts/{account_id}
+    roles: null
+    query: []
+    body:
+      allow: [api_key, api_secret, account_type, parent_account_id, execution_account_id, is_testnet, default_risk_ratio, risk_capital_multiplier, risk_capital_addon, is_enabled, expected_revision, client_ref]
+      deny: [session, sessionString, account_id]
+      required: [expected_revision, client_ref]
+    response: {omit: [], mask: [api_key, api_secret], headers: json}
+    budget: null
+    write: {operation: account.update, conditional: true, bumps_revision: true, idempotency: transactional}
+
+  - id: br.account.delete
+    phase: P0
+    identity: browser
+    method: DELETE
+    outer_path: null
+    inner_path: /api/trading/accounts/{account_id}
+    roles: null
+    query: []
+    body: {allow: [expected_revision, client_ref], deny: [session, sessionString], required: [expected_revision, client_ref]}
+    response: {omit: [], mask: [api_key, api_secret], headers: json}
+    budget: null
+    write: {operation: account.delete, conditional: true, bumps_revision: true, idempotency: transactional}
+
+  - id: br.channels.get
+    phase: P0
+    identity: browser
+    method: GET
+    outer_path: null
+    inner_path: /api/trading/channels
+    roles: null
+    query: []
+    body: {allow: [], deny: [], required: []}
+    response: {omit: [], mask: [], headers: json_config_read}
+    budget: null
+    write: null
+
+  - id: br.channels.post
+    phase: P0
+    identity: browser
+    method: POST
+    outer_path: null
+    inner_path: /api/trading/channels
+    roles: null
+    query: []
+    body:
+      allow: [channel_id, target_account_id, channel_name, expected_revision, client_ref]
+      deny: [session, sessionString]
+      required: [channel_id, target_account_id, expected_revision, client_ref]
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: {operation: channel.upsert, conditional: true, bumps_revision: true, idempotency: transactional}
+
+  - id: br.channel.delete
+    phase: P0
+    identity: browser
+    method: DELETE
+    outer_path: null
+    inner_path: /api/trading/channels/{channel_id}
+    roles: null
+    query: []
+    body: {allow: [expected_revision, client_ref], deny: [session, sessionString], required: [expected_revision, client_ref]}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: {operation: channel.delete, conditional: true, bumps_revision: true, idempotency: transactional}
+
+  - id: br.risks.get
+    phase: P0
+    identity: browser
+    method: GET
+    outer_path: null
+    inner_path: /api/trading/risks
+    roles: null
+    query: []
+    body: {allow: [], deny: [], required: []}
+    response: {omit: [], mask: [], headers: json_config_read}
+    budget: null
+    write: null
+
+  - id: br.risks.post
+    phase: P0
+    identity: browser
+    method: POST
+    outer_path: null
+    inner_path: /api/trading/risks
+    roles: null
+    query: []
+    body:
+      allow: [symbol, risk_ratio, expected_revision, client_ref]
+      deny: [session, sessionString]
+      required: [symbol, risk_ratio, expected_revision, client_ref]
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: {operation: risk.upsert, conditional: true, bumps_revision: true, idempotency: transactional}
+
+  - id: br.risk.delete
+    phase: P0
+    identity: browser
+    method: DELETE
+    outer_path: null
+    inner_path: /api/trading/risks/{symbol}
+    roles: null
+    query: []
+    body: {allow: [expected_revision, client_ref], deny: [session, sessionString], required: [expected_revision, client_ref]}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: {operation: risk.delete, conditional: true, bumps_revision: true, idempotency: transactional}
+
+  - id: br.orders.get
+    phase: P0
+    identity: browser
+    method: GET
+    outer_path: null
+    inner_path: /api/trading/orders
+    roles: null
+    query: [status, channel]
+    body: {allow: [], deny: [], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: null
+
+  - id: br.orders_active.get
+    phase: P0
+    identity: browser
+    method: GET
+    outer_path: null
+    inner_path: /api/trading/orders/active
+    roles: null
+    query: []
+    body: {allow: [], deny: [], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: null
+
+  - id: br.briefings.get
+    phase: P0
+    identity: browser
+    method: GET
+    outer_path: null
+    inner_path: /api/trading/briefings
+    roles: null
+    query: [hours, limit, before_created_at, before_id]
+    body: {allow: [], deny: [], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: null
+
+  - id: br.trading_messages.get
+    phase: P0
+    identity: browser
+    method: GET
+    outer_path: null
+    inner_path: /api/trading/messages
+    roles: null
+    query: [channel, hours, limit, before_created_at, before_id]
+    body: {allow: [], deny: [], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: null
+
+  - id: br.price_monitor_status.get
+    phase: P0
+    identity: browser
+    method: GET
+    outer_path: null
+    inner_path: /api/price-monitor/status
+    roles: null
+    query: []
+    body: {allow: [], deny: [], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: null
+
+  - id: br.price_alerts.get
+    phase: P0
+    identity: browser
+    method: GET
+    outer_path: null
+    inner_path: /api/price-alerts
+    roles: null
+    query: [source, account_id, environment, position_ref, triggered]
+    body: {allow: [], deny: [], required: []}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: null
+
+  - id: br.price_alerts.post
+    phase: P0
+    identity: browser
+    method: POST
+    outer_path: null
+    inner_path: /api/price-alerts
+    roles: null
+    query: []
+    body:
+      allow: [order_id, source, account_id, position_ref, environment, symbol, target_price, direction, alert_type, quantity, note, client_ref]
+      deny: [session, sessionString]
+      required: [symbol, target_price, direction, client_ref]
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: {operation: price_alert.create, conditional: false, bumps_revision: false, idempotency: transactional}
+
+  - id: br.price_alert.delete
+    phase: P0
+    identity: browser
+    method: DELETE
+    outer_path: null
+    inner_path: /api/price-alerts/{alert_id}
+    roles: null
+    query: []
+    body: {allow: [client_ref], deny: [session, sessionString], required: [client_ref]}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: {operation: price_alert.delete, conditional: false, bumps_revision: false, idempotency: transactional}
+
+  - id: br.price_alerts_by_order.delete
+    phase: P0
+    identity: browser
+    method: DELETE
+    outer_path: null
+    inner_path: /api/price-alerts/order/{order_id}
+    roles: null
+    query: []
+    body: {allow: [client_ref], deny: [session, sessionString], required: [client_ref]}
+    response: {omit: [], mask: [], headers: json}
+    budget: null
+    write: {operation: price_alert.delete_by_order, conditional: false, bumps_revision: false, idempotency: transactional}
