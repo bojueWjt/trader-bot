@@ -508,7 +508,6 @@ test("validates addon, subaccount parent, and environment", async () => {
 
   for (const account of [
     { account_id: "invalid-type", account_type: "secondary" },
-    { account_id: "self-parent", account_type: "subaccount", parent_account_id: "self-parent" },
     { account_id: "main-with-parent", account_type: "main", parent_account_id: "main-live" },
   ]) {
     const result = await request("POST", "/api/trading/accounts", {
@@ -524,6 +523,28 @@ test("validates addon, subaccount parent, and environment", async () => {
     } finally {
       db.close();
     }
+  }
+
+  const selfParentMain = await request("POST", "/api/trading/accounts", {
+    account_id: "self-parent",
+    api_key: "key",
+    api_secret: "secret",
+    risk_capital_addon: 0,
+  });
+  assert.equal(selfParentMain.status, 200);
+  const selfParentUpdate = await request("PUT", "/api/trading/accounts/self-parent", {
+    account_type: "subaccount",
+    parent_account_id: "self-parent",
+  });
+  assert.equal(selfParentUpdate.status, 400);
+  assert.equal(selfParentUpdate.body.message, "subaccount requires another main account");
+  const selfParentDb = new Database(dbPath, { readonly: true });
+  try {
+    assert.deepEqual(selfParentDb.prepare(
+      "SELECT account_type, parent_account_id FROM account_configs WHERE account_id = ?"
+    ).get("self-parent"), { account_type: "main", parent_account_id: "" });
+  } finally {
+    selfParentDb.close();
   }
 
   const unknownParent = await request("POST", "/api/trading/accounts", {
@@ -593,25 +614,28 @@ test("routes channels to both main and subaccounts", async () => {
   });
   assert.equal(unknownTarget.status, 400);
 
-  const disabled = await request("PUT", "/api/trading/accounts/main-live", {
-    is_enabled: false,
-  });
-  assert.equal(disabled.status, 200);
-  const disabledTarget = await request("POST", "/api/trading/channels", {
-    channel_id: "disabled-channel",
-    target_account_id: "main-live",
-  });
-  assert.equal(disabledTarget.status, 400);
-  const db = new Database(dbPath);
   try {
-    assert.equal(db.prepare("SELECT 1 FROM channel_routing WHERE channel_id = 'disabled-channel'").get(), undefined);
+    const disabled = await request("PUT", "/api/trading/accounts/main-live", {
+      is_enabled: false,
+    });
+    assert.equal(disabled.status, 200);
+    const disabledTarget = await request("POST", "/api/trading/channels", {
+      channel_id: "disabled-channel",
+      target_account_id: "main-live",
+    });
+    assert.equal(disabledTarget.status, 400);
+    const db = new Database(dbPath);
+    try {
+      assert.equal(db.prepare("SELECT 1 FROM channel_routing WHERE channel_id = 'disabled-channel'").get(), undefined);
+    } finally {
+      db.close();
+    }
   } finally {
-    db.close();
+    const reenabled = await request("PUT", "/api/trading/accounts/main-live", {
+      is_enabled: true,
+    });
+    assert.equal(reenabled.status, 200);
   }
-  const reenabled = await request("PUT", "/api/trading/accounts/main-live", {
-    is_enabled: true,
-  });
-  assert.equal(reenabled.status, 200);
 });
 
 test("updates account settings while blank credentials retain current values", async () => {

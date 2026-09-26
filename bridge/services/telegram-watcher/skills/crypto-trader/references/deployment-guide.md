@@ -44,7 +44,7 @@ npm install
 
 ### 2.3 配置账号和频道
 
-按 2.4 启动 telegram-watcher 后，访问 watcher 站点 `http://localhost:9100` 或使用 app 配置账号、频道路由与品种风险。`db_manager.py add-account`、`set-channel`、`set-risk` 已停用。在站点的「交易账号」中维护主账号、子账号和风险资金系数，在「频道路由」中选择执行账号，并在品种风险配置入口设置 BTCUSDT、ETHUSDT 等风险比例。初始化辅助项按“目标有效权益 ÷ 初始化实际权益”计算系数，账号仅保存最终系数。`9000` 等目标有效权益只作为初始化输入或测试样例；运行时始终按“当前实时实际权益 × 已保存系数”计算有效权益，使盈利后的仓位预算上升、亏损后的仓位预算下降。已有账号在首次启动时自动归类为主账号；缺少有效风险资金系数的账号保持禁用，配置正数系数后才能启用；已有频道映射保持原目标账号。
+按 2.4 启动 telegram-watcher 后，经站点入口登录 watcher 管理界面，或使用 app 配置账号、频道路由与品种风险。`db_manager.py add-account`、`set-channel`、`set-risk` 已停用。在站点的「交易账号」中维护主账号、子账号和风险资金系数，在「频道路由」中选择执行账号，并在品种风险配置入口设置 BTCUSDT、ETHUSDT 等风险比例。初始化辅助项按“目标有效权益 ÷ 初始化实际权益”计算系数，账号仅保存最终系数。`9000` 等目标有效权益只作为初始化输入或测试样例；运行时始终按“当前实时实际权益 × 已保存系数”计算有效权益，使盈利后的仓位预算上升、亏损后的仓位预算下降。已有账号在首次启动时自动归类为主账号；缺少有效风险资金系数的账号保持禁用，配置正数系数后才能启用；已有频道映射保持原目标账号。
 
 ### 2.3.1 Binance API 代理
 
@@ -61,7 +61,7 @@ node server.js
 nohup node server.js > watcher.log 2>&1 &
 ```
 
-首次启动需要在 `http://localhost:9100` 上配置 Telegram API 凭据并登录。
+首次启动需要经站点入口登录 watcher 管理界面，再配置 Telegram API 凭据并登录；直连 `localhost:9100` 会返回 401。
 
 ### 2.5 验证
 
@@ -188,4 +188,4 @@ python3 ~/.claude/skills/crypto-trader/scripts/briefing.py --db ~/projects/tradi
 | 数据库报错 `no such table` | 在 watcher 项目目录启动 `node server.js` 并检查启动日志有无 `[db] Failed to ensure trading tables`；用上文 `sqlite3` 命令核对三张表。`/api/status` 需要经站点登录，无凭据 curl 返回 401。 |
 | Binance 报 `APIError(code=-2015)` | API Key 无效或权限不足 |
 | telegram-watcher 无法启动 | 检查 Node.js 是否安装，`npm install` 是否执行 |
-| 管理界面打不开 | 确认 `node server.js` 正在运行，访问 `http://localhost:9100` |
+| 管理界面打不开 | 确认 `node server.js` 正在运行并查看启动日志，再经站点入口登录 watcher 管理界面；直连 `localhost:9100` 会返回 401。 |
