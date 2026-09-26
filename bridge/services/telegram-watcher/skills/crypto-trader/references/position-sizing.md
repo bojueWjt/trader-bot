@@ -74,12 +74,7 @@ python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py get-risk BTCUSDT --
 | ETHUSDT | 0.015 (1.5%) | 主流品种，波动略大于 BTC |
 | 山寨币默认 | 0.01 (1%) | 波动大，用全局默认即可 |
 
-配置命令：
-
-```bash
-python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py set-risk BTCUSDT 0.02
-python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py set-risk ETHUSDT 0.015
-```
+在 watcher 站点或 app 的品种风险配置入口设置 BTCUSDT 为 0.02、ETHUSDT 为 0.015。`db_manager.py set-risk` 已停用。
 
 ## 计算示例
 

@@ -40,34 +40,11 @@ npm install
 
 ### 2.2 初始化数据库
 
-```bash
-python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py init-db
-```
-
-验证：应输出 `{"status": "ok", "message": "Database initialized", "path": "..."}`
+先按 2.4 启动 telegram-watcher；启动时由 watcher 的 `ensureTradingTables` 自动建表。`db_manager.py init-db` 已停用，配置表不能由 Python 脚本初始化。
 
 ### 2.3 配置账号和频道
 
-**方式 A：命令行**
-
-```bash
-# 添加可交易主账号（testnet）
-python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py add-account main "MAIN_API_KEY" "MAIN_API_SECRET" --type main --risk 0.01 --testnet
-
-# 添加可交易子账号；子账号使用自己的 API Key 和 API Secret
-python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py add-account channel-a "SUBACCOUNT_API_KEY" "SUBACCOUNT_API_SECRET" --type subaccount --parent-account main --risk 0.01 --capital-multiplier 2 --testnet
-
-# 频道可以路由到主账号或子账号
-python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py set-channel "-1002198013097" channel-a --name "VIP信号群"
-
-# 设置币种风险比例
-python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py set-risk BTCUSDT 0.02
-python3 ~/.claude/skills/crypto-trader/scripts/db_manager.py set-risk ETHUSDT 0.015
-```
-
-**方式 B：Web 管理界面**
-
-启动 telegram-watcher 后访问 `http://localhost:9100`，在「交易账号」中维护主账号、子账号和风险资金系数，在「频道路由」中选择执行账号。初始化辅助项按“目标有效权益 ÷ 初始化实际权益”计算系数，账号仅保存最终系数。`9000` 等目标有效权益只作为初始化输入或测试样例；运行时始终按“当前实时实际权益 × 已保存系数”计算有效权益，使盈利后的仓位预算上升、亏损后的仓位预算下降。已有账号在首次启动时自动归类为主账号；缺少有效风险资金系数的账号保持禁用，配置正数系数后才能启用；已有频道映射保持原目标账号。
+按 2.4 启动 telegram-watcher 后，访问 watcher 站点 `http://localhost:9100` 或使用 app 配置账号、频道路由与品种风险。`db_manager.py add-account`、`set-channel`、`set-risk` 已停用。在站点的「交易账号」中维护主账号、子账号和风险资金系数，在「频道路由」中选择执行账号，并在品种风险配置入口设置 BTCUSDT、ETHUSDT 等风险比例。初始化辅助项按“目标有效权益 ÷ 初始化实际权益”计算系数，账号仅保存最终系数。`9000` 等目标有效权益只作为初始化输入或测试样例；运行时始终按“当前实时实际权益 × 已保存系数”计算有效权益，使盈利后的仓位预算上升、亏损后的仓位预算下降。已有账号在首次启动时自动归类为主账号；缺少有效风险资金系数的账号保持禁用，配置正数系数后才能启用；已有频道映射保持原目标账号。
 
 ### 2.3.1 Binance API 代理
 
@@ -208,7 +185,7 @@ python3 ~/.claude/skills/crypto-trader/scripts/briefing.py --db ~/projects/tradi
 | 问题 | 排查 |
 |---|---|
 | 脚本报 `No module named 'binance'` | `pip3 install python-binance` |
-| 数据库报错 `no such table` | `python3 scripts/db_manager.py init-db` |
+| 数据库报错 `no such table` | 在 watcher 项目目录执行 `node server.js`，再执行 `curl -f http://localhost:9100/api/status` 检查启动；watcher 启动时由 `ensureTradingTables` 建表。 |
 | Binance 报 `APIError(code=-2015)` | API Key 无效或权限不足 |
 | telegram-watcher 无法启动 | 检查 Node.js 是否安装，`npm install` 是否执行 |
 | 管理界面打不开 | 确认 `node server.js` 正在运行，访问 `http://localhost:9100` |
