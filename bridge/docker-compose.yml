@@ -163,7 +163,10 @@ services:
         - node
         - -e
         - |
-          fetch('http://127.0.0.1:9100/healthz', {signal: AbortSignal.timeout(5000)})
+          fetch('http://127.0.0.1:9100/healthz', {
+            headers: {'X-Watcher-Proxy-Auth': process.env.WATCHER_BROWSER_PROXY_TOKEN || ''},
+            signal: AbortSignal.timeout(5000)
+          })
             .then(response => {
               if (response.ok) {
                 process.exit(0);
