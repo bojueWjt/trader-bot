@@ -48,6 +48,7 @@ _DECIMAL_RE = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?\Z")
 _SHA_RE = re.compile(r"[0-9a-f]{64}\Z")
 _GENERATED_RE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\Z")
 _LOG = logging.getLogger(__name__)
+_LOG_SETUP_LOCK = threading.Lock()
 
 
 class SnapshotUnavailable(Exception):
@@ -402,8 +403,8 @@ class SnapshotCache:
         elif state == "invalid":
             reason = self._blocked_reason or "invalid"
         _LOG.info(
-            "snapshot_state_transition from=%s to=%s reason=%s revision=%s age_ms=%s",
-            self._logged_state, state, reason, revision, age_ms,
+            "snapshot_state_transition from=%s to=%s reason=%s revision=%s age_ms=%s last_error=%s",
+            self._logged_state, state, reason, revision, age_ms, self.last_refresh_error,
         )
         self._logged_state = state
         self._logged_revision = revision
@@ -541,8 +542,32 @@ def get_process_cache() -> SnapshotCache:
         return _process_cache
 
 
+def _ensure_info_logging() -> None:
+    # Uvicorn's default configuration leaves application loggers without a
+    # handler and inheriting WARNING. Configure only this module, once needed.
+    with _LOG_SETUP_LOCK:
+        _LOG.setLevel(logging.INFO)
+        current = _LOG
+        while current is not None:
+            if any(
+                not isinstance(handler, logging.NullHandler)
+                and handler.level <= logging.INFO
+                for handler in current.handlers
+            ):
+                return
+            if not current.propagate:
+                break
+            current = current.parent
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.INFO)
+        _LOG.addHandler(handler)
+        # Do not duplicate these records if root logging is configured later.
+        _LOG.propagate = False
+
+
 def start_if_enabled() -> None:
     if enabled():
+        _ensure_info_logging()
         get_process_cache().start()
 
 
