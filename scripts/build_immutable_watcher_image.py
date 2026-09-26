@@ -34,6 +34,7 @@ class ImmutableWatcherBuildError(ValueError):
 WATCHER_RUNTIME_RELATIVE_PATHS = (
     "ecosystem.config.js",
     "lib/auth.js",
+    "lib/config-store.js",
     "lib/env-flags.js",
     "lib/generated/gateway-routes.js",
     "lib/generated/watcher-routes.js",
