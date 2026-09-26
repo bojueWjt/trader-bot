@@ -22,7 +22,7 @@ from typing import Any
 import polars as pl
 
 from .lake import Layout, now_utc, preserve_ingested_at, schema_hash, stable_id, write_parquet_atomic
-from .plan_source import select_plans
+from .plan_source import select_plans, descriptive_only
 from .llm import AdjudicationRequest, LLMClient, adjudicate
 from .reasons import Reason
 
@@ -110,7 +110,7 @@ def build_candidates(cp: pl.DataFrame, mv: pl.DataFrame, ex: pl.DataFrame | None
         prior = first_branch.get(identity)
         if prior is None or (p.available_at or ingested_at, p.version_no) < (prior.available_at or ingested_at, prior.version_no):
             first_branch[identity] = p
-    root_ids = {p.plan_id for p in first_branch.values() if p.kind in ROOT_KINDS}
+    root_ids = {p.plan_id for p in first_branch.values() if p.kind in ROOT_KINDS and not descriptive_only(p.row)}
     roots = [p for p in plans if p.plan_id in root_ids]
     mv_ids = set(zip(mv["channel_id"].to_list(), mv["source_id"].struct.field("message_id").to_list()))
 

@@ -53,7 +53,7 @@ args = sys.argv[1:]
 assert args[:5] == ["exec", "-m", "gpt-6-astra", "-s", "read-only"]
 assert "--skip-git-repo-check" in args and "--ephemeral" in args and args[-1] == "-"
 schema = json.loads(pathlib.Path(args[args.index("--output-schema") + 1]).read_text())
-assert "quotes" in schema["properties"]["items"]["items"]["properties"]
+assert "actions" in schema["properties"]["items"]["items"]["properties"]
 assert "spans" not in schema["properties"]["items"]["items"]["properties"]
 data = json.loads(sys.stdin.read())
 with open(os.environ["CX_CAPTURE"], "a") as stream:
@@ -68,6 +68,13 @@ for message in data["messages"]:
     result = {item()!r}
     result["key"] = message["key"]
     if mode == "bad_quote": result["quotes"][2]["quote"] = "不存在 90"
+    if message["schema_name"] == "cx.actions.v2":
+        atom = lambda value, quote: {{"value": str(value), "quote": quote}}
+        action = {{"op": "open", "time_ref": "now", "symbol_raw": "BTC", "side": "long",
+                   "entry": {{"kind": "limit", "price": atom(100, "入场 100"), "lo": None, "hi": None, "levels": []}},
+                   "stop": {{"kind": "price", "price": atom(90, "止损 90"), "condition": None}},
+                   "tps": [{{"kind": "price", "value": atom(v, str(v))}} for v in (110, 120)], "field_issues": []}}
+        result = {{"key": message["key"], "schema_version": 2, "actions": [action]}}
     items.append(result)
 if mode == "missing": items = items[:-1]
 if mode == "duplicate" and len(items) > 1: items[-1] = items[0]
@@ -99,9 +106,9 @@ def test_batches_resume_journal_and_mutants(tmp_path, fake_codex):
     invariant(cx.run_batches)
     with pytest.raises(AssertionError):
         invariant(mutant(cx.run_batches, 'if k not in completed]', 'if True]'))
-    broken = mutant(cx.run_batches, 'range(0, len(pending), batch_size)', 'range(0, len(pending), len(pending))')
-    with pytest.raises(KeyError):
-        broken(path, tmp_path / "wrong", executable=str(script), batch_size=2)
+    broken = mutant(cx.length_batches, 'len(batch) >= batch_size or size + length > max_chars', 'False')
+    with pytest.raises(AssertionError):
+        assert len(list(broken(list(cx.read_jsonl(path)), 2))) == 3
 
 
 @pytest.mark.parametrize("mode", ["fail", "missing", "duplicate", "timeout"])
@@ -398,15 +405,14 @@ def test_export_fake_run_import_api_build_and_nonopening_mutant(tmp_path, fake_c
     # Same numeric data, now a retrospective analysis. No new episode allowed.
     doc = json.loads(fixture.read_text())
     for rec in doc["items"].values():
-        rec["response"].update(kind="analysis", op="analysis", refers_to_previous=True)
+        rec["response"]["actions"][0].update(op="analysis", time_ref="past")
     cx.write_json(fixture, doc)
     def invariant(version):
         report = api.build(source, layout, graph_version=version, llm_fixture=fixture,
                            plan_source="reconciled", ingested_at=T0)
         assert report["lifecycle"]["n_episodes"] == 0
     invariant("nonopening")
-    monkeypatch.setattr(plan_source, "approved_sources", mutant(plan_source.approved_sources,
-        'if ex is not None:', 'if False:'))
+    monkeypatch.setattr(plan_source, "action_overridden", lambda *_: False)
     with pytest.raises(AssertionError):
         invariant("mutant-nonopening")
 

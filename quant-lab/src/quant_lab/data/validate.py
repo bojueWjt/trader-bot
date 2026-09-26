@@ -103,6 +103,32 @@ def canonicalize_row(r: dict[str, Any], *, registry: InstrumentRegistry) -> tupl
     entry_ref = None
     if entry and entry.get("lo") is not None and entry.get("hi") is not None:
         entry_ref = (entry["lo"] + entry["hi"]) / 2 if entry["kind"] == "zone" else (entries[0] if entries else entry["lo"])
+    source_checks = json.loads(r.get("checks") or "{}")
+    v2 = source_checks.get("schema_version") == 2
+    mapping_issues = []
+    percent_ref = entry_ref
+    if v2:
+        action = source_checks.get("action", {})
+        source_entry = action.get("entry")
+        if source_entry and source_entry["kind"] in ("zone", "ladder"):
+            # No average fill or zone midpoint may be guessed for relative targets.
+            atoms = source_entry["levels"] if source_entry["kind"] == "ladder" else []
+            values = [Decimal(a["price"]["value"]) for a in atoms if a.get("price")]
+            if source_entry["kind"] == "zone" or len(values) != len(atoms) or len(set(values)) != 1:
+                percent_ref = None
+        source_stop = action.get("stop")
+        if source_stop and source_stop["kind"] == "condition":
+            mapping_issues.append({"field": "stop", "reason": "condition_not_supported_by_order_plan"})
+            stop = None
+        if source_entry and source_entry["kind"] == "ladder" and any(a.get("price") is None for a in source_entry["levels"]):
+            mapping_issues.append({"field": "entry", "reason": "incomplete_ladder"})
+        converted_tps = []
+        for t in tps:
+            if t["kind"] == "pct" and (percent_ref is None or side not in ("long", "short")):
+                mapping_issues.append({"field": "tps", "reason": "percent_requires_unambiguous_entry_and_side"})
+            else:
+                converted_tps.append(t)
+        tps = converted_tps
     # 百分比 TP → 价（只有入场参考时；记 checks）
     conv = 0
     for t in tps:
@@ -144,6 +170,12 @@ def canonicalize_row(r: dict[str, Any], *, registry: InstrumentRegistry) -> tupl
     if r.get("entry_mode") == "unknown" and r["kind"] == "entry_proposal":
         elig["execution"] = False  # 入场方式无原文依据：不猜市价（S06）
         checks["entry_mode_unknown"] = True
+    if v2 and mapping_issues:
+        checks["mapping_issues"] = mapping_issues
+        elig["execution"] = False
+    if v2 and source_checks.get("time_ref") != "now":
+        elig["execution"] = False
+        elig["original_entry"] = False
     out = {
         "instrument_id": inst, "instrument_status": status, "side": side, "entry": entry, "entries": entries, "entry_ref": entry_ref,
         "stop": stop, "tps": tps, "direction_ok": direction_ok,

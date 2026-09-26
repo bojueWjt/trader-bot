@@ -1,0 +1,92 @@
+"""Fabricated gold and replies in pytest tmp_path; never read pilot files."""
+from copy import deepcopy
+import json
+
+import pytest
+
+from quant_lab.data import cx_batch as cx, cx_regression as regression
+from test_cx_v2 import action, envelope, number
+from test_cx_batch import TEXT
+
+
+def corpus(tmp_path):
+    source = tmp_path / 'source.jsonl'
+    truths = []
+    inputs = []
+    for i in range(4):
+        identity = f'fiction-{i}'
+        inputs.append(dict(item_id=identity, channel='虚构频道', message_time=str(i), text=TEXT, previous_text=None))
+        truths.append(dict(item_id=identity, channel='虚构频道', truth_op='open' if i < 3 else 'analysis',
+                           symbol='BTC', side='long', entry=dict(kind='market_ref', lo=100, hi=100), stop=90, tps=[110],
+                           image_affected_fields=['stop'] if i == 2 else []))
+    source.write_text(''.join(cx.dumps(i) + '\n' for i in inputs))
+    truth = tmp_path / 'truth.json'
+    truth.write_text(cx.dumps(dict(source_path=str(source), items=truths)))
+    prompts = tmp_path / 'prompts'
+    regression.prepare(truth, prompts)
+    return truth, prompts, list(cx.read_jsonl(prompts))
+
+
+def test_message_denominators_include_discard_and_wrong_label_fields(tmp_path):
+    truth, prompts, rows = corpus(tmp_path)
+    responses = tmp_path / 'responses'
+    records = [dict(key=rows[0]['key'], response=envelope(action(op='analysis'))),
+               dict(key=rows[1]['key'], abstain=dict(note='model_undecidable')),
+               dict(key=rows[2]['key'], response=envelope(action())),
+               dict(key=rows[3]['key'], response=envelope(action()))]
+    responses.write_text(''.join(cx.dumps(r) + '\n' for r in records))
+    report = regression.check(truth, prompts, responses)
+    metrics = report['overall']['metrics']
+    assert metrics['open_false_discovery']['numerator'] == 1 and metrics['open_false_discovery']['denominator'] == 2
+    assert metrics['open_miss']['numerator'] == 2 and metrics['open_miss']['denominator'] == 3
+    assert metrics['entry']['numerator'] == 2 and metrics['entry']['denominator'] == 3
+    assert metrics['stop']['numerator'] == 1 and metrics['stop']['denominator'] == 2
+    assert metrics['whole_message_discarded']['numerator'] == 1
+    assert metrics['model_uncertain']['numerator'] == 1
+    assert metrics['unjustified_discard']['numerator'] == 1 and metrics['unjustified_discard']['denominator'] == 1
+    assert not report['overall']['passes'] and report['blind_test'] is False
+
+
+def test_field_failure_counted_without_message_discard_and_evidence_rechecked(tmp_path):
+    truth, prompts, rows = corpus(tmp_path)
+    responses = tmp_path / 'responses'
+    records = [dict(key=r['key'], response=envelope(action(stop=dict(kind='price', price=number(91, '90'), condition=None)))) for r in rows]
+    responses.write_text(''.join(cx.dumps(r) + '\n' for r in records))
+    result = regression.check(truth, prompts, responses)
+    assert result['overall']['field_evidence_failed'] == 4
+    assert result['overall']['metrics']['whole_message_discarded']['numerator'] == 0
+    assert result['overall']['metrics']['stop']['numerator'] == 0
+    with pytest.raises(ValueError, match='cannot_approve'):
+        regression.check(truth, prompts, responses, adjudications={'fiction-0': {'stop': dict(correct=True, reason='test')}})
+
+
+def test_missing_responses_are_not_dropped_and_unsupported_semantics_never_pass(tmp_path):
+    truth, prompts, rows = corpus(tmp_path)
+    doc = regression.load(truth)
+    doc['items'][0]['entry']['qualifier'] = '超过'
+    cx.write_json(truth, doc)
+    responses = tmp_path / 'responses'
+    responses.write_text(cx.dumps(dict(key=rows[0]['key'], response=envelope(action()))) + '\n')
+    result = regression.check(truth, prompts, responses)
+    assert result['population'] == 4 and result['missing_responses'] == 3
+    assert result['overall']['metrics']['entry']['denominator'] == 3
+    assert result['overall']['pending_fields'] == 1
+    assert not result['items'][0]['fields']['entry']['correct']
+    assert not result['overall']['passes']
+    rows[0]['text'] = 'tampered'
+    cx._atomic_text(prompts, ''.join(cx.dumps(r) + '\n' for r in rows))
+    with pytest.raises(ValueError, match='prompt_source_mismatch'):
+        regression.check(truth, prompts, responses)
+
+
+def test_gold_grouping_and_percent_condition_comparison():
+    a = action(symbol_raw='AAA', entry=dict(kind='limit', price=number(100), lo=None, hi=None, levels=[]))
+    b = action(symbol_raw='BBB', entry=dict(kind='limit', price=number(200), lo=None, hi=None, levels=[]))
+    gold = dict(entry=dict(by_symbol={'AAA': dict(kind='limit', lo=100, hi=100), 'BBB': dict(kind='limit', lo=200, hi=200)}))
+    assert regression.compare_field('entry', gold, [a, b]) == (True, None)
+    b['entry']['price'] = number(100)
+    assert regression.compare_field('entry', gold, [a, b]) == (False, None)
+    a['tps'] = [dict(kind='percent', value=number(10, '10%'))]
+    assert regression.compare_field('tps', dict(tps=dict(relative_percent=[10])), [a]) == (True, None)
+    a['stop'] = dict(kind='condition', condition='周线收盘跌破均线', price=None)
+    assert regression.compare_field('stop', dict(stop=dict(condition='周线收盘跌破均线')), [a]) == (True, None)

@@ -5,7 +5,7 @@
 - 每个数字必须能定位：spans[{field,start,end,source=text}]，text[start:end] 即该数字 token（含单位）。
 - 单位：只转换**有证据**的单位（万/k）；同一条消息内显式单位可向无单位的同量级数字传播（记 spans.field=unit_anchor）。
   无单位的缩写（"747"）不猜倍数，留给层 5 的数量级门（UNIT_SCALE_CONFLICT）。
-- parser 与 LLM 各自成行（extractor.name 区分），不互相投票；LLM 行证据 span 校验失败 → 拒收（Abstention 行，kind=undecidable）。
+- parser 与 LLM 各自成行（extractor.name 区分），不互相投票；v1 LLM 行证据 span 失败整行拒收；cx v2 逐字段拒收，动作各自成行并保留 issues。
 - 输出 silver/extracted_event.parquet（契约 §2 + §9.1 增列）；extract_id = sha256(source_version_id, extractor, version)。
 """
 from __future__ import annotations
@@ -685,14 +685,28 @@ def apply_ocr(res: ParseResult, text: str, media_hashes: list[str], ocr: OcrProv
 
 
 # ---------------------------------------------------------------- LLM 行
-def llm_extract(text: str, *, client: LLMClient, channel_name: str, message_date: str | None) -> tuple[ParseResult | None, Abstention | None, dict[str, Any]]:
+def llm_extract(text: str, *, client: LLMClient, channel_name: str, message_date: str | None, previous_text: str | None = None) -> tuple[ParseResult | list[ParseResult] | None, Abstention | None, dict[str, Any]]:
     system, user = build_extract_prompt(text, channel_name=channel_name, message_date=message_date)
     client = gate(client)
+    from . import cx_v2
+    v2_system, v2_user = cx_v2.build_prompt(text, channel_name=channel_name, message_date=message_date, previous_text=previous_text)
+    if isinstance(client, RecordedClient) and client.has(system=v2_system, user=v2_user, schema_name=cx_v2.SCHEMA_NAME):
+        out, attempts = call_with_retry(client, system=v2_system, user=v2_user, schema_name=cx_v2.SCHEMA_NAME)
+        if isinstance(out, Abstention):
+            return None, out, {"usage": {}, "attempts": attempts}
+        try:
+            results, stats = cx_v2.parse_actions(out.payload, text)
+        except (ValueError, TypeError, KeyError):
+            return None, Abstention(Reason.INTENT_AMBIGUOUS, "invalid_v2_envelope"), {"attempts": attempts}
+        return results, None, dict(usage=out.usage, model=out.model, response_hash=out.response_hash, attempts=attempts, **stats)
     if isinstance(client, RecordedClient) and not client.has(system=system, user=user, schema_name=SCHEMA_NAME_EXTRACT):
         return None, None, {"skipped": "no_recording"}
     out, attempts = call_with_retry(client, system=system, user=user, schema_name=SCHEMA_NAME_EXTRACT)
     if isinstance(out, Abstention):
         return None, out, {"usage": {}, "attempts": attempts}
+    if out.payload.get("schema_version") == 2:
+        results, stats = cx_v2.parse_actions(out.payload, text)
+        return results, None, dict(usage=out.usage, model=out.model, response_hash=out.response_hash, attempts=attempts, **stats)
     errs = validate_evidence(out.payload, text)
     if errs:
         if isinstance(client, GrokCliClient):
@@ -773,7 +787,11 @@ def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClien
     batch_id = mv["batch_id"][0] if mv.height else "tg-empty"
     rows: list[dict[str, Any]] = []
     qrows: list[dict[str, Any]] = []
-    llm_stats = {"rows": 0, "abstain": 0, "rejected": 0, "skipped": 0}
+    llm_stats = {"rows": 0, "abstain": 0, "rejected": 0, "skipped": 0, "model_uncertain": 0, "field_evidence_failed": 0, "whole_message_discarded": 0}
+    by_message = {}
+    for message in mv.iter_rows(named=True):
+        identity = (message["channel_id"], message["source_id"]["message_id"])
+        by_message.setdefault(identity, []).append(message)
     parser_ex = {"name": "parser", "version": PARSER_VERSION, "model": None}
     ledgers: dict[tuple[int, str], LayerLedger] = {}
     for r in frame.filter(pl.col("is_canonical")).iter_rows(named=True):
@@ -805,19 +823,28 @@ def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClien
             llm_stats["skipped"] += 1
             continue
         if client is not None:
-            pr, ab, meta = llm_extract(r["text"], client=client, channel_name=r["channel_name"], message_date=r["message_date"].isoformat() if r["message_date"] else None)
+            parents = by_message.get((r["channel_id"], r["reply_to_message_id"]), [])
+            parents = [p for p in parents if r["available_at"] is not None and p["available_at"] is not None
+                       and p["available_at"] <= r["available_at"] and p["source_version_id"] != r["source_version_id"]]
+            parent = max(parents, key=lambda p: (p["available_at"], p["version_no"]), default=None)
+            pr, ab, meta = llm_extract(r["text"], client=client, channel_name=r["channel_name"], message_date=r["message_date"].isoformat() if r["message_date"] else None, previous_text=parent["text"] if parent else None)
             llm_ex = {"name": "llm", "version": getattr(client, "version", "?"), "model": getattr(client, "model", getattr(client, "name", "?"))}
             if pr is not None:
-                lrow = _row(r, pr, llm_ex, ingested_at, inherited=inherited, meta=meta)
-                rows.append(lrow)
-                led.map(r["source_version_id"], lrow["extract_id"], "split", [])
-                llm_stats["rows"] += 1
+                for result in pr if isinstance(pr, list) else [pr]:
+                    lrow = _row(r, result, llm_ex, ingested_at, inherited=inherited, meta=meta)
+                    rows.append(lrow)
+                    led.map(r["source_version_id"], lrow["extract_id"], "split", [])
+                    llm_stats["rows"] += 1
+                for metric in ("model_uncertain", "field_evidence_failed", "whole_message_discarded"):
+                    llm_stats[metric] += meta.get(metric, 0)
             elif ab is not None:
                 a = ParseResult(kind="undecidable", reason_codes=[ab.reason_code], notes=[ab.note])
                 lrow = _row(r, a, llm_ex, ingested_at, inherited=inherited, meta=meta)
                 rows.append(lrow)
                 led.map(r["source_version_id"], lrow["extract_id"], "split", [ab.reason_code])
                 llm_stats["abstain"] += 1
+                llm_stats["whole_message_discarded"] += 1
+                llm_stats["model_uncertain"] += int(ab.note == "model_undecidable")
                 if ab.note.startswith("evidence_rejected"):
                     llm_stats["rejected"] += 1
             else:

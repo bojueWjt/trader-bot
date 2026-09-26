@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from decimal import Decimal
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -178,6 +179,22 @@ def _order_plan(root: dict[str, Any], stop: float | None, tps: list[dict], expir
         entries = [{"kind": "ladder", "price_lo": e["lo"], "price_hi": e["hi"], "fraction": None, "tif": "GTC", "post_only": False}]
     else:
         entries = [{"kind": "limit", "price_lo": e["lo"], "price_hi": e["hi"], "fraction": None, "tif": "GTC", "post_only": False}]
+    checks = json.loads(root.get("checks") or "{}")
+    if checks.get("schema_version") == 2:
+        action = checks.get("action", {})
+        source_entry = action.get("entry")
+        if source_entry and source_entry["kind"] == "ladder":
+            if any(level.get("price") is None for level in source_entry["levels"]):
+                return None
+            entries = []
+            for level in source_entry["levels"]:
+                price = Decimal(level["price"]["value"])
+                fraction = level.get("fraction")
+                entries.append(dict(kind=level["kind"], price_lo=price, price_hi=price,
+                                    fraction=Decimal(fraction["value"]) / 100 if fraction else None,
+                                    tif="IOC" if level["kind"] == "market_ref" else "GTC", post_only=False))
+        if action.get("stop") and action["stop"]["kind"] == "condition":
+            stop = None
     return {"instrument_id": root["instrument_id"], "side": root["side"], "entries": entries,
             "stop": {"price": stop, "trigger": "mark"} if stop is not None else None,
             "tps": [{"level": t["level"], "fraction": t.get("fraction")} for t in tps],
@@ -189,7 +206,7 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
                 observation_end: datetime | None = None, plan_source: str = "parser", extracted_event: pl.DataFrame | None = None) -> tuple[pl.DataFrame, pl.DataFrame, list[dict], dict[tuple[int, str], LayerLedger], dict[str, Any]]:
     ingested_at = ingested_at or now_utc()
     batch_id = cp["batch_id"][0] if cp.height else "tg-empty"
-    from .plan_source import select_plans, disagreements
+    from .plan_source import select_plans, disagreements, descriptive_only
     plans = {r["plan_id"]: r for r in select_plans(cp, plan_source, extracted_event).iter_rows(named=True)}
     conflicts = disagreements(cp, extracted_event)
     mvd = {r["source_version_id"]: r for r in mv.iter_rows(named=True)}
@@ -199,7 +216,7 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
         dg_members.setdefault(r["duplicate_group_id"], []).append(r["source_version_id"])
     sel = {r["from_plan_id"]: r for r in cb.filter(pl.col("selected")).iter_rows(named=True) if r["from_plan_id"] in plans and r["to_plan_id"] in plans}
     adj = {r["from_plan_id"]: r for r in jd.iter_rows(named=True) if r["from_plan_id"] in plans}
-    roots = [pid for pid, p in plans.items() if p["kind"] == "entry_proposal" and pid not in adj]
+    roots = [pid for pid, p in plans.items() if p["kind"] == "entry_proposal" and pid not in adj and not descriptive_only(p)]
     targets = {e["to_plan_id"] for e in sel.values()}
     orphan_roots = sorted(({pid for pid, a in adj.items() if a["action"] == "new_episode" and plans[pid]["kind"] != "entry_proposal"} | (targets - set(roots))) & set(plans))
     members: dict[str, list[str]] = {r: [] for r in roots + orphan_roots}
@@ -271,10 +288,17 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
         for i, e in enumerate(evs):
             p = plans[e["pid"]]
             kind = e["kind"]
+            description_only = descriptive_only(p)
             np_, nc, action = transition(p_state, c_state, "entry_proposal" if (e["root"] and not is_orphan) else kind)
+            if description_only:
+                np_, nc, action = p_state, c_state, "desc"
             if e["root"] and is_orphan:
                 reasons.append(Reason.PARENT_MISSING)
             payload: dict[str, Any] = {"from": [p_state, c_state], "to": [np_, nc], "action": action, "invalid_transition": action == "I", "synthesized": e["synth"]}
+            source_checks = json.loads(p.get("checks") or "{}")
+            if source_checks.get("schema_version") == 2:
+                payload["action_v2"] = source_checks.get("action")
+                payload["mapping_issues"] = source_checks.get("mapping_issues", [])
             if e["basis"]:
                 payload["basis"] = e["basis"]
             if action == "I":
@@ -344,12 +368,12 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
             event_id = stable_id("ev", episode_id, e["pid"], kind, i)[:32]
             if (e["root"] and not is_orphan) or (kind in ("amend", "stop_move") and p["stop"] is not None and action in ("=", "move")):
                 stop_event_id = event_id
-            if action != "I" and action != "R":
+            if not description_only and action != "I" and action != "R":
                 for field_name in ("entry", "stop", "tps"):
                     if p.get(field_name):
                         field_events[field_name] = event_id
             grades.append(mvd.get(p["source_version_id"], {}).get("time_grade", "U"))
-            if t_dec is not None and decision_visible(e["edge_available_at"], t_dec):
+            if not description_only and t_dec is not None and decision_visible(e["edge_available_at"], t_dec):
                 dec.update({"state": (p_state, c_state), "stop": stop, "tps": [dict(t) for t in tps]})
                 dec["events"].append((e["pid"], kind, action))
                 dec["invalid"] += int(action == "I")
