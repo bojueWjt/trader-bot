@@ -152,3 +152,11 @@ def test_condition_stops_compare_cited_levels_and_split_entries_merge():
     other = action(symbol_raw='ETH', entry=dict(kind='limit', price=number(106000), lo=None, hi=None, levels=[]))
     # Different symbols never pool their prices.
     assert regression.compare_field('entry', dict(gold), [a, other]) == (False, None)
+
+
+def test_zone_and_two_level_ladder_with_same_endpoints_compare_equal():
+    ladder = action(entry=dict(kind='ladder', price=None, lo=None, hi=None, levels=[
+        dict(kind='market_ref', price=number(85500), fraction=None), dict(kind='limit', price=number(84000), fraction=None)]))
+    gold = dict(entry=dict(kind='zone', lo='84000', hi='85500'), entry_market_leg=True)
+    assert regression.compare_field('entry', dict(gold), [ladder]) == (True, None)
+    assert regression.compare_field('entry', dict(gold, entry=dict(kind='zone', lo='84000', hi='86000')), [ladder]) == (False, None)

@@ -295,3 +295,17 @@ def test_range_ends_and_range_units_are_evidence(text, quote, value):
 def test_range_unit_needs_the_unit_in_the_quote_and_a_real_range(text, quote, value):
     with pytest.raises(ValueError):
         v2.exact_number(dict(value=value, quote=quote), text)
+
+
+@pytest.mark.parametrize('text,quote,value,percent', [('当前1810入10%底仓，1860挂单10%', '1860', '1860', False),
+                                                     ('当前1810入10%底仓，1860挂单10%', '10%', '10', True),
+                                                     ('2.5u趋势线支撑位做多', '2.5u', '2.5', False),
+                                                     ('1860挂单10%，1930挂单10%', '10%，', '10', True)])
+def test_chinese_comma_and_u_suffix_do_not_hide_prices(text, quote, value, percent):
+    assert v2.exact_number(dict(value=value, quote=quote), text, percent=percent)[0]['value'] == value
+
+
+@pytest.mark.parametrize('text,quote,value', [('1,86', '86', '86'), ('5Uniswap', '5', '5'), ('12,345', '345', '345')])
+def test_grouping_guard_still_blocks_partial_tokens(text, quote, value):
+    with pytest.raises(ValueError):
+        v2.exact_number(dict(value=value, quote=quote), text)

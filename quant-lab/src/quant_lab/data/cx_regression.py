@@ -150,6 +150,15 @@ def condition_numbers(text):
     return frozenset(str(Decimal(n.replace(',', '')).normalize()) for n in re.findall(r'\d[\d,]*(?:\.\d+)?', norm))
 
 
+def _prices(anchors):
+    """Zone endpoints count as prices: "CMP 85500 到 84000" is written as a zone by some labellers and as a
+    CMP+limit ladder by the model; both name the same two prices, and the CMP leg is judged separately."""
+    out = set()
+    for a in anchors:
+        out.update(('px', v) for v in a[1:])
+    return frozenset(out)
+
+
 def _merge_entries(actions):
     """One idea split into several now-open actions for the same symbol (e.g. 10.8万 and 10.6万) is judged
     on the union of its prices and whether any leg is at market."""
@@ -199,7 +208,7 @@ def compare_field(field, gold, actions):
             got = _merge_entries(actions)
             gold.setdefault('_leg_seen', []).append(leg is not None)
             # A shared gold value applies to every action unless explicitly grouped.
-            return all(g[0] == anchors and (leg is None or g[1] == leg) for g in got), None
+            return all(_prices(g[0]) == _prices(anchors) and (leg is None or g[1] == leg) for g in got), None
         want = signature(field, expected)
         got = [signature(field, a.get(key), predicted=True) for a in actions]
         return all(v == want for v in got), None
