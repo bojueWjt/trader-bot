@@ -109,6 +109,15 @@ for key, (name, gate, base, backup, first_write, restart, after) in apply_cases.
     check("wait 60s, then 4 samples every 20s" in ev[i_after][1], f"{key}: fleet guard defaults changed: {ev[i_after][1]!r}")
     check(sum(1 for e in ev if e[0] == "PLAN" and e[1].startswith(restart)) == 1, f"{key}: exactly one restart step in apply")
 
+cpf = [e for e in events("plan-o0_deploy_caddy-preflight.txt") if e[0] == "PLAN"]
+i_cand = idx(cpf, lambda e: e[1].startswith("candidate resolves inside the stage dir"), "caddy preflight candidate-dir step")
+i_bind = idx(cpf, lambda e: e[1].startswith("candidate and bundle snippet are exactly what the O0-A05P local probe passed"), "caddy preflight probe binding")
+i_stage = idx(cpf, lambda e: e[1].startswith("stage the bundle's snippet next to the candidate"), "caddy preflight staging")
+check(i_cand == 1 and i_bind < i_stage, f"caddy preflight: candidate-dir check right after the gate clear, probe binding before the first staging write ({i_cand},{i_bind},{i_stage})")
+check("probe_candidate_sha256=" in cpf[-1][2] and "probe_snippet_sha256=" in cpf[-1][2], "caddy preflight gate must record the probe sha256 values")
+capply = [e for e in events("plan-o0_deploy_caddy-apply.txt") if e[0] == "PLAN"]
+check("probe_candidate_sha256=" in capply[0][2] and "probe_snippet_sha256=" in capply[0][2], "caddy apply must re-check the probe sha256 values in its REQUIRE")
+
 build = events("plan-o0_deploy_watcher-build.txt")
 text = "".join(e[2] for e in build)
 dry = next(e for e in build if e[1].startswith("first-start migration dry-run"))
@@ -148,7 +157,7 @@ check('chown "$own"' in ev[i_inst][2] and 'chmod "$mode"' in ev[i_inst][2] and "
 if problems:
     print("\n".join(problems))
     sys.exit(1)
-print("STRUCTURE_OK preflight_gate_clear=4 apply_order=3 restore_db_order=ok oq_isolation_gate=2 build_graceful_stop=ok build_backup_api=ok")
+print("STRUCTURE_OK preflight_gate_clear=4 caddy_probe_binding=ok apply_order=3 restore_db_order=ok oq_isolation_gate=2 build_graceful_stop=ok build_backup_api=ok")
 PY
 
 # ---------------------------------------------------------------- 2. automatic rollback (sandbox)
@@ -344,7 +353,8 @@ caddy_setup() {
   python3 "$O0/o0_tool.py" gate-write --out "$S/evidence/caddy-preflight.gate.json" --stage caddy-preflight --bundle "$S/bundle" \
     --file-sha "candidate_caddyfile=$S/caddy/Caddyfile.candidate" --file-sha "live_caddyfile=$SB/etc/caddy/Caddyfile" \
     --file-sha "live_caddy_env=$SB/etc/caddy/v3.env" --file-sha "cred_caddy_env=$S/creds/set-initial/caddy.env" \
-    --file-sha "staged_snippet=$S/caddy/caddy-watcher-gateway.caddy" >/dev/null
+    --file-sha "staged_snippet=$S/caddy/caddy-watcher-gateway.caddy" \
+    --file-sha "probe_candidate_sha256=$S/caddy/Caddyfile.candidate" --file-sha "probe_snippet_sha256=$S/bundle/caddy/caddy-watcher-gateway.caddy" >/dev/null
 }
 caddy_restored() {  # caddy_restored <label> [present]: snippet file removed (first deploy) or back to the pre-apply bytes
   sha256sum -c --quiet "$S/evidence/caddy-live.sha256" >/dev/null 2>&1 && ok "$1: Caddyfile and v3.env restored byte for byte" || bad "$1: Caddy files not restored"
@@ -394,6 +404,19 @@ if [ "$RC" -ne 0 ] && [ ! -e "$S/backup-caddy" ] && ! grep -q 'systemctl restart
    && sha256sum -c --quiet "$S/evidence/caddy-live.sha256" >/dev/null 2>&1 && ! printf '%s' "$OUT" | grep -q AUTO_ROLLBACK_ARMED; then
   ok "caddy SN3 (a different snippet file is live): refused at the gate, nothing backed up, written or restarted"
 else bad "caddy SN3: rc=$RC"; printf '%s\n' "$OUT" | grep -E 'STEP|FAIL' | tail -5 | sed 's/^/    /'; fi
+# PB (wac-090, review wac-088 🟡-4): the preflight gate carries a probe sha that is not the candidate in hand
+caddy_setup PB
+printf 'probed but different\n' > "$WORK/other-candidate"
+python3 "$O0/o0_tool.py" gate-write --out "$S/evidence/caddy-preflight.gate.json" --stage caddy-preflight --bundle "$S/bundle" \
+  --file-sha "candidate_caddyfile=$S/caddy/Caddyfile.candidate" --file-sha "live_caddyfile=$SB/etc/caddy/Caddyfile" \
+  --file-sha "live_caddy_env=$SB/etc/caddy/v3.env" --file-sha "cred_caddy_env=$S/creds/set-initial/caddy.env" \
+  --file-sha "staged_snippet=$S/caddy/caddy-watcher-gateway.caddy" \
+  --file-sha "probe_candidate_sha256=$WORK/other-candidate" --file-sha "probe_snippet_sha256=$S/bundle/caddy/caddy-watcher-gateway.caddy" >/dev/null
+run_apply o0_deploy_caddy.sh O0-A05
+if [ "$RC" -ne 0 ] && [ ! -e "$S/backup-caddy" ] && ! grep -q 'systemctl restart' "$CALLS" && [ ! -e "$SB/etc/caddy/caddy-watcher-gateway.caddy" ] \
+   && printf '%s' "$OUT" | grep -q 'gate field probe_candidate_sha256 differs' && sha256sum -c --quiet "$S/evidence/caddy-live.sha256" >/dev/null 2>&1; then
+  ok "caddy PB (gate's probe sha is not the candidate's): refused at the gate, nothing backed up, written or restarted"
+else bad "caddy PB: rc=$RC"; printf '%s\n' "$OUT" | grep -E 'STEP|FAIL' | tail -5 | sed 's/^/    /'; fi
 
 # ---- watcher
 watcher_setup() {

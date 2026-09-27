@@ -111,6 +111,14 @@ run "--i-understand-data-loss" o0_deploy_watcher.sh --execute --phase restore-db
 run "needs --auth-id O0-A08" o0_deploy_operator_query.sh --execute --phase apply --auth-id O0-A07
 run "--phase is required" o0_deploy_operator_query.sh --execute --auth-id O0-A08
 STUB_UID=1000 run "must run as root" o0_deploy_caddy.sh --execute --phase apply --auth-id O0-A05
+# wac-090 (review wac-088 🟡-6, 🟡-4): candidate outside the stage dir, probe binding missing
+run "must be inside the stage dir" o0_deploy_caddy.sh --execute --phase preflight --auth-id O0-A05 --candidate "$SB/etc/caddy/Caddyfile.candidate" \
+  --probe-candidate-sha256 "$(printf '%064d' 0)" --probe-snippet-sha256 "$(printf '%064d' 0)"
+run "must be inside the stage dir" o0_deploy_caddy.sh --execute --phase preflight --auth-id O0-A05 --candidate /etc/caddy/Caddyfile.candidate
+run "must be inside the stage dir" o0_deploy_caddy.sh --execute --phase apply --auth-id O0-A05 --candidate "$SB/srv/trader-staging/Caddyfile.candidate"
+run "must not contain '..'" o0_deploy_caddy.sh --execute --phase preflight --auth-id O0-A05 --candidate "$S/caddy/../../../../etc/caddy/Caddyfile.candidate"
+run "--probe-candidate-sha256 and --probe-snippet-sha256" o0_deploy_caddy.sh --execute --phase preflight --auth-id O0-A05
+run "--probe-candidate-sha256 and --probe-snippet-sha256" o0_deploy_caddy.sh --execute --phase preflight --auth-id O0-A05 --probe-candidate-sha256 abc --probe-snippet-sha256 "$(printf '%064d' 0)"
 run "gate file missing" o0_deploy_caddy.sh --execute --phase apply --auth-id O0-A05
 run "gate file missing" o0_deploy_operator_query.sh --execute --phase apply --auth-id O0-A08 --operator-query-env "$WORK/wroot/docker-compose.yml"
 run "gate file missing" o0_deploy_watcher.sh --execute --phase apply --auth-id O0-A07 --watcher-root "$WORK/wroot"
