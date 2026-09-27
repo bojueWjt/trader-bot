@@ -465,14 +465,17 @@ async def test_never_allowed_all_methods_and_scope_targets(setup):
 @run_async
 async def test_artifact_disable_four_sources_preserves_existing_routes(caplog, monkeypatch):
     import read_api
+    for role, token in FAKE.items():
+        name = {"system_observer": "SYSTEM_OBSERVER_TOKEN", "viewer": "VIEWER_TOKEN", "risk_admin": "RISK_ADMIN_TOKEN", "reviewer": "REVIEWER_TOKEN"}[role]
+        monkeypatch.setenv(name, token)
     original = wg.PAYLOAD
     upstream_calls = []
     monkeypatch.setattr(wg.gateway, "_resources", lambda budget: upstream_calls.append(budget))
     async def probe(app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://local") as client:
             old = await client.get("/v1/accounts/", follow_redirects=False)
-            get = await client.get("/v1/watcher/status")
-            post = await client.post("/v1/watcher/config")
+            get = await client.get("/v1/watcher/status", headers={"Authorization": "Bearer " + FAKE["viewer"]})
+            post = await client.post("/v1/watcher/config", headers={"Authorization": "Bearer " + FAKE["risk_admin"]})
             return old, get, post
     baseline, _, _ = await probe(read_api.create_app("operator-query"))
     variants = []
@@ -501,6 +504,7 @@ async def test_artifact_disable_four_sources_preserves_existing_routes(caplog, m
         assert "gateway_disabled" == get.json()["code"] == post.json()["code"]
         assert upstream_calls == []
         assert all(token not in caplog.text for token in FAKE.values())
+        assert "Authorization" not in caplog.text
     finally:
         assert wg.load_route_artifact(original)
 

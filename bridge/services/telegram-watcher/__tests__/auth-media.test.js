@@ -90,6 +90,42 @@ test("never_allowed is the generated payload object", () => {
   assert.ok(neverAllowed.length > 0 && neverAllowed.every(row => row.methods === "*"));
 });
 
+test("watcher rejects malformed never_allowed at load time", () => {
+  const { PAYLOAD } = require("../lib/generated/gateway-routes");
+  const cases = [
+    ["empty", (source) => { source.never_allowed = []; }, /never_allowed empty/u],
+    ["shape", (source) => { source.never_allowed[0].reason = 3; }, /never_allowed shape/u],
+    ["methods", (source) => { source.never_allowed[0].methods = ["GET"]; }, /never_allowed shape/u],
+    ["path", (source) => { source.never_allowed[0].inner_path = "api/config"; }, /never_allowed path/u],
+    ["duplicate", (source) => { source.never_allowed.push({ ...source.never_allowed[0] }); }, /never_allowed path/u],
+    ["browser intersection", (source) => { source.never_allowed[0].inner_path = "/api/not-mounted"; }, /browser intersection/u],
+  ];
+  for (const [name, change, pattern] of cases) {
+    const source = structuredClone(PAYLOAD);
+    change(source);
+    assert.throws(() => assertPayload(source), pattern, name);
+    assert.throws(() => createAuthMiddleware(TOKENS, source), pattern, name);
+  }
+});
+
+test("non-ASCII and control characters fail before route matching", () => {
+  for (const identity of ["gateway", "snapshot"]) {
+    for (const character of ["\u00a0", "\u3000", "é", "\x7f", "\x1f"]) {
+      const result = invoke(identity, `/api/status${character}`);
+      assert.equal(result.res.statusCode, 403, `${identity} U+${character.codePointAt(0).toString(16)}`);
+      assert.equal(result.res.body.code, "identity_forbidden");
+      assert.equal(result.passed, false);
+    }
+  }
+});
+
+test("percent normalization rejects a path assigned to another identity", () => {
+  const result = invoke("gateway", "/api/trading/accounts/acct-1%23x");
+  assert.equal(result.res.statusCode, 404);
+  assert.equal(result.res.body.code, "route_not_found");
+  assert.equal(result.passed, false);
+});
+
 test("NA, path_part and intersection fixed probes", () => {
   for (const pathname of ["/api/config", "/API/CONFIG", "/api/config/", "/api/login", "/api/login/", "/api/login/start", "/api/login/anything/else", "/api/login/qr/status", "/", "//", "/index.html", "/healthz", "/healthz/"]) {
     assert.equal(isNeverAllowed(pathname), true, pathname);
@@ -143,6 +179,27 @@ test("dump-route-table matches generated identities and registered handlers", ()
   assert.ok(actual.handlers.length > 0);
   assert.deepEqual(actual.missing, []);
   assert.deepEqual(actual.unexpected, []);
+});
+
+test("dump-route-table reports rogue literal, parameter and mounted handlers", () => {
+  const script = path.resolve(__dirname, "../scripts/dump-route-table.js");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "watcher-route-injection-"));
+  const preload = path.join(root, "inject.js");
+  try {
+    for (const [route, registration] of [
+      ["/api/rogue", "post"],
+      ["/api/:rogue", "post"],
+      ["/api/rogue-middleware", "use"],
+    ]) {
+      fs.writeFileSync(preload, `const Module = require("node:module");\nconst load = Module._load;\nModule._load = function(request, parent, main) {\n  const result = load.apply(this, arguments);\n  if (request === "../server") result.app.${registration}(${JSON.stringify(route)}, (_, res) => res.json({}));\n  return result;\n};\n`);
+      const result = spawnSync(process.execPath, ["--require", preload, script], { encoding: "utf8", timeout: 15000 });
+      assert.equal(result.status, 1, `${route}: ${result.stderr}`);
+      const actual = JSON.parse(result.stdout);
+      assert.ok(actual.unexpected.some((row) => row.path === route), route);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("non browser raw targets are rejected before handler and static through real sockets", async () => {
