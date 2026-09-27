@@ -15,6 +15,17 @@ for (const [name, value] of Object.entries({ WATCHER_GATEWAY_TOKEN: "g", WATCHER
 }
 
 try {
+  const express = require("express");
+  const mounts = [];
+  const originalUse = express.application.use;
+  express.application.use = function (...args) {
+    const mount = typeof args[0] === "string" ? args[0] : "/";
+    const handlers = typeof args[0] === "string" ? args.slice(1) : args;
+    for (const handler of handlers) {
+      mounts.push({ path: mount, name: handler.name });
+    }
+    return originalUse.apply(this, args);
+  };
   const { app } = require("../server");
   const { registerTradingApi } = require("../lib/trading-api");
   registerTradingApi(app, {});
@@ -31,13 +42,18 @@ try {
       handlers.push({ method: method.toUpperCase(), path: layer.route.path });
     }
   }
-  // Express static and mounted media are middleware, so they have no route entry.
-  const staticPaths = ["/", "/index.html"];
-  const mediaPaths = ["/media/{filename}"];
+  // Express does not retain the mount string on middleware layers. Capture it at registration.
+  const staticMounts = mounts.filter((mount) => mount.name === "serveStatic").map((mount) => mount.path);
+  const mediaMounts = mounts.filter((mount) => mount.name === "mediaHandler").map((mount) => mount.path);
+  const staticPaths = staticMounts.flatMap((mount) => [mount, path.posix.join(mount, "index.html")]);
+  const mediaPaths = mediaMounts.map((mount) => path.posix.join(mount, "{filename}"));
   function sameShape(actual, template) {
     const left = actual.split("/");
     const right = template.split("/");
-    return left.length === right.length && left.every((segment, index) => segment.startsWith(":") || right[index].startsWith("{") || segment === right[index]);
+    return left.length === right.length && left.every((segment, index) => {
+      const parameter = /^:([A-Za-z][A-Za-z0-9_]*)$/u.exec(segment);
+      return parameter ? /^\{[a-z][a-z0-9_]*\}$/u.test(right[index]) : segment === right[index];
+    });
   }
   const identityRoutes = authLayer.handle.routeTable.map(({ identity, method, inner_path: innerPath }) => ({ identity, method, inner_path: innerPath }));
   const missing = identityRoutes.filter((row) => {
@@ -47,6 +63,11 @@ try {
     return !handlers.some((handler) => handler.method === row.method && sameShape(handler.path, row.inner_path));
   });
   const unexpected = handlers.filter((handler) => (handler.path.startsWith("/api/") || handler.path.startsWith("/media/")) && !identityRoutes.some((row) => row.method === handler.method && sameShape(handler.path, row.inner_path)));
+  for (const mount of mounts) {
+    if ((mount.path.startsWith("/api/") || mount.path.startsWith("/media/")) && !mediaMounts.includes(mount.path)) {
+      unexpected.push({ method: "USE", path: mount.path });
+    }
+  }
   process.stdout.write(JSON.stringify({ identity_routes: identityRoutes, handlers, static_paths: staticPaths, media_paths: mediaPaths, missing, unexpected }) + "\n");
   if (missing.length || unexpected.length) {
     process.exitCode = 1;

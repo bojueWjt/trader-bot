@@ -160,6 +160,43 @@ def test_check_fails_on_tampered_caddy_snippet(isolated_root):
     assert "ROUTES_DIFF_EMPTY" not in result.stdout
 
 
+@pytest.mark.parametrize(
+    ("check_id", "edits"),
+    [
+        ("S-21", [
+            ('  - {inner_path: /healthz, methods: "*", reason: "容器健康探针，不经网关"}\n',
+             '  - {inner_path: /healthz, methods: "*", reason: "容器健康探针，不经网关"}\n  - {inner_path: /healthz, methods: "*", reason: "dup"}\n'),
+        ]),
+        ("S-22", [("  caddy_external_prefix: /m\n", "  caddy_external_prefix: /M\n")]),
+        ("S-23", [
+            ("  source: {type: string, enum: [watcher, v3], gateway_enum: [v3]}   #",
+             "  source: {type: string, enum: [watcher, v3], gateway_enum: [v3, watcher]}   #"),
+        ]),
+        ("S-11", [
+            ("  environment: {type: string, enum: [mainnet, testnet]}\n  position_ref",
+             "  environment: {type: string, enum: [mainnet, testnet], gateway_enum: [zzz]}\n  position_ref"),
+        ]),
+        ("S-10", [
+            ("  channel: {type: string, pattern: '^-?[0-9]{1,24}$'}\n  hours:",
+             "  channel: {type: string, pattern: '^-?[0-9]{1,24}$'}\n  café: {type: string, max_length: 8}\n  hours:"),
+            ("    query: [channel, hours, limit, before_created_at, before_id]\n    body: {allow: [], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: []}\n    response: {omit: [], mask: [], headers: json}\n    budget: config\n    write: null\n\n  - id: gw.briefings.get",
+             "    query: [channel, hours, limit, before_created_at, before_id, café]\n    body: {allow: [], deny: [api_key, api_secret, apiKey, apiSecret, api_id, api_hash, apiId, apiHash, session, sessionString, password, phoneNumber, phone, code, token], required: []}\n    response: {omit: [], mask: [], headers: json}\n    budget: config\n    write: null\n\n  - id: gw.briefings.get"),
+        ]),
+    ],
+)
+def test_source_self_consistency_rejects_tampering(isolated_root, check_id, edits):
+    yaml_path = isolated_root / YAML.relative_to(ROOT)
+    source = yaml_path.read_text(encoding="utf-8")
+    for old, new in edits:
+        assert source.count(old) == 1, check_id
+        source = source.replace(old, new)
+    yaml_path.write_text(source, encoding="utf-8")
+    result = _run_check(isolated_root)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert check_id in result.stdout + result.stderr
+    assert "ROUTES_DIFF_EMPTY" not in result.stdout
+
+
 def test_p3_gate_rejects_p3_paths_in_p2_artifact(isolated_root):
     caddy = isolated_root / CADDY.relative_to(ROOT)
     p3 = _render_phase("P3", isolated_root)[caddy]
