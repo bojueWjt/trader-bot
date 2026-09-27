@@ -1539,7 +1539,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             assert art(text, good_snip) is not None, ("list accepted", name)
             checks += 1
         # the same regex tamper in BOTH files (a consistent snippet): only the "regex derived from the template" rule is left
-        bad_re = row.split(" ")[1].replace("[^/]+$", "[^/]*$")
+        bad_re = row.split(" ")[1].replace("[^/]+$", ".+$")    # no '*': the star rule must not be what catches it
         assert art(good_list.replace(row, row.replace(row.split(" ")[1], bad_re)), good_snip.replace(row.split(" ")[1], bad_re)) is not None, \
             "regex not derived from the template, snippet consistent"
         checks += 1
@@ -1700,6 +1700,10 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         "well-formed unlisted line inside the block": lambda s: s.insert(first_wgw(s) + 1, {"group": "group21", "match": [{"method": ["GET"], "path_regexp": {
             "name": "wgw_r_price_alerts", "pattern": "^/m/v1/watcher/price-alerts$"}}], "handle": copy.deepcopy(s[first_wgw(s)]["handle"])}),
         "last line and fallback moved into a nested subroute": lambda s: s.insert(fb(s) - 1, {"handle": [{"handler": "subroute", "routes": [s.pop(fb(s) - 1), s.pop(fb(s))]}]}),
+        # the moved line keeps its index (16 non-matching pads before it): contiguity and fallback position both hold,
+        # only the "one list" rule can refuse it
+        "last line nested at the same index (padded)": lambda s: s.insert(fb(s) - 1, {"handle": [{"handler": "subroute", "routes":
+            [{"match": [{"path": [f"/o0-pad/{i}"]}], "handle": [{"handler": "vars", "p": str(i)}]} for i in range(fb(s) - 1)] + [s.pop(fb(s) - 1)]}]}),
         # forwarders of the prefix (d) and emulation (e)
         "forwarder of the prefix hidden behind the fallback": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m/v1/watcher/*"]}])),
         "/m/* forwarder after the fallback (watcherx reaches OQ)": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m/*"]}])),
