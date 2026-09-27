@@ -1,0 +1,43 @@
+# O-0 test fixture (NOT the production file): the jp-bot site shape the O-0 tools assume,
+# after stage C. @@BCRYPT@@ is replaced at test time by a hash of a random one-off password.
+{
+	admin localhost:2019
+}
+import caddy-watcher-gateway.caddy
+(watcher_gateway_upstream) {
+	uri strip_prefix /m
+	reverse_proxy 127.0.0.1:8183
+}
+jp-bot.balen.wang {
+	import watcher_gateway_routes
+	encode gzip
+	header X-Content-Type-Options nosniff
+	@mobile path /m/v1/accounts /m/v1/mirror/positions /m/v1/operator/orders /m/v1/operator/orders/*
+	handle @mobile {
+		uri strip_prefix /m
+		reverse_proxy 127.0.0.1:8183
+	}
+	handle /v1/* {
+		reverse_proxy 127.0.0.1:8183 {
+			header_up Authorization "Bearer {env.SYSTEM_OBSERVER_TOKEN}"
+		}
+	}
+	@watcher path /watcher /watcher/* /api/* /media/* /healthz
+	handle @watcher {
+		basic_auth {
+			o0fixture @@BCRYPT@@
+		}
+		request_header -X-Watcher-Actor
+		request_header -X-Watcher-Token-Fingerprint
+		request_header -X-Watcher-Proxy-Auth
+		request_header -Authorization
+		uri strip_prefix /watcher
+		reverse_proxy 127.0.0.1:9090 {
+			header_up X-Watcher-Proxy-Auth {env.WATCHER_BROWSER_PROXY_TOKEN}
+		}
+	}
+	handle {
+		root * /srv/trader-dashboard/dist
+		file_server
+	}
+}

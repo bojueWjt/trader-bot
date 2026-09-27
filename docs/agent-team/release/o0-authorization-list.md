@@ -1,10 +1,10 @@
-# O-0 待用户授权清单（wac-032 草案，wac-045 修订，供 Planner 转交用户）
+# O-0 待用户授权清单（wac-032 草案，wac-045 修订，wac-060 适配 WGW-1.0.2，供 Planner 转交用户）
 
 > 规则：每一项都要用户**逐项**明确授权后才执行。任何 Agent 的转述都不算授权。上一项的验证没有通过，就不申请下一项。
 > **授权号与脚本阶段绑定**（审查 wac-032 🔴-2）：每个脚本阶段只接受下表"脚本阶段"列里写明的那一个授权号，别的号（包括格式正确的号）一律拒绝；绑定表在 `scripts/ops/o0/o0_common.sh` 的 `o0_expected_auth`，`tests/auth_gate_test.sh` 逐条核对表中组合与三份 runbook 里的每一条示例命令。执行记录写入 `evidence/authorizations.log`：时间、脚本、阶段、授权号、候选提交、是否带 `--i-understand-data-loss`。
 > 所有项都**不包含 RESUME**。部署前后节点保持原授权状态：HALTED 保持 HALTED。某一步之后舰队有任何变化（状态、release、`/ready`、心跳冻结），脚本以退出码 3 停下并报告；是否恢复交易只由用户决定（O0-A06）。
 > 编号 O0-A09、O0-A19 保留未用（验证并入 A08，清理并入 A18）。
-> 目前**不能**开始申请生产授权：打包门禁 G7（wac-015 未合入）未通过（G4 与 G9-pytest 已在合入 wac-040/W-0b 修正后的集成分支上转绿，wac-059）；另外 WGW-1.0.2 的 Caddy 清单 v2 与片段适配（wac-060）未完成前不申请 O0-A05，见 `o0-requirements.md` §1 与 §6。本清单先给出完整顺序，让用户提前看到每一步的影响。
+> **门禁状态（wac-060 更新；此前"G7（wac-015 未合入）未通过"的说法已过时）**：G7 自集成分支 `d8342ad`（wac-015b 合入）起通过；WGW-1.0.2 之后挡路的是 O-0 工具链不认清单 v2（打包在 G12 前中止、`run_all.sh` 失败），wac-060 已适配：在 `auto/wac-060` 上 `run_all.sh` 全过（含真实 Caddy v2.10.2），打包门禁 `--report-only --run-tests` G1–G12 全部 PASS、`deploy_candidate: true`（证据见 `o0-requirements.md` §10）。**仍不能开始申请生产授权**，直到：wac-060 经 Reviewer PASS 并合入集成分支、在合入后的集成分支提交上重跑打包门禁仍全绿；U-1（D-02）、U-2（D-04）由用户确认。本清单先给出完整顺序，让用户提前看到每一步的影响。
 
 ## 一、决策状态
 
@@ -12,7 +12,7 @@
 |---|---|---|---|
 | D-01 | W-0b 第 3 次 FAIL 的处置 | **已定（用户 2026-09-26）**：方案 A | 第 4 轮小修 wac-043 进行中；W-0b 已合入集成分支 `f7641cb`，门禁 G6 通过 |
 | D-02 | 接受 Caddy restart 可能让全舰队 HALT，并选定窗口 | **待用户在上线前确认** | 推荐：用户在场、手机能收告警、信号稀少的窗口；若 A01 时舰队本来就是 HALTED，就在那个窗口做。所有 Caddy 变更合并为一次 restart。若 HALT 发生，恢复只由用户发起，不用 `resume_race.py` 的默认 intent 修复（09-10 裸仓教训） <!-- o0-allow --> |
-| D-03 | Caddy 路径清单里 `*` 的翻译方式 | **已定（用户 2026-09-26）**：严格"恰好一个非空段"，锚定、区分大小写的 `path_regexp`（`[^/]+`） | 写入下次勘误 WGW-1.0.2（P-12）。`--accept-prefix` 已从核对工具删除；前缀写法、`(?i)`、`[^/]*`、`.+`、缺 `$` 都判失败 |
+| D-03 | Caddy 路径清单里 `*` 的翻译方式 | **已定（用户 2026-09-26）**：严格"恰好一个非空段"，锚定、区分大小写的 `path_regexp`（`[^/]+`） | 已写入 WGW-1.0.2（F-04）：清单改为格式 v2（`<template> <regex> <methods>`，不含 `*`），另有已提交的片段 `caddy-watcher-gateway.caddy`（16 组 + 兜底 404）。wac-060 起 O-0 **不再 render**，候选 Caddyfile 直接 import 片段；核对工具对前缀写法、行级 `(?i)`、`[^/]*`、`.+`、缺 `$`、旧兜底 `(?:/|$)`、缺兜底、兜底不在最后都判失败 |
 | D-04 | 接受"共享代码目录"的混合版本状态 | **待用户在上线前确认** | 推荐接受，附两个条件：S-10 确认三个单元确实共用目录；在运维文档与记忆中登记"下一次 node-control / event-ingest 重启即加载新 `read_api.py`"，把那次重启当作一次部署看待 |
 | D-05 | compose `env_file` 与镜像白名单 | **Planner 已定**：由 wac-040 实现（已合入 `a881802`） | 白名单还缺 W-0b 之后的 `lib/config-store.js`（G4 失败），需 Planner 另行派发或并入 wac-015 |
 | D-06 | C-0 逐 worker 预热日志 | **Planner 已定**：wac-041（`c9b1e3f`，审查中） | 切换门禁以"每个 worker 一行 `snapshot_warmup result=success`"为证据（切换 runbook §3.2.3，`o0_tool.py warmup-check`） |
@@ -38,15 +38,16 @@
 
 | 授权 ID | 脚本阶段（只接受这个号） | 动作（一句话） | 影响 | 回滚方式 | 前置 |
 |---|---|---|---|---|---|
-| **O0-A01** | `o0_site_check.sh --execute` | 在 jp-24 跑只读现场核对（S-00…S-18），并从本机发 6 个不带凭据的公网 GET（L-P1…L-P6） | 只读；不在主机写文件；Caddy 完整配置**不离开主机**，只带回白名单骨架与主机上算出的"运行配置是否等于文件"结论；主机上的 `sync_operator_risk_db.py` 只有 sha 等于已审版本才以 `--check` 运行。**本轮新增（wac-072）**：S-00 在每个 `trader-v3-node-*` 容器里 `docker exec` 一段只读 python，只打印三个数（心跳判定时长、心跳间隔常量、是否覆盖），不改容器状态；另在约 10 秒内多做 6 次同样的只读心跳查询。**路径脱敏的残余风险**（审查 wac-032-r3 🟡-1 已修；以下为启发式本身的边界，需用户知悉）：纯字母令牌（例如 `/probe/qctbhyapqzxwvuk`、查询串里无 `=` 的纯字母值）、短于 12 位的字母数字混合段、短于 16 位的纯数字段会原样出现在本机证据里 | 无需回滚 | 无 |
+| **O0-A01** | `o0_site_check.sh --execute` | 在 jp-24 跑只读现场核对（S-00…S-18），并从本机发 6 个不带凭据的公网 GET（L-P1…L-P6） | 只读；不在主机写文件；Caddy 完整配置**不离开主机**，只带回白名单骨架与主机上算出的"运行配置是否等于文件"结论；主机上的 `sync_operator_risk_db.py` 只有 sha 等于已审版本才以 `--check` 运行。**本轮新增（wac-072）**：S-00 在每个 `trader-v3-node-*` 容器里 `docker exec` 一段只读 python，只打印三个数（心跳判定时长、心跳间隔常量、是否覆盖），不改容器状态；另在约 10 秒内多做 6 次同样的只读心跳查询。**wac-060 修正**：S-00 实测心跳年龄遇到 `NULL` 不再算成 0，输出 `<uncomparable:NULL>`；找不到节点容器时输出 `node_containers=0`；S-02 大纲另列出全局 `order` 行与站点顶层前置指令（参数照旧分类脱敏），供阶段 C 的 F-13 (2) 人工记录；S-10 另读 `NeedDaemonReload`、`FragmentPath`、`DropInPaths`（只读）。**路径脱敏的残余风险**（审查 wac-032-r3 🟡-1 已修；wac-073 的 M3/M4——以 `+`、`=` 分隔的纯数字令牌——已在 wac-060 修掉；以下为启发式本身的边界，需用户知悉）：纯字母令牌（例如 `/probe/qctbhyapqzxwvuk`、查询串里无 `=` 的纯字母值）、短于 12 位的字母数字混合段、短于 16 位的纯数字段（分隔符去掉之后计），以及**自身含 `/` 的令牌**（标准 base64 被 `/` 切开、正则里用 `\/` 转义的斜杠，审查 wac-073 的 M1/M2/M12：与路径结构无法区分）会原样出现在本机证据里 | 无需回滚 | 无 |
 | **O0-A02** | （人工命令，runbook §2.2） | 建 `/srv/trader-staging/o0-<UTC>`（0700），上传 bundle 并校验 sha | 只写 staging | 删除该目录 | A01 无阻断项；本地门禁全 PASS |
 | **O0-A03** | （人工命令，凭据 runbook I-1、I-2） | 在 staging 生成三组 watcher 凭据并校验（含与控制面 token 目录按摘要比对） | 只写 staging；不输出任何值 | 删除凭据集目录 | A02 |
 | **O0-A04** | `o0_deploy_watcher.sh`：`preflight`、`build` | watcher 只读门禁；用仓库离线白名单构建器（以**运行中镜像**为固定基础、只叠加已审文件、`--network=none`）构建候选镜像；列出运行中镜像里白名单之外的文件供审阅；真库一致副本；在副本上跑首次启动迁移（`--network none`、一次性假凭据、空 Telegram 配置、正常停止）；写 `watcher-build` 门禁 | 新增一个镜像、两份库副本；运行中的 watcher、真库、Caddy、控制面都不变 | `docker rmi` 候选镜像，删除 staging 副本 | A03；S-07 无 `config.json`；S-12 Python ≥ 3.11；S-14 磁盘够 |
-| **O0-A05** | `o0_deploy_caddy.sh`：`preflight`、`apply`、`verify`、`rollback` | 阶段 C：Caddy 加浏览器清头与注入、加 16 条 `/m/v1/watcher/*` 锚定单段路由；apply 先核对 preflight 门禁文件（同一候选 Caddyfile、同一线上文件、同一凭据），装好后对**已安装文件**再 adapt 与核对一遍，再 `validate` 与 `systemctl restart caddy`（不 reload）；失败自动回滚 | **可能让全舰队 fail-closed HALT**（D-02）；公网站点瞬断；`/m/v1/watcher/*` 从 SPA 变为控制面 404 | 自动/手动：还原 Caddyfile 与 v3.env 备份、校验 sha、validate、restart | A04；D-02 已确认 |
+| **O0-A05P** | （本机命令，不连 jp-24 执行；需要生产文件的副本） | 阶段 C 之前的**本机 Caddy 探针**（契约 F-12、F-13 (3)）：把候选 Caddyfile 的副本与片段放到本机 0700 目录，用同版本 Caddy（v2.10.2）跑 `o0_caddy_watcher_routes.py probe`（只改站点地址、两个上游、全局 admin/auto_https/端口，差异逐行记录；Caddy 状态目录在临时目录），完成后删除副本 | 只在本机；**副本含 basic auth 的 bcrypt 哈希**（不是明文，但属于凭据相关材料），所以取回副本本身需要授权。两种做法由用户选：(a) 执行者用 `scp -P 53222` 取回 `$S/caddy/Caddyfile.candidate`（O0-A02 之后）并在本机探针后删除；(b) 用户自己把副本放到指定的本机目录。**若 S-02/S-03 显示 Caddyfile 里有字面的头值或 token（`<literal len=N>` 而不是 `{env.…}` 占位符），副本就含明文凭据**：此时不用 (a)，由用户决定 (b) 或先把字面值改成占位符。契约把本机探针列为 O-0 的规范要求，不做探针就不申请 O0-A05 | 删除本机副本 | A02；候选 Caddyfile 已按部署 runbook §3.1 写好 |
+| **O0-A05** | `o0_deploy_caddy.sh`：`preflight`、`apply`、`verify`、`rollback` | 阶段 C：Caddy 加浏览器清头与注入；**新增文件 `/etc/caddy/caddy-watcher-gateway.caddy`**（已提交片段的逐字节副本）并在候选 Caddyfile 里 import（全局位置 import 片段文件、站点顶层在所有 handle 之前 `import watcher_gateway_routes`，F-12）：16 条锚定单段路由 + 兜底 404；preflight 另做候选文本检查、打印 F-13 (2) 记录行（执行者补全后交用户审阅）、verify 的两步遮蔽检查；apply 先核对 preflight 门禁文件（同一候选 Caddyfile、同一线上文件、同一凭据、同一 staging 片段；线上若已有**不同**的片段文件即拒绝），装好后对**已安装文件**再 adapt 与核对一遍，再 `validate` 与 `systemctl restart caddy`（不 reload）；失败自动回滚 | **可能让全舰队 fail-closed HALT**（D-02）；公网站点瞬断；16 条表内路径从 SPA 变为控制面 404（阶段 O 之后才由网关处理），其余 `/m/v1/watcher` 前缀路径由兜底直接 404 | 自动/手动：还原 Caddyfile 与 v3.env 备份、片段文件回到 apply 前状态（原本不存在就删除）、校验 sha、validate、restart | A04；A05P 的探针结果 `CADDY_PROBE_OK`；F-13 (2) 记录已由用户审阅；D-02 已确认 |
 | O0-A06 | （条件项，不是部署步骤） | 若某阶段后节点状态变化，是否以及何时恢复交易 | 只属于用户。Release Steward 不写恢复命令，只提供守卫的前后对比证据 | — | — |
 | **O0-A07** | `o0_deploy_watcher.sh`：`apply-preflight`、`apply`、`verify`、`rollback` | 阶段 W：上线前重跑只读门禁（门禁有效期 1 小时）；apply 先核对两份门禁文件并确认**已测试的候选镜像存在且 ID 一致**，之后才备份、写 env_file、装源码与 compose（各自装后 sha 校验）、用该镜像重建 watcher；启动、90 秒重启计数、**Telegram 重新连上**（180 秒内）都在自动回滚窗口内断言 | watcher 重建期间 Telegram 采集中断约 1 分钟（可能漏信号，事后按 §1 核对，只报告不补单）；真库新增 `config_revision`、`config_audit`；浏览器站点从此要求 Caddy 注入的凭据 | 自动/手动：旧镜像 + 旧源码 + 旧 compose + env_file 回到 apply 前状态后重建；新增两张表保留（旧代码忽略） | A05 已验证；`MIGRATION_DRYRUN_OK`；S-15 无 `db_manager.py` 写入者；用户已审阅"运行中镜像里白名单之外的文件"清单 |
 | O0-A07R | `o0_deploy_watcher.sh`：`restore-db`，另须 `--i-understand-data-loss` | （仅在迁移破坏数据时）把真库换回 A07 前的在线备份；先断言快照开关为 0、备份 sha 与 `integrity_check` 正确；移动前记录线上库的属主、权限与 sha，装回的库**保持原属主与权限**；上一次移走的原库还在时拒绝执行 | **破坏性**：A07 之后写入的配置、审计与 Telegram 消息会丢失 | 自动：停 watcher 之后任一步失败，把换下的原库原样放回（sha、属主、权限核对），重新启动 watcher，跑舰队守卫（只报告）；自动恢复失败时按部署 runbook W-6 的手工路径（同一授权范围）并立即报用户 | 用户单独决定；O0-A07 的号**不能**执行这一步 |
-| **O0-A08** | `o0_deploy_operator_query.sh`：`preflight`、`apply`、`verify`、`rollback` | 阶段 O：preflight 与 apply 先过控制面单元隔离门禁（S-10 的机读版：另两个单元不加载 `operator-query.env`、不带 `WATCHER_*TOKEN`，operator-query 在 `--cp-root` 下运行；违例即阻断，不写任何东西）；operator-query env 加入 `WATCHER_GATEWAY_TOKEN`、`WATCHER_SNAPSHOT_TOKEN`（开关保持 0），安装五个文件（装后 sha 校验），**只重启 operator-query**；在自动回滚窗口内用 `SYSTEM_OBSERVER_TOKEN`（进程内读取，只打印状态码）经网关打一次新 watcher，期望 200 | app 与运维查询端点重启约数秒；网关上线；node-control 与 event-ingest 不重启，但磁盘上已是新代码（D-04） | 自动/手动：还原文件与 env（sha 校验）、只重启 operator-query | A07 已验证；S-12；S-13 无漂移；D-04 已确认 |
+| **O0-A08** | `o0_deploy_operator_query.sh`：`preflight`、`apply`、`verify`、`rollback` | 阶段 O：preflight 与 apply 先过控制面单元隔离门禁（S-10 的机读版：另两个单元不加载 `operator-query.env`、不带 `WATCHER_*TOKEN`，operator-query 在 `--cp-root` 下运行；违例即阻断，不写任何东西；wac-060 起任一单元 `NeedDaemonReload=yes`——磁盘上的单元或 drop-in 改了但没加载——或 `EnvironmentFiles=` 有读不懂的值，都判 `CP_ISOLATION_UNCOMPARABLE` 并阻断，不在 O-0 里 daemon-reload）；operator-query env 加入 `WATCHER_GATEWAY_TOKEN`、`WATCHER_SNAPSHOT_TOKEN`（开关保持 0），安装五个文件（装后 sha 校验），**只重启 operator-query**；在自动回滚窗口内用 `SYSTEM_OBSERVER_TOKEN`（进程内读取，只打印状态码）经网关打一次新 watcher，期望 200 | app 与运维查询端点重启约数秒；网关上线；node-control 与 event-ingest 不重启，但磁盘上已是新代码（D-04） | 自动/手动：还原文件与 env（sha 校验）、只重启 operator-query | A07 已验证；S-12；S-13 无漂移；D-04 已确认 |
 | O0-A10 | — | 真机联调 A-0（手机或 Xiaomi Pad 9 Pro Max） | 只在用户说"现在可以用"时进行 | — | A08 |
 | O0-A11 | `o0_fleet_guard.sh`：`drill-R-2`、`drill-R-3`、`drill-R-5` | （可选）gateway 凭据轮换演练：R-1 → R-2 → R-3 → R-4 → R-5，每一步前后舰队守卫 | watcher 重建两次；operator-query 重启一次 | 每一步各有回滚（凭据 runbook §3） | A08 |
 | O0-A12 | — | （可选，默认在隔离环境做）生产上分两段暂停 watcher 容器实测 | 暂停期间无信号采集 | `docker unpause` | 开关打开之后；D-08 |
@@ -58,7 +59,17 @@
 | O0-A18 | — | （≥ 30 天后）删除副本备份与 staging 中含凭据的 env 备份、凭据集目录 | 不可逆 | 无 | A17 满 30 天且无回滚需求 |
 | O0-A20 … A23 | `o0_fleet_guard.sh`：`R-1`（A20）、`R-2`（A21）、`R-3`/`R-4`（A22）、`R-5`（A23） | 以后任何一次例行凭据轮换：A20 生成新值、A21 watcher 接受新旧、A22 持有方切新值并观察、A23 撤旧值 | 见凭据 runbook §3；browser 的持有方一步要重启 Caddy，带 D-02 的风险 | 每一步都有该步回滚 | 用户发起 |
 
-## 四、交给用户时附带的材料
+## 四、wac-060 之后仍需用户授权或确认的要点（Planner 转达；任何 Agent 的转述都不算授权）
+
+1. **U-1 / D-02**：Caddy restart 可能让全舰队 HALT，以及窗口选择。所有 Caddy 变更（浏览器清头注入 + 片段文件 + 两行 import）合并在**一次** restart 里。
+2. **U-2 / D-04**：共享代码目录的混合版本。隔离门禁（O0-A08）现在对 `NeedDaemonReload=yes` 与读不懂的 `EnvironmentFiles=` 判 UNCOMPARABLE。
+3. **U-3**：O0-A01 范围（S-00 的只读 `docker exec` 与 6 次心跳查询；本轮新增的只是输出格式：`<uncomparable:NULL>`、`node_containers=`，S-02/S-10 多列几项只读属性）。
+4. **U-4**：O0-A01 路径脱敏的残余风险（纯字母、短段、自身含 `/` 的令牌），M3/M4 已修。
+5. **新增 O0-A05P**：本机 Caddy 探针需要候选 Caddyfile 的副本离开主机（含 bcrypt 哈希）；做法 (a) 或 (b) 由用户选，探针完成后删除副本。
+6. **O0-A05 的附加前置**：F-13 (2) 人工记录（全局 `order` 选项、站点顶层前置指令）由用户审阅；片段文件是 `/etc/caddy/` 下的新文件（回滚会删除它）。
+7. U-5…U-10 不变：守卫参数组、`O0_FLEET_KNOWN_DOWN`、O0-A01…A08 逐项授权、O0-A07R 单独决定、O0-A06 恢复交易只属于用户、O0-A10 真机只在用户说"现在可以用"时进行。
+
+## 五、交给用户时附带的材料
 
 1. `o0-requirements.md`：要求清单、前置、审查 wac-032 的逐条处置、本地实跑证据。
 2. `o0-site-checklist.md`：A01 要跑的每一条命令、预期、不符时的处置。

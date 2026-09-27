@@ -103,9 +103,10 @@ KV = re.compile(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*[=:]\s*)(.*)$"
 # Two passes (review wac-032-r3 🟡-1: escapes, '.', '-' and '+' cut one token into short
 # pieces that each stayed below the threshold):
 # 1. the path is split at '/' into chunks; a chunk is judged twice, with {placeholders} and
-#    regex syntax removed, and with separators removed as well ('+' and '=' are base64
-#    characters and stay): the first catches short dotted parts that only reach 12 with
-#    their separators, the second catches separated digit/hex tokens; if either is a token,
+#    regex syntax removed, and with separators AND '+'/'=' removed as well ('+' and '=' are
+#    base64 characters: the first pass keeps them, the second drops them, review wac-072 🟡-2):
+#    the first catches short dotted parts that only reach 12 with their separators, the second
+#    catches separated digit/hex tokens ('-', '.', '+', '=' ...); if either is a token,
 #    the WHOLE chunk becomes <seg len=N>;
 # 2. any other chunk is split at regex metacharacters and each piece is judged as before.
 PATH_CHUNK_SPLIT = re.compile(r"(/+)")
@@ -124,7 +125,9 @@ def _token_segment(seg: str) -> bool:
 
 def _chunk_is_token(chunk: str) -> bool:
     bare = CHUNK_REGEX_SYNTAX.sub("", CHUNK_PLACEHOLDER.sub("", chunk))
-    return _token_segment(bare) or _token_segment(CHUNK_SEPARATORS.sub("", bare))
+    # second pass also drops '+' and '=' (review wac-072 🟡-2: '4829+1057+3829+1045' is a 16-digit
+    # token); the first pass keeps them as base64 token characters (N7 is unaffected)
+    return _token_segment(bare) or _token_segment(CHUNK_SEPARATORS.sub("", bare).replace("+", "").replace("=", ""))
 
 
 def _redact_pieces(chunk: str) -> str:
@@ -631,23 +634,36 @@ def cmd_fleet_params(args: argparse.Namespace) -> int:
 WATCHER_CRED_NAME = re.compile(r"^WATCHER_[A-Z0-9_]*TOKEN[A-Z0-9_]*$")
 
 
+# Review wac-072 🟡-3: a value the parser does not understand is UNCOMPARABLE, never silently
+# skipped. systemd prints "EnvironmentFiles=<path> (ignore_errors=yes|no)"; the path is cut from
+# the RIGHT at " (ignore_errors=" so a path with spaces still parses. A bare "-/path" (no suffix)
+# is accepted only without whitespace; anything else (no leading '/', unknown suffix) is kept in
+# "unparsed" and the gate returns CP_ISOLATION_UNCOMPARABLE.
+ENVFILES_VALUE = re.compile(r"^(-?)(/.*?)(?: \(ignore_errors=(yes|no)\))?$")
+
+
 def _parse_unit_show(text: str) -> dict:
-    out: dict = {"envfiles": [], "env_names": []}
+    out: dict = {"envfiles": [], "env_names": [], "unparsed": []}
     for line in text.splitlines():
         key, sep, value = line.partition("=")
         if not sep:
             continue
         if key == "EnvironmentFiles":
-            m = re.match(r"^(-?)(\S+)(?: \(ignore_errors=(yes|no)\))?$", value.strip())
-            if m:
-                out["envfiles"].append((m.group(2), m.group(1) == "-" or m.group(3) == "yes"))
+            v = value.strip()
+            if not v:
+                continue
+            m = ENVFILES_VALUE.match(v)
+            if not m or (m.group(3) is None and re.search(r"\s", m.group(2))):
+                out["unparsed"].append(v)
+                continue
+            out["envfiles"].append((m.group(2), m.group(1) == "-" or m.group(3) == "yes"))
         elif key == "Environment":
             try:
                 words = shlex.split(value)
             except ValueError:
                 words = value.split()
             out["env_names"] += [w.split("=", 1)[0] for w in words if "=" in w]
-        elif key in ("LoadState", "WorkingDirectory"):
+        elif key in ("LoadState", "WorkingDirectory", "NeedDaemonReload", "FragmentPath", "DropInPaths"):
             out[key] = value.strip()
     return out
 
@@ -672,9 +688,19 @@ def cp_isolation_check(shows: dict[str, str], oq_unit: str, other_units: list[st
                        cp_root: str) -> tuple[int, list[str]]:
     lines: list[str] = []
     units = {u: _parse_unit_show(shows.get(u, "")) for u in [oq_unit] + other_units}
+    evidence = []
     for u, info in units.items():
         if info.get("LoadState") != "loaded":
             return 2, [f"CP_ISOLATION_UNCOMPARABLE {u}: LoadState={info.get('LoadState', '<missing>')} (unit unknown or systemctl output unreadable)"]
+        # review wac-072 🟡-3: a drop-in changed on disk but not loaded is invisible to `systemctl show`;
+        # the next daemon-reload + restart of that unit would load it
+        if info.get("NeedDaemonReload") != "no":
+            return 2, [f"CP_ISOLATION_UNCOMPARABLE {u}: NeedDaemonReload={info.get('NeedDaemonReload', '<missing>')} (unit files changed on disk "
+                       "but not loaded: the gate would judge the OLD configuration; report to the user, do not daemon-reload here)"]
+        if info["unparsed"]:
+            return 2, [f"CP_ISOLATION_UNCOMPARABLE {u}: {len(info['unparsed'])} EnvironmentFiles= value(s) in an unexpected format "
+                       "(not '<absolute path> (ignore_errors=yes|no)'): cannot tell which env files the unit loads"]
+        evidence.append(f"{u}: FragmentPath={info.get('FragmentPath') or '<none>'} DropInPaths={info.get('DropInPaths') or '<none>'}")
     violations = []
     oq_env_real = os.path.realpath(oq_env)
     root = os.path.normpath(cp_root)
@@ -702,6 +728,7 @@ def cp_isolation_check(shows: dict[str, str], oq_unit: str, other_units: list[st
         if not any(v.startswith(("ENVFILE_ISOLATION VIOLATION " + u)) for v in violations):
             lines.append(f"ENVFILE_ISOLATION ok {u} envfiles={len(info['envfiles'])} env_names={len(info['env_names'])}")
     shared = [u for u in other_units if os.path.normpath(units[u].get("WorkingDirectory") or "/") == oq_wd]
+    lines += evidence
     lines.append(f"working directories: " + " ".join(f"{u}={os.path.normpath(units[u].get('WorkingDirectory') or '<unset>')}" for u in units))
     if violations:
         return 1, lines + violations + [f"CP_ISOLATION_FAILED violations={len(violations)} (stage O blocked; report to the user)"]
@@ -713,7 +740,8 @@ def cmd_cp_isolation(args: argparse.Namespace) -> int:
     import subprocess
     shows = {}
     for u in [args.oq_unit] + args.other_unit:
-        r = subprocess.run(["systemctl", "show", u, "-p", "LoadState", "-p", "WorkingDirectory", "-p", "EnvironmentFiles", "-p", "Environment"],
+        r = subprocess.run(["systemctl", "show", u, "-p", "LoadState", "-p", "WorkingDirectory", "-p", "EnvironmentFiles", "-p", "Environment",
+                            "-p", "NeedDaemonReload", "-p", "FragmentPath", "-p", "DropInPaths"],
                            stdin=subprocess.DEVNULL, capture_output=True, text=True)
         if r.returncode != 0:
             print(f"CP_ISOLATION_UNCOMPARABLE systemctl show {u} rc={r.returncode}")
@@ -878,6 +906,9 @@ PATH_SHAPES_R3 = (
     ("/t/a1b2c3d4e5f6", ("a1b2c3d4e5f6",)),                                                     # exactly 12 mixed
     ("/n/4829-1057-3829-1045", ("4829-1057", "3829-1045")),                                     # dash-separated digits (hex rule after separators)
     ("/k/a1.b2.c3.d4.e5", ("a1.b2.c3", "c3.d4.e5")),                                            # short dotted parts, 12+ only with the dots
+    ("/n/4829+1057+3829+1045", ("4829+1057", "3829+1045", "48291057")),                         # M3 (wac-073): '+'-separated digits
+    ("/n/4829=1057=3829=1045", ("4829=1057", "3829=1045", "48291057")),                         # M4 (wac-073): '='-separated digits
+    ("^/n/4829\\+1057\\+3829\\+1045$", ("4829", "3829")),                                         # M3 as an escaped regex
 )
 # exact outputs that pin each rule on its own (a removed rule or a moved threshold changes them)
 PATH_RULE_PINS = (
@@ -890,6 +921,9 @@ PATH_RULE_PINS = (
     ("/k/Ab3dEfG5hI+x/jK7lMnO9pQ==", "/k/<seg len=12>/<seg len=12>"),  # '+' and '=' are token characters
     ("/n/4829-1057-3829-1045", "/n/<seg len=19>"),     # separators removed before the hex rule
     ("/k/a1.b2.c3.d4.e5", "/k/<seg len=14>"),          # judged with the separators too
+    ("/n/4829+1057+3829+1045", "/n/<seg len=19>"),     # '+' dropped in the second pass (wac-073 M3)
+    ("/n/4829=1057=3829=1045", "/n/<seg len=19>"),     # '=' dropped in the second pass (wac-073 M4)
+    ("/n/4829+1057+3829+104", "/n/4829+1057+3829+104"),  # 15 digits after dropping '+': below the threshold, whole chunk kept
 )
 LEGIT_PATHS = (
     "/m/v1/watcher/dialogs", "/m/v1/watcher/disconnect", "/m/v1/watcher/groups", "/m/v1/watcher/media/*", "/m/v1/watcher/reconnect",
@@ -900,6 +934,8 @@ LEGIT_PATHS = (
     "/.well-known/acme-challenge/*", "/m/v1/watcher/config/revision", "{http.request.uri}", "/api/login/*",
     "/m/v1/watcher/trading/price-alerts/[^/]+$", "(?i:/m/v1/watcher)(?:/|$)", "^(?i:/m/v1/watcher)(?:/|$)",
     "/api{http.request.uri.path.1}",   # a placeholder is structure: it is removed before a chunk is judged
+    "^(?i:/m/v1/watcher)(?:[/\\n]|$)", "/m/v1/watcher/trading/accounts/{account_id}",   # WGW-1.0.2 fallback and a v2 template (wac-060)
+    "/etc/caddy/caddy-watcher-gateway.caddy",
 )
 
 
@@ -1079,8 +1115,9 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
         nc_env_f.write_text("NAUTILUS_NODE_AUTH_JSON={}\n", encoding="utf-8")
         bad_env_f.write_text("export WATCHER_SNAPSHOT_TOKEN=SENTINELleak0123456789\n", encoding="utf-8")
         U_OQ, U_NC, U_EI = "trader-v3-controlplane-operator-query", "trader-v3-controlplane-node-control", "trader-v3-controlplane-event-ingest"
-        def show(wd, files, env=""):
-            return "LoadState=loaded\nWorkingDirectory=%s\n%sEnvironment=%s\n" % (wd, "".join(f"EnvironmentFiles={f} (ignore_errors=no)\n" for f in files), env)
+        def show(wd, files, env="", reload="no"):
+            return "LoadState=loaded\nNeedDaemonReload=%s\nFragmentPath=/etc/systemd/system/x.service\nWorkingDirectory=%s\n%sEnvironment=%s\n" % (
+                reload, wd, "".join(f"EnvironmentFiles={f} (ignore_errors=no)\n" for f in files), env)
         good_shows = {U_OQ: show(cp / "api", [oq_env_f], "PYTHONPATH=/x"), U_NC: show(cp / "api", [nc_env_f]),
                       U_EI: show(cp / "api", [], "FOO=SENTINELvalue0123456789 BAR=1")}
         def iso(shows):
@@ -1092,7 +1129,8 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
             ("event-ingest Environment= carries a watcher token name", dict(good_shows, **{U_EI: show(cp / "api", [], "WATCHER_GATEWAY_TOKEN=SENTINELenv0123456789")}), 1),
             ("node-control env file defines a watcher token", dict(good_shows, **{U_NC: show(cp / "api", [bad_env_f])}), 1),
             ("operator-query runs from another directory", dict(good_shows, **{U_OQ: show(base / "elsewhere", [oq_env_f])}), 1),
-            ("unknown unit (LoadState not-found)", dict(good_shows, **{U_EI: "LoadState=not-found\n"}), 2),
+            # systemd prints NeedDaemonReload=no for a unit that does not exist: only the LoadState rule can refuse it
+            ("unknown unit (LoadState not-found)", dict(good_shows, **{U_EI: "LoadState=not-found\nNeedDaemonReload=no\n"}), 2),
             ("empty systemctl output", dict(good_shows, **{U_NC: ""}), 2),
             ("unreadable env file without ignore_errors", dict(good_shows, **{U_NC: show(cp / "api", [base / "missing.env"])}), 2),
         ):
@@ -1103,9 +1141,41 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
             checks += 1
         rc_i, lines_i = iso(dict(good_shows, **{U_NC: show(base / "other", [nc_env_f]), U_EI: show(base / "other", [])}))
         assert rc_i == 0 and "shared_code_dir=none" in lines_i[-1], lines_i
-        rc_i, lines_i = iso(dict(good_shows, **{U_EI: "LoadState=loaded\nWorkingDirectory=%s\nEnvironmentFiles=-%s\n" % (cp / "api", base / "missing.env")}))
+        rc_i, lines_i = iso(dict(good_shows, **{U_EI: "LoadState=loaded\nNeedDaemonReload=no\nWorkingDirectory=%s\nEnvironmentFiles=-%s\n" % (cp / "api", base / "missing.env")}))
         assert rc_i == 0, ("a missing '-' (optional) env file is not a violation", lines_i)
         checks += 2
+        # review wac-072 🟡-3: unparseable EnvironmentFiles= and not-yet-loaded drop-ins are UNCOMPARABLE (rc 2), never OK
+        spaced = base / "dir with space"
+        spaced.mkdir()
+        (spaced / "nc.env").write_text("export WATCHER_GATEWAY_TOKEN_PREVIOUS=SENTINELspace0123456789\n", encoding="utf-8")
+        for name, shows_bad, want in (
+            ("EnvironmentFiles= value without a leading '/'", dict(good_shows, **{U_NC: show(cp / "api", []) + "EnvironmentFiles=relative/nc.env (ignore_errors=no)\n"}), 2),
+            ("EnvironmentFiles= with an unknown suffix", dict(good_shows, **{U_NC: show(cp / "api", []) + f"EnvironmentFiles={nc_env_f} (ignore_errors=maybe)\n"}), 2),
+            ("bare path with a space (no suffix)", dict(good_shows, **{U_NC: show(cp / "api", []) + f"EnvironmentFiles={spaced}/nc.env\n"}), 2),
+            ("NeedDaemonReload=yes (drop-in changed on disk, not loaded)", dict(good_shows, **{U_EI: show(cp / "api", [], reload="yes")}), 2),
+            ("NeedDaemonReload missing (property not read)", dict(good_shows, **{U_EI: show(cp / "api", []).replace("NeedDaemonReload=no\n", "")}), 2),
+            ("path with a space and the systemd suffix parses (and its watcher name is found)", dict(good_shows, **{U_NC: show(cp / "api", [spaced / "nc.env"])}), 1),
+        ):
+            rc_i, lines_i = iso(shows_bad)
+            assert rc_i == want, (name, rc_i, lines_i)
+            assert "SENTINEL" not in "\n".join(lines_i), (name, "env value printed")
+            checks += 1
+        rc_i, lines_i = iso(good_shows)
+        assert any(l.startswith(U_NC + ": FragmentPath=/etc/systemd/system/x.service") for l in lines_i), ("unit file paths recorded", lines_i)
+        # review wac-072 🟡-4: symlink to operator-query.env (realpath), systemd's "(ignore_errors=yes)" form for an
+        # absent optional file, a file NAMED operator-query.env elsewhere (by name, present or not)
+        oq_pre = base / "srv" / "operator-query.env"
+        oq_pre.parent.mkdir()
+        oq_pre.write_text("RISK_ADMIN_TOKEN=x\n", encoding="utf-8")          # before O-2: no watcher names yet
+        link = base / "nc-link.env"
+        link.symlink_to(oq_pre)
+        rc_i, lines_i = cp_isolation_check(dict(good_shows, **{U_NC: show(cp / "api", [link])}), U_OQ, [U_NC, U_EI], str(oq_pre), str(cp))
+        assert rc_i == 1 and any("ENVFILE_ISOLATION VIOLATION " + U_NC + " loads" in l for l in lines_i), ("symlink to operator-query.env", lines_i)
+        rc_i, lines_i = iso(dict(good_shows, **{U_EI: show(cp / "api", []) + f"EnvironmentFiles={base}/absent-optional.env (ignore_errors=yes)\n"}))
+        assert rc_i == 0 and any("absent (ignore_errors=yes)" in l for l in lines_i), ("systemd ignore_errors=yes form", lines_i)
+        rc_i, lines_i = iso(dict(good_shows, **{U_EI: show(cp / "api", []) + "EnvironmentFiles=/elsewhere/operator-query.env (ignore_errors=yes)\n"}))
+        assert rc_i == 1 and any("loads /elsewhere/operator-query.env" in l for l in lines_i), ("operator-query.env by name", lines_i)
+        checks += 4
         # warm-up
         j = ("Sep 26 x uvicorn[11]: INFO snapshot_warmup result=success revision=7 content_sha256=abcdefabcdef pid=11 role=operator-query duration_ms=40\n"
              "Sep 26 x uvicorn[12]: INFO snapshot_warmup result=success revision=7 content_sha256=abcdefabcdef pid=12 role=operator-query duration_ms=41\n")
@@ -1118,9 +1188,9 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
         checks += 6
     finally:
         for path in sorted(base.rglob("*"), reverse=True):
-            path.unlink() if path.is_file() else path.rmdir()
+            path.unlink() if (path.is_symlink() or path.is_file()) else path.rmdir()
         base.rmdir()
-    print(f"SELFTEST_OK checks={checks} fleet_cases={len(cases)} redaction_shapes=3+2 path_shapes=4+{len(PATH_SHAPES_R3)} path_pins={len(PATH_RULE_PINS)} legit_paths={len(LEGIT_PATHS)} gates=14 fleet_params=12 cp_isolation=9 warmup=6")
+    print(f"SELFTEST_OK checks={checks} fleet_cases={len(cases)} redaction_shapes=3+2 path_shapes=4+{len(PATH_SHAPES_R3)} path_pins={len(PATH_RULE_PINS)} legit_paths={len(LEGIT_PATHS)} gates=14 fleet_params=12 cp_isolation=19 warmup=6")
     return 0
 
 
