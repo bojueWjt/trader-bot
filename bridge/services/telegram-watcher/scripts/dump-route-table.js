@@ -67,6 +67,9 @@ try {
   const staticPaths = staticMounts.flatMap((mount) => [mount, path.posix.join(mount, "index.html")]);
   const mediaPaths = mediaMounts.map((mount) => path.posix.join(mount, "{filename}"));
   function sameShape(actual, template) {
+    if (typeof actual !== "string") {
+      return false;
+    }
     const left = actual.toLowerCase().split("/");
     const right = template.toLowerCase().split("/");
     return left.length === right.length && left.every((segment, index) => {
@@ -81,23 +84,76 @@ try {
     }
     return !handlers.some((handler) => handler.method === row.method && sameShape(handler.path, row.inner_path));
   });
-  const unexpected = handlers.filter((handler) => {
-    const routePath = typeof handler.path === "string" ? handler.path.toLowerCase() : "";
-    return (routePath === "/api" || routePath.startsWith("/api/") || routePath === "/media" || routePath.startsWith("/media/")) && !identityRoutes.some((row) => row.method === handler.method && sameShape(handler.path, row.inner_path));
-  });
+  const seenRoutes = new Set();
+  let healthzCount = 0;
+  const unexpected = [];
+  for (const handler of handlers) {
+    if (handler.method === "GET" && handler.path === "/healthz") {
+      healthzCount += 1;
+      if (healthzCount === 1) {
+        continue;
+      }
+    }
+    const index = identityRoutes.findIndex((row) => row.inner_path !== "/healthz" && !mediaPaths.includes(row.inner_path) && !staticPaths.includes(row.inner_path) && row.method === handler.method && sameShape(handler.path, row.inner_path));
+    if (index < 0 || seenRoutes.has(index)) {
+      unexpected.push({ method: handler.method, path: typeof handler.path === "string" ? handler.path : String(handler.path) });
+      continue;
+    }
+    seenRoutes.add(index);
+  }
+  const mountPaths = new Map();
   for (const mount of mounts) {
-    const allowed = typeof mount.path === "string" && (
-      (mount.path === "/" && (known.auth.has(mount.handler) || known.validation.has(mount.handler) || known.static.has(mount.handler))) ||
-      (mount.path === "/media" && known.media.has(mount.handler))
-    );
-    if (!allowed) {
-      unexpected.push({ method: "USE", path: typeof mount.path === "string" ? mount.path : String(mount.path) });
+    const paths = mountPaths.get(mount.handler) || [];
+    paths.push(mount.path);
+    mountPaths.set(mount.handler, paths);
+  }
+  const seenMounts = { auth: 0, validation: 0, static: 0, media: 0 };
+  function checkMounts(stack) {
+    for (const layer of stack) {
+      if (layer.route) {
+        continue;
+      }
+      const paths = mountPaths.get(layer.handle);
+      const mountPath = paths && paths.length ? paths.shift() : undefined;
+      let kind;
+      if (known.auth.has(layer.handle)) {
+        kind = "auth";
+      } else if (known.validation.has(layer.handle)) {
+        kind = "validation";
+      } else if (known.static.has(layer.handle)) {
+        kind = "static";
+      } else if (known.media.has(layer.handle)) {
+        kind = "media";
+      }
+      const allowedPath = kind === "media" ? "/media" : "/";
+      if (!kind || mountPath !== allowedPath || seenMounts[kind] > 0) {
+        unexpected.push({ method: "USE", path: mountPath === undefined ? "<unknown>" : String(mountPath) });
+      } else {
+        seenMounts[kind] += 1;
+      }
+      if (Array.isArray(layer.handle?.stack)) {
+        checkMounts(layer.handle.stack);
+      }
+    }
+  }
+  checkMounts(app.router.stack);
+  for (const kind of Object.keys(seenMounts)) {
+    if (seenMounts[kind] !== 1) {
+      missing.push({ method: "USE", inner_path: kind === "media" ? "/media" : "/", handler: kind });
     }
   }
   process.stdout.write(JSON.stringify({ identity_routes: identityRoutes, handlers, static_paths: staticPaths, media_paths: mediaPaths, missing, unexpected }) + "\n");
   if (missing.length || unexpected.length) {
     process.exitCode = 1;
   }
+} catch (err) {
+  process.stderr.write(`${err && err.stack ? err.stack : String(err)}\n`);
+  process.exitCode = 1;
 } finally {
-  fs.rmSync(root, { recursive: true, force: true });
+  try {
+    fs.rmSync(root, { recursive: true, force: true });
+  } catch (err) {
+    process.stderr.write(`${err && err.stack ? err.stack : String(err)}\n`);
+    process.exitCode = 1;
+  }
 }
