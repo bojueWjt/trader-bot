@@ -376,7 +376,18 @@
 
 ### 11.2 本机实跑（未连 jp-24；打包门禁 `--report-only`，未带 `--execute`）
 
-见提交说明与本节下方的证据补记（本节数字在代码提交之后补入）。
+代码提交 `eb7deee`（`auto/wac-090`，基于集成分支 `00405e3`）。二进制同 §10.4（审查者构建的 Caddy v2.10.2，经 `O0_CADDY_BIN` 使用，不进仓库）。
+
+| 命令 | 结果 |
+|---|---|
+| `O0_CADDY_BIN=<v2.10.2> O0_WAL_REPRO_DB=<审查 walt/w.db> O0_FLEET_REPRO_DIR=<审查 fleet/evidence> bash -o pipefail scripts/ops/o0/tests/run_all.sh` | 退出 0，末行 `ALL_O0_OFFLINE_CHECKS_OK real_caddy=ok`：`BASH_N_OK files=13`、`PY_COMPILE_OK`；o0_tool `SELFTEST_OK checks=104`；credentials `scenarios=13`；`CADDY_ARTIFACTS_OK lines=16 … fallback_verbatim=yes`；Caddy 工具 `SELFTEST_OK good_passes=241 variants_caught=68/68 (raw and skeleton) benign_two_step=8 checks=86 … probe_pinning=ok matchpath_pins=ok`；baseline `wal_case=ok repro_refused=ok`；`REDACTION_PARITY_OK corpus=83`；`LEAK_TEST_OK sections=19 sentinels=38 leaks=0`；`FLEET_GUARD_TEST_OK cases=7`；`AUTH_GATE_TEST_OK checks=24`（原 18）；`APPLY_ROLLBACK_TEST_OK checks=139`（原 138，另有计划结构的探针绑定检查）；`CADDY_REAL_TEST OK checks=49 failures=0 caddy=v2.10.2`（原 22）；`PLAN_MODE_OK scripts=5` |
+| 同上但不设 `O0_CADDY_BIN` | 退出 0，`CADDY_REAL_TEST_SKIPPED (O0_CADDY_BIN unset)`，末行 `O0_OFFLINE_CHECKS_OK_WITHOUT_REAL_CADDY real_caddy=skipped` |
+| 13 个 shell 脚本逐个 `bash -n` | 13/13 |
+| 真实 Caddy 探针（夹具） | `CADDY_PROBE_OK caddy=v2.10.2 live_checks=260 verify_passes=241 lines=16 … stub_hits=oq:37,watcher:0,sink:0 candidate_sha256=… snippet_sha256=…`；金丝雀副本 `sink:5`、金丝雀 0 个请求 |
+| 本机 `~/Library/Application Support/Caddy/` | 最终两次 `run_all.sh` 前后逐文件 `stat` 修改时间与 sha256 完全相同（`USER_CADDY_DIR_UNCHANGED`） |
+| `bash scripts/ops/o0/o0_package.sh --candidate HEAD(eb7deee) --out <scratchpad> --report-only --run-tests`（未带 `--execute`） | **G1–G12 全部 PASS**：G2 `ROUTES_DIFF_EMPTY rows=63 … phase_max=P2`；G3 `META_OK`；G4 `CLOSURE_OK closure=16 whitelist=36`；G5 `COMPOSE_OK env_file=True`；G8 5 个文件；G9 pytest `35 passed`、watcher `tests 155 / pass 155 / fail 0 / skipped 0`；G10 17 个候选工具与 runbook 文件无禁用动词；G11 14 个工具文件；G12 `RUNTIME_MANIFEST_OK files=36`。`PACKAGE_OK`，`RELEASE.json`：`candidate eb7deee…`、`deploy_candidate: true`、`failed_gates: 0`、`phase_max P2` |
+
+证据文件（scratchpad `w090/`）：`runall-caddy-final.log`、`runall-nocaddy-final.log`、`caddyreal.log`、`pkg.log`、`pkg/`、`gomatch/`（差分程序与脚本）、`mut/`（`muts090.py`、`one.sh`、`results.txt`、`results-r2.txt`、`w/<变异>/out.txt`）、`caddyhome-final-{before,after}.txt`。
 
 ### 11.3 变异复跑（scratchpad `w090/mut/`，pristine = 本任务代码，测试集 = 带真实 Caddy 的完整 `run_all.sh`）
 
