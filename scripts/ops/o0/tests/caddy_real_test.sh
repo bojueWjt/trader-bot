@@ -4,7 +4,7 @@
 # (run_all.sh reports the skip on its last line, so a skip is never read as a pass).
 #   1. the committed snippet + tests/fixtures/caddy/Caddyfile.prodlike.in: caddyfile-check OK,
 #      real `caddy adapt` -> verify OK (the selftest fixture is shaped like this output);
-#   2. F-12 / F-13 violations written as real Caddyfiles, adapted by real Caddy: verify FAILS;
+#   2. F-12 / F-13 violations written as real Caddyfiles (12), adapted by real Caddy: verify FAILS;
 #      whitelisted top-level directives and non-hitting ones: verify passes (two steps, not
 #      "fail on any hit");
 #   3. the local probe (`probe`) on the fixture as the "production copy": every §9.14.4 item 1
@@ -69,6 +69,8 @@ bad("handle-path-wrapped", good.replace(site_import, "\thandle_path /m* {\n\t\ti
 bad("global-order-reverse-proxy", good.replace("\tadmin localhost:2019\n", "\tadmin localhost:2019\n\torder reverse_proxy before handle\n")
     .replace(site_import, site_import + "\treverse_proxy /m/* 127.0.0.1:8183\n"))
 bad("toplevel-redir-prefix", good.replace(site_import, site_import + "\tredir /m/v1/watcher/* /\n"))
+bad("toplevel-uri-strip-suffix", good.replace(site_import, site_import + "\turi /m/v1/watcher/* strip_suffix /never-there\n"))
+bad("toplevel-method-rewrite", good.replace(site_import, site_import + "\tmethod /m/v1/watcher/* POST\n"))
 bad("toplevel-forward-auth", good.replace(site_import, site_import + "\tforward_auth 127.0.0.1:7000 {\n\t\turi /check\n\t}\n"))
 fine("whitelisted-toplevel", good.replace(site_import, site_import + "\tvars o0probe 1\n\theader -Server\n\tmap {path} {o0m} {\n\t\tdefault x\n\t}\n"))
 fine("redir-non-hitting", good.replace(site_import, site_import + "\tredir /old/* /new/\n\trewrite /static/x /static/y\n"))

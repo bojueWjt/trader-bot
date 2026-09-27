@@ -1538,6 +1538,11 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         for name, text in list_bad.items():
             assert art(text, good_snip) is not None, ("list accepted", name)
             checks += 1
+        # the same regex tamper in BOTH files (a consistent snippet): only the "regex derived from the template" rule is left
+        bad_re = row.split(" ")[1].replace("[^/]+$", "[^/]*$")
+        assert art(good_list.replace(row, row.replace(row.split(" ")[1], bad_re)), good_snip.replace(row.split(" ")[1], bad_re)) is not None, \
+            "regex not derived from the template, snippet consistent"
+        checks += 1
         snip_bad = {
             "_format": good_snip.replace(SNIPPET_FORMAT, "watcher-gateway-caddy-snippet.v0"),
             "old fallback (?:/|$)": good_snip.replace(FALLBACK_REGEX, "^(?i:/m/v1/watcher)(?:/|$)"),
@@ -1573,6 +1578,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             "snippet file not imported": cf_good.replace("import caddy-watcher-gateway.caddy\n", ""),
             "site does not import the routes": cf_good.replace("\timport watcher_gateway_routes\n", ""),
             "imported twice": cf_good.replace("\timport watcher_gateway_routes\n", "\timport watcher_gateway_routes\n\timport watcher_gateway_routes\n"),
+            "extra nested import besides the top-level one": cf_good.replace("\t\treverse_proxy 127.0.0.1:8183\n\t}\n}\n", "\t\treverse_proxy 127.0.0.1:8183\n\t}\n\thandle /x/* {\n\t\timport watcher_gateway_routes\n\t}\n}\n"),
         }.items():
             assert caddyfile_check(text, redact_line)[0], ("caddyfile check accepted", name)
             checks += 1
@@ -1655,6 +1661,8 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         "old fallback (?:/|$)": lambda s: set_pattern(s, "(?i:", "^(?i:/m/v1/watcher)(?:/|$)"),
         "fallback proxies instead of 404": lambda s: s.__setitem__(fb(s), strip_proxy_route(s[fb(s)]["match"])),
         "fallback answers 200": lambda s: s[fb(s)]["handle"][0]["routes"][0]["handle"][0].update({"status_code": 200}),
+        "fallback 404 with a body (contract: empty body)": lambda s: s[fb(s)]["handle"][0]["routes"][0]["handle"][0].update({"body": "gone"}),
+        "fallback 404 preceded by another handler": lambda s: s[fb(s)]["handle"][0]["routes"][0]["handle"].insert(0, {"handler": "headers", "response": {"set": {"X-A": ["1"]}}}),
         "fallback not last (before the per-path routes)": lambda s: s.insert(first_wgw(s), s.pop(fb(s))),
         "fallback with a method matcher": lambda s: s[fb(s)]["match"][0].update({"method": ["GET"]}),
         "fallback duplicated": lambda s: s.insert(fb(s) + 1, copy.deepcopy(s[fb(s)])),
@@ -1676,11 +1684,24 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         "case-sensitive path_regexp ^/M/ hits the upper-case probe": lambda s: s.insert(0, {"match": [{"path_regexp": {"name": "u", "pattern": "^/M/"}}], "handle": [
             {"handler": "rewrite", "strip_path_prefix": "/M"}]}),
         "unknown plugin handler before the snippet": lambda s: s.insert(0, {"handle": [{"handler": "rate_limit"}]}),
+        # isolated F-13 cases: the emulated requests are unaffected, ONLY the shadow check can catch them
+        "no-op rewrite (strip_suffix) hits the prefix": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"], "path": ["/m/v1/watcher/*"]}], "handle": [
+            {"handler": "rewrite", "strip_path_suffix": "/never-there"}]}),
+        "whitelisted handler, terminal, method-only matcher": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"]}], "handle": [
+            {"handler": "encode", "encodings": {"gzip": {}}}], "terminal": True}),
+        "whitelisted handler in a handle group before the snippet": lambda s: s.insert(first_wgw(s), {"group": "group21", "match": [{"method": ["CONNECT"]}],
+            "handle": [{"handler": "vars", "x": "1"}]}),
+        "unevaluable path_regexp counts as a hit": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"], "path_regexp": {"name": "u", "pattern": "^/m/\\pL+"}}],
+            "handle": [{"handler": "rewrite", "strip_path_suffix": "/never-there"}]}),
         "import wrapped in route { } (after the handle blocks)": wrap_in_route,
         "import wrapped in route { } without a catch-all handle": wrap_in_route_no_catchall,
         "snippet inside handle_path /m* (extra strip, nested)": lambda s: s.insert(first_wgw(s), {"group": "group21", "match": [{"path": ["/m*"]}], "handle": [
             {"handler": "rewrite", "strip_path_prefix": "/m"}, {"handler": "subroute", "routes": [s.pop(first_wgw(s))]}]}),
+        "well-formed unlisted line inside the block": lambda s: s.insert(first_wgw(s) + 1, {"group": "group21", "match": [{"method": ["GET"], "path_regexp": {
+            "name": "wgw_r_price_alerts", "pattern": "^/m/v1/watcher/price-alerts$"}}], "handle": copy.deepcopy(s[first_wgw(s)]["handle"])}),
+        "last line and fallback moved into a nested subroute": lambda s: s.insert(fb(s) - 1, {"handle": [{"handler": "subroute", "routes": [s.pop(fb(s) - 1), s.pop(fb(s))]}]}),
         # forwarders of the prefix (d) and emulation (e)
+        "forwarder of the prefix hidden behind the fallback": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m/v1/watcher/*"]}])),
         "/m/* forwarder after the fallback (watcherx reaches OQ)": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m/*"]}])),
         "double strip": lambda s: s[gw_index(s, "watcher/status")]["handle"][0]["routes"].insert(0, {"handle": [{"handler": "rewrite", "strip_path_prefix": "/m"}]}),
         "upstream snippet injects the panel Authorization": lambda s: s[gw_index(s, "watcher/status")]["handle"][0]["routes"][0]["handle"][1].update(
@@ -1697,6 +1718,13 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:9090"}]}]}),
     }
     caught = 0
+    # a handler before the site's subroute inside the host route runs for every request (F-13, enclosing level)
+    host_route_extra = copy.deepcopy(good)
+    host_route_extra["apps"]["http"]["servers"]["srv0"]["routes"][0]["handle"].insert(0, {"handler": "rewrite", "strip_path_suffix": "/never-there"})
+    for form, candidate in (("raw", host_route_extra), ("skeleton", caddy_skeleton(host_route_extra))):
+        ok_c, text_c = verdict(candidate)
+        assert not ok_c and "container route 0 handler before its subroute" in text_c, ("enclosing-level handler not caught", form)
+    checks += 1
     for name, fn in variants.items():
         cfg = mutated(fn)
         for form, candidate in (("raw", cfg), ("skeleton", caddy_skeleton(cfg))):

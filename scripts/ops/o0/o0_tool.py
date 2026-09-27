@@ -1129,7 +1129,8 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
             ("event-ingest Environment= carries a watcher token name", dict(good_shows, **{U_EI: show(cp / "api", [], "WATCHER_GATEWAY_TOKEN=SENTINELenv0123456789")}), 1),
             ("node-control env file defines a watcher token", dict(good_shows, **{U_NC: show(cp / "api", [bad_env_f])}), 1),
             ("operator-query runs from another directory", dict(good_shows, **{U_OQ: show(base / "elsewhere", [oq_env_f])}), 1),
-            ("unknown unit (LoadState not-found)", dict(good_shows, **{U_EI: "LoadState=not-found\n"}), 2),
+            # systemd prints NeedDaemonReload=no for a unit that does not exist: only the LoadState rule can refuse it
+            ("unknown unit (LoadState not-found)", dict(good_shows, **{U_EI: "LoadState=not-found\nNeedDaemonReload=no\n"}), 2),
             ("empty systemctl output", dict(good_shows, **{U_NC: ""}), 2),
             ("unreadable env file without ignore_errors", dict(good_shows, **{U_NC: show(cp / "api", [base / "missing.env"])}), 2),
         ):
