@@ -21,6 +21,11 @@
 #   over set-aside files (r2 🟡-5); the stage O isolation gate refuses apply before any write
 #   (r2 🟡-6); the fleet guard parameters are checked against the node heartbeat parameters in
 #   a real execute run (r2 🟡-7).
+# wac-060: stage C installs the WGW-1.0.2 snippet file next to the Caddyfile: SN1 its install
+#   fails (no restart, removed again), SN2 it pre-existed with the same bytes (restored, not
+#   removed), SN3 a different file sits there (refused at the gate before any write). The
+#   reviewer's five restore-db failure points from wac-073 (R073 STOPFAIL/STARTFAIL/MVMID/
+#   WALMADE/RECSHA, review wac-072 🟡-4) are part of this file.
 # All values are fakes generated here; nothing leaves the temporary directory.
 # --structure-only runs part 1 only (auth_gate_test.sh calls it that way).
 set -eo pipefail
@@ -156,6 +161,10 @@ cat > "$BIN/docker" <<'STUB'
 echo "docker $*" >> "$CALLS"
 case "$*" in
   *psql*) if [ -n "${HALT_AFTER_RESTART:-}" ] && grep -qE 'systemctl restart|compose .* up ' "$CALLS"; then echo 'account-a HALTED abcdef012345 hb_age=1.0'; else echo 'account-a ACTIVE abcdef012345 hb_age=1.0'; fi ;;
+  *" stop "*) if [ -n "${STOP_FAIL_FIRST:-}" ] && [ ! -e "$CALLS.sf" ]; then : > "$CALLS.sf"; exit 1; fi ;;
+  *" start "*) if [ -n "${START_FAIL_FIRST:-}" ] && [ ! -e "$CALLS.stf" ]; then : > "$CALLS.stf"; exit 1; fi
+     if [ -n "${CORRUPT_REPLACED:-}" ] && [ ! -e "$CALLS.cr" ]; then : > "$CALLS.cr"; printf 'x' >> "$CORRUPT_REPLACED"; fi
+     if [ -n "${START_MAKES_WAL:-}" ] && [ ! -e "$CALLS.wal" ]; then : > "$CALLS.wal"; printf 'walbytes' > "$START_MAKES_WAL"; fi ;;
   *" up "*) if [ -n "${UP_FAIL_FIRST:-}" ] && [ ! -e "$CALLS.uf" ]; then : > "$CALLS.uf"; exit 1; fi ;;
   "image inspect"*) echo "sha256:cand" ;;
   "inspect -f {{.Image}}"*) echo "sha256:running" ;;
@@ -174,6 +183,10 @@ echo "systemctl $*" >> "$CALLS"
 # injects the two S-10 violations (env file / Environment= name) with a sentinel VALUE
 if [ "$1" = "show" ] && [[ " $* " == *" -p LoadState "* ]]; then
   echo LoadState=loaded; echo "WorkingDirectory=$O0_SANDBOX/srv/trader-v3/services/control-plane/api"
+  # wac-060 (review wac-072 🟡-3): reload = node-control drop-in changed on disk but not loaded;
+  # unparsed = an EnvironmentFiles= value the gate cannot read
+  if [ "${ISOLATION_FAIL:-}" = reload ] && [[ "$2" == *node-control ]]; then echo NeedDaemonReload=yes; else echo NeedDaemonReload=no; fi
+  if [ "${ISOLATION_FAIL:-}" = unparsed ] && [[ "$2" == *event-ingest ]]; then echo 'EnvironmentFiles=etc/relative.env (ignore_errors=no)'; fi
   oqe="$O0_SANDBOX/srv/trader-v3/secrets/control-plane/operator-query.env"
   case "$2" in
     *operator-query) echo "EnvironmentFiles=$oqe (ignore_errors=no)"; echo 'Environment=PYTHONPATH=/x' ;;
@@ -245,6 +258,7 @@ if [ -n "${CP_CORRUPT:-}" ]; then last="${*: -1}"; case "$last" in *watcher-trad
 STUB
 cat > "$BIN/mv" <<'STUB'
 #!/usr/bin/env bash
+if [ -n "${MV_FAIL_SRC:-}" ] && [ ! -e "$CALLS.mvf" ]; then for a in "$@"; do case "$a" in *"$MV_FAIL_SRC") : > "$CALLS.mvf"; exit 1;; esac; done; fi
 [ -n "${MV_LOSE_OWNER:-}" ] || exec /bin/mv "$@"
 args=(); for a in "$@"; do [ "$a" = "--" ] || args+=("$a"); done
 src="${args[0]}"; dst="${args[1]}"; [ -d "$dst" ] && dst="$dst/$(basename "$src")"
@@ -287,7 +301,7 @@ new_sandbox() {  # new_sandbox <name>  -> SB, S, CALLS
   rm -rf "$SB"; : > "$CALLS"; rm -f "$CALLS.active"
   mkdir -p "$SB/srv/trader-v3" "$S/bundle/tools" "$S/bundle/caddy" "$S/evidence" "$S/creds"
   cp "$O0"/o0_*.py "$S/bundle/tools/"
-  cp "$REPO/contracts/generated/caddy-watcher-gateway-paths.txt" "$S/bundle/caddy/"
+  cp "$REPO/contracts/generated/caddy-watcher-gateway-paths.txt" "$REPO/contracts/generated/caddy-watcher-gateway.caddy" "$S/bundle/caddy/"
   printf '{"candidate": "%040d", "deploy_candidate": true, "phase_max": "P2", "yaml_sha256": "x"}\n' 7 > "$S/bundle/RELEASE.json"
   python3 "$O0/o0_watcher_credentials.py" generate --out-dir "$S/creds/set-initial" --allow-any-dir >/dev/null
 }
@@ -323,14 +337,23 @@ caddy_setup() {
   mkdir -p "$SB/etc/caddy" "$S/caddy"
   printf 'old.example {\n\trespond 200\n}\n' > "$SB/etc/caddy/Caddyfile"
   printf 'CADDY_DOMAIN=jp-bot.balen.wang\n' > "$SB/etc/caddy/v3.env"
-  printf 'jp-bot.balen.wang {\n\trespond 204\n}\n' > "$S/caddy/Caddyfile.candidate"
+  printf 'import caddy-watcher-gateway.caddy\njp-bot.balen.wang {\n\timport watcher_gateway_routes\n\trespond 204\n}\n' > "$S/caddy/Caddyfile.candidate"
+  cp "$S/bundle/caddy/caddy-watcher-gateway.caddy" "$S/caddy/caddy-watcher-gateway.caddy"   # preflight stages it (relative import)
   (cd "$SB/etc/caddy" && sha256sum "$SB/etc/caddy/Caddyfile" "$SB/etc/caddy/v3.env") > "$S/evidence/caddy-live.sha256"
   seal_bundle
   python3 "$O0/o0_tool.py" gate-write --out "$S/evidence/caddy-preflight.gate.json" --stage caddy-preflight --bundle "$S/bundle" \
     --file-sha "candidate_caddyfile=$S/caddy/Caddyfile.candidate" --file-sha "live_caddyfile=$SB/etc/caddy/Caddyfile" \
-    --file-sha "live_caddy_env=$SB/etc/caddy/v3.env" --file-sha "cred_caddy_env=$S/creds/set-initial/caddy.env" >/dev/null
+    --file-sha "live_caddy_env=$SB/etc/caddy/v3.env" --file-sha "cred_caddy_env=$S/creds/set-initial/caddy.env" \
+    --file-sha "staged_snippet=$S/caddy/caddy-watcher-gateway.caddy" >/dev/null
 }
-caddy_restored() { sha256sum -c --quiet "$S/evidence/caddy-live.sha256" >/dev/null 2>&1 && ok "$1: Caddyfile and v3.env restored byte for byte" || bad "$1: Caddy files not restored"; }
+caddy_restored() {  # caddy_restored <label> [present]: snippet file removed (first deploy) or back to the pre-apply bytes
+  sha256sum -c --quiet "$S/evidence/caddy-live.sha256" >/dev/null 2>&1 && ok "$1: Caddyfile and v3.env restored byte for byte" || bad "$1: Caddy files not restored"
+  if [ "${2:-}" = present ]; then
+    cmp -s "$SB/etc/caddy/caddy-watcher-gateway.caddy" "$S/bundle/caddy/caddy-watcher-gateway.caddy" && ok "$1: pre-existing snippet file restored" || bad "$1: pre-existing snippet file not restored"
+  else
+    [ ! -e "$SB/etc/caddy/caddy-watcher-gateway.caddy" ] && ok "$1: snippet file removed again (did not exist before apply)" || bad "$1: snippet file left behind"
+  fi
+}
 
 caddy_setup A
 CADDY_ADAPT_FAIL=1 run_apply o0_deploy_caddy.sh O0-A05
@@ -351,6 +374,26 @@ if [ "$RC" -ne 0 ] && [ "$n_restart" = 1 ] && [ "$n_validate" = 2 ] && grep -q '
    && printf '%s' "$OUT" | grep -q 'ROLLBACK FAILED'; then
   ok "caddy C (rollback sha check fails): stops at once, no validate, no second restart, ROLLBACK FAILED + fleet verdict recorded"
 else bad "caddy C: rc=$RC restarts=$n_restart validates=$n_validate"; cat "$S/evidence/auto-rollback.log" 2>/dev/null | sed 's/^/    /'; fi
+# SN1 (wac-060): installing the snippet file fails (first write to /etc/caddy): files restored, no restart
+caddy_setup SN1
+INSTALL_FAIL=1 run_apply o0_deploy_caddy.sh O0-A05
+assert_rollback "caddy SN1 (snippet install fails)" no 'systemctl restart' 0 "install the watcher gateway snippet"
+caddy_restored "caddy SN1"
+# SN2 (wac-060): the snippet file already exists with the SAME bytes (re-run); failure after the restart
+caddy_setup SN2
+cp "$S/bundle/caddy/caddy-watcher-gateway.caddy" "$SB/etc/caddy/caddy-watcher-gateway.caddy"
+ACTIVE_FAIL_FIRST=1 run_apply o0_deploy_caddy.sh O0-A05
+assert_rollback "caddy SN2 (snippet pre-existing, not active after restart)" yes 'systemctl restart caddy' 2 "caddy active"
+caddy_restored "caddy SN2" present
+# SN3 (wac-060): a DIFFERENT file already sits at the snippet path: refused before any write
+caddy_setup SN3
+printf '(watcher_gateway_routes) {\n}\n' > "$SB/etc/caddy/caddy-watcher-gateway.caddy"
+cp "$SB/etc/caddy/caddy-watcher-gateway.caddy" "$WORK/foreign-snippet"
+run_apply o0_deploy_caddy.sh O0-A05
+if [ "$RC" -ne 0 ] && [ ! -e "$S/backup-caddy" ] && ! grep -q 'systemctl restart' "$CALLS" && cmp -s "$WORK/foreign-snippet" "$SB/etc/caddy/caddy-watcher-gateway.caddy" \
+   && sha256sum -c --quiet "$S/evidence/caddy-live.sha256" >/dev/null 2>&1 && ! printf '%s' "$OUT" | grep -q AUTO_ROLLBACK_ARMED; then
+  ok "caddy SN3 (a different snippet file is live): refused at the gate, nothing backed up, written or restarted"
+else bad "caddy SN3: rc=$RC"; printf '%s\n' "$OUT" | grep -E 'STEP|FAIL' | tail -5 | sed 's/^/    /'; fi
 
 # ---- watcher
 watcher_setup() {
@@ -539,13 +582,42 @@ if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q 'ROLLBACK FAILED' && [ "$n_st
    && [ "$(sha256sum < "$DB" | cut -d' ' -f1)" = "$ORIG_DB_SHA" ]; then
   ok "restore-db MVOWNER: original bytes back but owner/mode differ -> ROLLBACK FAILED, watcher not started, fleet verdict recorded"
 else bad "restore-db MVOWNER: rc=$RC starts=$n_start"; cat "$S/evidence/auto-rollback.log" 2>/dev/null | sed 's/^/    /'; printf '%s\n' "$OUT" | grep -E 'STEP|owner|ROLLBACK' | tail -6 | sed 's/^/    /'; fi
-# ---- stage O isolation gate (review wac-032-r2 🟡-6): a violation refuses apply before ANY write
-for kind in envfile envname; do
+
+# ==== reviewer wac-073 extra restore-db failure points
+rdb_setup STOPFAIL
+STOP_FAIL_FIRST=1 run_restore
+assert_rollback "R073 STOPFAIL (compose stop fails)" yes 'docker compose .* start ' 1 "stop watcher"
+original_back "R073 STOPFAIL"
+rdb_setup STARTFAIL
+START_FAIL_FIRST=1 run_restore
+assert_rollback "R073 STARTFAIL (compose start itself fails)" yes 'docker compose .* start ' 2 "start watcher"
+original_back "R073 STARTFAIL"
+rdb_setup MVMID
+MV_FAIL_SRC=watcher-trading.db-shm run_restore
+assert_rollback "R073 MVMID (set-aside mv of -shm fails after the DB moved)" yes 'docker compose .* start ' 1 "set aside the current DB files"
+original_back "R073 MVMID"
+rdb_setup WALMADE
+START_MAKES_WAL="$DB-wal" RESTORE_DB_FAIL=1 run_restore
+assert_rollback "R073 WALMADE (failed start on restored copy left a -wal)" yes 'docker compose .* start ' 2 "watcher up"
+original_back "R073 WALMADE"
+[ ! -e "$DB-wal" ] && [ -e "$S/backup-watcher/db-failed-restore/watcher-trading.db-wal" ] && ok "R073 WALMADE: stray -wal moved to db-failed-restore" || bad "R073 WALMADE: stray -wal left next to the original DB"
+[ "$(grep -cE 'compose .* stop ' "$CALLS")" = 2 ] && ok "R073 WALMADE: recovery stopped the watcher again before moving files" || bad "R073 WALMADE: recovery did not stop the watcher before moving files"
+rdb_setup RECSHA
+# the set-aside original gets corrupted before recovery: recovery must refuse to start the watcher
+RESTORE_DB_FAIL=1 CORRUPT_REPLACED="$S/backup-watcher/db-replaced/watcher-trading.db" run_restore
+n_start=$(grep -cE 'compose .* start ' "$CALLS" || true)
+if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q 'ROLLBACK FAILED' && [ "$n_start" = 1 ] && grep -q 'runtime_rolled_back=no rollback_rc=[1-9]' "$S/evidence/auto-rollback.log"; then
+  ok "R073 RECSHA: set-aside original corrupted -> sha check fails, ROLLBACK FAILED, watcher NOT started, fleet verdict recorded"
+else bad "R073 RECSHA: rc=$RC starts=$n_start"; cat "$S/evidence/auto-rollback.log" 2>/dev/null; printf '%s\n' "$OUT" | grep -E 'STEP|FAILED|OK' | tail -8; fi
+# ---- stage O isolation gate (review wac-032-r2 🟡-6): a violation refuses apply before ANY write;
+# wac-060: so does an UNCOMPARABLE unit (NeedDaemonReload=yes, unparseable EnvironmentFiles=)
+for kind in envfile envname reload unparsed; do
+  case "$kind" in reload|unparsed) want_iso='CP_ISOLATION_UNCOMPARABLE' ;; *) want_iso='CP_ISOLATION_FAILED' ;; esac
   oq_setup "ISO-$kind"
   ISOLATION_FAIL=$kind run_apply o0_deploy_operator_query.sh O0-A08 --cp-root "$WORK/sb-oq-ISO-$kind/srv/trader-v3/services/control-plane" \
     --operator-query-env "$WORK/sb-oq-ISO-$kind/srv/trader-v3/secrets/control-plane/operator-query.env"
   failed_at="$(printf '%s\n' "$OUT" | awk '/\[o0\] STEP [0-9]+: /{s=$0} END{print s}' | sed -E 's/.*STEP [0-9]+: //')"
-  if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q 'ENVFILE_ISOLATION VIOLATION' && printf '%s' "$OUT" | grep -q 'CP_ISOLATION_FAILED' \
+  if [ "$RC" -ne 0 ] && { [ "$want_iso" != CP_ISOLATION_FAILED ] || printf '%s' "$OUT" | grep -q 'ENVFILE_ISOLATION VIOLATION'; } && printf '%s' "$OUT" | grep -q "$want_iso" \
      && [ "${failed_at#control-plane unit isolation}" != "$failed_at" ] && [ ! -e "$S/backup-operator-query" ] && [ ! -e "$S/evidence/auto-rollback.log" ] \
      && ! grep -q 'systemctl restart' "$CALLS"; then
     ok "operator-query ISO-$kind: apply refused at the isolation gate, before backup/env/install/restart"

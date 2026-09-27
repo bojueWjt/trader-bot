@@ -5,7 +5,9 @@
 # integ/watcher-app-crew and runs the local release gates:
 #   G1 candidate descends from the production baseline (67b401a)
 #   G2 contract generator check: ROUTES_DIFF_EMPTY and phase_max=P2   (§9.14.4, wac-016-r2 §7-1, wac-026)
-#   G3 the three generated artifacts carry the same yaml_sha256/phase_max (§9.14.3)
+#   G3 the four generated artifacts carry the same yaml_sha256/phase_max; the Caddy list is format v2
+#      and the snippet format snippet.v1, the snippet equals the list-derived §9.14.3 shape byte for
+#      byte (candidate's o0_caddy_watcher_routes.py check-artifacts; wac-060)          (§9.14.3)
 #   G4 watcher require() closure is inside WATCHER_RUNTIME_RELATIVE_PATHS (wac-007 🟡-4)
 #   G5 compose passes the six WATCHER_* values to the watcher, healthcheck not interpolated (wac-009 🟡-5, E-16)
 #   G6 W-0b merged (lib/config-store.js wired)                                            (wac-009 🟡-7)
@@ -103,14 +105,29 @@ ns = {}
 exec((root / "services/control-plane/api/generated/watcher_gateway_routes.py").read_text(), ns)
 meta = ns["PAYLOAD"]["_meta"]
 js = (root / "bridge/services/telegram-watcher/lib/generated/gateway-routes.js").read_text()
-caddy = (root / "contracts/generated/caddy-watcher-gateway-paths.txt").read_text().splitlines()
-head = dict(l[2:].split(" ", 1) for l in caddy[:3])
+formats = {"contracts/generated/caddy-watcher-gateway-paths.txt": "watcher-gateway-caddy-paths.v2",
+           "contracts/generated/caddy-watcher-gateway.caddy": "watcher-gateway-caddy-snippet.v1"}
+for rel, fmt in formats.items():
+    rows = (root / rel).read_text(encoding="ascii").splitlines()
+    head = dict(l[2:].split(" ", 1) for l in rows[:4] if l.startswith("# _"))
+    assert set(head) == {"_generated_from", "_yaml_sha256", "_phase_max", "_format"}, (rel, sorted(head))
+    assert head["_format"] == fmt, (rel, head["_format"])
+    assert head["_phase_max"] == meta["phase_max"] and head["_yaml_sha256"] == meta["yaml_sha256"], (rel, head)
 assert meta["phase_max"] == "P2", meta
-assert head["_phase_max"] == meta["phase_max"] and head["_yaml_sha256"] == meta["yaml_sha256"], head
 assert ns["PAYLOAD_SHA256"] in js, "JS artifact does not embed the same payload digest"
 print(f"META_OK yaml_sha256={meta['yaml_sha256']} phase_max={meta['phase_max']} payload_sha256={ns['PAYLOAD_SHA256']}")
 PY
-then gate_pass "G3 $(tail -n 1 "$OUT/logs/g3.log")"; else gate_fail "G3 generated _meta mismatch (see $OUT/logs/g3.log)"; fi
+then
+  # the candidate's own tool re-derives the snippet from the list (independent of the generator)
+  if (cd "$OUT/src" && "$O0_PY" scripts/ops/o0/o0_caddy_watcher_routes.py check-artifacts \
+        --paths contracts/generated/caddy-watcher-gateway-paths.txt --snippet contracts/generated/caddy-watcher-gateway.caddy \
+        --expect-phase-max P2 --expect-yaml-sha256 "$(sed -n 's/.* yaml_sha256=\([0-9a-f]*\) .*/\1/p' "$OUT/logs/g3.log")") >>"$OUT/logs/g3.log" 2>&1 \
+     && tail -n 1 "$OUT/logs/g3.log" | grep -q '^CADDY_ARTIFACTS_OK '; then
+    gate_pass "G3 $(grep '^META_OK' "$OUT/logs/g3.log") $(tail -n 1 "$OUT/logs/g3.log" | cut -d' ' -f1-4)"
+  else
+    gate_fail "G3 Caddy list/snippet check: $(tail -n 1 "$OUT/logs/g3.log")"
+  fi
+else gate_fail "G3 generated _meta/_format mismatch (see $OUT/logs/g3.log)"; fi
 
 # G4
 if "$O0_PY" "$O0_TOOL" closure --watcher-root "$OUT/src/bridge/services/telegram-watcher" \
@@ -226,11 +243,11 @@ put "$OUT/src/bridge/docker-compose.yml" "$B/compose/docker-compose.yml"
 printf 'docker-compose.yml\n' > "$OUT/manifests/compose.paths"
 "$O0_PY" "$O0_TOOL" manifest-build --root "$B/compose" --paths-file "$OUT/manifests/compose.paths" --out "$OUT/manifests/compose.candidate.sha256"
 "$O0_PY" "$O0_TOOL" manifest-build --root "$OUT/base/bridge" --paths-file "$OUT/manifests/compose.paths" --out "$OUT/manifests/compose.baseline.sha256"
+# Caddy: the COMMITTED list and snippet, copied as is (no render step since wac-060: the candidate
+# Caddyfile imports caddy-watcher-gateway.caddy, stage C installs it next to /etc/caddy/Caddyfile)
 put "$OUT/src/contracts/generated/caddy-watcher-gateway-paths.txt" "$B/caddy/caddy-watcher-gateway-paths.txt"
+put "$OUT/src/contracts/generated/caddy-watcher-gateway.caddy" "$B/caddy/caddy-watcher-gateway.caddy"
 for f in "${TOOL_FILES[@]}"; do put "$f" "$B/tools/$(basename "$f")" 0755; done
-if [ -f "$B/tools/o0_caddy_watcher_routes.py" ]; then
-  "$O0_PY" "$B/tools/o0_caddy_watcher_routes.py" render --paths "$B/caddy/caddy-watcher-gateway-paths.txt" > "$B/caddy/watcher-gateway.caddy"
-fi
 # G12: runtime manifest for scripts/build_immutable_watcher_image.py (payload = bundle/watcher/<rel>)
 if python3 - "$OUT/src/scripts" "$B" "$CAND_SHA" >"$OUT/logs/g12.log" 2>&1 <<'PY'
 import hashlib, importlib.util, json, sys
@@ -265,7 +282,8 @@ import hashlib, json, sys
 from pathlib import Path
 out, cand, base, failed, tools = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), Path(sys.argv[5])
 g3 = Path(out, "logs/g3.log").read_text().strip().splitlines()
-meta = dict(kv.split("=", 1) for kv in g3[-1].split()[1:]) if g3 and g3[-1].startswith("META_OK") else {}
+meta_line = next((l for l in g3 if l.startswith("META_OK")), "")
+meta = dict(kv.split("=", 1) for kv in meta_line.split()[1:]) if meta_line else {}
 tool_sha = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(tools.glob("*")) if p.is_file()}
 print(json.dumps({"schema": "o0-release/v1", "candidate": cand, "baseline": base,
                   "yaml_sha256": meta.get("yaml_sha256"), "phase_max": meta.get("phase_max"),

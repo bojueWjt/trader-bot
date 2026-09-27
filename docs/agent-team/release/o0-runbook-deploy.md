@@ -1,7 +1,7 @@
-# O-0 分阶段部署 runbook（wac-032 草案，wac-045 修订）
+# O-0 分阶段部署 runbook（wac-032 草案，wac-045 修订，wac-060 适配 WGW-1.0.2）
 
 > 草案。**没有执行任何生产动作**。每个带 O0-Axx 的步骤都要用户逐项授权后才执行（`o0-authorization-list.md`）；脚本阶段与授权号一一绑定，号不对脚本直接拒绝。
-> 范围：计划 §4.1 第 1 步"新增并验证"落到 jp-24：watcher 镜像（W-0）、控制面 operator-query（C-0 reader 开关保持关 + C-1 网关）、Caddy（浏览器入口清头注入 + `/m/v1/watcher/*` 逐路径）。**app 不需要部署**（A-0 只在 app 集成分支，真机联调另行授权 O0-A10）。快照开关在本 runbook 全程保持关闭；打开开关见 `o0-runbook-snapshot-switch.md`。
+> 范围：计划 §4.1 第 1 步"新增并验证"落到 jp-24：watcher 镜像（W-0）、控制面 operator-query（C-0 reader 开关保持关 + C-1 网关）、Caddy（浏览器入口清头注入 + 契约 WGW-1.0.2 的片段 `caddy-watcher-gateway.caddy`：16 条逐路径锚定路由 + 兜底 404）。**app 不需要部署**（A-0 只在 app 集成分支，真机联调另行授权 O0-A10）。快照开关在本 runbook 全程保持关闭；打开开关见 `o0-runbook-snapshot-switch.md`。
 > 不做：不重启 node-control、event-ingest；不写控制面库与记账五表；不新增控制面迁移；不发 RESUME；不 reload Caddy；不下单、不平仓、不撤单。
 > 下文 `$S` = `/srv/trader-staging/o0-<UTC>`，`$T` = `$S/bundle/tools`（工具取自候选提交，门禁 G11）。执行者把每条命令的完整输出存为 `… 2>&1 | tee -a $S/evidence/<阶段>.log`。
 
@@ -9,7 +9,7 @@
 
 | 顺序 | 阶段 | 为什么排在这里 | 中间态是否安全 |
 |---|---|---|---|
-| 1 | **C：Caddy** | W-0a 上线后，浏览器请求必须带 Caddy 注入的 `X-Watcher-Proxy-Auth`，否则站点全 401。先让 Caddy 注入，旧 watcher 会忽略这个头 | 安全：旧 watcher 忽略注入头；`/m/v1/watcher/*` 暂时落到旧 operator-query，得到 404 |
+| 1 | **C：Caddy** | W-0a 上线后，浏览器请求必须带 Caddy 注入的 `X-Watcher-Proxy-Auth`，否则站点全 401。先让 Caddy 注入，旧 watcher 会忽略这个头 | 安全：旧 watcher 忽略注入头；16 条表内路径暂时落到旧 operator-query（没有 `/v1/watcher/*` 路由，得到 404），其余 `/m/v1/watcher` 前缀路径由片段兜底直接 404 |
 | 2 | **W：watcher** | 新 watcher 需要三个当前值才能启动；浏览器身份此时已由 Caddy 提供 | 安全：旧 operator-query 读副本文件，不经 HTTP 访问 watcher；feeder 直读库不受影响 |
 | 3 | **O：operator-query** | 网关要打到已经鉴权的新 watcher | 安全：快照开关关闭，交易路径不引入快照依赖 |
 
@@ -43,7 +43,7 @@ Caddy 只重启一次（阶段 C），operator-query 只重启一次（阶段 O�
 
 | 门禁 | 证据 | 不满足 |
 |---|---|---|
-| 本地打包门禁 G1–G12 全部 PASS，`RELEASE.json` 的 `deploy_candidate: true` | `o0_package.sh` 输出与 `logs/` | 不申请任何生产授权。当前（`o0-requirements.md` §6.1）只剩 G7 失败 |
+| 本地打包门禁 G1–G12 全部 PASS，`RELEASE.json` 的 `deploy_candidate: true` | `o0_package.sh` 输出与 `logs/` | 不申请任何生产授权。当前状态见 `o0-requirements.md` §6.1（wac-060 起 G7 已通过、打包不再在 G12 前中止） |
 | 现场只读核对（`o0-site-checklist.md`）无阻断项，§二的参数已按现场确认 | L-A5 汇总页 | 同上 |
 | 用户已确认 D-02（Caddy HALT 风险与窗口）、D-04（共享代码目录） | 看板备注 | 同上 |
 | 选定低流量窗口：避开信号密集时段；用户在场、手机能收 Telegram 告警 | 用户确认 | 顺延 |
@@ -62,18 +62,24 @@ Caddy 只重启一次（阶段 C），operator-query 只重启一次（阶段 O�
 
 ### 3.1 准备候选 Caddyfile（人工，在 staging 里完成，不碰 `/etc/caddy`）
 
-1. `cp -p /etc/caddy/Caddyfile $S/caddy/Caddyfile.candidate`
-2. 在 jp-bot 站点块里、现有 `/m` 移动端 handle 旁边，粘贴 `bundle/caddy/watcher-gateway.caddy`（`o0_caddy_watcher_routes.py render` 从生成清单产出：16 个具名匹配器，每个是锚定的 `path_regexp` + `method`）。**用户裁决（2026-09-26，写入 WGW-1.0.2）**：清单里的 `*` = 恰好一个非空段，翻译为 `[^/]+`；四条带参数的路径是：
+依据：契约 `contracts/backend-api.md` §9.14.3"Caddy 片段"与"O-0 并入规则（规范性）"，§9.16 F-04、F-10、F-12、F-13。**没有 render 步骤**（wac-060 退役）：Caddyfile 直接 import 已提交的片段文件 `bundle/caddy/caddy-watcher-gateway.caddy`（与 `contracts/generated/` 中的文件逐字节相同，打包门禁 G3 用独立实现从清单重新推导并逐字节比对）。片段定义 snippet `watcher_gateway_routes`：16 个外部路径各一组锚定、区分大小写的 `path_regexp`（`{param}` = `[^/]+`，恰好一个非空段，用户裁决 2026-09-26）+ `method`，最后是兜底 `^(?i:/m/v1/watcher)(?:[/\n]|$)` → `respond 404`。
+
+1. `cp -p /etc/caddy/Caddyfile $S/caddy/Caddyfile.candidate`。preflight 会把 bundle 的片段放到 `$S/caddy/caddy-watcher-gateway.caddy`（与候选同目录），所以候选里的相对 import 在 staging 与 `/etc/caddy` 两处都解析到同一份片段。
+2. 在候选的**全局位置**（任何站点块之外、全局选项块之后）加一行 `import caddy-watcher-gateway.caddy`（相对路径，Caddy 按 Caddyfile 所在目录解析；apply 把片段装成 `/etc/caddy/caddy-watcher-gateway.caddy`），并手写上游 snippet，恰好一次 strip、不注入任何头、不含其他匹配逻辑：
 
    ```caddyfile
-   path_regexp wgw_media_param ^/m/v1/watcher/media/[^/]+$
-   path_regexp wgw_trading_accounts_param ^/m/v1/watcher/trading/accounts/[^/]+$
-   path_regexp wgw_trading_channels_param ^/m/v1/watcher/trading/channels/[^/]+$
-   path_regexp wgw_trading_risks_param ^/m/v1/watcher/trading/risks/[^/]+$
+   (watcher_gateway_upstream) {
+   	uri strip_prefix /m
+   	reverse_proxy 127.0.0.1:8183
+   }
    ```
 
-   `path_regexp` 区分大小写（与网关路由表一致）；**不要**加 `(?i)`，不要改成 `path …/*`（Caddy 的 `path` 前缀匹配会跨段且不区分大小写），不要写 `[^/]*` 或 `.+`，不要去掉末尾 `$`。**不要**加任何 `/m/*`、`/m/v1/*` 兜底；不要贴 `{param}`。核对工具对以上每一种写法都判失败（自测 20 种变体）。
-3. 在现有 watcher basicauth handle 内、`basic_auth` 之后、`reverse_proxy` 之前加入（保持现有匹配器与 `uri strip_prefix /watcher` 不变）：
+3. 在 jp-bot 站点块的**顶层**、该站点块里**所有** `handle`、`handle_path`、`route` **之前**写 `import watcher_gateway_routes`（F-12）。不得放进 `handle_path /m*`、`handle`、`route { }` 之类的块；不得写两次；站点里不得有其他处理器把 `/m/v1/watcher` 前缀（任意大小写，含 `/m/v1/watcherx` 这类紧跟其他字符的路径）转发到 operator-query 或 watcher（例如 `handle /m/* { reverse_proxy 127.0.0.1:8183 }` 不论写在 import 前后都判失败）。**不要**自己改片段、不要贴 `{param}`、不要加 `(?i)`、不要删兜底。
+4. **人工记录 F-13 (2)**（import 位置管不到的两类指令）：preflight 的 `caddyfile-check` 会打印两类 `RECORD` 行，执行者逐条补全后存为 `$S/evidence/caddy-f13-record.txt`，交用户与 Reviewer 审阅：
+   - 全局块里的每一条 `order` 选项：它把哪条指令移到了 `handle` 之前？
+   - jp-bot 站点块顶层每一条默认排在 `handle` 之前的指令（`tracing`、`map`、`vars`、`fs`、`root`、`log_append`、`skip_log`/`log_skip`、`log_name`、`header`、`request_body`、`redir`、`method`、`rewrite`、`uri`、`try_files`、`basicauth`/`basic_auth`、`forward_auth`、`request_header`、`encode`、`push`、`intercept`、`templates`、`invoke`）：指令名、匹配器、它是否可能命中 `/m/v1/watcher` 前缀（任意大小写）、为什么不构成遮蔽。
+   机器兜底在 adapt 后的 JSON 上做（下一条的 verify），它已经反映了全局 `order` 与指令排序的结果；人工记录是契约额外要求的第二道。
+5. 在现有 watcher basicauth handle 内、`basic_auth` 之后、`reverse_proxy` 之前加入（保持现有匹配器与 `uri strip_prefix /watcher` 不变）：
 
    ```caddyfile
    request_header -X-Watcher-Actor
@@ -88,17 +94,20 @@ Caddy 只重启一次（阶段 C），operator-query 只重启一次（阶段 O�
    header_up X-Watcher-Proxy-Auth {env.WATCHER_BROWSER_PROXY_TOKEN}
    ```
 
-   说明：`request_header` 在指令顺序上先于 `reverse_proxy` 执行，所以是"先清后注入"；浏览器的 basic `Authorization` 必须清掉（核对工具现在要求这一项）。**不要**在 `reverse_proxy` 里写 `header_up -X-Watcher-*`。必须用运行时占位符 `{env.…}`，不能用 `{$…}`。
-4. 若 S-03 显示 `/media/*` 目前不走 basicauth 块，而站点要显示图片，把 `/media/*` 并入 basicauth 块的匹配器。
+   说明：`request_header` 在指令顺序上先于 `reverse_proxy` 执行，所以是"先清后注入"；浏览器的 basic `Authorization` 必须清掉（核对工具要求这一项）。**不要**在 `reverse_proxy` 里写 `header_up -X-Watcher-*`。必须用运行时占位符 `{env.…}`，不能用 `{$…}`。这几行在 basicauth handle **内部**，不是站点顶层，不属于第 4 条的记录范围。
+6. 若 S-03 显示 `/media/*` 目前不走 basicauth 块，而站点要显示图片，把 `/media/*` 并入 basicauth 块的匹配器。
+7. **本机 Caddy 探针（非生产，F-12、F-13 (3)；授权 O0-A05P，见授权清单）**：在 C-1 之前，用与生产同版本的 Caddy（S-01 的 `caddy version`，当前按 v2.10.2 准备）对**候选 Caddyfile 的副本**跑
+   `python3 $T/o0_caddy_watcher_routes.py probe --caddy <caddy 二进制> --caddyfile <副本目录>/Caddyfile.candidate [--adapt-env NAME=<假值> …]`
+   （片段文件须放在副本同目录）。工具只改四类东西并打印逐行差异（脱敏）：站点地址 → `http://127.0.0.1:<空闲端口>`、`127.0.0.1:8183`/`127.0.0.1:9090` → 本机桩、全局 `admin off`/`auto_https off`/`http_port`/`https_port`；Caddy 的 autosave 与数据目录放在临时目录。它先对副本 adapt 并跑同一套 verify，再真实启动 Caddy、用原始请求行发送：§9.14.4 第 1 项的全部行级与兜底探针（含 `%0A` 换行结尾、`#`）；F-13 (3) 两类用例——**字面点段与 `//` 期望被 clean 后转发到桩**（`/m/v1/watcher/x/../status`、`/m/v1/watcher/./status`、`/m/v1/watcher//status` → 桩收到 `/v1/watcher/status`；`…/accounts/a/..` → `/v1/watcher/trading/accounts`；`/m/v1/watcher/x/../config` → 兜底 404），**不按 404 判定**；百分号编码形式与 `#` 原样转发（`/m/v1/watcher/x/%2e%2e/status` → `/v1/watcher/x/%2e%2e/status`，`/m/v1/watcher/media/a#x` → `/v1/watcher/media/a%23x`，到网关后由 `%` 规则 404）；`/m/v1/watcher/status` 带调用方 `Authorization` 到达 operator-query 桩且未被改写、未注入 `X-Watcher-Proxy-Auth`；`/m/v1/accounts` 同样保留调用方 `Authorization`；`/watcher/`、`/api/status`、`/media/<名>` 无凭据 401 且不到 watcher 桩。期望末行 `CADDY_PROBE_OK caddy=v2.10.2 …`；把完整输出（含 `caddy version` 与逐行差异）存为 `$S/evidence/caddy-local-probe.txt`。本仓库的 `tests/caddy_real_test.sh` 用同一工具对仿生产夹具跑过（`O0_CADDY_BIN=<v2.10.2>`）。
 
 ### 3.2 步骤
 
 | 步 | 内容 | 命令 | sha / 验证 | 失败处置 |
 |---|---|---|---|---|
-| C-1 前置门禁（只读） | 清旧门禁；舰队基线（完整、新鲜）；bundle 复核；Caddy 版本；记录线上 Caddyfile 与 v3.env 的 sha；候选存在且不同于线上；脱敏 diff（只容忍 `diff` 退出码 1，脱敏失败即失败）；凭据检查（含控制面目录）；带 env 的 `caddy validate`；`caddy adapt` 到 0600 JSON；按生成清单 verify；**全部通过才写 `caddy-preflight` 门禁** | `bash $T/o0_deploy_caddy.sh --execute --phase preflight --auth-id O0-A05 --stage-dir $S` | `FLEET_BASELINE_OK`；`CREDENTIAL_CHECK_OK`；`Valid configuration`；`CADDY_WATCHER_ROUTES_OK lines=16`；`GATE_WRITTEN stage=caddy-preflight`；人工确认脱敏 diff 只动了 §3.1 的两处 | 任一失败：中止，线上未改，也没有门禁文件 |
-| C-2 应用 | **先**核对门禁（同一候选 Caddyfile、线上两个文件与凭据片段未变、≤ 1 小时）、bundle 复核、再 validate 候选、记录舰队基线；然后备份两份文件（0700）；合入 `WATCHER_BROWSER_PROXY_TOKEN` 并用摘要确认 v3.env 持有 watcher 当前值；安装候选；**已安装文件与门禁里的候选 sha 一致**；带 env validate；对已安装文件 adapt 并 verify 路由；`systemctl restart caddy`；`is-active`；舰队守卫（稳定窗 + 多次采样） | `bash $T/o0_deploy_caddy.sh --execute --phase apply --auth-id O0-A05 --stage-dir $S` | `GATE_OK`；备份 sha 写入 `evidence/caddy-backup.sha256`；`CADDY_WATCHER_ROUTES_OK`（已安装文件）；`FLEET_UNCHANGED_ALL_SAMPLES` | 门禁不符：退出，线上未改。备份之后、restart 之前的任何失败：ERR trap 自动回滚只还原两份文件、sha 校验回到 C-1 记录值、validate，**不 restart**（运行中的 Caddy 从未变过，restart 只会平添 D-02 风险）。restart 及之后的失败：还原、validate、再 restart、`is-active`。两种情况回滚后都跑舰队守卫（对比 `before-caddy`，只报告不设门槛），结论写入 `evidence/auto-rollback.log` 与 `fleet-after-auto-rollback-*.verdict.txt`，脚本退出 1；`fleet_rc` 非 0 立即报用户。舰队变化：退出码 3，**不回滚也不 RESUME**，立即报用户 |
-| C-3 验证（只读） | admin API 取运行中配置到 0600 JSON，再跑同一 verify；本机回环 `--resolve` 公网探针：`/m/v1/accounts` 无 token 401、伪 token 403；`/m/v1/watcher/status` 404；两段路径不到网关；`/watcher/`、`/api/status` 401；`/media/<名>` 不得无认证返回图片；节点通道有响应；舰队守卫 | `bash $T/o0_deploy_caddy.sh --execute --phase verify --auth-id O0-A05 --stage-dir $S --node-channel <S-06 地址>` | `CADDY_WATCHER_ROUTES_OK`；探针全部符合；`FLEET_UNCHANGED_ALL_SAMPLES` | 验证失败：执行 C-4 |
-| C-4 回滚 | 记录回滚前舰队样本（不设门槛）；还原两份备份、sha 校验、带 env validate、restart、`is-active`、探针、舰队守卫 | `bash $T/o0_deploy_caddy.sh --execute --phase rollback --auth-id O0-A05 --stage-dir $S` | `sha256sum -c evidence/caddy-live.sha256` 通过 | 回滚本身失败：Caddy 不可用 = 节点通道中断，**立即**报用户；手工恢复路径为 `cp -p backup-caddy/Caddyfile.bak /etc/caddy/Caddyfile && cp -p backup-caddy/v3.env.bak /etc/caddy/v3.env && systemctl restart caddy` |
+| C-1 前置门禁（只读，只写 staging） | 清旧门禁；舰队基线（完整、新鲜）；bundle 复核；Caddy 版本；记录线上 Caddyfile 与 v3.env 的 sha；候选存在且不同于线上；**bundle 清单（格式 v2）与片段（snippet.v1）自检，片段等于从清单推导的形状**；**线上 `/etc/caddy/caddy-watcher-gateway.caddy` 不存在或与 bundle 相同**；把片段放到候选同目录并比对字节；**候选文本检查**（片段文件在全局位置恰好 import 一次，站点顶层 `import watcher_gateway_routes` 在所有 handle 之前，打印 F-13 (2) 记录行）；脱敏 diff（只容忍 `diff` 退出码 1，脱敏失败即失败）；凭据检查（含控制面目录）；带 env 的 `caddy validate`；`caddy adapt` 到 0600 JSON；**verify**：`^/m/v1/watcher/` 的 (pattern, methods) 与清单对称差为空、兜底逐字相同且在最后、F-13 两步遮蔽检查（第一条 wgw 路由之前、以及外层的每一条路由）、没有别的处理器转发该前缀、逐行逐方法模拟、浏览器清头注入；**全部通过才写 `caddy-preflight` 门禁**（含候选、线上两文件、凭据片段、staging 片段的 sha） | `bash $T/o0_deploy_caddy.sh --execute --phase preflight --auth-id O0-A05 --stage-dir $S` | `FLEET_BASELINE_OK`；`CADDY_ARTIFACTS_OK lines=16`；`LIVE_SNIPPET_ABSENT`（或 `…EQUALS_BUNDLE`）；`SNIPPET_STAGED`；`CADDYFILE_CHECK_OK`；`CREDENTIAL_CHECK_OK`；`Valid configuration`；`CADDY_WATCHER_ROUTES_OK mode=snippet lines=16`；`GATE_WRITTEN stage=caddy-preflight`；人工确认脱敏 diff 只动了 §3.1 的 2、3、5 条；§3.1 第 4 条的记录与第 7 条的本机探针证据齐全 | 任一失败：中止，线上未改，也没有门禁文件。verify 报 `shadow …`：按 §3.1 第 3、4 条改候选，不得给白名单加例外 |
+| C-2 应用 | **先**核对门禁（同一候选 Caddyfile、线上两个文件、凭据片段与 staging 片段未变、≤ 1 小时）、bundle 复核、staging 片段仍等于 bundle 且线上片段文件不存在或相同、再 validate 候选、记录舰队基线；然后备份两份文件（0700）并记录片段文件原本是否存在；合入 `WATCHER_BROWSER_PROXY_TOKEN` 并用摘要确认 v3.env 持有 watcher 当前值；**安装片段为 `/etc/caddy/caddy-watcher-gateway.caddy` 并比对字节**；安装候选；**已安装文件与门禁里的候选 sha 一致**；带 env validate；对已安装文件 adapt 并 verify 路由；`systemctl restart caddy`；`is-active`；舰队守卫（稳定窗 + 多次采样） | `bash $T/o0_deploy_caddy.sh --execute --phase apply --auth-id O0-A05 --stage-dir $S` | `GATE_OK`；备份 sha 写入 `evidence/caddy-backup.sha256`；`CADDY_WATCHER_ROUTES_OK`（已安装文件）；`FLEET_UNCHANGED_ALL_SAMPLES` | 门禁不符（含线上已有一份**不同**的片段文件）：退出，线上未改。备份之后、restart 之前的任何失败：ERR trap 自动回滚还原两份文件、把片段文件恢复到 apply 前的状态（原本不存在就删除，`SNIPPET_REMOVED_AS_BEFORE_APPLY`）、sha 校验回到 C-1 记录值、validate，**不 restart**（运行中的 Caddy 从未变过，restart 只会平添 D-02 风险）。restart 及之后的失败：还原、validate、再 restart、`is-active`。两种情况回滚后都跑舰队守卫（对比 `before-caddy`，只报告不设门槛），结论写入 `evidence/auto-rollback.log` 与 `fleet-after-auto-rollback-*.verdict.txt`，脚本退出 1；`fleet_rc` 非 0 立即报用户。舰队变化：退出码 3，**不回滚也不 RESUME**，立即报用户 |
+| C-3 验证（只读） | admin API 取运行中配置到 0600 JSON，再跑同一 verify；线上片段文件仍等于 bundle；本机回环 `--resolve` 公网探针：`/m/v1/accounts` 无 token 401、伪 token 403；`/m/v1/watcher/status` 404（阶段 O 之后 401）；两段路径不到网关；`/watcher/`、`/api/status` 401；`/media/<名>` 不得无认证返回图片；节点通道有响应；舰队守卫 | `bash $T/o0_deploy_caddy.sh --execute --phase verify --auth-id O0-A05 --stage-dir $S --node-channel <S-06 地址>` | `CADDY_WATCHER_ROUTES_OK`；探针全部符合；`FLEET_UNCHANGED_ALL_SAMPLES` | 验证失败：执行 C-4 |
+| C-4 回滚 | 记录回滚前舰队样本（不设门槛）；还原两份备份与片段文件状态、sha 校验、带 env validate、restart、`is-active`、探针、舰队守卫 | `bash $T/o0_deploy_caddy.sh --execute --phase rollback --auth-id O0-A05 --stage-dir $S` | `sha256sum -c evidence/caddy-live.sha256` 通过 | 回滚本身失败：Caddy 不可用 = 节点通道中断，**立即**报用户；手工恢复路径为 `cp -p backup-caddy/Caddyfile.bak /etc/caddy/Caddyfile && cp -p backup-caddy/v3.env.bak /etc/caddy/v3.env && { [ -e backup-caddy/snippet.absent ] && rm -f /etc/caddy/caddy-watcher-gateway.caddy || cp -p backup-caddy/snippet.bak /etc/caddy/caddy-watcher-gateway.caddy; } && systemctl restart caddy` |
 
 ## 4. 阶段 W：watcher（O0-A04 门禁与构建，O0-A07 上线，O0-A07R 仅在需要时恢复数据库）
 
@@ -155,5 +164,7 @@ W-3 之后按 `docs/agent-operations.md` §1 核对重建窗口内有无漏信�
 | 阶段 C 之后站点 401 循环 | basic auth 块被改坏 | C-4 回滚 |
 | 新 watcher 反复重启或 `TELEGRAM_NOT_RECONNECTED` | 凭据不合规、DB 路径变量冲突、首次迁移拿锁超时、会话失效 | 自动回滚已触发；读 `docker logs` 首行错误（只含变量名）；对照 S-05、S-15 |
 | 站点正常但图片不显示 | `/media/*` 没进 basicauth 块 | 修候选 Caddyfile，重走阶段 C（新授权） |
+| C-1 verify 报 `shadow …` 或 `wgw routes are not in the top-level route list` | `import watcher_gateway_routes` 写在某个 handle 之后或包进了块里；站点顶层有 `rewrite`/`uri`/`redir`/`basic_auth`/`forward_auth`/`request_header` 等可能命中前缀的指令；全局 `order` 把某条指令移到了 handle 之前 | 按 §3.1 第 3、4 条改候选；白名单只能经契约修订扩充，O-0 不加例外 |
+| C-1 报 `LIVE_SNIPPET` 不符或 SN3 类拒绝 | `/etc/caddy/caddy-watcher-gateway.caddy` 已存在且不是本 bundle 的片段 | 不覆盖；查清来源后报用户 |
 | 网关 503 `gateway_disabled` / `watcher_unavailable` | operator-query 没拿到或撞值；两边值不一致或 watcher 不可达 | O-2 内已自动回滚；重跑凭据 `check` |
 | 网关每个请求 500 | `.venv-cp` Python < 3.11 | O-4 回滚；S-12 本应拦住 |

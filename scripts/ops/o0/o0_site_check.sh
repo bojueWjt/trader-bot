@@ -94,7 +94,7 @@ def _token_segment(seg):
 
 def _chunk_is_token(chunk):
     bare = CHUNK_REGEX_SYNTAX.sub("", CHUNK_PLACEHOLDER.sub("", chunk))
-    return _token_segment(bare) or _token_segment(CHUNK_SEPARATORS.sub("", bare))
+    return _token_segment(bare) or _token_segment(CHUNK_SEPARATORS.sub("", bare).replace("+", "").replace("=", ""))
 
 def _redact_pieces(chunk):
     parts = PATH_SEG_SPLIT.split(chunk)
@@ -219,7 +219,10 @@ def print_skeleton(label, cfg):
 DIRECTIVES = {"import", "handle", "handle_path", "handle_errors", "route", "basic_auth", "basicauth", "reverse_proxy", "uri",
               "header_up", "header_down", "request_header", "header", "path", "path_regexp", "method", "redir", "respond",
               "file_server", "root", "rewrite", "try_files", "encode", "host", "not", "strip_prefix", "strip_suffix",
-              "log", "tls", "php_fastcgi", "abort", "error", "vars", "map", "forward_auth", "expression", "remote_ip", "client_ip"}
+              "log", "tls", "php_fastcgi", "abort", "error", "vars", "map", "forward_auth", "expression", "remote_ip", "client_ip",
+              # wac-060, F-13 (2): global order options and every directive that runs before handle must be visible
+              "order", "tracing", "fs", "log_append", "skip_log", "log_skip", "log_name", "request_body", "push", "intercept",
+              "templates", "invoke"}
 HEADER_DIRECTIVES = {"header_up", "header_down", "request_header", "header"}
 SAFE_WORDS = {"{", "}", "*", "strip_prefix", "strip_suffix", "replace", "flush_interval", "bcrypt", "GET", "HEAD", "POST", "PUT",
               "DELETE", "PATCH", "OPTIONS", "-1", "not", "off", "on"}
@@ -244,6 +247,10 @@ def outline_tokens(toks):
             name = args[0]
             out.append(name if HEADER_NAME_RE.match(name.lstrip("+-><")) and redact_line(name) == name else _literal(name))
             out += [a if PLACEHOLDER_RE.match(a.strip('"')) or a in ("{", "}") else _literal(a.strip('"')) for a in args[1:]]
+    elif head == "order":
+        # directive names and before/after/first/last only: lower-case LETTERS with single underscores (no digits,
+        # so a token-like word cannot pass; the leak test pins it); anything else is classified
+        out += [a if re.fullmatch(r"[a-z]{1,24}(?:_[a-z]{1,24}){0,3}", a) else classify(a) for a in args]
     elif head == "respond":
         out += [a if re.match(r"^([0-9]{3}|@[A-Za-z0-9_-]+|\{|\})$", a) else _literal(a.strip('"')) for a in args]
     else:
@@ -354,18 +361,19 @@ keys_of() { printf "sed -E -e '/^[[:space:]]*(#|\$)/d' -e 's/^[[:space:]]*export
 run "S-00 fleet state before any O-0 action (docs/agent-operations.md §0); node ids = O0_FLEET_NODES for every fleet guard" \
   "docker exec trader-v3-postgres psql -U postgres -d trader -Atc \"SELECT node_id||' '||coalesce(status::text,'NULL')||' '||coalesce(release_id::varchar(12),'NULL')||' hb_age='||coalesce(round(extract(epoch from now()-last_seen_at)::numeric,1)::text,'NULL') FROM node_heartbeats ORDER BY node_id\"; for p in 8081 8082 8083 8084; do printf 'ready:%s %s\n' \$p \"\$(curl -s -o /dev/null -w '%{http_code}' -m 3 http://127.0.0.1:\$p/ready || true)\"; done
    echo '--- node heartbeat parameters for the fleet guard (O0_NODE_HB_INTERVAL_S / O0_NODE_HB_TIMEOUT_S; review wac-032-r2 🟡-7)'
-   for c in \$(docker ps --format '{{.Names}}' | grep -E '^trader-v3-node-' | sort); do
+   cs=\$(docker ps --format '{{.Names}}' | grep -E '^trader-v3-node-' | sort || true); echo \"node_containers=\$(printf '%s' \"\$cs\" | grep -c . || true)\"
+   for c in \$cs; do
      cfg=\$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \$c | sed -n 's/^NODE_CONFIG_PATH=//p')
      printf '%s NODE_CONFIG_PATH=%s ' \$c \"\${cfg:-<unset>}\"; docker exec \$c python3 -c \"\$NODE_HB_PY\" \"\$cfg\" '$NODE_APP_ROOT' || echo 'NODE_HB_PARAMS_UNREADABLE'
    done
    echo '--- observed heartbeat age ($HB_SAMPLES samples, ${HB_SAMPLE_GAP}s apart): the max approximates the real interval'
    i=0; while [ \$i -lt $HB_SAMPLES ]; do docker exec trader-v3-postgres psql -U postgres -d trader -Atc \"SELECT node_id||' '||coalesce(status::text,'NULL')||' '||coalesce(release_id::varchar(12),'NULL')||' hb_age='||coalesce(round(extract(epoch from now()-last_seen_at)::numeric,1)::text,'NULL') FROM node_heartbeats ORDER BY node_id\"; i=\$((i + 1)); [ \$i -ge $HB_SAMPLES ] || sleep $HB_SAMPLE_GAP; done \\
-     | awk '{split(\$4, a, \"=\"); v = a[2] + 0; if (!(\$1 in m) || v > m[\$1]) m[\$1] = v; n[\$1]++} END {for (k in m) printf \"observed_max_hb_age %s %.1f samples=%d\\n\", k, m[k], n[k]}' | sort"
+     | awk '{n[\$1]++; split(\$4, a, \"=\"); if (a[2] !~ /^-?[0-9]+([.][0-9]+)?\$/) {bad[\$1]++; why[\$1] = (a[2] ~ /^[A-Za-z]+\$/) ? a[2] : \"non-numeric\"; next} v = a[2] + 0; if (!(\$1 in m) || v > m[\$1]) m[\$1] = v} END {for (k in n) if (k in bad) printf \"observed_max_hb_age %s <uncomparable:%s> samples=%d non_numeric=%d\\n\", k, why[k], n[k], bad[k]; else printf \"observed_max_hb_age %s %.1f samples=%d\\n\", k, m[k], n[k]}' | sort"
 
 run "S-01 caddy version, unit, EnvironmentFile key names" \
   "caddy version; systemctl show caddy -p ActiveState,SubState,ExecMainStartTimestamp,NRestarts,EnvironmentFiles; systemctl cat caddy | grep -E '^(ExecStart|ExecReload|EnvironmentFile)' | $REDACT; echo '--- keys in $CADDY_ENV'; $(keys_of "'$CADDY_ENV'"); stat -c '%a %U:%G %s %y %n' '$CADDY_ENV' '$CADDYFILE'"
 
-run "S-02 Caddyfile imports and directive outline (arguments classified; literals shown as <literal len=N>)" \
+run "S-02 Caddyfile imports and directive outline (arguments classified; literals shown as <literal len=N>); global order options and pre-handle directives shown for the F-13 (2) record" \
   "sha256sum '$CADDYFILE' | cut -c1-16; ${PYRUN}caddyfile_outline(sys.argv[1])\" '$CADDYFILE'"
 
 run "S-03 Caddyfile adapted with v3.env loaded WITHOUT shell expansion -> ALLOWLIST skeleton only (the full JSON never leaves the host)" \
@@ -402,8 +410,8 @@ run "S-09 replica and sync tooling; the host's sync script is executed (--check,
    if [ \"\$have\" != '$EXPECT_SYNC_SHA256' ]; then echo 'SYNC_CHECK_SKIPPED: host script differs from the reviewed sha256; unknown code is not executed'; exit 0; fi
    rc=0; python3 '$SYNC_SCRIPT' --check --source '$WATCHER_DB' --target '$REPLICA_DB' || rc=\$?; echo \"sync --check exit=\$rc (0 unchanged, 3 drift)\""
 
-run "S-10 control-plane units (all three): state, worker count, working directory, env files, user; node-control/event-ingest must NOT load operator-query.env" \
-  "for u in $CP_UNITS; do echo \"--- \$u\"; systemctl show \$u -p ActiveState,SubState,MainPID,ExecMainStartTimestamp,NRestarts,WorkingDirectory,User,EnvironmentFiles; systemctl cat \$u | grep -E '^(ExecStart|Environment=|EnvironmentFile|WorkingDirectory)' | $REDACT; done
+run "S-10 control-plane units (all three): state, worker count, working directory, env files, user, NeedDaemonReload + unit file paths (stage O gate treats NeedDaemonReload=yes as UNCOMPARABLE); node-control/event-ingest must NOT load operator-query.env" \
+  "for u in $CP_UNITS; do echo \"--- \$u\"; systemctl show \$u -p ActiveState,SubState,MainPID,ExecMainStartTimestamp,NRestarts,WorkingDirectory,User,EnvironmentFiles,NeedDaemonReload,FragmentPath,DropInPaths; systemctl cat \$u | grep -E '^(ExecStart|Environment=|EnvironmentFile|WorkingDirectory)' | $REDACT; done
    for u in trader-v3-controlplane-node-control trader-v3-controlplane-event-ingest; do
      if systemctl show \$u -p EnvironmentFiles --value | grep -F -e '$OQ_ENV_FILE' -e 'operator-query.env' >/dev/null; then echo \"ENVFILE_ISOLATION VIOLATION \$u loads operator-query.env (would hold WATCHER_GATEWAY/SNAPSHOT_TOKEN after O-2)\"; else echo \"ENVFILE_ISOLATION ok \$u\"; fi
    done"

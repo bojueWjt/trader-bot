@@ -39,7 +39,12 @@ CADDY_DOMAIN=jp-bot.balen.wang
 SYSTEM_OBSERVER_TOKEN=$S2
 EOF
 cat > "$WORK/etc/Caddyfile" <<EOF
+{
+	order rate_limit before basic_auth
+	order $S12 before handle
+}
 jp-bot.balen.wang {
+	log_append o0k 1
 	@watcher path /watcher/* /api/*
 	handle @watcher {
 		basic_auth { balen {\$WATCHER_BASIC_AUTH_HASH} }
@@ -132,7 +137,9 @@ PY
 stub() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$STUB/$1"; chmod +x "$STUB/$1"; }
 stub id 'echo 0'
 stub docker "case \"\$*\" in
-  *psql*) echo 'account-a ACTIVE abcdef012345 hb_age=1.1';;
+  *psql*) echo 'account-a ACTIVE abcdef012345 hb_age=1.1'; echo 'account-b NULL NULL hb_age=NULL'
+          k=\$(cat '$WORK/psql.n' 2>/dev/null || echo 0); echo \$((k + 1)) > '$WORK/psql.n'
+          if [ \"\$k\" = 1 ]; then echo 'account-c ACTIVE abcdef012345 hb_age=NULL'; else echo 'account-c ACTIVE abcdef012345 hb_age=0.7'; fi;;
   ps\ --format*) echo 'trader-v3-node-a';;
   *Config.Env*trader-v3-node-a*) printf '%s\n' 'NODE_CONFIG_PATH=$WORK/node/account-a.json' 'CONTROL_PLANE_ACCOUNT_A_TOKEN=SENTINELnodeENVtoken0123456789';;
   exec\ trader-v3-node-*) python3 -c \"\$5\" \"\$6\" '$WORK/nodeapp';;
@@ -185,6 +192,8 @@ for want in '"dial": "127.0.0.1:9090"' '{env.WATCHER_BROWSER_PROXY_TOKEN}' '"str
             'path_regexp ^/<seg len=46>/.*$' '"pattern": "^/<seg len=46>/.*$"' 'ExecStartPre=/usr/bin/curl -H Authorization: Bearer <redacted>' \
             '@r3a path_regexp ^/hook/<seg len=29>' '@r3b path_regexp ^/k/<seg len=26>' 'handle /k/<seg len=21>' 'handle /n/<seg len=16>' \
             'heartbeat_timeout_seconds=15 default_heartbeat_interval_seconds=2.0 node_py_overrides_interval=False' 'observed_max_hb_age account-a 1.1 samples=6' \
+            'observed_max_hb_age account-b <uncomparable:NULL> samples=6 non_numeric=6' 'observed_max_hb_age account-c <uncomparable:NULL> samples=6 non_numeric=1' \
+            'node_containers=1' 'order rate_limit before basic_auth' 'order <literal len=15> before handle' 'log_append <literal len=3> 1' \
             'rewrite /t/* /t/<seg len=12>' 'root * /srv/<seg len=16>' '"/k/<seg len=12>/<seg len=12>"' '"pattern": "^/hook/<seg len=29>"'; do
   grep -qF -- "$want" "$OUT" || { echo "expected output missing: $want"; exit 1; }
 done

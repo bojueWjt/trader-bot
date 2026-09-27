@@ -1,9 +1,10 @@
-# O-0 发行要求可追溯清单（wac-032 草案，wac-045 修订，wac-059 第 3 轮，wac-072 加固）
+# O-0 发行要求可追溯清单（wac-032 草案，wac-045 修订，wac-059 第 3 轮，wac-072 加固，wac-060 适配 WGW-1.0.2）
 
 > 作者：watcher-app-crew-release-steward。状态：**草案，未执行任何生产动作，也没有做只读现场核对**。
 > wac-045 修订：处置审查报告 `reviews/wac-032.md`（5 🔴、18 🟡、4 💭），逐条见 §7；按用户 2026-09-26 裁决（W-0b 方案 A、Caddy `*` 严格单段锚定 `path_regexp`）与 Planner 对 D-05…D-08 的决定更新。事实基线：集成分支 `f7641cb`（含 wac-040 `a881802`、W-0b）。
 > wac-059 第 3 轮：处置复审报告 `reviews/wac-032-r2.md` 的 🔴-1 与 🟡-1…4，见 §8。WGW-1.0.2 的 Caddy 清单 v2 与片段适配不在本轮（另有任务 wac-060）。
 > wac-072 加固（worktree `auto/wac-072`，基于集成分支 `487f6eb`）：处置终审报告 `reviews/wac-032-r3.md` §7 的剩余待办（🟡-1 路径令牌碎片、🟡-3 测试缺口）与 r2 遗留的 🟡-5、🟡-6、🟡-7，见 §9。仍不做 WGW-1.0.2 适配（wac-060）。
+> wac-060（worktree `auto/wac-060`，基于集成分支 `bff84ef`，已含 WGW-1.0.2 与 wac-072）：O-0 工具链适配契约 WGW-1.0.2（清单格式 v2、已提交片段、F-04/F-10/F-12/F-13），并处置 wac-073 复审（`reviews/wac-072.md`）的 🟡-2…🟡-5，见 §10。
 > 基线：worktree `auto/wac-032`，分支点 `3d58761`；写作期间集成分支已前进到 `4fb0c11`（多了 C-0 校准 `eaf333d`、C-0 测试加固 `122ef51`、A-0 加固看板），本清单按 `4fb0c11` 的事实标注状态。
 > 依据：计划 `docs/plans/2026-09-11-watcher-to-app-migration.md` v0.6（下称"计划"）；契约 `contracts/backend-api.md` WGW-1.0.1 §9（下称"契约"）；审查报告 `docs/agent-team/reviews/`（wac-022 的审查报告 `wac-022.md` 在 `.worktrees/wac-integ` 中尚未提交，按其现场内容引用）；`AGENTS.md`；`docs/agent-operations.md`（主 checkout 中的未跟踪文件，集成分支没有）；协作协议 `docs/agent-team/watcher-app-crew-workflow-protocol.md`。
 > 配套：`o0-site-checklist.md`（S-xx）、`o0-runbook-deploy.md`（阶段 C/W/O）、`o0-runbook-credentials.md`、`o0-runbook-snapshot-switch.md`、`o0-authorization-list.md`（O0-Axx），脚本草案在 `scripts/ops/o0/`。
@@ -25,7 +26,7 @@
 | ID | 前置 | 当前状态（以 git 与看板为证） | 由谁拦截 |
 |---|---|---|---|
 | P-01 | W-0b 配置写路径合入集成分支 | **done**：用户选方案 A，已合入 `f7641cb`（第 4 轮小修 wac-043 仍在进行，合入后复跑门禁） | 打包门禁 G6（现 PASS） |
-| P-02 | W-0 集成补齐 wac-015（E-02 格式、`req.watcherRoute`、W6/W7、改用生成的 `gateway-routes.js`、删手写 `watcher-routes.js`、停用 `db_manager.py` 直写） | **pending**，未开工 | G7 |
+| P-02 | W-0 集成补齐 wac-015（E-02 格式、`req.watcherRoute`、W6/W7、改用生成的 `gateway-routes.js`、删手写 `watcher-routes.js`、停用 `db_manager.py` 直写） | **done**：wac-015/wac-015b 已合入（集成分支 `d8342ad` 起 G7 PASS） | G7 |
 | P-03 | `db_manager.py` 写命令停用（D1），且 jp-24 上没有调用者 | 代码侧属 P-02；现场由 S-15 核对 | G7 + S-15 |
 | P-04 | compose 把六个 `WATCHER_*` 交给 watcher（`env_file: /srv/trader-secrets/watcher-gateway.env`），健康检查不插值 | **done**：wac-040 已合入 `a881802` | G5（现 PASS） |
 | P-05 | watcher 镜像白名单 `WATCHER_RUNTIME_RELATIVE_PATHS` 补齐运行时闭包 | **部分**：wac-040 补了 `lib/auth.js`、`lib/media.js`、`lib/status.js`、两个生成文件；W-0b 在其后合入，`lib/config-store.js` 仍不在白名单（本地 `CLOSURE_NOT_WHITELISTED lib/config-store.js`）。需 Planner 派发（可并入 wac-015） | G4（现 FAIL）、G12 |
@@ -35,7 +36,7 @@
 | P-09 | C-0 校准（403 锁存、4 MiB、R12、E-14 拒因）与测试加固 | **done**：`eaf333d`（wac-022，审查 wac-023 PASS）、`122ef51`（wac-033，含持久化证据测试） | — |
 | P-10 | C-0 每个 worker 预热成功或锁存时写一条日志，带 `revision`、`content_sha256`、pid | **wac-041 `c9b1e3f` 审查中**：格式 `snapshot_warmup result=… revision=… content_sha256=<12> pid=… role=operator-query duration_ms=…`；切换门禁用 `o0_tool.py warmup-check` 判定“每个 worker 一行成功” | 切换 runbook §3.2.3 |
 | P-11 | T0-6 三路对照工具与报告（计划 §4.1 第 2 步、§4.3 T0-6） | **未派**（看板 M5：三路对照工具待派） | 切换 runbook §2 |
-| P-12 | WGW-1.0.2 勘误：Caddy 清单中 `*` 的语义为“恰好一个非空段”，翻译为锚定、区分大小写的 `path_regexp` | **用户已裁决 2026-09-26**，勘误待出；核对工具已按裁决收紧 | D-03 |
+| P-12 | WGW-1.0.2 勘误：Caddy 清单中 `*` 的语义为“恰好一个非空段”，翻译为锚定、区分大小写的 `path_regexp` | **done**：WGW-1.0.2 已出（F-04、F-10、F-12、F-13），清单格式 v2 + 片段已提交；O-0 工具链在 wac-060 适配 | D-03、G3 |
 | P-13 | jp-24 `.venv-cp` 的 Python ≥ 3.11，且可 import `httpx` | 未核（S-12） | 阶段 O preflight |
 | P-14 | jp-24 控制面代码与 `67b401a` 一致（09-22 起有热挂载史，线上 read_api 曾漂移） | 未核（S-13） | 阶段 O preflight |
 | P-15 | jp-24 watcher 源码与 compose 与 `67b401a` 一致 | 未核（S-07） | 阶段 W preflight |
@@ -51,13 +52,13 @@
 | R03 | "每个进程只持自己需要的那一个，watcher 环境里不放任何控制面 reader token" | 计划 §2.1 | P-04 | `check` 拒绝 watcher env 出现控制面密钥名；S-05；阶段 W verify |
 | R04 | "operator-query 缺 `gateway` 时只禁用网关路由并告警，不得让交易端点启动失败（上线前配置校验锁定）" | 计划 §2.1、§4.2 | C-1 R11 已实现 | 阶段 O preflight import 冒烟断言 `_LOAD_ERROR is None`；生产不做缺 token 负例 |
 | R05 | "轮换用 `*_TOKEN` + `*_TOKEN_PREVIOUS` 双值，顺序为：watcher 先接受新旧两值，网关切到新值，确认请求与审计正常，再撤旧值" | 计划 §2.1；契约 §9.2 | P-02 | 凭据 runbook §3 |
-| R06 | "确认 import 与 handler 顺序" | 计划 §9 O-0 | — | S-02、S-03/S-04 + `o0_caddy_watcher_routes.py verify`（按 Caddy 路由顺序模拟，遮蔽即失败） |
+| R06 | "确认 import 与 handler 顺序" | 计划 §9 O-0；契约 F-12、F-13 | — | S-02（含全局 `order` 与前置指令）、S-03/S-04 + `verify --before-deploy`（前瞻遮蔽检查）；阶段 C：`caddyfile-check`（片段文件全局 import、站点顶层 import 在所有 handle 之前）、F-13 (2) 人工记录、`verify` 的两步遮蔽检查（第一条 wgw 路由之前与外层每一条路由）、本机 Caddy 探针（O0-A05P） |
 | R07 | "`/m` 只 strip 一次" | 计划 §9 O-0 | — | verify：每条样本恰好一次 `strip_path_prefix /m`；L-probe |
 | R08 | "上游仍是 8183" | 计划 §9 O-0 | — | verify：dial 恰为 `127.0.0.1:8183`；S-06 |
 | R09 | "移动端 `Authorization` 保留且不被面板注入的 `system_observer` 覆盖" | 计划 §9 O-0 | — | verify：移动样本链路上无 Authorization 头操作；探针 `/m/v1/accounts` 无 token 必须 401（若被注入会变 200） |
 | R10 | "浏览器 basicauth 后先清头再注入" | 计划 §9 O-0；§2.1 | — | verify：浏览器样本经 authentication，先删 `X-Watcher-Actor`/`X-Watcher-Token-Fingerprint`，再 set `X-Watcher-Proxy-Auth={env.WATCHER_BROWSER_PROXY_TOKEN}` |
 | R11 | "`/media` 与其他公网入口没有绕过" | 计划 §9 O-0 | — | verify：任何代理到 9090/9100 的路由必须被浏览器样本覆盖且带认证，否则失败；S-06 只允许 127.0.0.1:9090；探针 `/media/<name>` 不得无认证返回图片 |
-| R12 | "按路由真源逐路径追加"；"禁止 `/m/v1/*` 通配" | 计划 §9 O-0、§2.1 | P-12 | `render` 从生成清单产出片段；verify 静态检查拒绝通配与清单外路径 |
+| R12 | "按路由真源逐路径追加"；"禁止 `/m/v1/*` 通配" | 计划 §9 O-0、§2.1 | P-12 | 直接 import 已提交的片段（wac-060 退役 render）；`check-artifacts` 从清单独立推导片段并逐字节比对（G3、C-1）；verify：`^/m/v1/watcher/` 的 (pattern, methods) 与清单对称差为空、兜底逐字相同且在最后、没有别的处理器转发该前缀 |
 | R13 | "记录 watcher 端口映射为宿主 9090 对容器 9100" | 计划 §9 O-0 | — | S-05 `PortBindings`、S-06 |
 | R14 | "Caddy 只改浏览器入口的清头与注入；app 不新增任何配置项" | 计划 §4.1 第 1 步 | — | 阶段 C 的脱敏 diff 人工审核（只允许浏览器块与 `wgw_*` 块变化） |
 | R15 | "影子三路对照（隔离环境）……先做数据基线（三表非秘密字段导出、主键/行数/内容摘要、逐项差异与预期裁决）" | 计划 §4.1 第 2 步 | P-11 | `o0_watcher_config_baseline.py`；切换 runbook §2 |
@@ -87,7 +88,7 @@
 | R34 | 开关打开且缺 `WATCHER_SNAPSHOT_TOKEN` → operator-query 启动失败 | 契约 §9.2、§9.11 | — | 阶段 O 同时下发 snapshot token（开关仍关）；切换 runbook 预检 |
 | R35 | `revision` 小于缓存值时记 `snapshot_revision_regressed`（真库回滚场景） | 契约 §9.11 | — | watcher 数据库恢复与切换回滚的预期告警 |
 | R36 | `config_audit` 至少保留 30 天 | 契约 §9.12 | — | O-0 不清理审计表；数据库恢复会丢审计，列为破坏性授权 O0-A07R |
-| R37 | Caddy 清单是 O-0 核对 Caddy 逐路径配置的输入 | 契约 §9.14.3 | — | `render`/`verify` 只读该清单 |
+| R37 | Caddy 清单是 O-0 核对 Caddy 逐路径配置的输入 | 契约 §9.14.3 | — | `load_list` 解析格式 v2 并校验 `_format`；`verify`/`check-artifacts`/`probe` 只读清单与片段 |
 | R38 | 缺 `WATCHER_GATEWAY_TOKEN` 或撞值 → 网关 503 `gateway_disabled`，交易端点不受影响 | 契约 §9.2、§9.3 G5 | — | 阶段 O 下发前 `check` 保证不撞值；verify 走通 200 |
 
 ## 4. C 类：审查报告
@@ -121,11 +122,11 @@
 | R63 | 生成第三份产物 Caddy 路径清单 | wac-016 🟡-5 | done（wac-026，`be76e92`） | — |
 | R64 | 确认 jp-24 `.venv-cp` 解释器 ≥ 3.11，否则网关每个请求 500（进程能起来） | wac-016 🟡-8；wac-016-r2 §7 第 2 条 | P-13 | S-12；阶段 O preflight |
 | R65 | 门禁除校验脚本外也跑 P2 断言测试，或核对 `phase_max=P2` | wac-016-r2 §7 第 1 条 | — | G2（脚本已强制 P2，wac-026）+ G9 跑两份 P2 断言测试 |
-| R66 | 不把 `{param}` 原样贴进 Caddyfile（未知占位符替换成空串） | wac-026 🟡-1 (a) | — | `render` 用 `[^/]+`；清单含 `{` 即拒绝 |
-| R67 | 每行用 `path`+`method` 具名匹配器；媒体行 HEAD 显式列出 | wac-026 🟡-1 (b) | — | `render`；verify 比对方法集合 |
+| R66 | 不把 `{param}` 原样贴进 Caddyfile（未知占位符替换成空串） | wac-026 🟡-1 (a) | — | 片段里只有 `[^/]+`（`check-artifacts` 逐字节核对）；清单的 `{param}` 只作标识，每行 regex 必须等于从模板推导的值 |
+| R67 | 每行用 `path`+`method` 具名匹配器；媒体行 HEAD 显式列出 | wac-026 🟡-1 (b) | — | 片段（`path_regexp` + `method`）；verify 比对方法集合，每个 wgw 匹配器恰为 `{path_regexp, method}` 且是该路由唯一的匹配器组 |
 | R68 | Caddy `*` 在末尾时是前缀匹配、会跨段 | wac-026 🟡-1 (c) | P-12 | **用户裁决：锚定单段 `path_regexp`**；`--accept-prefix` 已删除；verify 对前缀写法、`(?i)`、`[^/]*`、`.+`、缺 `$`、静态行用 `path` 匹配器都判失败，负样本含多段、空段、尾斜杠、大小写变体 |
 | R69 | `/m` 的 handle 块里不得有兜底 `reverse_proxy`，清单外路径落到 404 或其他既有路由 | wac-026 🟡-1 (d) | — | verify 负样本：尾斜杠、多段、空段、未列方法、未注册路径都不得到达网关 |
-| R70 | 写核对脚本：解析 adapt 后 JSON，抽出 `/m/v1/watcher/` 全部 `(path, method)` 与清单逐行比较，对称差为空且行数 > 0 | wac-026 🟡-1 (e) | — | `o0_caddy_watcher_routes.py verify`，自测 14 种破坏全部抓住 |
+| R70 | 写核对脚本：解析 adapt 后 JSON，抽出 `/m/v1/watcher/` 全部 `(path, method)` 与清单逐行比较，对称差为空且行数 > 0 | wac-026 🟡-1 (e)；契约 §9.14.3 O-0 核对脚本 | — | `o0_caddy_watcher_routes.py verify`（按 v2 比对 regex 列），自测 42 种破坏（原样与骨架两种形态）全部抓住，真实 Caddy v2.10.2 adapt 的 10 种违例全部判失败 |
 | R71 | 确认生产 Caddy 版本（path cleaning 自 #4407 引入） | wac-026 🟡-1 (f) | — | S-01 |
 | R72 | 浏览器凭据用 `{env.*}`（同 R44） | wac-026 🟡-1 (g) | — | 同 R44 |
 | R73 | WGW-1.0.2 勘误写明清单中 `*` 为"恰好一个非空段"并规定 O-0 翻译方式 | wac-026 §5 第 5 点 | P-12 | Planner |
@@ -149,7 +150,7 @@
 | R86 | watcher 重启是信号采集空窗；重启后要核对有无漏信号 | `docs/agent-operations.md` §1；记忆 09-04/09-25 | apply 在自动回滚窗口内断言 180 秒内出现 `[watcher] Connected, listening...`；verify 记录转发行计数；runbook 给出 feeder 计数对照命令 |
 | R87 | 凭据零接触：不打印、不提交、不写日志 | 协议铁律 3 | 工具只输出变量名；现场核对默认拒绝输出，Caddy 完整配置不离开主机；泄露测试 15 个哨兵 0 泄露 |
 
-## 6. 本地已实跑的证据（wac-072 更新，全部在本机，未连 jp-24）
+## 6. 本地已实跑的证据（wac-072 时的数字，全部在本机，未连 jp-24；wac-060 的最新结果见 §10）
 
 一键复跑：`O0_WAL_REPRO_DB=<审查 scratchpad/walt/w.db> O0_FLEET_REPRO_DIR=<审查 scratchpad/fleet/evidence> bash scripts/ops/o0/tests/run_all.sh`（两个环境变量可省略，省略时用内嵌的等价夹具）。
 
