@@ -202,6 +202,99 @@ test("dump-route-table reports rogue literal, parameter and mounted handlers", (
   }
 });
 
+test("dump-route-table rejects unexpected mounts and routes in every Express form", () => {
+  const script = path.resolve(__dirname, "../scripts/dump-route-table.js");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "watcher-route-injection-"));
+  const preload = path.join(root, "inject.js");
+  const inject = [
+    ["api root mount", 'result.app.use("/api", (_, res) => res.end());'],
+    ["media impostor", 'result.app.use("/media", function mediaHandler(_, res) { res.end(); });'],
+    ["mixed case mount", 'result.app.use("/API/x", (_, res) => res.end());'],
+    ["upper case route", 'result.app.post("/API/rogue", (_, res) => res.end());'],
+    ["mixed case route", 'result.app.post("/Api/Rogue", (_, res) => res.end());'],
+    ["array mount", 'result.app.use(["/api/x"], (_, res) => res.end());'],
+    ["regex mount", 'result.app.use(/^\\/api\\/x/, (_, res) => res.end());'],
+    ["root child router", `const router = require(${JSON.stringify(require.resolve("express"))}).Router(); router.post("/api/rogue", (_, res) => res.end()); result.app.use(router);`],
+    ["media name on api", 'result.app.use("/api/x", function mediaHandler(_, res) { res.end(); });'],
+    ["rogue root mount", 'result.app.use((_, res) => res.end());'],
+  ];
+  try {
+    for (const [label, registration] of inject) {
+      fs.writeFileSync(preload, `const Module = require("node:module");\nconst load = Module._load;\nModule._load = function(request, parent, main) {\n  const result = load.apply(this, arguments);\n  if (request === "../server") { ${registration} }\n  return result;\n};\n`);
+      const result = spawnSync(process.execPath, ["--require", preload, script], { encoding: "utf8", timeout: 15000 });
+      assert.equal(result.status, 1, `${label}: ${result.stderr}`);
+      const actual = JSON.parse(result.stdout);
+      assert.ok(actual.unexpected.length > 0, label);
+      if (label === "root child router") {
+        assert.ok(actual.unexpected.some((row) => row.method === "POST" && row.path === "/api/rogue"), label);
+      }
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dump-route-table fails closed for alternate route and mount registrations", () => {
+  const script = path.resolve(__dirname, "../scripts/dump-route-table.js");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "watcher-route-injection-"));
+  const preload = path.join(root, "inject.js");
+  const expressPath = JSON.stringify(require.resolve("express"));
+  const mediaPath = JSON.stringify(require.resolve("../lib/media"));
+  const cases = [
+    ["PATCH array", 'app.patch(["/api/rogue"], (_, res) => res.end());', "PATCH", "/api/rogue"],
+    ["PATCH regex", 'app.patch(/^\\/api\\/rogue$/, (_, res) => res.end());', "PATCH", "/^\\/api\\/rogue$/"],
+    ["POST array", 'app.post(["/api/rogue"], (_, res) => res.end());', "POST", "/api/rogue"],
+    ["wildcard", 'app.all("/{*splat}", (_, res) => res.end());', "GET", "/{*splat}"],
+    ["first parameter", 'app.post("/:a/login", (_, res) => res.end());', "POST", "/:a/login"],
+    ["router use", 'app.router.use("/api", (_, res) => res.end());', "USE", "<unknown>"],
+    ["second static", `app.use(require(${expressPath}).static("/"));`, "USE", "/"],
+    ["duplicate", 'app.get("/api/status", (_, res) => res.end());', "GET", "/api/status"],
+    ["case variant duplicate", 'app.get("/API/STATUS", (_, res) => res.end());', "GET", "/API/STATUS"],
+    ["media case variant", 'app.get("/MEDIA/:f", (_, res) => res.end());', "GET", "/MEDIA/:f"],
+    ["media on api", `app.use("/api/x", require(${mediaPath}).createMediaHandler("/tmp/x"));`, "USE", "/api/x"],
+    ["api root", 'app.post("/api", (_, res) => res.end());', "POST", "/api"],
+  ];
+  try {
+    for (const [label, registration, method, routePath] of cases) {
+      fs.writeFileSync(preload, `const Module = require("node:module");\nconst load = Module._load;\nModule._load = function(request, parent, main) {\n  const result = load.apply(this, arguments);\n  if (request === "../server") { const app = result.app; ${registration} }\n  return result;\n};\n`);
+      const result = spawnSync(process.execPath, ["--require", preload, script], { encoding: "utf8", timeout: 15000 });
+      assert.equal(result.status, 1, `${label}: ${result.stderr}`);
+      const actual = JSON.parse(result.stdout);
+      assert.ok(actual.unexpected.some((row) => row.method === method && row.path === routePath), `${label}: ${result.stdout}`);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dump-route-table exits nonzero when its route table check throws", () => {
+  const script = path.resolve(__dirname, "../scripts/dump-route-table.js");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "watcher-route-injection-"));
+  const preload = path.join(root, "inject.js");
+  try {
+    fs.writeFileSync(preload, 'const Module = require("node:module");\nconst load = Module._load;\nModule._load = function(request, parent, main) {\n  const result = load.apply(this, arguments);\n  if (request === "../server") { const stack = result.app.router.stack; const index = stack.findIndex((item) => Array.isArray(item.handle?.routeTable)); stack.splice(index, 1); }\n  return result;\n};\n');
+    const result = spawnSync(process.execPath, ["--require", preload, script], { encoding: "utf8", timeout: 15000 });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /watcher authentication route table is not mounted/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dump-route-table exits nonzero when cleanup throws", () => {
+  const script = path.resolve(__dirname, "../scripts/dump-route-table.js");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "watcher-route-injection-"));
+  const preload = path.join(root, "inject.js");
+  try {
+    fs.writeFileSync(preload, 'const fs = require("node:fs");\nconst original = fs.rmSync;\nfs.rmSync = function(target, options) { const result = original.call(this, target, options); if (String(target).includes("watcher-route-table-")) throw new Error("injected cleanup failure"); return result; };\n');
+    const result = spawnSync(process.execPath, ["--require", preload, script], { encoding: "utf8", timeout: 15000 });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /injected cleanup failure/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("non browser raw targets are rejected before handler and static through real sockets", async () => {
   const app = express();
   let handlers = 0;

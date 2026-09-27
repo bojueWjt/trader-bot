@@ -474,10 +474,13 @@ async def test_artifact_disable_four_sources_preserves_existing_routes(caplog, m
     async def probe(app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://local") as client:
             old = await client.get("/v1/accounts/", follow_redirects=False)
-            get = await client.get("/v1/watcher/status", headers={"Authorization": "Bearer " + FAKE["viewer"]})
-            post = await client.post("/v1/watcher/config", headers={"Authorization": "Bearer " + FAKE["risk_admin"]})
-            return old, get, post
-    baseline, _, _ = await probe(read_api.create_app("operator-query"))
+            responses = []
+            for headers in ({}, {"Authorization": "Bearer " + FAKE["viewer"]}):
+                responses.append(await client.get("/v1/watcher/status", headers=headers))
+            for headers in ({}, {"Authorization": "Bearer " + FAKE["risk_admin"]}):
+                responses.append(await client.post("/v1/watcher/config", headers=headers))
+            return old, responses
+    baseline, _ = await probe(read_api.create_app("operator-query"))
     variants = []
     collision = copy.deepcopy(original)
     collision["routes"].append({**copy.deepcopy(next(row for row in original["routes"] if row["identity"] == "gateway")), "id": "gw.injected.get", "outer_path": "/v1/watcher/login/x", "inner_path": "/api/login/x"})
@@ -491,17 +494,21 @@ async def test_artifact_disable_four_sources_preserves_existing_routes(caplog, m
     try:
         for variant in variants:
             assert wg.load_route_artifact(variant) is False
-            old, get, post = await probe(read_api.create_app("operator-query"))
+            old, responses = await probe(read_api.create_app("operator-query"))
             assert (old.status_code, old.content) == (baseline.status_code, baseline.content)
-            for response in (get, post):
+            for response in responses:
                 assert response.status_code == 503
                 assert set(response.json()) == {"code", "message", "request_id"}
                 assert response.json()["code"] == "gateway_disabled"
+            assert upstream_calls == []
+            assert all(token not in caplog.text for token in FAKE.values())
         assert wg.load_route_artifact(loader=lambda _: (_ for _ in ()).throw(ImportError("fixture"))) is False
-        old, get, post = await probe(read_api.create_app("operator-query"))
+        old, responses = await probe(read_api.create_app("operator-query"))
         assert (old.status_code, old.content) == (baseline.status_code, baseline.content)
-        assert get.status_code == post.status_code == 503
-        assert "gateway_disabled" == get.json()["code"] == post.json()["code"]
+        for response in responses:
+            assert response.status_code == 503
+            assert set(response.json()) == {"code", "message", "request_id"}
+            assert response.json()["code"] == "gateway_disabled"
         assert upstream_calls == []
         assert all(token not in caplog.text for token in FAKE.values())
         assert "Authorization" not in caplog.text
