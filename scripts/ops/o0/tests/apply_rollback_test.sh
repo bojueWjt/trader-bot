@@ -13,6 +13,14 @@
 #   operator-query: (A) a failure BEFORE the restart/recreate must restore the files and must
 #   NOT restart/recreate anything; (B) a failure AFTER it must restore and restart/recreate.
 #   In both cases the fleet guard must run after the rollback and its verdict be recorded.
+#   (D) the restart/recreate command itself fails; (E) the fleet guard after the restart sees a
+#   change: stop and report, no automatic rollback; (F) a candidate manifest WITH an ABSENT line
+#   (review wac-032-r3 §3.2/§3.3, 🟡-3).
+# Part 2 also covers (wac-072): restore-db keeps the ORIGINAL owner/mode (inode-aware chown/stat
+#   stubs), recovers to the original DB files when a step after the stop fails, refuses a rerun
+#   over set-aside files (r2 🟡-5); the stage O isolation gate refuses apply before any write
+#   (r2 🟡-6); the fleet guard parameters are checked against the node heartbeat parameters in
+#   a real execute run (r2 🟡-7).
 # All values are fakes generated here; nothing leaves the temporary directory.
 # --structure-only runs part 1 only (auth_gate_test.sh calls it that way).
 set -eo pipefail
@@ -29,7 +37,7 @@ bad() { checks=$((checks + 1)); fails=$((fails + 1)); echo "FAIL $*"; }
 # ---------------------------------------------------------------- 1. plan structure
 plan() { env -u O0_FLEET_SETTLE_S -u O0_FLEET_SAMPLES -u O0_FLEET_INTERVAL_S bash "$O0/$1" --phase "$2" > "$WORK/plan-${1%.sh}-$2.txt"; }
 for pair in o0_deploy_caddy.sh:preflight o0_deploy_caddy.sh:apply o0_deploy_watcher.sh:preflight o0_deploy_watcher.sh:build \
-            o0_deploy_watcher.sh:apply o0_deploy_operator_query.sh:preflight o0_deploy_operator_query.sh:apply; do
+            o0_deploy_watcher.sh:apply o0_deploy_watcher.sh:restore-db o0_deploy_operator_query.sh:preflight o0_deploy_operator_query.sh:apply; do
   plan "${pair%%:*}" "${pair#*:}"
 done
 if python3 - "$WORK" > "$WORK/structure.txt" 2>&1 <<'PY'; then ok "plan structure: $(tail -1 "$WORK/structure.txt")"; else bad "plan structure"; cat "$WORK/structure.txt"; fi
@@ -109,10 +117,33 @@ check(m is not None and m.group(1) == m.group(2), "build: dryrun.post.db must be
 check("baseline --db '" in post[2] and "/dryrun.post.db' --export-json" in post[2], "build: the post-migration analysis must read dryrun.post.db")
 check(not re.search(r"\bcp\b[^\n]*dryrun\.post\.db", post[2]), "build: dryrun.post.db must not be a plain cp")
 
+# stage O isolation gate (review wac-032-r2 🟡-6): in preflight before the gate is written, in
+# apply before the fleet baseline and the first backup; both other units named
+for name, before_what in (("plan-o0_deploy_operator_query-preflight.txt", "record the passed oq-preflight gate"),
+                          ("plan-o0_deploy_operator_query-apply.txt", "fleet baseline (before-oq)")):
+    ev = events(name)
+    i_iso = idx(ev, lambda e: e[1].startswith("control-plane unit isolation (S-10)"), f"{name} isolation gate")
+    i_next = idx(ev, lambda e: e[1].startswith(before_what), f"{name} {before_what}")
+    check(i_iso < i_next, f"{name}: the isolation gate must come before '{before_what}'")
+    check("cp-isolation" in ev[i_iso][2] and "--other-unit trader-v3-controlplane-node-control" in ev[i_iso][2]
+          and "--other-unit trader-v3-controlplane-event-ingest" in ev[i_iso][2], f"{name}: isolation gate must check both other units")
+
+# restore-db (review wac-032-r2 🟡-5): owner/mode/sha recorded before the stop; recovery armed
+# and the runtime marked before the stop; the install uses the RECORDED owner and mode
+ev = events("plan-o0_deploy_watcher-restore-db.txt")
+i_rec = idx(ev, lambda e: e[1].startswith("record owner, mode and sha of the live DB files"), "restore-db owner record")
+i_arm = idx(ev, lambda e: e[0] == "NOTE" and e[1].startswith("AUTO_ROLLBACK_ARMED (watcher-restore-db)"), "restore-db recovery armed")
+i_mark = idx(ev, lambda e: e[0] == "NOTE" and e[1].startswith("RUNTIME_REPLACEMENT_BEGINS"), "restore-db runtime mark")
+i_stop = idx(ev, lambda e: e[1] == "stop watcher", "restore-db stop")
+i_inst = idx(ev, lambda e: e[1].startswith("set aside the current DB files"), "restore-db install")
+check(i_rec < i_arm < i_mark < i_stop < i_inst, f"restore-db order: record {i_rec} < armed {i_arm} < mark {i_mark} < stop {i_stop} < install {i_inst}")
+check("stat -c '%u:%g %a'" in ev[i_rec][2] and "DB_REPLACED_NOT_EMPTY" in ev[i_rec][2], "restore-db: owner/mode recorded with stat, rerun refused")
+check('chown "$own"' in ev[i_inst][2] and 'chmod "$mode"' in ev[i_inst][2] and "root:root" not in ev[i_inst][2], "restore-db: install must use the recorded owner/mode")
+
 if problems:
     print("\n".join(problems))
     sys.exit(1)
-print("STRUCTURE_OK preflight_gate_clear=4 apply_order=3 build_graceful_stop=ok build_backup_api=ok")
+print("STRUCTURE_OK preflight_gate_clear=4 apply_order=3 restore_db_order=ok oq_isolation_gate=2 build_graceful_stop=ok build_backup_api=ok")
 PY
 
 # ---------------------------------------------------------------- 2. automatic rollback (sandbox)
@@ -124,18 +155,34 @@ cat > "$BIN/docker" <<'STUB'
 #!/usr/bin/env bash
 echo "docker $*" >> "$CALLS"
 case "$*" in
-  *psql*) echo 'account-a ACTIVE abcdef012345 hb_age=1.0' ;;
+  *psql*) if [ -n "${HALT_AFTER_RESTART:-}" ] && grep -qE 'systemctl restart|compose .* up ' "$CALLS"; then echo 'account-a HALTED abcdef012345 hb_age=1.0'; else echo 'account-a ACTIVE abcdef012345 hb_age=1.0'; fi ;;
+  *" up "*) if [ -n "${UP_FAIL_FIRST:-}" ] && [ ! -e "$CALLS.uf" ]; then : > "$CALLS.uf"; exit 1; fi ;;
   "image inspect"*) echo "sha256:cand" ;;
   "inspect -f {{.Image}}"*) echo "sha256:running" ;;
   "inspect -f {{.RestartCount}}"*) echo "0 true" ;;
   *" config --quiet"*) [ -z "${DC_CONFIG_FAIL:-}" ] || exit 1 ;;
-  logs*) printf 'Web UI listening on 0.0.0.0:9100\n'; [ -z "${WATCHER_LOG_DBFAIL:-}" ] || printf '[db] Failed to open trading db\n' ;;
+  logs*) printf 'Web UI listening on 0.0.0.0:9100\n[watcher] Connected, listening...\n'; [ -z "${WATCHER_LOG_DBFAIL:-}" ] || printf '[db] Failed to open trading db\n'
+         # restore-db: the FIRST start (on the restored copy) logs a DB failure
+         if [ -n "${RESTORE_DB_FAIL:-}" ] && [ "$(grep -cE 'compose .* start ' "$CALLS")" = 1 ]; then printf '[db] Failed to open trading db\n'; fi ;;
 esac
 exit 0
 STUB
 cat > "$BIN/systemctl" <<'STUB'
 #!/usr/bin/env bash
 echo "systemctl $*" >> "$CALLS"
+# unit properties for the stage O isolation gate (o0_tool.py cp-isolation); ISOLATION_FAIL
+# injects the two S-10 violations (env file / Environment= name) with a sentinel VALUE
+if [ "$1" = "show" ] && [[ " $* " == *" -p LoadState "* ]]; then
+  echo LoadState=loaded; echo "WorkingDirectory=$O0_SANDBOX/srv/trader-v3/services/control-plane/api"
+  oqe="$O0_SANDBOX/srv/trader-v3/secrets/control-plane/operator-query.env"
+  case "$2" in
+    *operator-query) echo "EnvironmentFiles=$oqe (ignore_errors=no)"; echo 'Environment=PYTHONPATH=/x' ;;
+    *node-control) [ "${ISOLATION_FAIL:-}" != envfile ] || echo "EnvironmentFiles=$oqe (ignore_errors=no)"; echo 'Environment=' ;;
+    *event-ingest) if [ "${ISOLATION_FAIL:-}" = envname ]; then echo 'Environment=WATCHER_SNAPSHOT_TOKEN=SENTINELisoleak0123456789'; else echo 'Environment='; fi ;;
+  esac
+  exit 0
+fi
+if [ "$1" = "restart" ] && [ -n "${RESTART_FAIL_FIRST:-}" ] && [ ! -e "$CALLS.rf" ]; then : > "$CALLS.rf"; exit 1; fi
 if [ "$1" = "is-active" ]; then
   n=$(cat "$CALLS.active" 2>/dev/null || echo 0); echo $((n + 1)) > "$CALLS.active"
   if [ -n "${ACTIVE_FAIL_FIRST:-}" ] && [ "$n" = 0 ]; then exit 3; fi
@@ -174,8 +221,50 @@ if mk:
     os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
 shutil.copyfile(src, dst)
 STUB
-printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN/chown"
-printf '#!/usr/bin/env bash\necho "600 root:root ${@: -1}"\n' > "$BIN/stat"
+# chown/stat: ownership is kept per INODE in $CALLS.owners (mv keeps it, cp makes a new file
+# owned by root), so a restore that forgets to re-apply the recorded owner is visible.
+cat > "$BIN/chown" <<'STUB'
+#!/usr/bin/env python3
+import json, os, sys
+if os.environ.get("CHOWN_FAIL"):
+    sys.exit(1)
+db = os.environ["CALLS"] + ".owners"
+owners = json.load(open(db)) if os.path.exists(db) else {}
+owner = sys.argv[1].replace("root", "0")
+for f in sys.argv[2:]:
+    owners[str(os.stat(f).st_ino)] = owner
+json.dump(owners, open(db, "w"))
+STUB
+# cp/mv: real, plus two restore-db faults. CP_CORRUPT: the copy onto the watcher DB lands with
+# different bytes. MV_LOSE_OWNER: a cross-filesystem move that does not keep the owner/mode
+# (copy to a new inode, remove the source).
+cat > "$BIN/cp" <<'STUB'
+#!/usr/bin/env bash
+/bin/cp "$@" || exit $?
+if [ -n "${CP_CORRUPT:-}" ]; then last="${*: -1}"; case "$last" in *watcher-trading.db) printf 'x' >> "$last" ;; esac; fi
+STUB
+cat > "$BIN/mv" <<'STUB'
+#!/usr/bin/env bash
+[ -n "${MV_LOSE_OWNER:-}" ] || exec /bin/mv "$@"
+args=(); for a in "$@"; do [ "$a" = "--" ] || args+=("$a"); done
+src="${args[0]}"; dst="${args[1]}"; [ -d "$dst" ] && dst="$dst/$(basename "$src")"
+/bin/cp "$src" "$dst.mvtmp" && /bin/rm -f "$src" && /bin/mv "$dst.mvtmp" "$dst"
+STUB
+cat > "$BIN/stat" <<'STUB'
+#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+fmt = args[args.index("-c") + 1]
+files = [a for i, a in enumerate(args) if a != "-c" and (i == 0 or args[i - 1] != "-c")]
+db = os.environ.get("CALLS", "/nonexistent") + ".owners"
+owners = json.load(open(db)) if os.path.exists(db) else {}
+for f in files:
+    st = os.stat(f)
+    uid, gid = owners.get(str(st.st_ino), "0:0").split(":")
+    name = lambda n: "root" if n == "0" else n
+    out = fmt.replace("%a", format(st.st_mode & 0o7777, "o")).replace("%u", uid).replace("%g", gid)
+    print(out.replace("%U", name(uid)).replace("%G", name(gid)).replace("%n", f))
+STUB
 cat > "$BIN/journalctl" <<'STUB'
 #!/usr/bin/env bash
 [ -z "${OQ_JOURNAL_FAIL:-}" ] || echo 'watcher gateway: route artifact unavailable'
@@ -206,7 +295,7 @@ seal_bundle() { (cd "$S/bundle" && find . -type f ! -name SHA256SUMS | sed 's|^\
 run_apply() {  # run_apply <script> <auth> args...  -> sets RC, OUT
   local script="$1" auth="$2"; shift 2
   RC=0
-  OUT="$(PATH="$BIN:$PATH" O0_SANDBOX="$SB" CALLS="$CALLS" O0_FLEET_NODES=account-a O0_FLEET_READY_PORTS=8081 O0_FLEET_SETTLE_S=0 \
+  OUT="$(PATH="$BIN:$PATH" O0_SANDBOX="$SB" O0_FLEET_PARAMS_SANDBOX_SKIP=1 CALLS="$CALLS" O0_FLEET_NODES=account-a O0_FLEET_READY_PORTS=8081 O0_FLEET_SETTLE_S=0 \
          O0_FLEET_SAMPLES=1 O0_FLEET_INTERVAL_S=0 bash "$O0/$script" --execute --phase apply --auth-id "$auth" --stage-dir "$S" "$@" 2>&1)" || RC=$?
 }
 fake_catalog() {  # fake_catalog <file>: catalog tokens are random fakes, distinct from the watcher set
@@ -332,8 +421,170 @@ OQ_JOURNAL_FAIL=1 run_apply o0_deploy_operator_query.sh O0-A08 --cp-root "$WORK/
   --operator-query-env "$WORK/sb-oq-B/srv/trader-v3/secrets/control-plane/operator-query.env"
 assert_rollback "operator-query B (startup journal fails after restart)" yes 'systemctl restart trader-v3-controlplane-operator-query' 2 "startup journal since the restart"
 oq_restored "operator-query B" B
+# ---- review wac-032-r3 §3.2/§3.3 (🟡-3): D = the restart/recreate command itself fails; E = the fleet guard after
+# the restart sees a change (stop and report, no automatic rollback); F = candidate manifest WITH an ABSENT line
+# restart command ITSELF fails (marker set before it): rollback restarts once more
+caddy_setup D
+RESTART_FAIL_FIRST=1 run_apply o0_deploy_caddy.sh O0-A05
+assert_rollback "caddy D (systemctl restart itself fails)" yes 'systemctl restart caddy' 2 "restart caddy"
+caddy_restored "caddy D"
+# fleet guard after the restart sees a change: no automatic rollback, exit non-zero, one restart
+caddy_setup E
+HALT_AFTER_RESTART=1 run_apply o0_deploy_caddy.sh O0-A05
+n=$(grep -c 'systemctl restart caddy' "$CALLS" || true)
+if [ "$RC" -ne 0 ] && [ "$n" = 1 ] && [ ! -e "$S/evidence/auto-rollback.log" ] && ! printf '%s' "$OUT" | grep -q 'apply failed: automatic rollback'; then
+  ok "caddy E (fleet guard after restart = CHANGED): rc=$RC, 1 restart, no auto rollback (stop and report)"
+else bad "caddy E: rc=$RC restarts=$n"; printf '%s\n' "$OUT" | tail -6 | sed 's/^/    /'; fi
+printf '%s' "$OUT" | grep -q 'FLEET_GUARD_STOP sample=1 rc=3' && ok "caddy E: the guard's stop line is printed (report to the user; no RESUME, no rollback)" || bad "caddy E: no FLEET_GUARD_STOP rc=3 line"
+# watcher: recreate command itself fails
+watcher_setup D
+UP_FAIL_FIRST=1 run_apply o0_deploy_watcher.sh O0-A07 "${watcher_args[@]//sb-watcher-X/sb-watcher-D}"
+assert_rollback "watcher D (compose up itself fails)" yes 'docker compose .* up ' 2 "recreate watcher with the tested image"
+watcher_restored "watcher D"
+# watcher: candidate manifest WITH an ABSENT line (a whitelisted file the candidate drops)
+watcher_setup F
+echo 'legacy' > "$SRC/lib/old.js"
+printf 'server.js\nlib/auth.js\nlib/old.js\n' > "$WORK/wpaths"
+python3 "$O0/o0_tool.py" manifest-build --root "$SRC" --paths-file "$WORK/wpaths" --out "$S/bundle/watcher.baseline.sha256" >/dev/null
+python3 "$O0/o0_tool.py" manifest-build --root "$S/bundle/watcher" --paths-file "$WORK/wpaths" --out "$S/bundle/watcher.candidate.sha256" >/dev/null
+grep -q '^ABSENT  lib/old.js$' "$S/bundle/watcher.candidate.sha256" && ok "watcher F: candidate manifest has ABSENT lib/old.js" || bad "watcher F: no ABSENT line"
+seal_bundle
+python3 "$O0/o0_tool.py" gate-write --out "$S/evidence/watcher-preflight.gate.json" --stage watcher-preflight --bundle "$S/bundle" \
+  --file-sha "cred_watcher_env=$S/creds/set-initial/watcher.env" --file-sha "live_compose=$W/docker-compose.yml" >/dev/null
+python3 "$O0/o0_tool.py" gate-write --out "$S/evidence/watcher-build.gate.json" --stage watcher-build --bundle "$S/bundle" \
+  --field cand_image_id=sha256:cand --file-sha "dryrun_log=$S/evidence/watcher-dryrun.log" >/dev/null
+DC_CONFIG_FAIL=1 run_apply o0_deploy_watcher.sh O0-A07 "${watcher_args[@]//sb-watcher-X/sb-watcher-F}"
+assert_rollback "watcher F (ABSENT line, fails at compose config)" no 'docker compose .* up ' 0 "compose config parses"
+printf '%s' "$OUT" | grep -q 'watcher-live-vs-candidate' && ok "watcher F: candidate manifest verified (old.js was removed)" || bad "watcher F: no candidate verify"
+[ "$(cat "$SRC/lib/old.js" 2>/dev/null)" = legacy ] && ok "watcher F: rollback restored lib/old.js" || bad "watcher F: lib/old.js not restored"
+watcher_restored "watcher F"
+# operator-query: restart command itself fails
+oq_setup D
+RESTART_FAIL_FIRST=1 run_apply o0_deploy_operator_query.sh O0-A08 --cp-root "$WORK/sb-oq-D/srv/trader-v3/services/control-plane" \
+  --operator-query-env "$WORK/sb-oq-D/srv/trader-v3/secrets/control-plane/operator-query.env"
+assert_rollback "operator-query D (restart itself fails)" yes 'systemctl restart trader-v3-controlplane-operator-query' 2 "restart operator-query ONLY"
+oq_restored "operator-query D" D
+# ---- restore-db (review wac-032-r2 🟡-5): the restored file keeps the ORIGINAL owner and mode;
+# a failure after the stop puts the original DB files back (owner/mode/sha proven), starts the
+# watcher again and records the fleet verdict; a second run over set-aside files is refused.
+rdb_setup() {
+  new_sandbox "rdb-$1"
+  DBD="$SB/var/lib/docker/volumes/trader_signal-data/_data"; DB="$DBD/watcher-trading.db"; W="$SB/srv/trader"
+  mkdir -p "$DBD" "$W" "$SB/srv/trader-v3/secrets/control-plane" "$S/backup-watcher"
+  fake_catalog "$SB/srv/trader-v3/secrets/control-plane/operator-query.env"
+  echo 'services: {watcher: {}}' > "$W/docker-compose.yml"
+  python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("CREATE TABLE t (v TEXT)"); c.execute("INSERT INTO t VALUES (\"post-apply\")"); c.commit()' "$DB"
+  printf 'shm-bytes' > "$DB-shm"
+  chmod 640 "$DB" "$DB-shm"; CALLS="$CALLS" "$BIN/chown" 1000:1000 "$DB" "$DB-shm"
+  python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("CREATE TABLE t (v TEXT)"); c.execute("INSERT INTO t VALUES (\"pre-apply\")"); c.commit()' "$S/backup-watcher/watcher-trading.pre-o0.db"
+  sha256sum "$S/backup-watcher/watcher-trading.pre-o0.db" > "$S/evidence/watcher-db-backup.sha256"
+  ORIG_DB_SHA="$(sha256sum < "$DB" | cut -d' ' -f1)"; ORIG_SHM_SHA="$(sha256sum < "$DB-shm" | cut -d' ' -f1)"
+  PRE_SHA="$(sha256sum < "$S/backup-watcher/watcher-trading.pre-o0.db" | cut -d' ' -f1)"
+}
+run_restore() {
+  RC=0
+  OUT="$(PATH="$BIN:$PATH" O0_SANDBOX="$SB" O0_FLEET_PARAMS_SANDBOX_SKIP=1 CALLS="$CALLS" O0_FLEET_NODES=account-a O0_FLEET_READY_PORTS=8081 O0_FLEET_SETTLE_S=0 \
+         O0_FLEET_SAMPLES=1 O0_FLEET_INTERVAL_S=0 bash "$O0/o0_deploy_watcher.sh" --execute --phase restore-db --auth-id O0-A07R --i-understand-data-loss \
+         --stage-dir "$S" --watcher-root "$W" --telegram-timeout-s 5 2>&1)" || RC=$?
+}
+own_of() { CALLS="$CALLS" "$BIN/stat" -c '%u:%g %a' "$1"; }
+original_back() {  # the live DB is the ORIGINAL (post-apply) file again, owner and mode unchanged
+  if [ "$(sha256sum < "$DB" | cut -d' ' -f1)" = "$ORIG_DB_SHA" ] && [ "$(sha256sum < "$DB-shm" | cut -d' ' -f1)" = "$ORIG_SHM_SHA" ] \
+     && [ "$(own_of "$DB")" = "1000:1000 640" ] && [ "$(own_of "$DB-shm")" = "1000:1000 640" ] && [ -z "$(ls -A "$S/backup-watcher/db-replaced")" ]; then
+    ok "$1: original DB files back (sha, owner 1000:1000, mode 640), db-replaced empty"
+  else bad "$1: original DB not back: owner=$(own_of "$DB" 2>&1) replaced=$(ls "$S/backup-watcher/db-replaced" 2>&1 | tr '\n' ' ')"; printf '%s\n' "$OUT" | tail -8 | sed 's/^/    /'; fi
+}
+rdb_setup OK
+run_restore
+if [ "$RC" -eq 0 ] && [ "$(sha256sum < "$DB" | cut -d' ' -f1)" = "$PRE_SHA" ] && printf '%s' "$OUT" | grep -q RESTORED_DB_OWNER_MODE_OK; then
+  ok "restore-db OK: live DB = pre-apply copy (RESTORED_DB_SHA_OK, RESTORED_DB_OWNER_MODE_OK)"
+else bad "restore-db OK: rc=$RC"; printf '%s\n' "$OUT" | grep -E 'STEP|ABORT|MISMATCH|FAIL' | tail -6 | sed 's/^/    /'; fi
+[ "$(own_of "$DB")" = "1000:1000 640" ] && [ "$(cat "$S/evidence/watcher-db-owner.txt")" = "1000:1000 640" ] \
+  && ok "restore-db OK: restored file has the ORIGINAL owner and mode (1000:1000 640), recorded in evidence" || bad "restore-db OK: owner/mode $(own_of "$DB")"
+[ -e "$S/backup-watcher/db-replaced/watcher-trading.db" ] && [ -e "$S/backup-watcher/db-replaced/watcher-trading.db-shm" ] && [ ! -e "$DB-shm" ] \
+  && ok "restore-db OK: DB and -shm set aside in db-replaced/, no stale -shm next to the restored DB" || bad "restore-db OK: set-aside files"
+[ "$(grep -cE 'compose .* stop ' "$CALLS")" = 1 ] && [ "$(grep -cE 'compose .* start ' "$CALLS")" = 1 ] && [ ! -e "$S/evidence/auto-rollback.log" ] \
+  && ok "restore-db OK: one stop, one start, no automatic recovery" || bad "restore-db OK: stop/start counts"
+# a second run over the set-aside files is refused before anything stops or moves
+n_stop=$(grep -cE 'compose .* stop ' "$CALLS"); run_restore
+if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q DB_REPLACED_NOT_EMPTY && [ "$(grep -cE 'compose .* stop ' "$CALLS")" = "$n_stop" ] \
+   && [ "$(sha256sum < "$DB" | cut -d' ' -f1)" = "$PRE_SHA" ] && [ ! -e "$S/evidence/auto-rollback.log" ]; then
+  ok "restore-db rerun: refused (DB_REPLACED_NOT_EMPTY) before any stop; the set-aside originals are not overwritten"
+else bad "restore-db rerun: rc=$RC"; fi
+# the watcher fails on the restored copy -> automatic recovery to the original files
+rdb_setup FAILUP
+RESTORE_DB_FAIL=1 run_restore
+assert_rollback "restore-db FAILUP (watcher fails on the restored DB)" yes 'docker compose .* start ' 2 "watcher up"
+original_back "restore-db FAILUP"
+[ "$(sha256sum < "$S/backup-watcher/db-failed-restore/watcher-trading.db" | cut -d' ' -f1)" = "$PRE_SHA" ] \
+  && ok "restore-db FAILUP: the restored copy that failed is kept in db-failed-restore/" || bad "restore-db FAILUP: db-failed-restore"
+printf '%s' "$OUT" | grep -q RESTORE_DB_RECOVERED_FILES && ok "restore-db FAILUP: RESTORE_DB_RECOVERED_FILES printed" || bad "restore-db FAILUP: no RESTORE_DB_RECOVERED_FILES"
+# failure while installing (chown) after the originals moved: recovery before any start
+rdb_setup FAILINSTALL
+CHOWN_FAIL=1 run_restore
+assert_rollback "restore-db FAILINSTALL (chown fails after the move)" yes 'docker compose .* start ' 1 "set aside the current DB files"
+original_back "restore-db FAILINSTALL"
+# the installed copy's bytes differ from the recorded sha: stop at the install step, recover
+rdb_setup CORRUPT
+CP_CORRUPT=1 run_restore
+assert_rollback "restore-db CORRUPT (installed bytes differ from the recorded sha)" yes 'docker compose .* start ' 1 "set aside the current DB files"
+printf '%s' "$OUT" | grep -q RESTORED_DB_SHA_MISMATCH && ok "restore-db CORRUPT: RESTORED_DB_SHA_MISMATCH named" || bad "restore-db CORRUPT: no RESTORED_DB_SHA_MISMATCH"
+original_back "restore-db CORRUPT"
+# the move does not keep owner/mode: recovery must NOT start the watcher on those files
+rdb_setup MVOWNER
+MV_LOSE_OWNER=1 RESTORE_DB_FAIL=1 run_restore
+n_start=$(grep -cE 'compose .* start ' "$CALLS" || true)
+if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q 'ROLLBACK FAILED' && [ "$n_start" = 1 ] \
+   && grep -q 'runtime_rolled_back=no rollback_rc=[1-9][0-9]* fleet_rc=0' "$S/evidence/auto-rollback.log" 2>/dev/null \
+   && [ "$(sha256sum < "$DB" | cut -d' ' -f1)" = "$ORIG_DB_SHA" ]; then
+  ok "restore-db MVOWNER: original bytes back but owner/mode differ -> ROLLBACK FAILED, watcher not started, fleet verdict recorded"
+else bad "restore-db MVOWNER: rc=$RC starts=$n_start"; cat "$S/evidence/auto-rollback.log" 2>/dev/null | sed 's/^/    /'; printf '%s\n' "$OUT" | grep -E 'STEP|owner|ROLLBACK' | tail -6 | sed 's/^/    /'; fi
+# ---- stage O isolation gate (review wac-032-r2 🟡-6): a violation refuses apply before ANY write
+for kind in envfile envname; do
+  oq_setup "ISO-$kind"
+  ISOLATION_FAIL=$kind run_apply o0_deploy_operator_query.sh O0-A08 --cp-root "$WORK/sb-oq-ISO-$kind/srv/trader-v3/services/control-plane" \
+    --operator-query-env "$WORK/sb-oq-ISO-$kind/srv/trader-v3/secrets/control-plane/operator-query.env"
+  failed_at="$(printf '%s\n' "$OUT" | awk '/\[o0\] STEP [0-9]+: /{s=$0} END{print s}' | sed -E 's/.*STEP [0-9]+: //')"
+  if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q 'ENVFILE_ISOLATION VIOLATION' && printf '%s' "$OUT" | grep -q 'CP_ISOLATION_FAILED' \
+     && [ "${failed_at#control-plane unit isolation}" != "$failed_at" ] && [ ! -e "$S/backup-operator-query" ] && [ ! -e "$S/evidence/auto-rollback.log" ] \
+     && ! grep -q 'systemctl restart' "$CALLS"; then
+    ok "operator-query ISO-$kind: apply refused at the isolation gate, before backup/env/install/restart"
+  else bad "operator-query ISO-$kind: rc=$RC failed_at='$failed_at'"; printf '%s\n' "$OUT" | grep -E 'STEP|ISOLATION|ABORT' | tail -5 | sed 's/^/    /'; fi
+  oq_restored "operator-query ISO-$kind" "ISO-$kind"
+  printf '%s' "$OUT" | grep -q SENTINELisoleak && bad "operator-query ISO-$kind: an Environment= VALUE was printed" || ok "operator-query ISO-$kind: no env value printed (names only)"
+done
+# ---- fleet guard parameters vs node heartbeat parameters (review wac-032-r2 🟡-7), checked in
+# every execute run BEFORE any step (here: the standalone guard, runbook step R-2)
+run_guard_params() {  # env assignments come from the caller
+  RC=0
+  OUT="$(PATH="$BIN:$PATH" O0_SANDBOX="$SB" CALLS="$CALLS" O0_FLEET_NODES=account-a O0_FLEET_READY_PORTS=8081 \
+         bash "$O0/o0_fleet_guard.sh" --execute --phase R-2 --auth-id O0-A21 --stage-dir "$S" --action before 2>&1)" || RC=$?
+}
+new_sandbox params-default
+run_guard_params
+if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 'FLEET_PARAMS_OK' && grep -q 'FLEET_BASELINE_OK' "$S/evidence/fleet-R-2-before.verdict.txt" \
+   && grep -q 'fleet_params=hb_interval=2,hb_timeout=15,max_hb_age=5,max_hb_jump=5,settle=60,samples=4x20' "$S/evidence/authorizations.log"; then
+  ok "fleet params: defaults (2 s / 15 s -> 5, 5, 60, 4 x 20) pass in a real execute run and are recorded in authorizations.log"
+else bad "fleet params default: rc=$RC"; printf '%s\n' "$OUT" | tail -5 | sed 's/^/    /'; fi
+new_sandbox params-timeout60
+O0_NODE_HB_TIMEOUT_S=60 run_guard_params
+if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q 'FLEET_PARAMS_INCONSISTENT' && [ ! -e "$S/evidence/fleet-R-2-before.txt" ] && ! grep -q psql "$CALLS"; then
+  ok "fleet params: node timeout 60 s with the default 60 s settle window is refused before any sample"
+else bad "fleet params timeout60: rc=$RC"; printf '%s\n' "$OUT" | tail -5 | sed 's/^/    /'; fi
+new_sandbox params-interval4
+O0_NODE_HB_INTERVAL_S=4 run_guard_params
+[ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q 'O0_FLEET_MAX_HB_AGE=10' && ok "fleet params: interval 4 s with the default 5 s age is refused and 10 is suggested" || bad "fleet params interval4: rc=$RC"
+new_sandbox params-interval4-adjusted
+O0_NODE_HB_INTERVAL_S=4 O0_FLEET_MAX_HB_AGE=10 O0_FLEET_MAX_HB_JUMP=10 run_guard_params
+if [ "$RC" -eq 0 ] && grep -q 'FLEET_BASELINE_OK .* max_hb_age=10.0' "$S/evidence/fleet-R-2-before.verdict.txt"; then
+  ok "fleet params: a consistent non-default set (interval 4 s, age/jump 10) passes and reaches fleet-compare"
+else bad "fleet params interval4-adjusted: rc=$RC"; printf '%s\n' "$OUT" | tail -5 | sed 's/^/    /'; fi
+new_sandbox params-skip-needs-sandbox
+if ( unset O0_SANDBOX; source "$O0/o0_common.sh"; O0_FLEET_PARAMS_SANDBOX_SKIP=1 O0_NODE_HB_TIMEOUT_S=60; O0_STAGE_DIR="$S"; o0_fleet_params_check ) >/dev/null 2>&1; then
+  bad "fleet params: O0_FLEET_PARAMS_SANDBOX_SKIP skipped the check without O0_SANDBOX"
+else ok "fleet params: the skip seam is ignored without O0_SANDBOX"; fi
 # the other control-plane units are never touched, in any case
-if grep -hE 'systemctl .*(node-control|event-ingest)' "$WORK"/calls-*.log >/dev/null; then bad "a rollback touched node-control/event-ingest"; else ok "node-control/event-ingest never touched"; fi
+if grep -hE 'systemctl (restart|stop|start|kill|reload|try-restart|reload-or-restart) .*(node-control|event-ingest)' "$WORK"/calls-*.log >/dev/null; then bad "a rollback touched node-control/event-ingest"; else ok "node-control/event-ingest never touched (read-only 'systemctl show' only)"; fi
 fi
 
 if [ "$fails" -gt 0 ]; then echo "APPLY_ROLLBACK_TEST_FAILED failures=$fails checks=$checks"; exit 1; fi

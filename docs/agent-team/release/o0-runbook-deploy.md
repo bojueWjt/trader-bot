@@ -23,6 +23,20 @@ Caddy 只重启一次（阶段 C），operator-query 只重启一次（阶段 O�
 - 变更之后先等稳定窗（默认 60 秒），再采样 4 次、每 20 秒一次；每一次都要与基线在状态、release、`/ready` 上一致，且心跳仍新鲜（冻结或年龄跃升都算变化）。0 行、缺节点、多节点、无法解析都判"无法比较"（退出码 2），不当作"没变化"。有变化：退出码 3，停下，保持现场，报用户；**不回滚**（回滚会再重启一次），**不 RESUME**（O0-A06 只属于用户）。
 - 回滚阶段只记录回滚前样本、不以它为门槛（回滚不能被舰队状态挡住），回滚后照常比较。
 
+**守卫阈值与生产节点心跳参数**（审查 wac-032-r2 🟡-7）：阈值的依据是节点的心跳间隔与 fail-closed 判定时长。仓库 `67b401a` 里间隔是代码常量 `DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 2.0`（`services/nautilus-node/runtime/control_plane_session.py:14`，`app/node.py` 不覆盖），判定时长是每个节点配置的 `control_plane.heartbeat_timeout_seconds`（示例为 15）。**生产值以 S-00 为准**：S-00 打印每个节点容器的 `heartbeat_timeout_seconds`、运行中镜像的 `default_heartbeat_interval_seconds`、`node_py_overrides_interval`，以及约 10 秒内实测的 `observed_max_hb_age`（它的最大值近似真实间隔）。
+
+| 参数（环境变量） | 默认 | 规则（`o0_tool.py fleet-params`） |
+|---|---|---|
+| `O0_NODE_HB_INTERVAL_S` | 2 | 取 S-00 的 `default_heartbeat_interval_seconds`；`node_py_overrides_interval=True` 或实测最大年龄明显高于它时，先报用户，不自行取值 |
+| `O0_NODE_HB_TIMEOUT_S` | 15 | 取 S-00 各节点 `heartbeat_timeout_seconds` 的**最大值**（四个节点不一致也要报用户） |
+| `O0_FLEET_MAX_HB_AGE`、`O0_FLEET_MAX_HB_JUMP` | 5、5 | 在 [2, 3] × 间隔之内，目标 2.5 × 间隔（更紧：迟到的心跳被当成冻结；更松：死节点发现得晚） |
+| `O0_FLEET_SETTLE_S` | 60 | ≥ 判定时长 + 3 × 间隔（HALT 在通道恢复后的第一次心跳写回，提前采样会漏掉） |
+| `O0_FLEET_SAMPLES`、`O0_FLEET_INTERVAL_S` | 4、20 | 不变 |
+
+- **每一次 `--execute`**（三个部署脚本和 `o0_fleet_guard.sh`）在第一个步骤之前都跑这项检查：不一致就以 `FLEET_PARAMS_INCONSISTENT` 退出，并给出建议值，什么都不做。实际使用的参数写进 `evidence/authorizations.log` 的 `fleet_params=` 字段。
+- **S-00 与默认值一致**：什么都不用设。
+- **S-00 与默认值不一致**：(1) 不开始任何阶段，把 S-00 原文和按上表算出的整组值（两个节点参数 + 三个阈值）交 Planner 转用户；(2) **用户明确确认这组值**之后，才在执行会话里 `export` 这五个变量，确认记录写在看板备注，并与 `authorizations.log` 的 `fleet_params=` 对照；(3) 之后每个阶段都用同一组值，不在中途修改。执行者不能自行放宽阈值去"让守卫通过"。检查只拒绝不一致的组合，不替用户决定取值。
+
 **已声明的风险**：`systemctl restart caddy` 会瞬断节点通道（S-06 确认地址，预期 `172.30.1.1:8080`）。2026-08-30 这导致全舰队 fail-closed HALT，2026-08-31 没有。阶段 C 可能让 ACTIVE 节点变 HALTED，这不是"意外 HALT"，而是需要用户事先接受的已知后果（D-02，待确认）。
 
 ## 1. 开始前必须全部满足
@@ -96,7 +110,16 @@ Caddy 只重启一次（阶段 C），operator-query 只重启一次（阶段 O�
 | W-3 上线 | **先**：两份门禁核对（凭据片段与线上 compose 未变）；候选镜像存在且 ID = build 门禁；演练日志 sha 未变且含 `MIGRATION_DRYRUN_OK`；bundle 复核；线上源码与 compose 仍等于基线；凭据复核；舰队基线。**然后**：备份（旧镜像打 `o0-rollback-<UTC>`、被覆盖与新增源码清单与 tar、compose、env_file 状态（有则备份、无则记"原本不存在"）、真库在线备份及其 sha）；写 `/srv/trader-secrets/watcher-gateway.env`（0600）并用摘要确认两个持有方与之一致；安装候选源码 → `MANIFEST_OK watcher-live-vs-candidate`；安装候选 compose → `MANIFEST_OK compose-live-vs-candidate`；`compose config --quiet`；镜像名指向候选；记录重建时间；`up -d --no-deps --force-recreate --no-build watcher`；启动日志 `Web UI listening`、无 `[db] Failed`、无凭据错误、90 秒内重启计数 0；**180 秒内出现 `[watcher] Connected, listening...`**（出现 `Session not authorized` 立即失败）；无凭据 401、浏览器凭据 200；真库 `config_revision` 存在；舰队守卫 | `bash $T/o0_deploy_watcher.sh --execute --phase apply --auth-id O0-A07 --stage-dir $S` | 上列各行 + `TELEGRAM_RECONNECTED` + `FLEET_UNCHANGED_ALL_SAMPLES` | 门禁不符或镜像缺失：退出，任何服务都没动。备份之后、重建之前的失败：ERR trap 自动回滚只还原源码、compose、env_file 状态与镜像名标签，**不重建容器**（旧容器一直在跑）。重建及之后的任何失败（含 Telegram 未重连）：还原后用旧镜像重建（W-5）。两种情况回滚后都跑舰队守卫并写入 `evidence/auto-rollback.log`（只报告），脚本退出 1。舰队变化：退出码 3，报用户 |
 | W-4 验证（只读） | 健康检查变 healthy；Telegram 仍连着、容器仍在跑且重启计数 0、重建以来的转发行计数（只计数，不含正文）写入证据；容器 env 中没有控制面 token 名；舰队守卫；**用户浏览器核对** | `bash $T/o0_deploy_watcher.sh --execute --phase verify --auth-id O0-A07 --stage-dir $S` | `health=healthy`；`forwarded_lines_since_recreate=`；`NO_CONTROL_PLANE_TOKENS_IN_WATCHER` | 执行 W-5 |
 | W-5 回滚 | 记录回滚前舰队样本；还原被覆盖的源码、删除新增文件、还原 compose；env_file 回到 apply 前的状态（原有则还原，原本没有则删除）；源码与 compose 回到基线 sha；镜像名指回 `o0-rollback-<UTC>`；`--no-build` 重建；旧 watcher `/api/status` 200；舰队守卫 | `bash $T/o0_deploy_watcher.sh --execute --phase rollback --auth-id O0-A07 --stage-dir $S` | `MANIFEST_OK`（基线）；`ENV_FILE_RESTORED` 或 `ENV_FILE_REMOVED_AS_BEFORE_APPLY`；`api/status=200` | 数据库**不回滚**（两张新表旧代码忽略）。若快照开关已打开，**必须先关开关**再回滚 watcher（wac-011 第 6 点） |
-| W-6 恢复数据库（仅限数据被迁移破坏时） | 断言快照开关为 0（只检查，不改）；备份 sha 与 `integrity_check` 正确；舰队基线；停 watcher；把当前库文件移到备份目录；装回迁移前在线备份并证明字节一致；启动；`Web UI listening`、无 `[db] Failed`、Telegram 重连；舰队守卫 | `bash $T/o0_deploy_watcher.sh --execute --phase restore-db --auth-id O0-A07R --i-understand-data-loss --stage-dir $S` | `RESTORED_DB_SHA_OK`；`RESTORE_DB_WATCHER_UP` | **破坏性**：上线后写入的配置与 Telegram 消息会丢失，审计保留期（契约 §9.12 ≥ 30 天）被打断。O0-A07 的号执行不了这一步 |
+| W-6 恢复数据库（仅限数据被迁移破坏时） | 断言快照开关为 0（只检查，不改）；备份 sha 与 `integrity_check` 正确；**在任何移动之前**用 `stat` 记录线上库的属主与权限（`evidence/watcher-db-owner.txt`，数字 uid:gid 与八进制权限）、要移走的文件清单与各自 sha（`watcher-db-replaced.{files,sha256}`）；`backup-watcher/db-replaced/` 已有文件就拒绝（不覆盖上一次移走的原库）；舰队基线；上膛自动恢复；停 watcher；把当前库文件（含 `-wal`/`-shm`）移到 `db-replaced/`；装回迁移前在线备份，**按记录的属主与权限** `chown`/`chmod`，证明字节、属主、权限三者一致；启动；`Web UI listening`、无 `[db] Failed`、Telegram 重连；舰队守卫 | `bash $T/o0_deploy_watcher.sh --execute --phase restore-db --auth-id O0-A07R --i-understand-data-loss --stage-dir $S` | `RESTORED_DB_SHA_OK`；`RESTORED_DB_OWNER_MODE_OK`；`RESTORE_DB_WATCHER_UP` | **破坏性**：上线后写入的配置与 Telegram 消息会丢失，审计保留期（契约 §9.12 ≥ 30 天）被打断。O0-A07 的号执行不了这一步。**停 watcher 之后任何一步失败**（装回、属主、启动、Telegram 未重连）：自动恢复到 restore-db 开始前的状态：确保 watcher 已停；装回失败的那份移到 `db-failed-restore/`，失败启动留下的 `-wal`/`-shm` 也移过去；`db-replaced/` 里的原文件用 `mv` 放回（属主、权限、inode 不变）；按 `watcher-db-replaced.sha256` 核对字节，按 `watcher-db-owner.txt` 核对属主与权限（`RESTORE_DB_RECOVERED_FILES`）；启动 watcher 并检查启动日志；舰队守卫（只报告），写 `evidence/auto-rollback.log`，脚本退出 1。**自动恢复本身失败**（`ROLLBACK FAILED`，例如原库放回后字节或属主、权限与记录不符：跨文件系统的移动可能丢属主，此时**不启动** watcher）：立即报用户；手工路径见表下 |
+
+**W-6 自动恢复失败时的手工路径**（仍在 O0-A07R 授权范围内，每一步贴输出；`D=/var/lib/docker/volumes/trader_signal-data/_data`，`B=$S/backup-watcher`）：
+
+1. `docker compose --project-name trader --file /srv/trader/docker-compose.yml stop watcher`
+2. `mkdir -p -m 0700 $B/db-failed-restore; for s in '' -wal -shm; do [ -e "$D/watcher-trading.db$s" ] && mv "$D/watcher-trading.db$s" $B/db-failed-restore/; done`（先把现场的文件挪开，不删除）
+3. `while read -r n; do mv "$B/db-replaced/$n" "$D/$n"; done < $S/evidence/watcher-db-replaced.files`
+4. `(cd $D && sha256sum -c $S/evidence/watcher-db-replaced.sha256)` 全部 `OK`；`stat -c '%u:%g %a' $D/watcher-trading.db` 等于 `cat $S/evidence/watcher-db-owner.txt`。不一致就停在这里报用户，不启动。
+5. `docker compose … start watcher`；`docker logs --since <刚才的时间> trader-watcher-1 2>&1 | grep -cE 'Web UI listening|\[watcher\] Connected, listening'` ≥ 2，`grep -c '\[db\] Failed'` = 0。
+6. 按 `docs/agent-operations.md` §0 的查询手工采样一次舰队（只读），与 `evidence/fleet-before-restore-db.txt` 逐节点对照状态、release、心跳年龄，结论报用户。独立守卫脚本的号与 O0-A07R 不同，这里不用它。
 
 W-3 之后按 `docs/agent-operations.md` §1 核对重建窗口内有无漏信号：`journalctl -u trader-v3-hermes-feeder --since <evidence/watcher-recreate.at> | grep -c 'Triggered job: signal'`，与 W-4 的转发行计数对照；周末美股代币类频道静默时 0 不代表故障；漏了只报告，不补单。
 
@@ -104,16 +127,16 @@ W-3 之后按 `docs/agent-operations.md` §1 核对重建窗口内有无漏信�
 
 | 步 | 内容 | 命令 | sha / 验证 | 失败处置 |
 |---|---|---|---|---|
-| O-1 前置门禁（只读） | 清旧门禁；舰队基线；记录三个控制面单元 MainPID 与启动时间；bundle 复核；`.venv-cp` Python ≥ 3.11 且有 `httpx`；**线上 `api/*.py`、`security/*.py` 等于 `67b401a` 基线**；快照开关未设或为 0；凭据检查；overlay import 冒烟（三种角色）；写 `oq-preflight` 门禁 | `bash $T/o0_deploy_operator_query.sh --execute --phase preflight --auth-id O0-A08 --stage-dir $S` | `MANIFEST_OK cp-live-vs-baseline`；`IMPORT_OK operator-query watcher_routes=N`（N > 0），另两个角色 `watcher_routes=0`；`GATE_WRITTEN` | 中止；线上未改。import 冒烟若因缺少单元里 `Environment=` 的其他变量而失败，先补齐冒烟环境再跑，不能跳过 |
-| O-2 上线 | **先**：门禁核对（凭据片段与线上 env 未变）；bundle、venv、基线、开关、凭据复核；舰队基线。**然后**：备份被覆盖文件（tar）、新增文件清单、env 文件及其 sha；合入 `WATCHER_GATEWAY_TOKEN`、`WATCHER_SNAPSHOT_TOKEN` 并用摘要确认线上 env 持有 watcher 当前值、仍不与目录撞值、开关仍关；安装五个文件 → `MANIFEST_OK cp-installed`；记录重启时刻；**只重启 operator-query**；60 秒内 `/v1/accounts` 无 token 401；重启以来的日志没有生成物加载失败或网关 token 缺失/撞值；**在自动回滚窗口内**用 `SYSTEM_OBSERVER_TOKEN` 经网关请求 `/v1/watcher/status` 期望 200；舰队守卫 | `bash $T/o0_deploy_operator_query.sh --execute --phase apply --auth-id O0-A08 --stage-dir $S` | `GATE_OK`；`MANIFEST_OK cp-installed`；`gateway_startup_error_lines=0`；`PROBE … status=200`；`FLEET_UNCHANGED_ALL_SAMPLES` | 门禁不符：退出，线上未改。备份之后、重启之前的失败：ERR trap 自动回滚只还原代码与 env，**不重启**。重启及之后的任何失败（含网关 503 `gateway_disabled`/`watcher_unavailable`）：还原后只重启 operator-query（O-4）。两种情况回滚后都跑舰队守卫并写入 `evidence/auto-rollback.log`（只报告），脚本退出 1 |
+| O-1 前置门禁（只读） | 清旧门禁；舰队基线；记录三个控制面单元 MainPID 与启动时间；bundle 复核；`.venv-cp` Python ≥ 3.11 且有 `httpx`；**线上 `api/*.py`、`security/*.py` 等于 `67b401a` 基线**；快照开关未设或为 0；凭据检查；**控制面单元隔离（S-10 的机读门禁，`o0_tool.py cp-isolation`）**：node-control 与 event-ingest 的 EnvironmentFiles 不含 `operator-query.env`、它们的 `Environment=` 与各自 env 文件里没有任何 `WATCHER_*TOKEN` 名字、operator-query 的 WorkingDirectory 是 `--cp-root` 或其 `api/`（只读名字，不打印值）；overlay import 冒烟（三种角色）；写 `oq-preflight` 门禁 | `bash $T/o0_deploy_operator_query.sh --execute --phase preflight --auth-id O0-A08 --stage-dir $S` | `MANIFEST_OK cp-live-vs-baseline`；两行 `ENVFILE_ISOLATION ok`、`CP_ISOLATION_OK shared_code_dir=…`（共用目录时 D-04 适用）；`IMPORT_OK operator-query watcher_routes=N`（N > 0），另两个角色 `watcher_routes=0`；`GATE_WRITTEN` | 中止；线上未改，也没有门禁文件。`CP_ISOLATION_FAILED`（`ENVFILE_ISOLATION VIOLATION` 或 `CODE_DIR_MISMATCH`）：**阻断阶段 O**，报用户；不在 O-0 里改单元文件。`CP_ISOLATION_UNCOMPARABLE`（单元不存在、env 文件读不到）：同样阻断，核对 S-10。import 冒烟若因缺少单元里 `Environment=` 的其他变量而失败，先补齐冒烟环境再跑，不能跳过 |
+| O-2 上线 | **先**：门禁核对（凭据片段与线上 env 未变）；bundle、venv、基线、开关、凭据、**单元隔离**复核；舰队基线。**然后**：备份被覆盖文件（tar）、新增文件清单、env 文件及其 sha；合入 `WATCHER_GATEWAY_TOKEN`、`WATCHER_SNAPSHOT_TOKEN` 并用摘要确认线上 env 持有 watcher 当前值、仍不与目录撞值、开关仍关；安装五个文件 → `MANIFEST_OK cp-installed`；记录重启时刻；**只重启 operator-query**；60 秒内 `/v1/accounts` 无 token 401；重启以来的日志没有生成物加载失败或网关 token 缺失/撞值；**在自动回滚窗口内**用 `SYSTEM_OBSERVER_TOKEN` 经网关请求 `/v1/watcher/status` 期望 200；舰队守卫 | `bash $T/o0_deploy_operator_query.sh --execute --phase apply --auth-id O0-A08 --stage-dir $S` | `GATE_OK`；`MANIFEST_OK cp-installed`；`gateway_startup_error_lines=0`；`PROBE … status=200`；`FLEET_UNCHANGED_ALL_SAMPLES` | 门禁或单元隔离不符：退出，线上未改（隔离检查在备份之前）。备份之后、重启之前的失败：ERR trap 自动回滚只还原代码与 env，**不重启**。重启及之后的任何失败（含网关 503 `gateway_disabled`/`watcher_unavailable`）：还原后只重启 operator-query（O-4）。两种情况回滚后都跑舰队守卫并写入 `evidence/auto-rollback.log`（只报告），脚本退出 1 |
 | O-3 验证（只读） | 网关：无 token 401、伪 token 403、`SYSTEM_OBSERVER_TOKEN` 200、尾斜杠 404 无 `Location`、P3 路径 404；既有 `/v1/accounts` 200；公网 `/m/v1/watcher/status` 无 token 401；另两个单元 MainPID 与启动时间不变；舰队守卫 | `bash $T/o0_deploy_operator_query.sh --execute --phase verify --auth-id O0-A08 --stage-dir $S` | 无 `PROBE_FAIL`；`OTHER_UNITS_UNCHANGED`；`FLEET_UNCHANGED_ALL_SAMPLES` | 执行 O-4 |
 | O-4 回滚 | 记录回滚前舰队样本；还原被覆盖文件、删除新增文件与空的 `generated/`；代码 sha 回到基线；还原 env 并核对 sha；只重启 operator-query；`/v1/accounts` 401；舰队守卫 | `bash $T/o0_deploy_operator_query.sh --execute --phase rollback --auth-id O0-A08 --stage-dir $S` | `MANIFEST_OK cp-restored` | 回滚失败：app 与运维查询中断，但节点心跳走 node-control 不受影响；立即报用户 |
 
-**共享代码目录（D-04，待用户确认）**：三个控制面单元都跑 `read_api:app`，且（待 S-10 确认）共用同一目录。O-2 之后 node-control 与 event-ingest 仍在内存里跑旧代码，但磁盘上已是新 `read_api.py`，它们下次重启（任何原因）就会加载新代码。O-1 的 import 冒烟已证明新代码对这两个角色可加载、且不注册网关路由。
+**共享代码目录（D-04，待用户确认）**：三个控制面单元都跑 `read_api:app`，且（待 S-10 确认）共用同一目录。正因为共用目录，把网关值留在 operator-query 里的唯一边界是 env 文件；这条边界现在由 O-1、O-2 的单元隔离门禁机读检查（审查 wac-032-r2 🟡-6），违例即阻断阶段 O。O-2 之后 node-control 与 event-ingest 仍在内存里跑旧代码，但磁盘上已是新 `read_api.py`，它们下次重启（任何原因）就会加载新代码。O-1 的 import 冒烟已证明新代码对这两个角色可加载、且不注册网关路由。
 
 ## 6. 上线后
 
-- 证据包（都在 `$S/evidence/`，不含凭据）：`authorizations.log`、`*.gate.json`、各阶段 `fleet-*.txt` 与 `*.verdict.txt`、`caddy-live.sha256`、`caddy-backup.sha256`、`caddy-diff.redacted.txt`、`watcher-base-*.txt`、`watcher-build-attestation.json`、`watcher-dryrun.log`、`watcher-dryrun-{pre,post}.rc`、`watcher-rollback-image.txt`、`watcher-db-backup.sha256`、`watcher-recreate.at`、`watcher-ingest-count.txt`、`oq-env-backup.sha256`、`cp-units-before/after.txt`，以及执行者保存的各阶段完整输出。
+- 证据包（都在 `$S/evidence/`，不含凭据）：`authorizations.log`、`*.gate.json`、各阶段 `fleet-*.txt` 与 `*.verdict.txt`、`caddy-live.sha256`、`caddy-backup.sha256`、`caddy-diff.redacted.txt`、`watcher-base-*.txt`、`watcher-build-attestation.json`、`watcher-dryrun.log`、`watcher-dryrun-{pre,post}.rc`、`watcher-rollback-image.txt`、`watcher-db-backup.sha256`、（仅 W-6）`watcher-db-owner.txt`、`watcher-db-replaced.files`、`watcher-db-replaced.sha256`、`watcher-recreate.at`、`watcher-ingest-count.txt`、`oq-env-backup.sha256`、`cp-units-before/after.txt`，以及执行者保存的各阶段完整输出。
 - app：不部署。A-0 真机联调只在用户明确说"现在可以用"后进行（O0-A10）。
 - 快照开关仍为 0；副本仍在；打开开关按 `o0-runbook-snapshot-switch.md`。
 
@@ -124,6 +147,10 @@ W-3 之后按 `docs/agent-operations.md` §1 核对重建窗口内有无漏信�
 | 守卫报 `FLEET_BASELINE_STALE` 或 `FLEET_UNCOMPARABLE`，拒绝开始 | 有节点心跳冻结，或节点集合与 `O0_FLEET_NODES` 不一致 | 不开始；按 `docs/agent-operations.md` 排障或核对 S-00，由用户决定 |
 | 阶段 C 之后守卫报 `FLEET_CHANGED` | Caddy restart 瞬断节点通道（已知） | 停止后续阶段，报用户；恢复只由用户决定（O0-A06） |
 | apply 报 `GATE_FAIL` | 没跑 preflight/build、门禁过期、候选或输入文件变了 | 重跑对应的门禁阶段；不要绕过 |
+| 任何 `--execute` 一开始就报 `FLEET_PARAMS_INCONSISTENT` | 导出的节点心跳参数或守卫阈值不满足 §0 的规则 | 按 §0 算出整组值，用户确认后再导出；不单独放宽某个阈值 |
+| O-1/O-2 报 `CP_ISOLATION_FAILED` 或 `CP_ISOLATION_UNCOMPARABLE` | node-control/event-ingest 加载了 `operator-query.env` 或带 `WATCHER_*TOKEN`；operator-query 不在 `--cp-root` 下运行；单元不存在 | 阻断阶段 O，报用户；对照 S-10、S-13 |
+| W-6 报 `DB_REPLACED_NOT_EMPTY` | 上一次 restore-db 移走的原库还在 `db-replaced/` | 先查清那一次的结果（`auto-rollback.log`），按 W-6 手工路径处理完再重跑；不要删除那些文件 |
+| W-6 报 `ROLLBACK FAILED` | 自动恢复中某一步失败（原库 sha 或属主不符、启动失败） | 立即报用户；按 W-6 手工路径 |
 | apply 报 `CANDIDATE_IMAGE_MISSING` | build 没跑或镜像被清理 | 回到 W-2；此时没有任何服务被停 |
 | 阶段 C 之后站点 401 循环 | basic auth 块被改坏 | C-4 回滚 |
 | 新 watcher 反复重启或 `TELEGRAM_NOT_RECONNECTED` | 凭据不合规、DB 路径变量冲突、首次迁移拿锁超时、会话失效 | 自动回滚已触发；读 `docker logs` 首行错误（只含变量名）；对照 S-05、S-15 |

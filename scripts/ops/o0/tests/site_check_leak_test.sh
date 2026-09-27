@@ -29,6 +29,9 @@ S13="9f8e7d6c5b4a39281706f5e4d3c2b1a0ffeeddcc"   # 40-hex webhook path token
 S14="bot7654321098:AAHpathBOTsentinel0123456789abcd"   # bot token inside a path_regexp
 S15="SENTINELpathsecretXYZ0123456789abcdef"      # token inside a rewrite uri
 GOOD_RE='^/m/v1/watcher/trading/risks/[^/]+$'    # a legitimate gateway pattern must stay readable
+# review wac-032-r3 🟡-1: tokens cut into short pieces by an escape, '.', '-' or '+' (raw base64);
+# 🟡-3: the hex rule on its own (digit-only / letter-only hex) and the exact 12-char threshold
+R3_NEEDLES=(ab12cd34 ef56gh78 ij90kl12 SENTINELre gex0123456789 ab12cd34ef 56gh78ij90 Ab3dEfG5hI jK7lMnO9pQ 4829105738291045 DEADBEEFCAFEBABE a1b2c3d4e5f6)
 
 cat > "$WORK/etc/v3.env" <<EOF
 WATCHER_BASIC_AUTH_HASH=$S3
@@ -59,6 +62,19 @@ jp-bot.balen.wang {
 	@tg path_regexp ^/$S14/.*\$
 	@wgw_risk path_regexp $GOOD_RE
 	rewrite /legacy/* /api/$S15
+	@r3a path_regexp ^/hook/ab12cd34\-ef56gh78\-ij90kl12\$
+	@r3b path_regexp ^/k/SENTINELre\.gex0123456789\$
+	handle /k/ab12cd34ef.56gh78ij90 {
+		respond 204
+	}
+	handle /k/Ab3dEfG5hI+x/jK7lMnO9pQ== {
+		respond 204
+	}
+	handle /n/4829105738291045 {
+		respond 204
+	}
+	rewrite /t/* /t/a1b2c3d4e5f6
+	root * /srv/DEADBEEFCAFEBABE
 }
 EOF
 cat > "$WORK/oq.env" <<EOF
@@ -86,6 +102,12 @@ CREATE TABLE symbol_risk_configs (symbol TEXT, risk_ratio REAL);""")
 c.commit()
 PY
 cp "$WORK/watcher.db" "$WORK/replica.db"
+# S-00 node heartbeat parameters (review wac-032-r2 🟡-7): a node config with a LITERAL token and
+# a node env with a token; only the numbers may come out
+mkdir -p "$WORK/node" "$WORK/nodeapp/runtime" "$WORK/nodeapp/app"
+printf '{"control_plane": {"base_url": "http://cp:8080", "token": "SENTINELnodeCFGtoken0123456789", "heartbeat_timeout_seconds": 15}}\n' > "$WORK/node/account-a.json"
+printf 'DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 2.0\n' > "$WORK/nodeapp/runtime/control_plane_session.py"
+printf 'session = NodeControlPlaneSession(heartbeat=lambda: None)\n' > "$WORK/nodeapp/app/node.py"
 
 ADAPTED_JSON="{\"apps\":{\"http\":{\"servers\":{\"srv0\":{\"listen\":[\":443\"],\"routes\":[{\"match\":[{\"header\":{\"Authorization\":[\"Bearer $S7\"]},\"path\":[\"/hook\"]}],\"handle\":[{\"handler\":\"headers\",\"request\":{\"replace\":{\"X-Up\":[{\"search\":\"a\",\"replace\":\"$S8\"}]},\"delete\":[\"X-Watcher-Actor\"]}},{\"handler\":\"static_response\",\"status_code\":200,\"body\":\"$S9\"}]},{\"handle\":[{\"handler\":\"vars\",\"k\":\"$S10\"},{\"handler\":\"rewrite\",\"strip_path_prefix\":\"/m\",\"uri\":\"/x?token=$S11\"},{\"handler\":\"authentication\",\"providers\":{\"http_basic\":{\"accounts\":[{\"username\":\"balen\",\"password\":\"$S3\"}]}}},{\"handler\":\"reverse_proxy\",\"headers\":{\"request\":{\"set\":{\"Authorization\":[\"Bearer $S4\"],\"X-Other\":[\"$S10\"],\"X-Watcher-Proxy-Auth\":[\"{env.WATCHER_BROWSER_PROXY_TOKEN}\"]}}},\"upstreams\":[{\"dial\":\"127.0.0.1:9090\"}]}]},\
 {\"match\":[{\"path\":[\"/$S12\"]}],\"handle\":[{\"handler\":\"static_response\",\"status_code\":200}]},\
@@ -93,11 +115,27 @@ ADAPTED_JSON="{\"apps\":{\"http\":{\"servers\":{\"srv0\":{\"listen\":[\":443\"],
 {\"match\":[{\"path_regexp\":{\"name\":\"tg\",\"pattern\":\"^/$S14/.*\$\"}}],\"handle\":[{\"handler\":\"reverse_proxy\",\"upstreams\":[{\"dial\":\"127.0.0.1:7001\"}]}]},\
 {\"match\":[{\"path_regexp\":{\"name\":\"wgw_risk\",\"pattern\":\"$GOOD_RE\"}}],\"handle\":[{\"handler\":\"reverse_proxy\",\"upstreams\":[{\"dial\":\"127.0.0.1:8183\"}]}]},\
 {\"handle\":[{\"handler\":\"rewrite\",\"uri\":\"/api/$S15\"}]}]}}}}}"
+# the r3 shapes as matchers, rewrite targets and roots (built in python: JSON escapes of '\')
+ADAPTED_JSON="$(python3 - "$ADAPTED_JSON" <<'PY'
+import json, sys
+cfg = json.loads(sys.argv[1])
+shapes = [r"^/hook/ab12cd34\-ef56gh78\-ij90kl12$", r"^/k/SENTINELre\.gex0123456789$", "/k/ab12cd34ef.56gh78ij90",
+          "/k/Ab3dEfG5hI+x/jK7lMnO9pQ==", "/n/4829105738291045", "/h/DEADBEEFCAFEBABE", "/t/a1b2c3d4e5f6"]
+routes = cfg["apps"]["http"]["servers"]["srv0"]["routes"]
+for i, s in enumerate(shapes):
+    routes.append({"match": [{"path": [s]}, {"path_regexp": {"name": f"r3_{i}", "pattern": s}}],
+                   "handle": [{"handler": "rewrite", "uri": s, "strip_path_prefix": s}, {"handler": "file_server", "root": s}]})
+print(json.dumps(cfg, separators=(",", ":")))
+PY
+)"
 
 stub() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$STUB/$1"; chmod +x "$STUB/$1"; }
 stub id 'echo 0'
 stub docker "case \"\$*\" in
   *psql*) echo 'account-a ACTIVE abcdef012345 hb_age=1.1';;
+  ps\ --format*) echo 'trader-v3-node-a';;
+  *Config.Env*trader-v3-node-a*) printf '%s\n' 'NODE_CONFIG_PATH=$WORK/node/account-a.json' 'CONTROL_PLANE_ACCOUNT_A_TOKEN=SENTINELnodeENVtoken0123456789';;
+  exec\ trader-v3-node-*) python3 -c \"\$5\" \"\$6\" '$WORK/nodeapp';;
   *Config.Env*) printf '%s\n' 'WATCHER_GATEWAY_TOKEN=$S1' 'TRADER_TRADING_DB_PATH=/data/watcher-trading.db' 'WATCHER_ALERT_BOT_TOKEN=$S2';;
   *PortBindings*) echo '{\"9100/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"9090\"}]}';;
   *Labels*) echo '{\"com.docker.compose.project\":\"trader\"}';;
@@ -124,14 +162,14 @@ echo 'y = 1' > "$WORK/srv-trader-v3/services/control-plane/security/principal.py
 
 OUT="$WORK/out.txt"
 PATH="$STUB:$PATH" JP24_MARKER="$WORK/srv-trader-v3" CADDYFILE="$WORK/etc/Caddyfile" CADDY_ENV="$WORK/etc/v3.env" \
-  WATCHER_ROOT="$WORK/trader" WATCHER_DB="$WORK/watcher.db" REPLICA_DB="$WORK/replica.db" VENV_PY=python3 \
+  WATCHER_ROOT="$WORK/trader" WATCHER_DB="$WORK/watcher.db" REPLICA_DB="$WORK/replica.db" VENV_PY=python3 HB_SAMPLE_GAP=0 \
   bash -s -- --execute --auth-id O0-A01 < "$SITE" > "$OUT" 2>&1 || true
 
 [ -z "${O0_KEEP_OUT:-}" ] || cp "$OUT" "$O0_KEEP_OUT"
 sections=$(grep -c '^=== S-' "$OUT" || true)
 leaks=0
 SENTINELS=("$S1" "$S2" "$S3" "$S4" "$S5" "$S6" "$S7" "$S8" "$S9" "$S10" "$S11" "$S12" "$S13" "$S14" "$S15" SENTINELdbKEY SENTINELdbSECRET SENTINELbcrypt pw7
-           qctbhy 9f8e7d6c5b4a AAHpathBOT SENTINELpath 7654321098)
+           qctbhy 9f8e7d6c5b4a AAHpathBOT SENTINELpath 7654321098 "${R3_NEEDLES[@]}" SENTINELnodeCFG SENTINELnodeENV)
 for s in "${SENTINELS[@]}"; do
   if grep -qF -- "$s" "$OUT"; then echo "LEAK ${s:0:18}..." ; leaks=$((leaks + 1)); fi
 done
@@ -144,7 +182,10 @@ for want in '"dial": "127.0.0.1:9090"' '{env.WATCHER_BROWSER_PROXY_TOKEN}' '"str
             'ENVFILE_ISOLATION ok trader-v3-controlplane-node-control' 'SYNC_CHECK_PENDING' 'UPSTREAM_URL: <value hidden' 'header_up X-Api-Key <literal len=' \
             "\"pattern\": \"$GOOD_RE\"" "@wgw_risk path_regexp $GOOD_RE" '"/hook/<seg len=40>/*"' 'handle /hook/<seg len=40>/*' \
             '"/<seg len=15>"' 'handle /<seg len=15>' '"uri": "/api/<seg len=37>"' 'rewrite /legacy/* /api/<seg len=37>' \
-            'path_regexp ^/<seg len=46>/.*$' '"pattern": "^/<seg len=46>/.*$"' 'ExecStartPre=/usr/bin/curl -H Authorization: Bearer <redacted>'; do
+            'path_regexp ^/<seg len=46>/.*$' '"pattern": "^/<seg len=46>/.*$"' 'ExecStartPre=/usr/bin/curl -H Authorization: Bearer <redacted>' \
+            '@r3a path_regexp ^/hook/<seg len=29>' '@r3b path_regexp ^/k/<seg len=26>' 'handle /k/<seg len=21>' 'handle /n/<seg len=16>' \
+            'heartbeat_timeout_seconds=15 default_heartbeat_interval_seconds=2.0 node_py_overrides_interval=False' 'observed_max_hb_age account-a 1.1 samples=6' \
+            'rewrite /t/* /t/<seg len=12>' 'root * /srv/<seg len=16>' '"/k/<seg len=12>/<seg len=12>"' '"pattern": "^/hook/<seg len=29>"'; do
   grep -qF -- "$want" "$OUT" || { echo "expected output missing: $want"; exit 1; }
 done
 # the full Caddy JSON never appears: no raw password value
@@ -176,6 +217,8 @@ corpus = [
     "/api/SENTINELpathsecretXYZ0123456789abcdef", "^/m/v1/watcher/trading/risks/[^/]+$", "/m/v1/watcher/media/*",
     "token SENTINELfreeTOKEN0123456789abcdefXYZ here", "plain words only", "127.0.0.1:9090", "{env.WATCHER_BROWSER_PROXY_TOKEN}",
 ]
+base_corpus = len(corpus)
+corpus += [s for s, _ in o0_tool.PATH_SHAPES_R3] + [s for s, _ in o0_tool.PATH_RULE_PINS] + list(o0_tool.LEGIT_PATHS)
 bad = []
 for s in corpus:
     for name in ("redact_line", "redact_path"):
@@ -193,9 +236,25 @@ for s in corpus[:7] + corpus[8:12]:
 for keep in corpus[12:14] + corpus[15:18]:
     if o0_tool.redact_line(keep) != keep:
         bad.append(f"over-redaction of {keep!r}")
+# the site check's OWN copy, not only parity: every r3 shape 0 leaks in its line rule, path
+# rule and skeleton; the hex/threshold pins exact; every legitimate path unchanged
+for shape, needles in o0_tool.PATH_SHAPES_R3:
+    cfg3 = {"apps": {"http": {"servers": {"s": {"routes": [{"match": [{"path": [shape]}, {"path_regexp": {"name": "n", "pattern": shape}}],
+            "handle": [{"handler": "rewrite", "uri": shape, "strip_path_prefix": shape}, {"handler": "file_server", "root": shape}]}]}}}}}
+    outs = [site["redact_path"](shape), json.dumps(site["caddy_skeleton"](cfg3))] + [site["redact_line"](f"\t{d} {shape}") for d in ("handle", "rewrite *", "@m path_regexp", "root *")]
+    for o in outs:
+        for n in needles:
+            if n in o:
+                bad.append(f"site copy leaks {n!r} for {shape!r}: {o[:80]!r}")
+for shape, want in o0_tool.PATH_RULE_PINS:
+    if site["redact_path"](shape) != want:
+        bad.append(f"site redact_path pin {shape!r}: {site['redact_path'](shape)!r} != {want!r}")
+for keep in o0_tool.LEGIT_PATHS:
+    if site["redact_path"](keep) != keep or site["redact_line"](keep) != keep:
+        bad.append(f"site copy over-redacts {keep!r}")
 if bad:
     print("\n".join(bad))
     sys.exit(1)
-print(f"REDACTION_PARITY_OK corpus={len(corpus)}")
+print(f"REDACTION_PARITY_OK corpus={len(corpus)} (base {base_corpus} + r3 shapes {len(o0_tool.PATH_SHAPES_R3)} + pins {len(o0_tool.PATH_RULE_PINS)} + legit {len(o0_tool.LEGIT_PATHS)})")
 PY
-echo "LEAK_TEST_OK sections=$sections sentinels=${#SENTINELS[@]} leaks=0 skeleton_parity=ok redaction_parity=ok path_shapes=4"
+echo "LEAK_TEST_OK sections=$sections sentinels=${#SENTINELS[@]} leaks=0 skeleton_parity=ok redaction_parity=ok path_shapes=4+7"
