@@ -126,7 +126,7 @@
 | R67 | 每行用 `path`+`method` 具名匹配器；媒体行 HEAD 显式列出 | wac-026 🟡-1 (b) | — | 片段（`path_regexp` + `method`）；verify 比对方法集合，每个 wgw 匹配器恰为 `{path_regexp, method}` 且是该路由唯一的匹配器组 |
 | R68 | Caddy `*` 在末尾时是前缀匹配、会跨段 | wac-026 🟡-1 (c) | P-12 | **用户裁决：锚定单段 `path_regexp`**；`--accept-prefix` 已删除；verify 对前缀写法、`(?i)`、`[^/]*`、`.+`、缺 `$`、静态行用 `path` 匹配器都判失败，负样本含多段、空段、尾斜杠、大小写变体 |
 | R69 | `/m` 的 handle 块里不得有兜底 `reverse_proxy`，清单外路径落到 404 或其他既有路由 | wac-026 🟡-1 (d) | — | verify 负样本：尾斜杠、多段、空段、未列方法、未注册路径都不得到达网关 |
-| R70 | 写核对脚本：解析 adapt 后 JSON，抽出 `/m/v1/watcher/` 全部 `(path, method)` 与清单逐行比较，对称差为空且行数 > 0 | wac-026 🟡-1 (e)；契约 §9.14.3 O-0 核对脚本 | — | `o0_caddy_watcher_routes.py verify`（按 v2 比对 regex 列），自测 42 种破坏（原样与骨架两种形态）全部抓住，真实 Caddy v2.10.2 adapt 的 10 种违例全部判失败 |
+| R70 | 写核对脚本：解析 adapt 后 JSON，抽出 `/m/v1/watcher/` 全部 `(path, method)` 与清单逐行比较，对称差为空且行数 > 0 | wac-026 🟡-1 (e)；契约 §9.14.3 O-0 核对脚本 | — | `o0_caddy_watcher_routes.py verify`（按 v2 比对 regex 列），自测 52 种破坏（原样与骨架两种形态）全部抓住，真实 Caddy v2.10.2 adapt 的 12 种违例全部判失败 |
 | R71 | 确认生产 Caddy 版本（path cleaning 自 #4407 引入） | wac-026 🟡-1 (f) | — | S-01 |
 | R72 | 浏览器凭据用 `{env.*}`（同 R44） | wac-026 🟡-1 (g) | — | 同 R44 |
 | R73 | WGW-1.0.2 勘误写明清单中 `*` 为"恰好一个非空段"并规定 O-0 翻译方式 | wac-026 §5 第 5 点 | P-12 | Planner |
@@ -283,3 +283,76 @@
   - mut067 与 wac-059：57 个里 50 个被抓；4 个存活（4a、5d、5f、B1h，均为已判等价）；3 个锚点失效，重定锚后 3/3 被抓。
   - 记录在 scratchpad `mut072a/final-all.txt`、`mut072a/final-reanchor.txt`、`mut072b/final-067b.txt`、`mut072b/final-072.txt`。
 
+
+## 10. wac-060：适配 WGW-1.0.2，处置 wac-073 复审（未连 jp-24，未做只读生产核对）
+
+依据：`reviews/wac-015b.md` §7"O-0（wac-060）需适配的清单"9 项；契约 §9.14.3、§9.16 F-04、F-10、F-12、F-13；`reviews/wac-072.md`（wac-073 复审）🟡-1…🟡-5；用户裁决（Caddy 参数段严格"恰好一个非空段"，锚定 `path_regexp`，区分大小写）。
+
+### 10.1 适配清单 9 项
+
+| # | 项 | 处置 | 证据 |
+|---|---|---|---|
+| 1 | `load_list` 按 v2 解析并校验 `_format` | 头部四行按序校验（`_generated_from`、64 位十六进制 `_yaml_sha256`、`_phase_max`、`_format == watcher-gateway-caddy-paths.v2`）；每行 `<template> <regex> <METHOD…>`：模板每段是 `[a-z0-9-]+` 或 `{name}`（S-22），regex 必须等于从模板推导的 `^…$`（`{param}` → `[^/]+`），方法唯一、有序、在已知集合内，模板按字节序严格升序；全文 ASCII、LF、单个结尾换行、不含 `*`；0 行判无法比较。比对一律用清单的 regex 列 | selftest 10 种清单破坏（v1 `_format`、缺 `_format`、`*` 行、regex 与模板不符、`(?i)`、方法乱序、行乱序、CRLF、0 行、大写段）全部拒绝 |
+| 2 | `render` 退役 | 删除 `render` 子命令与"不得加兜底、不得加 `(?i)`"的注释和逻辑（与 F-10 相反）。Caddyfile 直接 import 已提交的片段；工具只做 `check-artifacts`：按 §9.14.3 的片段形状从清单**独立**重新渲染（不 import 生成器）并逐字节比对，兜底按 `paths` 独立拼出 `^(?i:/m/v1/watcher)(?:[/\n]|$)` | selftest 8 种片段破坏（`_format`、旧兜底 `(?:/|$)`、删兜底、兜底 200、行级 `(?i)`、多一个方法、片段里写上游地址、yaml sha 不一致）全部拒绝；在 clone 里提交旧兜底后打包，G3 以 `CADDY_ARTIFACTS_FAILED … line 119` 独立失败（G2 也失败） |
+| 3 | `verify` 重写 | (a) 全配置里 `^/m/v1/watcher/` 开头的 (pattern, methods) 与清单 (regex, methods) 对称差为空、无重复、行数 > 0；每个 wgw 匹配器恰为 `{path_regexp, method}`（兜底恰为 `{path_regexp}`）且是其路由唯一的匹配器组；其他含 `watcher` 的 `path_regexp` 一律失败。(b) 兜底恰好一次、逐字相同、只 `respond 404`、在同一列表里与逐路径路由连续且排在最后；wgw 路由必须在 app 站点的**顶层**路由列表里（`route {}`、`handle_path` 包裹即失败）。(c) F-13 两步遮蔽检查：第一条 wgw 路由之前（本层与外层每一层，以及外层容器里先于 subroute 的 handler）的每一条路由，先用三个探针判命中（`path` 按 Caddy 语义、`path_regexp` 按 RE2、`host` 可排除，其余匹配器与无法编译的正则都算命中），命中后要求 handler 全在白名单（`encode`、不带 `request` 的 `headers`、`vars`、`map`、`log_append`、`tracing`）、无 `terminal`、无 `group`、handle 非空。(d) 没有任何其他路由把前缀（含 `/m/v1/watcherx`、`\r`、`#`、大小写变体）转发到 8183 或 watcher。(e) 模拟器改用 RE2 的 `$`（只在文本末尾），按 §9.14.4 第 1 项生成负例（空段、`x/y`、尾斜杠、整路径大写、字面行 `/x`、字面行 `\n`/`#x`、每个未列方法）与正例（参数行 `\n`/`#x` 必须到网关），兜底探针必须由兜底 404 应答。原 `:453-456`、`:507-509` 的 `*` 判断随 v2 删除。打印的路径与正则一律经 `o0_tool.redact_path` | selftest：52 种破坏在原样与骨架两种形态下全部抓住（其中 9 种是只有该条检查能抓的隔离用例；外层容器 handler、清单与片段一致篡改的 regex、另一个块里多出的 import 这 3 个隔离用例在变体表之外，见 §10.5），5 种合规的两步用例（白名单 handler 命中、非白名单 handler 不命中、`not` + `encode`、其他 host）通过；真实 Caddy 见 §10.4 |
+| 4 | selftest 夹具改 v2 | `_fixture` 按真实 Caddy v2.10.2 对仿生产 Caddyfile（`tests/fixtures/caddy/Caddyfile.prodlike.in`）adapt 的结构重写：站点顶层 `headers`(响应)+`encode` 路由、16 条 wgw、兜底、移动端、面板 `/v1/*`、watcher basicauth 块（先 `strip /watcher`，再认证、四条 `headers` 删头、注入）、SPA；变体按片段结构重写 | `SELFTEST_OK good_passes=241 variants_caught=52/52`；`tests/caddy_real_test.sh` 对同一夹具的真实 adapt 结果 verify 通过 |
+| 5 | 打包脚本 | G3 读两份 Caddy 生成物的四行头部，校验 `_format` 与 `_yaml_sha256`/`_phase_max` 一致，再用**候选自己的** `check-artifacts` 核对片段；bundle 带 `caddy/caddy-watcher-gateway.caddy`（原样拷贝，不再 render）；RELEASE.json 从 G3 日志里找 `META_OK` 行 | 打包门禁 G1–G12 全部 PASS，见 §10.3 |
+| 6 | `o0_deploy_caddy.sh` 三处 verify | 三处都改为 `verify --paths … --snippet …`；另外：preflight 加 `check-artifacts`、线上片段文件不存在或与 bundle 相同、把片段放到候选同目录（相对 import）、`caddyfile-check`，门禁记录 staging 片段的 sha；apply 在凭据合入之后安装 `/etc/caddy/caddy-watcher-gateway.caddy` 并比对字节，备份时记录它原本是否存在，回滚时恢复或删除；verify 阶段核对线上片段仍等于 bundle | `apply_rollback_test.sh`：SN1（片段安装失败：不 restart，片段被删除）、SN2（片段原本就在：restart 后失败，恢复原片段）、SN3（线上有不同的片段：门禁处拒绝，没有备份、写入或 restart）；原有 Caddy A–E 场景同时断言片段被删回 |
+| 7 | `tests/apply_rollback_test.sh` 恢复 | 随第 1 项恢复；并入审查的 5 个 restore-db 场景（🟡-4）与上述 SN1–SN3、隔离门禁的 reload/unparsed 两种 | `APPLY_ROLLBACK_TEST_OK checks=138` |
+| 8 | runbook 并入规则 | 部署 runbook §3.1 重写：全局位置 `import caddy-watcher-gateway.caddy`（相对路径）、手写 `(watcher_gateway_upstream)`、站点顶层在所有 `handle`/`handle_path`/`route` 之前 `import watcher_gateway_routes`；第 4 条要求按 F-13 (2) 人工记录全局 `order` 选项与站点顶层前置指令（`caddyfile-check` 与 S-02 打印底稿，参数脱敏）；C-1…C-4、故障对照同步更新 | G10 扫描 17 个候选工具与 runbook 文件无禁用动词 |
+| 9 | 本机 Caddy 探针 | 新增 `o0_caddy_watcher_routes.py probe`：对生产 Caddyfile 副本只改站点地址、两个上游与全局 `admin off`/`auto_https off`/端口（逐行差异脱敏打印），Caddy 状态目录放临时目录；先 adapt + verify，再真实运行并用原始请求行发送 §9.14.4 第 1 项全部探针（含 `%0A`、`#`）与 F-13 (3) 两类用例：**字面点段与 `//` 期望 clean 后转发，不按 404 判定**；编码形式与 `#` 原样转发。生产副本的探针需要授权 O0-A05P | 仿生产夹具上 `CADDY_PROBE_OK caddy=v2.10.2 live_checks=224`；把 `handle /m/*` 放在 import 之前的副本 `CADDY_PROBE_FAILED` |
+
+### 10.2 wac-073 复审 🟡-1…🟡-5
+
+| 项 | 处置 | 测试 |
+|---|---|---|
+| 🟡-1 工具链停摆、授权清单开头的 G7 说明过时 | 本任务（§10.1）；授权清单开头改为当前门禁状态 | `run_all.sh` 全过；打包 G1–G12 PASS |
+| 🟡-2 `+`/`=` 分隔的纯数字令牌（O0-A01 前） | 两份实现的 `_chunk_is_token` 第二次判定同时去掉 `+`、`=`（第一次仍把它们算作令牌字符，N7 不变）。M1/M2/M12（自身含 `/` 的令牌）写进 O0-A01 的残余风险 | M3、M4 与转义版 M3 加入 `PATH_SHAPES_R3`（六个输出面 0 泄露）；钉住 `/n/4829+1057+3829+1045` → `<seg len=19>`、`=` 版同理，15 位（去掉 `+` 后）原样保留；parity 语料 83 条 |
+| 🟡-3 隔离门禁"解析不了当通过"、看不到未加载的 drop-in（O0-A08 前） | `EnvironmentFiles=` 用 `^(-?)(/.*?)(?: \(ignore_errors=(yes\|no)\))?$` 从右边切开后缀；不以 `/` 开头、后缀未知、无后缀却含空白的值都进 `unparsed` → `CP_ISOLATION_UNCOMPARABLE`；另读 `NeedDaemonReload`（不是 `no`，含缺失，即 UNCOMPARABLE）、`FragmentPath`、`DropInPaths`（写进证据行）；S-10 同步只读这三项 | selftest 新增 6 例（无 `/`、未知后缀、无后缀含空格、`NeedDaemonReload=yes`、缺失、带后缀的含空格路径正确解析并查出变量名）；沙箱 ISO-reload、ISO-unparsed 在任何写入之前拒绝 |
+| 🟡-4 测试缺口 | 审查的 5 个 restore-db 场景（stop 失败、start 失败、移走途中失败、失败启动留下 `-wal`、恢复时 sha 不符，外加恢复先停 watcher 的断言）原样并入；隔离门禁补软链（pre-O2 的 `operator-query.env` 不含 watcher 名字，只有 realpath 能抓）、systemd `(ignore_errors=yes)` 写法指向不存在的文件（判 OK）、另一目录下名为 `operator-query.env` 的文件（判违例）3 例 | D2、D3、D4、D7、D11、D18 见 §10.5 |
+| 🟡-5 S-00 把 NULL 心跳年龄算成 0（O0-A01 前） | awk 对非数值样本计数，输出 `observed_max_hb_age <节点> <uncomparable:NULL> samples=N non_numeric=K`；另加 `node_containers=<数>`（💭-4） | leak test 桩：account-b 全是 NULL、account-c 只有一次 NULL，两者都输出 `<uncomparable:NULL>`；account-a 仍是 `1.1` |
+
+另：S-02 大纲新增 `order` 与全部前置指令（`order` 行只显示纯字母的指令名，含数字的词按字面长度隐藏——leak test 第一次跑就抓到了一个更宽的规则会漏出 `qctbhy0a32hucub`，已收紧）；`caddyfile-check` 的记录行只打印指令名、匹配器（路径经脱敏）和"其余 N 个参数已隐藏"。
+
+### 10.3 本机实跑（未连 jp-24；打包门禁一律 `--report-only`，未带 `--execute`）
+
+| 命令 | 结果 |
+|---|---|
+| `O0_WAL_REPRO_DB=<审查 walt/w.db> O0_CADDY_BIN=<Caddy v2.10.2> bash scripts/ops/o0/tests/run_all.sh` | 退出 0，末行 `ALL_O0_OFFLINE_CHECKS_OK real_caddy=ok`：`BASH_N_OK files=13`、`PY_COMPILE_OK`；o0_tool `SELFTEST_OK checks=104 … path_shapes=4+21 path_pins=12 legit_paths=32 … cp_isolation=19`；credentials `scenarios=13`；`CADDY_ARTIFACTS_OK lines=16 list_format=watcher-gateway-caddy-paths.v2 snippet_format=watcher-gateway-caddy-snippet.v1 … fallback_verbatim=yes`；Caddy `SELFTEST_OK good_passes=241 variants_caught=52/52 (raw and skeleton) benign_two_step=5 checks=45`；baseline `wal_case=ok repro_refused=ok`；`REDACTION_PARITY_OK corpus=83`；`LEAK_TEST_OK sections=19 sentinels=38 leaks=0`；`FLEET_GUARD_TEST_OK cases=7`；`AUTH_GATE_TEST_OK checks=18`；`APPLY_ROLLBACK_TEST_OK checks=138`；`CADDY_REAL_TEST OK checks=22 failures=0 caddy=v2.10.2`；`PLAN_MODE_OK scripts=5` |
+| 同上但不设 `O0_CADDY_BIN` | 退出 0，`CADDY_REAL_TEST_SKIPPED (O0_CADDY_BIN unset)`，末行 `ALL_O0_OFFLINE_CHECKS_OK real_caddy=skipped`（跳过写在末行，不会被读成通过） |
+| 13 个 shell 脚本逐个 `bash -n` | 13/13 |
+| `bash scripts/ops/o0/o0_package.sh --candidate 3e5f1f8 --out <scratchpad> --report-only --run-tests` | **G1–G12 全部 PASS**：G2 `ROUTES_DIFF_EMPTY rows=63 … phase_max=P2`；G3 `META_OK … CADDY_ARTIFACTS_OK lines=16`；G4 `CLOSURE_OK closure=16 whitelist=36`；G5 `COMPOSE_OK env_file=True`；G7 PASS；G8 5 个文件；G9 pytest `30 passed`、watcher `tests 145 / pass 145 / fail 0 / skipped 0`；G10 17 个候选工具与 runbook 文件；G11 14 个工具文件；G12 `RUNTIME_MANIFEST_OK files=36`。末行 `PACKAGE_OK`，`RELEASE.json`：`deploy_candidate: true`、`failed_gates: 0`；bundle 里的片段与 `contracts/generated/` 逐字节相同 |
+| G3 负例：在 clone 里把片段的兜底改回 `(?:/|$)` 并提交，再打包 | G2、G3 两个门禁都 FAIL（G3：`CADDY_ARTIFACTS_FAILED snippet differs … at line 119`），`PACKAGE_NOT_A_DEPLOY_CANDIDATE failed_gates=2` |
+
+`deploy_candidate: true` 只说明本地门禁全绿，**不等于可以申请生产授权**：还需要 wac-060 审查 PASS 并合入、在合入后的集成分支提交上重跑打包门禁，以及授权清单 §四 列出的用户确认。
+
+### 10.4 真实 Caddy v2.10.2（本机，`tests/caddy_real_test.sh`）
+
+二进制：审查者在 scratchpad 从源码构建的 `wac058r/caddybin/caddy`（`caddy version` = `v2.10.2 h1:g/gTYjGMD0dec+UgMw8SnfmJ3I9+M2TdvoRL/Ovu6U8=`），不进仓库，测试通过 `O0_CADDY_BIN` 使用。夹具 `tests/fixtures/caddy/Caddyfile.prodlike.in` 是按 O-0 工具假定的 jp-bot 站点形态写的**仿生产**文件（不是生产文件），basic auth 哈希在测试时用一次性随机口令现算。
+
+- 夹具：`caddyfile-check` 通过；真实 `caddy adapt` 的结果 verify 通过（`CADDY_WATCHER_ROUTES_OK mode=snippet lines=16 passes=241`）。
+- 12 种违例写成真实 Caddyfile 并由真实 Caddy adapt，verify 全部失败：import 之前的 `handle /m/*`（遮蔽）、import 之后的 `handle /m/*`（前缀转发）、import 之后的顶层 `rewrite`、`uri … strip_suffix`、`method`、`request_header Authorization`、`basic_auth /m/*`、`redir /m/v1/watcher/*`、`forward_auth`、全局 `order reverse_proxy before handle` + 顶层 `reverse_proxy /m/*`、import 包进 `route { }`、包进 `handle_path /m*`。其中三种（handle 在前、`route`、`handle_path`）`caddyfile-check` 也拒绝；`order` 行出现在 F-13 (2) 记录里。
+- 2 种合规写法通过：顶层 `vars` + `header -Server` + `map`（白名单）；不命中前缀的 `redir /old/*` 与 `rewrite /static/x`。
+- 本机探针对夹具：`CADDY_PROBE_OK caddy=v2.10.2 live_checks=224 verify_passes=234`；逐行差异只含站点地址、上游与全局四项，不含哈希；探针运行后 `~/Library/Application Support/Caddy/autosave.json` 的 mtime 不变（状态目录在临时目录）。把 `handle /m/*` 放在 import 之前的副本：`CADDY_PROBE_FAILED`。
+
+### 10.5 变异复跑（scratchpad `r060m/`，pristine 取本任务的提交；测试集 = 审查的集合 + `apply_rollback_test.sh`，wac-060 组另加 `caddy_real_test.sh`）
+
+| 变异集 | 结果 |
+|---|---|
+| 审查 mut067（35 个） | 29 KILLED；3a、5b、5c 锚点被本轮改动移走，重定锚后 3/3 KILLED；4a、5d、5f SURVIVED（历次已判等价或纵深防御） |
+| wac-059 新增（22 个） | 20 KILLED；R1d 重定锚后 KILLED；B1h SURVIVED（已判等价） |
+| 审查 mut067b（9 个） | 8 KILLED；X7 SURVIVED（已判等价） |
+| wac-072 `muts072`（29 个） | 25 KILLED；N3、N8、N9 锚点随 🟡-2 改动移走，重定锚后 3/3 KILLED；**I6（去掉 LoadState 检查）首轮存活**：新加的 `NeedDaemonReload` 规则把"单元不存在"的用例提前拦下了，于是把该用例改成 systemd 的真实输出（`LoadState=not-found` + `NeedDaemonReload=no`），复跑 KILLED |
+| 审查 r073 `muts073`（17 个） | 13 KILLED，**r073 时存活的 D2、D3、D4（restore-db 恢复路径）与 D7、D11、D18（隔离门禁）全部转为被抓**；D12、D13、D14、D19 SURVIVED（审查已判等价或纵深防御） |
+| 本任务 `muts060`（39 个：Caddy 工具 26、阶段 C 4、🟡 修复 9） | 首轮 25 KILLED、14 SURVIVED。存活的大多被模拟器或逐字节比对"顺带"抓住，单独那条检查其实没有被测到：补了 12 个只有该条检查能抓的隔离用例（方法只写 `CONNECT` 的匹配器让模拟请求不受影响、容器路由里先于 subroute 的 handler、带 body 或多一个 handler 的兜底、形状完整的清单外行、藏在兜底后面的前缀转发、同索引的嵌套拆分、清单与片段一致篡改的 regex、另一个块里多出的 import），第二、三轮复跑后 **36/39 KILLED**。剩下 3 个判为冗余：C10（兜底位置）——兜底若排在某条逐路径路由之前，该路由在模拟里必然不可达；C11（按前缀而不是逐字认兜底）——兜底探针要求应答路由的模式逐字等于兜底，片段也逐字节比对；C22（文本里的 `*`）——模板段规则、regex 推导、头部规则与片段比对已经覆盖 `*` 可能出现的每个位置 |
+
+记录：`r060m/{mA1,mA2,mB,mC,mD,mN}/out.txt`（首轮，pristine `acc0151`）、`r060m/r2/out.txt`（第二轮，`02d364a`）、`r060m/r3/out.txt`（第三轮，`3e5f1f8`）。
+
+### 10.6 剩余限制与未完成事项
+
+1. **生产 Caddyfile 未见过**：夹具是按工具假定的形态写的。生产副本的 verify、`caddyfile-check`、本机探针要等 O0-A01（S-02/S-03 的脱敏大纲与骨架）和 O0-A05P（副本）之后才能做；在那之前，工具对真实生产结构的判断只经过骨架与仿生产夹具。
+2. **F-13 (2) 人工记录**：工具只打印底稿（指令名、匹配器、隐藏的参数个数），"为什么不构成遮蔽"必须由执行者逐条写、用户审阅。
+3. **Caddy 版本**：探针与真实测试用的是 v2.10.2；生产版本以 S-01 为准，不一致时要用同版本重跑 `caddy_real_test.sh` 与探针。
+4. **模拟器的范围**：只评估 `host`、`path`、`path_regexp`、`method`、`not`、`protocol` 匹配器与 `rewrite` 的 strip 前后缀；其他一律 `UNCOMPARABLE` 判失败（宁可误拦）。`--before-deploy` 的前瞻遮蔽检查把"第一个带 `group` 的路由"当作 import 将来的位置，这是近似，阶段 C 的 verify 才是准的。
+5. **awk 可移植性**：S-00 的新 awk 只用 POSIX 语法，本机只在 BSD awk 上跑过；jp-24 上的 mawk/gawk 未实测（本机没有）。
+6. **脱敏残余**：纯字母令牌、短段、自身含 `/` 的令牌（M1/M2/M12）仍会原样出现，已写进授权清单 O0-A01。
