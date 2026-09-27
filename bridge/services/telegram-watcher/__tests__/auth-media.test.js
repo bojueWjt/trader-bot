@@ -253,6 +253,7 @@ test("dump-route-table fails closed for alternate route and mount registrations"
     ["media case variant", 'app.get("/MEDIA/:f", (_, res) => res.end());', "GET", "/MEDIA/:f"],
     ["media on api", `app.use("/api/x", require(${mediaPath}).createMediaHandler("/tmp/x"));`, "USE", "/api/x"],
     ["api root", 'app.post("/api", (_, res) => res.end());', "POST", "/api"],
+    ["second healthz", 'app.get("/healthz", (_, res) => res.end());', "GET", "/healthz"],
   ];
   try {
     for (const [label, registration, method, routePath] of cases) {
@@ -260,7 +261,40 @@ test("dump-route-table fails closed for alternate route and mount registrations"
       const result = spawnSync(process.execPath, ["--require", preload, script], { encoding: "utf8", timeout: 15000 });
       assert.equal(result.status, 1, `${label}: ${result.stderr}`);
       const actual = JSON.parse(result.stdout);
-      assert.ok(actual.unexpected.some((row) => row.method === method && row.path === routePath), `${label}: ${result.stdout}`);
+      if (label === "wildcard") {
+        assert.ok(actual.unexpected.some((row) => row.method === method && row.path === routePath), `${label}: ${result.stdout}`);
+      } else {
+        assert.deepEqual(actual.unexpected, [{ method, path: routePath }], `${label}: ${result.stdout}`);
+      }
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dump-route-table reports missing registered routes and mounts", () => {
+  const script = path.resolve(__dirname, "../scripts/dump-route-table.js");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "watcher-route-missing-"));
+  const preload = path.join(root, "inject.js");
+  const cases = [
+    ["removed route", 'const i = index("get", "/api/status"); stack.splice(i, 1);', { method: "GET", inner_path: "/api/status" }],
+    ["removed mount", 'stack.splice(1, 1);', { method: "USE", inner_path: "/", handler: "validation" }],
+    ["parameter in literal position", 'stack[index("get", "/api/status")].route.path = "/:a/status";', { method: "GET", inner_path: "/api/status" }],
+    ["array route", 'stack[index("get", "/api/status")].route.path = ["/api/status"];', { method: "GET", inner_path: "/api/status" }],
+    ["brace literal", 'stack[index("delete", "/api/price-alerts/:id")].route.path = "/api/price-alerts/{alert_id}";', { method: "DELETE", inner_path: "/api/price-alerts/{alert_id}" }],
+    ...["{", "}", "*", "(", ")", "?", "+", "!", "\\", ":"].map((character) => [
+      `literal segment with ${JSON.stringify(character)}`,
+      `stack[index("get", "/api/status")].route.path = ${JSON.stringify(`/api/sta${character}tus`)};`,
+      { method: "GET", inner_path: "/api/status" },
+    ]),
+  ];
+  try {
+    for (const [label, mutation, expected] of cases) {
+      fs.writeFileSync(preload, `const Module = require("node:module");\nconst load = Module._load;\nModule._load = function(request, parent, main) {\n  const loaded = load.apply(this, arguments);\n  if (request === "../lib/trading-api" && parent && /dump-route-table/.test(parent.filename)) {\n    const original = loaded.registerTradingApi;\n    loaded.registerTradingApi = function(app, monitor) {\n      const value = original.call(this, app, monitor);\n      const stack = app.router.stack;\n      const index = (method, route) => stack.findIndex((layer) => layer.route && layer.route.path === route && layer.route.methods[method]);\n      ${mutation}\n      return value;\n    };\n  }\n  return loaded;\n};\n`);
+      const result = spawnSync(process.execPath, ["--require", preload, script], { encoding: "utf8", timeout: 15000 });
+      assert.equal(result.status, 1, `${label}: ${result.stdout} ${result.stderr}`);
+      const actual = JSON.parse(result.stdout);
+      assert.ok(actual.missing.some((row) => Object.entries(expected).every(([key, value]) => row[key] === value)), `${label}: ${result.stdout}`);
     }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

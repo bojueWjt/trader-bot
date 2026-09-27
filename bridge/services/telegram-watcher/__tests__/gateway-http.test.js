@@ -54,3 +54,45 @@ test('T0-1/T0-4 real HTTP W1-W8 rejects invalid inputs before any configuration 
     fs.rmSync(temp,{recursive:true,force:true});
   }
 });
+
+test('browser can delete a created price alert through the registered HTTP route', async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'watcher-alert-route-'));
+  process.env.TRADER_TRADING_DB_PATH = path.join(temp, 'db');
+  process.env.TRADING_DB_PATH = process.env.TRADER_TRADING_DB_PATH;
+  delete require.cache[require.resolve('../lib/trading-api')];
+  delete require.cache[require.resolve('../price-monitor')];
+  const { registerTradingApi } = require('../lib/trading-api');
+  const monitor = require('../price-monitor');
+  monitor.ensureTable();
+  const app = express();
+  app.use(createAuthMiddleware(env));
+  app.use(createRequestValidation());
+  registerTradingApi(app, monitor);
+  const server = await new Promise((resolve) => {
+    const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
+  });
+  try {
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const headers = { 'x-watcher-proxy-auth': env.WATCHER_BROWSER_PROXY_TOKEN, 'content-type': 'application/json' };
+    const created = await fetch(base + '/api/price-alerts', {
+      method: 'POST', headers, body: JSON.stringify({ symbol: 'BTCUSDT', target_price: 100, direction: 'above', client_ref: 'alert-route-001' }), signal: AbortSignal.timeout(4000),
+    });
+    const createdBody = await created.json();
+    assert.equal(created.status, 200, JSON.stringify(createdBody));
+    const { id } = createdBody;
+    const removed = await fetch(base + `/api/price-alerts/${id}`, { method: 'DELETE', headers, body: JSON.stringify({ client_ref: 'alert-route-002' }), signal: AbortSignal.timeout(4000) });
+    assert.equal(removed.status, 200);
+    assert.deepEqual(await removed.json(), { ok: true });
+    const db = monitor.getDb();
+    try {
+      assert.equal(db.prepare('SELECT count(*) AS n FROM price_alerts WHERE id = ?').get(id).n, 0);
+    } finally {
+      db.close();
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    delete process.env.TRADER_TRADING_DB_PATH;
+    delete process.env.TRADING_DB_PATH;
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});

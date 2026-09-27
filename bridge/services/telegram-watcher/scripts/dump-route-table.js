@@ -74,7 +74,10 @@ try {
     const right = template.toLowerCase().split("/");
     return left.length === right.length && left.every((segment, index) => {
       const parameter = /^:([A-Za-z][A-Za-z0-9_]*)$/u.exec(segment);
-      return parameter ? /^\{[a-z][a-z0-9_]*\}$/u.test(right[index]) : segment === right[index];
+      if (parameter) {
+        return /^\{[a-z][a-z0-9_]*\}$/u.test(right[index]);
+      }
+      return !/[{}*()?+!\\:]/u.test(segment) && segment === right[index];
     });
   }
   const identityRoutes = authLayer.handle.routeTable.map(({ identity, method, inner_path: innerPath }) => ({ identity, method, inner_path: innerPath }));
