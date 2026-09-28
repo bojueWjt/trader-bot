@@ -1,4 +1,4 @@
-# O-0 发行要求可追溯清单（wac-032 草案，wac-045 修订，wac-059 第 3 轮，wac-072 加固，wac-060 适配 WGW-1.0.2，wac-090 收紧 Caddy 核对）
+# O-0 发行要求可追溯清单（wac-032 草案，wac-045 修订，wac-059 第 3 轮，wac-072 加固，wac-060 适配 WGW-1.0.2，wac-090、wac-092、wac-094 收紧 Caddy 核对）
 
 > 作者：watcher-app-crew-release-steward。状态：**草案，未执行任何生产动作，也没有做只读现场核对**。
 > wac-045 修订：处置审查报告 `reviews/wac-032.md`（5 🔴、18 🟡、4 💭），逐条见 §7；按用户 2026-09-26 裁决（W-0b 方案 A、Caddy `*` 严格单段锚定 `path_regexp`）与 Planner 对 D-05…D-08 的决定更新。事实基线：集成分支 `f7641cb`（含 wac-040 `a881802`、W-0b）。
@@ -433,7 +433,7 @@
 | 同上但不设 `O0_CADDY_BIN` | 退出 0，`CADDY_REAL_TEST_SKIPPED`、`APPLY_ROLLBACK_TEST_OK checks=150`（PF-REAL 跳过），末行 `O0_OFFLINE_CHECKS_OK_WITHOUT_REAL_CADDY real_caddy=skipped` |
 | 13 个 shell 脚本逐个 `bash -n` | 13/13 |
 | 真实 Caddy 探针（仿生产夹具） | `CADDY_PROBE_OK caddy=v2.10.2 live_checks=420 verify_passes=241 lines=16 host=jp-bot.balen.wang … stub_hits=oq:117,watcher:0,sink:0`（原 `live_checks=260`、`oq:37`；多出的是 `//` 变体） |
-| 审查 r091 的 68 个真实 Caddy 变体（`cv/gen.py`，复制到本任务目录重跑，未改审查证据） | n07、n08、n15、n15b、n17、n18、n19 由 verify 通过变为失败；其余与审查记录相同（包括审查已说明预期写错或由 `caddyfile-check` 抓住的 6 个），期望通过的 6 个仍通过 |
+| 审查 r091 的 68 个真实 Caddy 变体（`cv/gen.py`，复制到本任务目录重跑，未改审查证据） | n07、n08、n15、n17、n18、n19 由 verify 通过变为失败（wac-094 更正，审查 wac-093 💭-1：原文把 n15b 也列进来，不准确；r091 的 run1、run3 里 n15b 已经是 FAIL）；其余与审查记录相同（包括审查已说明预期写错或由 `caddyfile-check` 抓住的 6 个），期望通过的 6 个仍通过 |
 | 审查 r091 的黑盒 glob 差分（`globdiff/diff.py`，种子 1–3 × 1500 模式，69,750 组） | 三个种子都是 `DANGEROUS tool=F caddy=HIT: 0`、`CONSERVATIVE tool=T caddy=MISS: 0`（审查时危险分歧 3/6/3） |
 | 本机 `~/Library/Application Support/Caddy/` | 本任务开工前快照（逐文件 `stat` 修改时间、大小、权限与 sha256，与审查 `caddyhome-final.txt` 一致）；之后经历全部 `run_all`、真实 Caddy 测试、探针、差分、49 次完整运行（变异 48、基线 1）与打包门禁，最终快照与开工前逐文件相同（`USER_CADDY_DIR_UNCHANGED`）。只做了检查，没有删除任何东西 |
 | `bash scripts/ops/o0/o0_package.sh --candidate c21259a --out <scratchpad> --report-only --run-tests`（未带 `--execute`） | **G1–G12 全部 PASS**：G2 `ROUTES_DIFF_EMPTY rows=63 … phase_max=P2`；G3 `META_OK`；G4 `CLOSURE_OK closure=16 whitelist=36`；G5 `COMPOSE_OK env_file=True`；G8 5 个文件；G9 pytest `35 passed`、watcher `tests 155 / pass 155 / fail 0 / skipped 0`；G10 17 个候选工具与 runbook 文件无禁用动词；G11 14 个工具文件；G12 `RUNTIME_MANIFEST_OK files=36`。`PACKAGE_OK`，`RELEASE.json`：`candidate c21259a…`、`deploy_candidate: true`、`failed_gates: 0`、`phase_max P2` |
@@ -453,6 +453,6 @@
 
 1. **更保守 = 可能误拦生产写法**：站点内任何带 `host` 的、会改写或终止请求的路由（例如 `@alias host 别名` + `redir`）、任何含非 ASCII 或 `//` 的 `path` 匹配器，在 C-1 都会失败。这是有意的：若生产副本因此失败，把别名移到单独的站点块或改写匹配器，不放宽检查；需要例外时由 Architect 裁定。
 2. **探针只复现一个主机名**：活体检查用生产主机名（默认 `jp-bot.balen.wang`）；站点应答的其他名字、以及 `header`、`remote_ip`、`client_ip`、`expression` 等依赖请求来源或头的条件，探针复现不了，只由 verify 的保守规则把关（站点内这些条件都不排除命中）。
-3. **信号清理不覆盖 SIGKILL 与断电**：探针进程被 `kill -9` 或机器断电时 `.o0probe`（0600）可能残留；runbook 保留 `ls -A` 确认。临界区的"先登记后创建"只能用测试间接覆盖（见 §12.3 N20），信号恰好落在临界区里的时序无法稳定复现。
+3. **信号清理不覆盖 SIGKILL 与断电**：探针进程被 `kill -9` 或机器断电时 `.o0probe`（0600）可能残留；runbook 保留 `ls -A` 确认。（wac-094 更正，审查 wac-093 🟡-2：这里只写了一半。实际还会留下含哈希的临时目录与一个仍在运行的 Caddy，处置见 §13。）临界区的"先登记后创建"只能用测试间接覆盖（见 §12.3 N20），信号恰好落在临界区里的时序无法稳定复现。
 4. **骨架里被脱敏的路径段**：L-A1 的 `--before-deploy` 核对跑在骨架上，令牌形状的路径段被换成 `<seg len=N>` 后按字面比较；C-1 在未脱敏的 adapt 结果上判定，不受影响（沿用 §10.6 的骨架说明）。
 5. 其余同 §11.4 第 1–3 条与 §10.6（`%` 保守判命中、转发检查更严、探针运行裁剪后的配置、生产 Caddyfile 未见过、F-13 (2) 人工记录、Caddy 版本、awk 可移植性、脱敏残余）。§11.4 第 4 条（preflight 没有沙箱执行路径）已由本节第 5 项解决。

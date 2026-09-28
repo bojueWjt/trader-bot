@@ -38,7 +38,14 @@ Sub-commands
                  path_regexp: RE2 semantics; host: Caddy MatchHost, compared only on the
                  server's own routes (site selection) - inside a site a host matcher never
                  excludes (wac-092); any other matcher (header, remote_ip, client_ip,
-                 expression, not, ...) counts as a hit.  If it hits, every handler must be one of encode, headers
+                 expression, not, ...) counts as a hit. wac-094 (review wac-092 🟡-1): a route
+                 that misses every sample is then judged against the WHOLE prefix space
+                 (_mset_may_hit_space: every parameter value, suffix and case): a concrete
+                 value (…/accounts/account-a), a suffix or middle glob (media/*.png,
+                 */risks/btcusdt), a glob whose literal head may start a space path, or a
+                 path_regexp not anchored with '^' / with flags / with a top-level '|' / whose
+                 literal prefix may start a space path, all count as a hit.
+                 If it hits, every handler must be one of encode, headers
                  WITHOUT "request", vars, map, log_append, tracing, and the route must carry
                  neither "terminal" nor "group";
              (d) no other route that may see the prefix (incl. /m/v1/watcherx, "\\r", "#", and
@@ -70,11 +77,18 @@ Sub-commands
              Literal dot segments and ``//`` (wac-092: every list line with a doubled slash at
              every position) are expected to be CLEANED and forwarded with the caller's
              Authorization untouched (never expected as 404); percent-encoded forms and ``#`` are
-             forwarded raw (``#`` as %23).
+             forwarded raw (``#`` as %23). wac-094: every parameter line is sent again with each
+             PROBE_PARAM_VALUES entry (account ids, symbols in both cases, long, dotted and image
+             file names) with every method of the line.
              The .o0probe file and the temporary Caddy state dir are removed on normal exit, on
              failure, on an exception and on SIGINT/SIGTERM/SIGHUP, including a second signal
-             during the cleanup (_ProbeRun); not on SIGKILL of the probe or power loss (the
-             runbook keeps `ls -A` afterwards).
+             during the cleanup (_ProbeRun); not on SIGKILL of the probe or power loss: then the
+             .o0probe, the temporary dir (bcrypt hash in probe-run.json) and a running Caddy are
+             left. wac-094: the temporary dir carries an owner record; every probe run first scans
+             $TMPDIR (scan_probe_residue) and cleans only what such a record proves to be its own
+             (reports foreign dirs and unprovable processes, never touches them), and refuses to
+             run while <copy>.o0probe exists. The runbook keeps `ls -A`, `ls -d
+             $TMPDIR/o0-caddy-probe-xdg-*` and `pgrep -fl o0-caddy-probe-xdg` afterwards.
   selftest   fixture-based self-test shaped like real ``caddy adapt`` output (good config +
              broken variants, raw and skeleton), artifact parser negatives, RE2 pins.
 
@@ -586,6 +600,133 @@ def _pattern_touches_prefix(pattern: str) -> bool:
     return head != p and len(head) >= 2 and EXTERNAL_PREFIX.startswith(head)
 
 
+# ---------------------------------------------------------------- prefix space (wac-094, review wac-092 🟡-1)
+# The /m/v1/watcher prefix space: every request path the snippet (lines and fallback) can see, after Caddy
+# cleans it, in ANY case: "/m/v1/watcher" itself, "/m/v1/watcher/<anything>" (every parameter value, every
+# suffix) and "/m/v1/watcher\n<anything>" (the fallback's newline form). Step 1 of the shadow check used to
+# evaluate a matcher against a handful of SAMPLE paths (parameters filled with 'x1'); a matcher written for one
+# concrete parameter value (…/accounts/account-a), a suffix glob (media/*.png), a middle glob (*/risks/btcusdt)
+# or an unanchored path_regexp (account-a$) missed every sample and was taken as "cannot hit" although real
+# Caddy applied it to table paths. Now a matcher counts as a hit when it MAY select ANY path of the space.
+_SPACE_SEPARATORS = ("/", "\n")
+
+
+def _in_space(path: str) -> bool:
+    """Is this (lower-cased, literal) path inside the prefix space?"""
+    p = path.lower()
+    return p == EXTERNAL_PREFIX or any(p.startswith(EXTERNAL_PREFIX + s) for s in _SPACE_SEPARATORS)
+
+
+def _head_meets_space(head: str) -> bool:
+    """Can some path of the prefix space START with this literal (lower-cased) head?"""
+    h = head.lower()
+    return any((EXTERNAL_PREFIX + s).startswith(h) for s in _SPACE_SEPARATORS) or _in_space(h)
+
+
+def _path_pattern_may_hit_space(pattern: str) -> bool:
+    """F-13 step 1 for one ``path`` pattern against the WHOLE prefix space, with Caddy v2.10.2 MatchPath
+    structure: anything _caddy_path_match cannot evaluate (non-ASCII, placeholder, '//', '%', malformed
+    glob) is a hit; '*' alone hits; ``*x*`` (substring) and ``*x`` (suffix) always hit (some parameter value
+    or suffix of a table path contains / ends with x: media/*.png, */risks/btcusdt); ``x*`` (fast prefix, x
+    literal) hits when a space path can start with x; a pattern without glob characters is an exact path and
+    hits when it lies in the space (…/accounts/account-a); any other glob hits unless its literal head (up to
+    the first glob character) rules the whole space out (…/accounts/a*, */x, ?x, [x]… all hit)."""
+    try:
+        _caddy_path_match(pattern, EXTERNAL_PREFIX)
+    except Uncomparable:
+        return True
+    p = pattern.lower()
+    if p == "*":
+        return True
+    stars = p.count("*")
+    if stars == 2 and p.startswith("*") and p.endswith("*"):
+        return True
+    if stars == 1 and p.startswith("*"):
+        return True
+    if stars == 1 and p.endswith("*"):
+        return _head_meets_space(p[:-1])
+    head = _literal_head(p)
+    if head == p:
+        return _in_space(p)
+    return head == "" or _head_meets_space(head)
+
+
+_RE_META = set("\\.+*?()|[]{}^$")
+
+
+def _regexp_may_hit_space(pattern: str) -> bool:
+    """F-13 step 1 for one ``path_regexp`` (RE2, case-sensitive, not multi-line) against the prefix space.
+    It can only EXCLUDE the space when it is anchored with a leading '^', carries no flags ('(?i)', '(?m)',
+    '(?s)', '(?U)'), has no top-level alternation ('^/a|watcher' also matches any path containing
+    'watcher'), and its literal prefix after '^' (up to the first regexp metacharacter; a '\\' before a
+    punctuation character is that character; a quantifier drops the character before it), compared without
+    case, rules the whole space out. Everything else counts as a hit (``account-a$``, ``%2[fF]``,
+    ``^.*watcher``, ``^/(m|x)/``...)."""
+    if not pattern.startswith("^") or re.search(r"\(\?[a-zA-Z-]", pattern):
+        return True
+    depth, in_class, i = 0, False, 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "\\":
+            i += 2
+            continue
+        if in_class:
+            in_class = c != "]"
+        elif c == "[":
+            in_class = True
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        elif c == "|" and depth == 0:
+            return True
+        i += 1
+    lit, i = "", 1
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "\\" and i + 1 < len(pattern) and not pattern[i + 1].isalnum():
+            lit += pattern[i + 1]
+            i += 2
+            continue
+        if c in _RE_META:
+            break
+        lit += c
+        i += 1
+    rest = pattern[i:]
+    if rest[:1] in ("?", "*", "+", "{"):
+        lit = lit[:-1]
+    if not lit.isascii() or "%" in lit:
+        return True
+    if rest == "$":            # exact literal path
+        return _in_space(lit)
+    return _head_meets_space(lit)
+
+
+def _mset_may_hit_space(mset: dict, host: str, host_exact: bool = True) -> bool:
+    """F-13 step 1 over the whole prefix space: path and path_regexp by the rules above, host as in
+    _mset_may_hit (compared only at the server's top level), every other matcher kind counts as a hit."""
+    for kind, value in mset.items():
+        if kind == "path":
+            if not any(_path_pattern_may_hit_space(str(p)) for p in value):
+                return False
+        elif kind == "path_regexp":
+            if not _regexp_may_hit_space(str(value.get("pattern", ""))):
+                return False
+        elif kind == "host":
+            if _host_may_exclude(value, host, host_exact):
+                return False
+    return True
+
+
+def _may_hit_space(match: list | None, host: str, host_exact: bool = True) -> bool:
+    if not match:
+        return True
+    return any(_mset_may_hit_space(m, host, host_exact) for m in match)
+
+
+SPACE_LABEL = "the /m/v1/watcher prefix space (some parameter value, suffix or case of a table path)"
+
+
 def _host_match(hosts: list, host: str) -> bool:
     """Caddy v2.10.2 MatchHost.MatchWithError (modules/caddyhttp/matchers.go) for a request Host
     without port: a pattern with '*' is compared label by label (same number of labels; a label
@@ -947,6 +1088,10 @@ def _shadow_check(rep: Report, levels: list[tuple], host: str, label: str, probe
             route = routes[j]
             # depth 0 = the server's route list (site selection by host); deeper = inside the site
             hits = [p for p in probes if _may_hit(route.get("match"), p, host, host_exact=depth == 0)]
+            # wac-094 (review wac-092 🟡-1): samples are not the space; a matcher that misses every sample may
+            # still select another parameter value, suffix or case of a table path
+            if not hits and _may_hit_space(route.get("match"), host, host_exact=depth == 0):
+                hits = [SPACE_LABEL]
             where = f"{label} level {depth} route {j} ({_route_matcher_summary(route.get('match'))})"
             if not hits:
                 print(f"INFO shadow {where}: no probe hit")
@@ -1059,7 +1204,11 @@ def _check_wgw_structure(rep: Report, config: dict, lines: list[Line], listen_po
 def _mset_written_for_prefix(mset: dict, host: str, host_exact: bool = True) -> bool:
     if "host" in mset and _host_may_exclude(mset["host"], host, host_exact):
         return False
-    return any(_pattern_touches_prefix(str(p)) for p in mset.get("path") or [])
+    if any(_pattern_touches_prefix(str(p)) for p in mset.get("path") or []):
+        return True
+    # wac-094: a path or path_regexp matcher that may select any path of the prefix space (``*.png``,
+    # ``*/risks/x``, an unanchored regexp) forwards table paths too
+    return ("path" in mset or "path_regexp" in mset) and _mset_may_hit_space(mset, host, host_exact)
 
 
 def _forwarder_check(rep: Report, routes: list, probes: list[str], host: str, upstream: str, skip: set[int], trail: tuple = (),
@@ -1577,7 +1726,8 @@ def probe_caddyfile(text: str, site_address: str, site_port: int, http_port: int
         lines = ["{"] + probe_opts + ["}"] + lines
     hits = 0
     for i, l in enumerate(lines):
-        if l and not l[0].isspace() and l.rstrip().endswith("{") and not l.startswith(("(", "{", "#")):
+        # wac-094 (PC-3): a site header may itself start with '{' (``{$CADDY_DOMAIN} {``); only the bare global '{' is skipped
+        if l and not l[0].isspace() and l.rstrip().endswith("{") and not l.startswith(("(", "#")) and l.strip() != "{":
             head = l.rstrip()[:-1].rstrip()
             addrs = [a.strip() for a in re.split(r"[\s,]+", head) if a.strip()]
             if site_address in addrs:
@@ -1698,11 +1848,14 @@ class _Stub:
             def _r(self):
                 hits.append((label, self.command, self.path, self.headers.get("Authorization"), "X-Watcher-Proxy-Auth" in self.headers))
                 body = f"STUB {label}".encode()
-                self.send_response(200)
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                if self.command != "HEAD":
-                    self.wfile.write(body)
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    if self.command != "HEAD":
+                        self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass    # Caddy stopped mid-request (a signal during the live checks): no traceback noise (review wac-092 💭-2)
             do_GET = do_POST = do_PUT = do_DELETE = do_HEAD = do_PATCH = do_OPTIONS = _r
 
             def log_message(self, *_a):
@@ -1750,6 +1903,19 @@ def _probe_env(xdg: Path, adapt_env: list[str] | None) -> dict[str, str]:
         k, _, v = kv.partition("=")
         env[k] = v
     return env
+
+
+# wac-094 (review wac-092 🟡-1): parameter values the live checks send on every parameter line (all
+# matched by the line's [^/]+): real account ids, symbols in both cases, Telegram-style ids, short, long
+# and dotted values, and file names with the usual image/video suffixes in both cases. The probe cannot
+# enumerate the space (verify's step 1 does that); this makes the common concrete spellings visible live.
+PROBE_PARAM_VALUES = (
+    "account-a", "ACCOUNT-A", "account-b", "account-c", "account-d", "a", "abc", "0", "1", "42",
+    "BTCUSDT", "btcusdt", "ETHUSDT", "SOLUSDT", "1000PEPEUSDT", "-1001234567890", "1234567890",
+    "x.png", "x.PNG", "x.jpg", "x.JPG", "x.jpeg", "x.gif", "x.webp", "x.mp4", "x.txt", "x.json",
+    "1700000000000-1.jpg", "1700000000000-1.png", "a.b.c", ".hidden", "x.", "x-y_z~1",
+    "v" * 200, "seg." * 40 + "png",
+)
 
 
 def double_slash_variants(path: str) -> list[str]:
@@ -1825,6 +1991,14 @@ def _probe_live_checks(port: int, hits: list, lines: list[Line], host: str = "12
         # and forwarded with the caller's Authorization untouched
         for target in double_slash_variants(ex):
             forwarded(m0, target, ex[len(MOBILE_PREFIX):])
+        # wac-094 (review wac-092 🟡-1): a header rewrite written for ONE parameter value, a suffix or a case
+        # (…/accounts/account-a, media/*.png, */risks/btcusdt) never sees the 'x' fill: every parameter line is
+        # sent again with each PROBE_PARAM_VALUES entry, with every method of the line
+        if line.param_count():
+            for value in PROBE_PARAM_VALUES:
+                target = line.sample(value)
+                for m in line.methods:
+                    forwarded(m, target, target[len(MOBILE_PREFIX):])
     for target in ("/m/v1/watcher", "/m/v1/watcher/", "/M/V1/WATCHER/login/start", "/m/v1/watcher/login/start", "/m/v1/watcher%0A",
                    "/M/V1/WATCHER%0A", "/m/v1/watcher/status%0A", "/m/v1/watcher/status#x", "/m/v1/watcher/config", "/m/V1/watcher/status"):
         fallback404("GET", target)
@@ -1855,6 +2029,126 @@ def _probe_live_checks(port: int, hits: list, lines: list[Line], host: str = "12
     return n, fails
 
 
+PROBE_TMP_PREFIX = "o0-caddy-probe-xdg-"
+OWNER_FILE = "o0-probe-owner.json"
+OWNER_FORMAT = "o0-caddy-probe-owner.v1"
+PROBE_SCRIPT_MARK = "o0_caddy_watcher_routes"
+
+
+def _process_table() -> list[tuple[int, int, str]] | None:
+    """(pid, pgid, command) of every process, or None when ``ps`` is unavailable."""
+    try:
+        out = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,pgid=,command="], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    table = []
+    for row in out.stdout.splitlines():
+        parts = row.strip().split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            table.append((int(parts[0]), int(parts[1]), parts[2] if len(parts) > 2 else ""))
+    return table
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def scan_probe_residue(tmpdir: Path, out=print) -> dict[str, int]:
+    """wac-094 (review wac-092 🟡-2): report and clean what an earlier probe left behind after a SIGKILL.
+    Only what the probe's OWN owner record proves is touched:
+      * ``<tmpdir>/o0-caddy-probe-xdg-*`` with a valid OWNER_FILE whose probe pid is no longer a running
+        probe: every process whose command line names that directory (the ``caddy run --config
+        <dir>/probe-run.json`` group), plus recorded child pids whose command line names the recorded
+        ``.o0probe``, is stopped (SIGTERM to its group when the group leader is a recorded pid, SIGKILL after
+        5 s); the ``.o0probe`` is deleted only when its sha256 equals the recorded one; then the directory
+        is removed -> PROBE_RESIDUE_CLEANED;
+      * such a directory whose probe is still running -> PROBE_RESIDUE_BUSY, untouched;
+      * a directory without a valid owner record (older tool version, another tool) -> PROBE_RESIDUE_FOREIGN,
+        untouched; a process that names o0-caddy-probe-xdg- but belongs to none of the cleaned or busy
+        directories -> PROBE_RESIDUE_ORPHAN pid=<n>, untouched (pgrep -fl o0-caddy-probe-xdg).
+    Only directory base names and pids are printed (no paths, no content)."""
+    counts = {"cleaned": 0, "busy": 0, "foreign": 0, "orphans": 0, "unproven": 0}
+    table = _process_table()
+    own_pid = os.getpid()
+    claimed: set[int] = set()
+    for d in sorted(tmpdir.glob(PROBE_TMP_PREFIX + "*")):
+        name = d.name
+        record = None
+        if d.is_dir() and not d.is_symlink():
+            try:
+                record = json.loads((d / OWNER_FILE).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                record = None
+        if not (isinstance(record, dict) and record.get("format") == OWNER_FORMAT and isinstance(record.get("probe_pid"), int)
+                and isinstance(record.get("pids"), list) and all(isinstance(p, int) for p in record["pids"])
+                and isinstance(record.get("probe_file"), str)):
+            counts["foreign"] += 1
+            out(f"PROBE_RESIDUE_FOREIGN dir={name}: no owner record of this tool (older version or another tool); NOT touched: "
+                "check it and remove it yourself (it may hold a bcrypt hash)")
+            continue
+        dpath = str(d) + os.sep      # mkdtemp suffixes have one length; the separator rules out any prefix clash
+        mine = [(pid, pgid) for pid, pgid, cmd in table or [] if dpath in cmd and pid != own_pid]
+        probe_pid = record["probe_pid"]
+        if probe_pid != own_pid and any(pid == probe_pid and PROBE_SCRIPT_MARK in cmd for pid, _g, cmd in table or []):
+            counts["busy"] += 1
+            claimed |= {pid for pid, _g in mine}
+            out(f"PROBE_RESIDUE_BUSY dir={name}: its probe (pid {probe_pid}) is still running; NOT touched")
+            continue
+        recorded = set(record["pids"])
+        probe_file = Path(record["probe_file"])
+        mine += [(pid, pgid) for pid, pgid, cmd in table or [] if pid in recorded and str(probe_file) in cmd and pid != own_pid]
+        if table is None and any(_pid_alive(p) for p in recorded):
+            counts["unproven"] += 1
+            out(f"PROBE_RESIDUE_UNPROVEN dir={name}: a recorded child pid is alive and the process table is unavailable; NOT touched")
+            continue
+        mine = list(dict.fromkeys(mine))
+        claimed |= {pid for pid, _g in mine}
+        for pid, pgid in mine:
+            try:
+                if pgid in recorded and pgid == pid:
+                    os.killpg(pgid, signal.SIGTERM)
+                else:
+                    os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+        deadline = time.monotonic() + 5
+        while any(_pid_alive(pid) for pid, _g in mine) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        for pid, pgid in mine:
+            try:
+                if pgid in recorded and pgid == pid:
+                    os.killpg(pgid, signal.SIGKILL)
+                elif _pid_alive(pid):
+                    os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        o0probe = "absent"
+        if probe_file.name.endswith(".o0probe") and probe_file.is_file() and not probe_file.is_symlink():
+            if record.get("probe_file_sha256") and _sha256_file(probe_file) == record["probe_file_sha256"]:
+                probe_file.unlink()
+                o0probe = "removed"
+            else:
+                o0probe = "kept(content not the recorded one)"
+        shutil.rmtree(d, ignore_errors=True)
+        counts["cleaned"] += 1
+        out(f"PROBE_RESIDUE_CLEANED dir={name} processes_stopped={len(mine)} o0probe={o0probe} dir_removed={not d.exists()}")
+    for pid, _g, cmd in table or []:
+        if PROBE_TMP_PREFIX in cmd and pid not in claimed and pid != own_pid and "ps -A" not in cmd:
+            counts["orphans"] += 1
+            out(f"PROBE_RESIDUE_ORPHAN pid={pid}: its command line names {PROBE_TMP_PREFIX}* but no owner record proves it is this "
+                "tool's; NOT touched (pgrep -fl o0-caddy-probe-xdg)")
+    out("PROBE_RESIDUE_SCAN " + " ".join(f"{k}={v}" for k, v in counts.items()) + (" process_table=unavailable" if table is None else ""))
+    return counts
+
+
 PROBE_SIGNALS = tuple(getattr(signal, name) for name in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, name))
 
 
@@ -1882,7 +2176,13 @@ class _ProbeRun:
     cleanup() removes ``.o0probe`` FIRST (the running Caddy never reads it), then stops Caddy
     (SIGTERM to its process group, SIGKILL after 10 s), then removes the temp dir (Caddy can no
     longer write into it), and only then closes the stubs.
-    Not covered: SIGKILL of the probe itself, power loss; the runbook keeps ``ls -A`` afterwards."""
+    Not covered: SIGKILL of the probe itself, power loss. Then ``<copy>.o0probe`` (bcrypt hash), the
+    temporary dir ``$TMPDIR/o0-caddy-probe-xdg-*`` (``probe-run.json`` with the hash) AND a running Caddy
+    (its own session, it does not die with the probe) are left behind (review wac-092 🟡-2). wac-094: every
+    temporary dir carries an owner record (OWNER_FILE: the probe's pid, the ``.o0probe`` path and the sha256
+    of what was written there, the pids of every child it started); the next probe run scans ``$TMPDIR``
+    first (scan_probe_residue) and cleans what that record proves to be its own; the runbook keeps
+    ``ls -A``, ``ls -d $TMPDIR/o0-caddy-probe-xdg-*`` and ``pgrep -fl o0-caddy-probe-xdg`` afterwards."""
 
     def __init__(self, probe_file: Path, keep: bool) -> None:
         self.probe_file = probe_file
@@ -1894,6 +2194,7 @@ class _ProbeRun:
         self.defer = 0
         self.pending: int | None = None
         self.old: dict = {}
+        self.owner: dict = {}
 
     def install(self) -> None:
         for s in PROBE_SIGNALS:
@@ -1930,8 +2231,31 @@ class _ProbeRun:
 
     def mkdtemp(self) -> Path:
         with self.critical():
-            self.xdg = Path(tempfile.mkdtemp(prefix="o0-caddy-probe-xdg-"))
+            self.xdg = Path(tempfile.mkdtemp(prefix=PROBE_TMP_PREFIX))
+            self.owner = {"format": OWNER_FORMAT, "probe_pid": os.getpid(), "probe_file": str(self.probe_file),
+                          "probe_file_sha256": None, "pids": []}
+            self._write_owner()
         return self.xdg
+
+    def _write_owner(self) -> None:
+        """The owner record (wac-094): written before the thing it describes exists, replaced atomically."""
+        if self.xdg is None:
+            return
+        tmp = self.xdg / (OWNER_FILE + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(self.owner, handle)
+        os.replace(tmp, self.xdg / OWNER_FILE)
+
+    def write_probe_file(self, text: str) -> None:
+        """Record the sha256 of the .o0probe text FIRST, then write it (0600): a later scan removes the file
+        only when its content is exactly what this run recorded."""
+        with self.critical():
+            self.owner["probe_file_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            self._write_owner()
+        fd = os.open(self.probe_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
 
     def add_stub(self, label: str, hits: list) -> _Stub:
         with self.critical():
@@ -1945,6 +2269,9 @@ class _ProbeRun:
         with self.critical():
             proc = subprocess.Popen(cmd, start_new_session=True, **kw)
             self.procs.append(proc)
+            if self.owner:
+                self.owner["pids"].append(proc.pid)
+                self._write_owner()
         return proc
 
     def run_capture(self, cmd: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
@@ -2019,18 +2346,26 @@ def cmd_probe(args: argparse.Namespace) -> int:
     if not PROBE_HOST_RE.fullmatch(host):
         print(f"CADDY_PROBE_FAILED --host {host!r} is not a plain host name (pass the production site name)")
         return 1
+    probe_file = copy_path.with_name(copy_path.name + ".o0probe")
+    run = _ProbeRun(probe_file, args.keep)
+    # signals first (review wac-092 💭-3): a Ctrl-C from here on ends in CADDY_PROBE_INTERRUPTED, not a traceback
+    run.install()
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from o0_tool import redact_line
+    # wac-094 (review wac-092 🟡-2): what an earlier probe left behind when it was SIGKILLed
+    scan_probe_residue(Path(tempfile.gettempdir()))
+    if probe_file.exists() or probe_file.is_symlink():
+        run.restore()
+        print(f"CADDY_PROBE_FAILED {probe_file.name} already exists next to the copy (an earlier probe was killed or ran with --keep; "
+              "it holds the bcrypt hash): read it if needed, delete it, then rerun")
+        return 1
     cand_sha, snip_sha = _sha256_file(copy_path), _sha256_file(staged)
     ident = f"candidate_sha256={cand_sha} snippet_sha256={snip_sha}"
     print(f"PROBE_INPUT {ident}  (stage C C-1: --probe-candidate-sha256 {cand_sha} --probe-snippet-sha256 {snip_sha})")
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from o0_tool import redact_line
-    probe_file = copy_path.with_name(copy_path.name + ".o0probe")
-    run = _ProbeRun(probe_file, args.keep)
     hits: list = []
     fails: list[str] = []
     n, version, verify_passes = 0, "?", 0
     interrupted: int | None = None
-    run.install()
     try:
         # everything that writes (the .o0probe copy holds the bcrypt hash, the temp dir the pinned JSON)
         # or starts a process is inside this try and registered with `run` first (review wac-090 🟡-4)
@@ -2039,9 +2374,7 @@ def cmd_probe(args: argparse.Namespace) -> int:
         port, hp, hsp = _free_port(), _free_port(), _free_port()
         original = copy_path.read_text(encoding="utf-8")
         text = probe_caddyfile(original, args.site_address, port, hp, hsp, host)
-        fd = os.open(probe_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
+        run.write_probe_file(text)
         diff = [redact_line(d) for d in difflib.unified_diff(original.splitlines(), text.splitlines(), "production-copy", "probe", n=0, lineterm="")]
         print("---- probe copy vs production copy (line diff, redacted)")
         print("\n".join(diff))
@@ -2238,6 +2571,33 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         except Uncomparable:
             return
         raise AssertionError(("must be uncomparable", fn.__name__, a))
+
+    # 1b'. wac-094 (review wac-092 🟡-1): step 1 over the whole /m/v1/watcher prefix space, not over samples.
+    # v15..v20 of the review (a concrete parameter value, suffix and middle globs, an unanchored regexp) hit;
+    # patterns whose literal part rules the space out do not.
+    for pattern in ("/m/v1/watcher/trading/accounts/account-a", "/m/v1/watcher/media/*.png", "*/risks/btcusdt",
+                    "/m/v1/watcher/trading/accounts/a*", "/m/v1/watcher/trading/channels/[0-9]*", "*.png", "*.PNG", "*watcher*",
+                    "?m/v1/x", "[/]m/v1/watcher", "/M/V1/WATCHER/X", "/m/*", "/*", "*", "/m/v1/watcher", "/m/v1/watcher/*/x",
+                    "/m/v1/*/status", "/m/v1/watch*", "/m/v1/watcher%2fstatus", "/m/v1/{http.vars.x}", "/m//v1/x", "/m/v1/watcİer"):
+        assert _path_pattern_may_hit_space(pattern), ("path pattern must hit the prefix space", pattern)
+        checks += 1
+    for pattern in ("/static/?ld", "/old/*", "/m/v1/w?tcher*", "/m/v1/watcherx*", "/m/v1/other", "/v1/*", "/m/v1/accounts",
+                    "/m/v1/operator/orders/*", "/watcher/*", "/api/*", "/media/*", "/healthz", "/m/v1/watcherx/*", "/m/v2/*"):
+        assert not _path_pattern_may_hit_space(pattern), ("path pattern cannot hit the prefix space", pattern)
+        checks += 1
+    for pattern in ("account-a$", "%2[fF]", "^.*watcher", "^/(m|x)/", "^/api|watcher", "(?i)^/M/", "^(?i)/api", "^/M",
+                    "^/m/v1/watcher/trading/accounts/account-a$", "^/mx?", "^\\/m\\/v1", "^", "^/m/v1/watcher\\n", "^[/]m", "^/m/v1/watcher$"):
+        assert _regexp_may_hit_space(pattern), ("path_regexp must hit the prefix space", pattern)
+        checks += 1
+    for pattern in ("^/static/", "^/m/v1$", "^/api/(a|b)", "^\\/api\\/", "^/m/v1/watcherx", "^/v1/watcher/", "^/static/.*\\.js$"):
+        assert not _regexp_may_hit_space(pattern), ("path_regexp cannot hit the prefix space", pattern)
+        checks += 1
+    assert _mset_may_hit_space({"method": ["PUT"], "path": ["/m/v1/watcher/trading/accounts/a*"]}, "jp-bot.balen.wang", False)
+    assert not _mset_may_hit_space({"method": ["PUT"], "path": ["/old/*"]}, "jp-bot.balen.wang", False)
+    assert not _mset_may_hit_space({"host": ["other.example"], "path": ["*.png"]}, "jp-bot.balen.wang", True)
+    assert _mset_may_hit_space({"host": ["other.example"], "path": ["*.png"]}, "jp-bot.balen.wang", False)
+    assert _may_hit_space(None, "jp-bot.balen.wang") and _may_hit_space([{"not": [{"path": ["/x"]}]}], "jp-bot.balen.wang")
+    checks += 1
 
     # 1c. wac-092 (review wac-090 🟡-1): non-ASCII. The reviewer's 12 dangerous black-box cases (tool "no hit",
     # real Caddy v2.10.2 "hit"; all U+0130, which Go lower-cases to 'i') plus other shapes: UNCOMPARABLE = hit
@@ -2565,6 +2925,22 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         # isolated: a /m/* forwarder to operator-query for another name after the fallback: only the forwarder check's host rule
         "operator-query forwarder of /m/* behind a host matcher for another name": lambda s: s.insert(fb(s) + 1, strip_proxy_route(
             [{"host": ["alias.balen.wang"], "path": ["/m/*"]}])),
+        # wac-094 (review wac-092 🟡-1, v15..v20): matchers that miss every sample path but select other parameter values,
+        # suffixes or cases of table paths; each injects the observer token
+        "v15 request_header on one account id (…/accounts/account-a)": lambda s: s.insert(0, {
+            "match": [{"path": ["/m/v1/watcher/trading/accounts/account-a"]}], "handle": [inject_observer()]}),
+        "v16 request_header on media/*.png": lambda s: s.insert(0, {"match": [{"path": ["/m/v1/watcher/media/*.png"]}], "handle": [inject_observer()]}),
+        "v17 request_header on an unanchored path_regexp account-a$": lambda s: s.insert(0, {
+            "match": [{"path_regexp": {"name": "x", "pattern": "account-a$"}}], "handle": [inject_observer()]}),
+        "v18 request_header on */risks/btcusdt": lambda s: s.insert(0, {"match": [{"path": ["*/risks/btcusdt"]}], "handle": [inject_observer()]}),
+        "v19 request_header on PUT …/accounts/a*": lambda s: s.insert(0, {
+            "match": [{"method": ["PUT"], "path": ["/m/v1/watcher/trading/accounts/a*"]}], "handle": [inject_observer()]}),
+        "v14 request_header on path_regexp %2[fF]": lambda s: s.insert(0, {
+            "match": [{"path_regexp": {"name": "x", "pattern": "%2[fF]"}}], "handle": [inject_observer()]}),
+        "v20 rewrite on …/channels/[0-9]* (literal prefix; a channel id may start with it)": lambda s: s.insert(0, {
+            "match": [{"path": ["/m/v1/watcher/trading/channels/[0-9]*"]}], "handle": [{"handler": "rewrite", "uri": "/index.html"}]}),
+        # isolated: dead forwarder of *.png to operator-query after the fallback (only the forwarder check's space rule)
+        "dead *.png forwarder to operator-query after the fallback": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["*.png"]}])),
     }
     caught = 0
     # a handler before the site's subroute inside the host route runs for every request (F-13, enclosing level)
@@ -2603,6 +2979,14 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         "'?' in a one-star prefix pattern is literal in Caddy": lambda s: s.insert(0, {"match": [{"path": ["/m/v1/w?tcher*"]}], "handle": [
             {"handler": "rewrite", "uri": "/index.html"}]}),
         "mobile handle spelled localhost:8183": lambda s: s[-4]["handle"][0]["routes"][0]["handle"][1]["upstreams"][0].update({"dial": "localhost:8183"}),
+        # wac-094: a suffix glob hits the prefix space, but a response-only header on it is whitelisted (the review's
+        # "@static path *.js *.css" expectation); a regexp whose literal prefix rules the space out passes step 1
+        "static suffix globs with a response header only": lambda s: s.insert(0, {"match": [{"path": ["*.js", "*.css"]}], "handle": [
+            {"handler": "headers", "response": {"set": {"Cache-Control": ["max-age=3600"]}}}]}),
+        "rewrite on an anchored regexp with an alternation inside a group": lambda s: s.insert(0, {"match": [{"path_regexp": {"name": "a",
+            "pattern": "^/api/(v1|v2)/old$"}}], "handle": [{"handler": "rewrite", "uri": "/api/new"}]}),
+        "redir on /m/v1/watcherx* (a fast prefix outside the space)": lambda s: s.insert(0, {"match": [{"path": ["/m/v1/watcherx*"]}], "handle": [
+            {"handler": "static_response", "status_code": 308}]}),
     }
     for name, fn in benign.items():
         cfg = mutated(fn)
@@ -2679,6 +3063,16 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     # wac-092 (🟡-3): the probe site keeps the production name (Host-dependent routes behave as in production)
     assert "\nhttp://jp-bot.balen.wang:1 {\n" in text_probe, text_probe
     assert "\nhttp://alias.balen.wang:1 {\n" in probe_caddyfile("jp-bot.balen.wang {\n\trespond 204\n}\n", "jp-bot.balen.wang", 1, 2, 3, "alias.balen.wang")
+    # wac-094 (PC-3): site headers spelled with an adapt-time placeholder, a scheme, a port or several addresses
+    for header, token in (("{$CADDY_DOMAIN} {", "{$CADDY_DOMAIN}"), ("https://jp-bot.balen.wang {", "https://jp-bot.balen.wang"),
+                          ("jp-bot.balen.wang:443 {", "jp-bot.balen.wang:443"), ("jp-bot.balen.wang, alias.balen.wang {", "jp-bot.balen.wang")):
+        got = probe_caddyfile("{\n\temail x@example.invalid\n}\n" + header + "\n\trespond 204\n}\n", token, 1, 2, 3, "jp-bot.balen.wang")
+        assert "\nhttp://jp-bot.balen.wang:1 {\n" in got and header not in got and "\temail x@example.invalid\n" in got, (header, got)
+    try:
+        probe_caddyfile("{$CADDY_DOMAIN} {\n\trespond 204\n}\n", "jp-bot.balen.wang", 1, 2, 3)
+        raise AssertionError("a site address that is not on any header line must fail, not be guessed")
+    except ArtifactError:
+        pass
     for bad_host in ("jp-bot.balen.wang/x", "{http.request.host}", "a b", "-x.example"):
         try:
             probe_caddyfile("jp-bot.balen.wang {\n\trespond 204\n}\n", "jp-bot.balen.wang", 1, 2, 3, bad_host)
@@ -2708,7 +3102,8 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     checks += _selftest_probe_process(args, snippet_path)
     print(f"SELFTEST_OK good_passes={passes} variants_caught={caught}/{len(variants)} (raw and skeleton) benign_two_step={len(benign)} "
           f"checks={checks} lines={len(lines)} list_format=v2 snippet_verbatim=ok re2_pins=ok caddyfile_text=ok skeleton_verify=ok before_deploy_mode=ok "
-          f"probe_pinning=ok matchpath_pins=ok non_ascii=uncomparable double_slash=uncomparable host_matchpins=ok probe_cleanup_signals=ok")
+          f"probe_pinning=ok matchpath_pins=ok non_ascii=uncomparable double_slash=uncomparable host_matchpins=ok probe_cleanup_signals=ok "
+          f"prefix_space=ok probe_residue=ok")
     return 0
 
 
@@ -2765,6 +3160,7 @@ def _selftest_probe_process(args: argparse.Namespace, snippet_path: Path) -> int
     import io
     base = Path(tempfile.mkdtemp(prefix="o0-probe-selftest-"))
     checks = 0
+    helpers: list[subprocess.Popen] = []
     try:
         work = base / "copy"
         work.mkdir()
@@ -2853,8 +3249,110 @@ def _selftest_probe_process(args: argparse.Namespace, snippet_path: Path) -> int
         scenario("SIGHUP-then-SIGINT-in-cleanup", "slow-requests slow-stop", [("request", signal.SIGHUP), ("stopping", signal.SIGINT)],
                  128 + signal.SIGINT, "CADDY_PROBE_INTERRUPTED signal=SIGINT during cleanup")
         checks += 5
+        checks += _selftest_probe_residue(args, snippet_path, base, work, fake, probe_file, alive, helpers)
     finally:
+        for proc in helpers:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
         shutil.rmtree(base, ignore_errors=True)
+    return checks
+
+
+def _selftest_probe_residue(args: argparse.Namespace, snippet_path: Path, base: Path, work: Path, fake: Path, probe_file: Path,
+                            alive, helpers: list) -> int:
+    """wac-094 (review wac-092 🟡-2): SIGKILL of the probe leaves .o0probe, the temporary dir and a running
+    (fake) Caddy; the next probe run reports and cleans exactly those (owner record), and leaves alone a
+    directory without an owner record, a directory whose probe is still running, and a process it cannot
+    prove to be its own. A leftover .o0probe without a record makes the probe refuse to run."""
+    checks = 0
+    tmp, mark = base / "tmp-sigkill", base / "mark-sigkill"
+    tmp.mkdir()
+    mark.write_text("")
+    cmd = [sys.executable, str(Path(__file__).resolve()), "probe", "--caddy", str(fake), "--caddyfile", str(work / "Caddyfile"),
+           "--paths", str(args.paths), "--snippet", str(snippet_path)]
+    env = {**os.environ, "TMPDIR": str(tmp), "O0_FAKE_MODE": "slow-requests", "O0_FAKE_MARK": str(mark)}
+    proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    helpers.append(proc)
+    deadline = time.monotonic() + 30
+    while "request" not in mark.read_text() and proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert "request" in mark.read_text(), "SIGKILL scenario: the live checks never started"
+    proc.kill()
+    proc.wait()
+    run_pid = next(int(x.split()[1]) for x in mark.read_text().splitlines() if x.startswith("run "))
+    left = sorted(tmp.glob(PROBE_TMP_PREFIX + "*"))
+    assert probe_file.exists() and len(left) == 1 and (left[0] / OWNER_FILE).is_file() and alive(run_pid), \
+        ("SIGKILL must leave the residue this test then expects to be cleaned", probe_file.exists(), left, alive(run_pid))
+    killed_dir = left[0]
+    checks += 1
+    # not this tool's (no owner record) and a process that only names the prefix: reported, never touched
+    foreign = tmp / (PROBE_TMP_PREFIX + "foreign1")
+    foreign.mkdir()
+    (foreign / "probe-run.json").write_text("{}")
+    ghost = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", str(tmp / (PROBE_TMP_PREFIX + "ghost1") / "probe-run.json")],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    helpers.append(ghost)
+    # a directory whose probe is still running (a process whose command line carries the script name)
+    busy_owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", PROBE_SCRIPT_MARK + "-busy"],
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    helpers.append(busy_owner)
+    busy = tmp / (PROBE_TMP_PREFIX + "busy1")
+    busy.mkdir()
+    (busy / OWNER_FILE).write_text(json.dumps({"format": OWNER_FORMAT, "probe_pid": busy_owner.pid, "probe_file": str(base / "nope.o0probe"),
+                                               "probe_file_sha256": None, "pids": []}))
+    time.sleep(0.2)
+    mark.write_text("")
+    env2 = {**env, "O0_FAKE_MODE": ""}
+    out = subprocess.run(cmd, env=env2, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120).stdout
+    deadline = time.monotonic() + 5
+    while alive(run_pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    problems = []
+    if not re.search(rf"^PROBE_RESIDUE_CLEANED dir={re.escape(killed_dir.name)} processes_stopped=1 o0probe=removed dir_removed=True$", out, re.M):
+        problems.append("no CLEANED line for the killed probe's dir")
+    if alive(run_pid):
+        problems.append("the killed probe's Caddy is still running")
+    if killed_dir.exists():
+        problems.append("the killed probe's dir is still there")
+    if not re.search(rf"^PROBE_RESIDUE_FOREIGN dir={PROBE_TMP_PREFIX}foreign1: ", out, re.M) or not (foreign / "probe-run.json").exists():
+        problems.append("foreign dir not reported or touched")
+    if not re.search(rf"^PROBE_RESIDUE_BUSY dir={PROBE_TMP_PREFIX}busy1: its probe \(pid {busy_owner.pid}\)", out, re.M) or not busy.exists():
+        problems.append("busy dir not reported or touched")
+    if not re.search(rf"^PROBE_RESIDUE_ORPHAN pid={ghost.pid}: ", out, re.M) or ghost.poll() is not None:
+        problems.append("orphan not reported or touched")
+    if not re.search(r"^PROBE_RESIDUE_SCAN cleaned=1 busy=1 foreign=1 orphans=[1-9][0-9]* unproven=0$", out, re.M):
+        problems.append("scan summary")
+    if "CADDY_PROBE_FAILED caddy=v2.10.2" not in out:     # the fake Caddy answers 200 everywhere: checks fail, as in R06
+        problems.append("the second run did not run to the end")
+    if probe_file.exists() or sorted(p.name for p in tmp.iterdir()) != sorted([foreign.name, busy.name]):
+        problems.append(f"after the second run: o0probe={probe_file.exists()} tmp={sorted(p.name for p in tmp.iterdir())}")
+    assert not problems, ("residue scan", problems, out[-2500:])
+    checks += 1
+    # a .o0probe without a record: refuse (it may be a --keep copy the user still reads), leave it alone
+    shutil.rmtree(foreign)
+    shutil.rmtree(busy)
+    probe_file.write_text("left by --keep")
+    r = subprocess.run(cmd, env=env2, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 1 and "CADDY_PROBE_FAILED Caddyfile.o0probe already exists" in r.stdout and probe_file.read_text() == "left by --keep" \
+        and not any(tmp.iterdir()), ("leftover .o0probe must stop the probe", r.returncode, r.stdout[-800:])
+    probe_file.unlink()
+    checks += 1
+    # a recorded .o0probe whose content changed since (not provably ours any more): the dir goes, the file stays
+    d = tmp / (PROBE_TMP_PREFIX + "stale1")
+    d.mkdir()
+    probe_file.write_text("edited")
+    (d / OWNER_FILE).write_text(json.dumps({"format": OWNER_FORMAT, "probe_pid": 2 ** 22 + 7, "probe_file": str(probe_file),
+                                            "probe_file_sha256": hashlib.sha256(b"original").hexdigest(), "pids": []}))
+    lines: list[str] = []
+    scan_probe_residue(tmp, out=lines.append)
+    assert any(l.startswith(f"PROBE_RESIDUE_CLEANED dir={d.name} processes_stopped=0 o0probe=kept") for l in lines) and probe_file.exists() \
+        and not d.exists(), ("changed .o0probe must be kept", lines)
+    probe_file.unlink()
+    checks += 1
+    for h in (ghost, busy_owner):
+        h.kill()
+        h.wait()
     return checks
 
 

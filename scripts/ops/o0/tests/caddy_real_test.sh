@@ -34,6 +34,13 @@
 #      (R06); SIGTERM during `caddy adapt`, SIGINT while `caddy run` starts, SIGTERM while the
 #      cleanup waits for Caddy, SIGHUP then SIGINT: each leaves no .o0probe, no temporary dir, no
 #      wrapper or Caddy process; the caller's proxy/OTEL_* variables never reach Caddy (R10).
+#   6. wac-094 (review wac-092 🟡-1, 🟡-2): v14..v20 (a concrete parameter value, media/*.png, an unanchored
+#      path_regexp, */risks/btcusdt, method PUT + …/accounts/a*, %2[fF], …/channels/[0-9]*) and a dead *.png
+#      forwarder written as real Caddyfiles: verify FAILS; *.js/*.css with a response header and an anchored
+#      regexp elsewhere: verify passes; v15..v19 as probe copies fail in verify AND in the live checks (the probe
+#      sends every parameter line with PROBE_PARAM_VALUES); a wrapper that injects on media/*.png in the RUN config
+#      only is caught by the live checks alone; SIGKILL of the probe leaves .o0probe, the temporary dir and a running
+#      Caddy, and the next probe run with the same TMPDIR stops that Caddy, removes both and passes.
 # Local only: 127.0.0.1 ports, a temporary directory, a random one-off basic-auth password.
 set -eo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,7 +51,9 @@ CADDY="$O0_CADDY_BIN"
 "$CADDY" version | grep -q '^v2\.10\.2 ' || { echo "CADDY_REAL_TEST_FAILED need Caddy v2.10.2 (got $("$CADDY" version | cut -d' ' -f1))"; exit 1; }
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/o0-caddy-real.XXXXXX")"
 CAN_PID=""
-trap '[ -z "$CAN_PID" ] || kill "$CAN_PID" 2>/dev/null; rm -rf "$WORK"' EXIT
+# wac-094: besides the canary, stop anything whose command line still names this work dir (a SIGKILLed probe's Caddy
+# if a check below failed half-way); only processes of this test run can carry the random $WORK path
+trap '[ -z "$CAN_PID" ] || kill "$CAN_PID" 2>/dev/null; for p in $(pgrep -f "$WORK/" 2>/dev/null); do kill -9 "$p" 2>/dev/null; done; rm -rf "$WORK"' EXIT
 T=(python3 "$O0/o0_caddy_watcher_routes.py")
 PATHS="$REPO/contracts/generated/caddy-watcher-gateway-paths.txt"
 SNIP="$REPO/contracts/generated/caddy-watcher-gateway.caddy"
@@ -118,6 +127,17 @@ bad("double-slash-forwarder", good.replace(site_import, site_import + "\thandle 
 bad("host-middle-wildcard-inject", good.replace(site_import, site_import + f"\t@h host jp-bot.*.wang\n\trequest_header @h {obs}\n"))
 bad("host-placeholder-inject", good.replace(site_import, site_import + f"\t@h host {{http.request.host}}\n\trequest_header @h {obs}\n"))
 bad("host-alias-redir-conservative", good.replace(site_import, site_import + "\t@alias host alias.balen.wang\n\tredir @alias https://jp-bot.balen.wang{uri}\n"))
+# wac-094 (review wac-092 🟡-1, v14..v20): a concrete parameter value, suffix / middle globs, unanchored regexps
+bad("v15-param-value-inject", good.replace(site_import, site_import + f"\t@x path /m/v1/watcher/trading/accounts/account-a\n\trequest_header @x {obs}\n"))
+bad("v16-media-png-inject", good.replace(site_import, site_import + f"\t@x path /m/v1/watcher/media/*.png\n\trequest_header @x {obs}\n"))
+bad("v17-regexp-unanchored-inject", good.replace(site_import, site_import + f"\t@x path_regexp account-a$\n\trequest_header @x {obs}\n"))
+bad("v18-middle-glob-inject", good.replace(site_import, site_import + f"\t@x path */risks/btcusdt\n\trequest_header @x {obs}\n"))
+bad("v19-method-param-glob-inject", good.replace(site_import, site_import + f"\t@x {{\n\t\tmethod PUT\n\t\tpath /m/v1/watcher/trading/accounts/a*\n\t}}\n\trequest_header @x {obs}\n"))
+bad("v14-regexp-pct-inject", good.replace(site_import, site_import + f"\t@x path_regexp %2[fF]\n\trequest_header @x {obs}\n"))
+bad("v20-channels-literal-prefix-rewrite", good.replace(site_import, site_import + "\trewrite /m/v1/watcher/trading/channels/[0-9]* /index.html\n"))
+bad("png-forwarder-dead", good.replace(site_import, site_import + "\t@png path *.png\n\thandle @png {\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n"))
+fine("static-suffix-response-header", good.replace(site_import, site_import + "\t@static path *.js *.css\n\theader @static Cache-Control max-age=3600\n"))
+fine("regexp-anchored-elsewhere-rewrite", good.replace(site_import, site_import + "\t@old path_regexp ^/api/(v1|v2)/old$\n\trewrite @old /api/new\n"))
 fine("glob-cannot-hit", good.replace(site_import, site_import + "\trewrite /static/?ld /static/old\n"))
 fine("mobile-handle-localhost", good.replace("\t\turi strip_prefix /m\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n\thandle /v1/*",
                                              "\t\turi strip_prefix /m\n\t\treverse_proxy localhost:8183\n\t}\n\thandle /v1/*"))
@@ -196,6 +216,11 @@ def edit(n):
     # wac-092: a header rewrite that only a '//' request (review n08) or only the production Host (n17b) triggers
     # (inject-dslash: a doubled slash only the per-line '//' variants send; inject-dslash-noauth: only when the caller
     # sends NO Authorization, so only the unauthenticated '//' request sees it)
+    # wac-094: only a request for one suffix (review v16 shape) sees it: the per-line parameter values of the probe
+    if mode == "inject-suffix" and isinstance(n.get("routes"), list) and any(
+            "^/m/v1/watcher/status$" == (m.get("path_regexp") or {}).get("pattern") for r in n["routes"] for m in r.get("match") or []):
+        n["routes"].insert(0, {"match": [{"path": ["/m/v1/watcher/media/*.png"]}],
+                               "handle": [{"handler": "headers", "request": {"set": {"Authorization": ["Bearer injected"]}}}]})
     if mode in ("inject-dslash", "inject-dslash-noauth", "inject-host") and isinstance(n.get("routes"), list) and any(
             "^/m/v1/watcher/status$" == (m.get("path_regexp") or {}).get("pattern") for r in n["routes"] for m in r.get("match") or []):
         match = {"inject-dslash": {"path": ["/m/v1//watcher/status"]},
@@ -285,7 +310,7 @@ else bad "canary: rc=$rc canary_requests=$(grep -c . "$WORK/canary.log" || true)
 
 # 4c. live checks alone (the wrapper edits only the RUN config; verify passed): G26 fallback body, Authorization rewrite
 PT3="$WORK/ptmp3"; mkdir -p "$PT3"
-for mode in fallback-body inject-auth strip-auth watcherx-to-oq inject-dslash inject-dslash-noauth inject-host; do
+for mode in fallback-body inject-auth strip-auth watcherx-to-oq inject-dslash inject-dslash-noauth inject-host inject-suffix; do
   rc=0; TMPDIR="$PT3" O0_WRAP_MODE="$mode" probe --caddy "$WRAP" --caddyfile "$WORK/Caddyfile" > "$WORK/probe-$mode.txt" 2>&1 || rc=$?
   case "$mode" in
     fallback-body) want='^FAIL fallback .* -> 404 body=1B' ;;
@@ -293,7 +318,8 @@ for mode in fallback-body inject-auth strip-auth watcherx-to-oq inject-dslash in
     watcherx-to-oq) want="^FAIL GET '/m/v1/watcherx' -> 200 reached operator-query or the watcher" ;;
     inject-dslash) want="^FAIL forward GET '/m/v1//watcher/status'.*Authorization changed" ;;   # wac-092 🟡-2
     inject-dslash-noauth) want="^FAIL forward GET '/m//v1/watcher/trading/accounts': the caller's Authorization changed" ;;
-    inject-host) want="^FAIL forward GET '/m/v1/watcher/status'.*Authorization changed" ;;                  # wac-092 🟡-3 (Host kept)
+    inject-host) want="^FAIL forward GET '/m/v1/watcher/dialogs'.*Authorization changed" ;;                 # wac-092 🟡-3 (Host kept; first line, the print cap is 40)
+    inject-suffix) want="^FAIL forward GET '/m/v1/watcher/media/x.png'.*Authorization changed" ;;           # wac-094 🟡-1 (parameter values)
   esac
   # R06 (review wac-090 🟡-5): a probe whose checks FAIL also removes the .o0probe copy and its temporary dir
   if [ "$rc" != 0 ] && grep -q '^CADDY_PROBE_FAILED' "$WORK/probe-$mode.txt" && grep -Eq "$want" "$WORK/probe-$mode.txt" && ! grep -q '^FAIL verify:' "$WORK/probe-$mode.txt" \
@@ -311,7 +337,12 @@ else bad "§2.3 copy rc=$rc"; grep -E '^FAIL|CADDY_PROBE' "$WORK/probe-inject.tx
 # 4d'. wac-092 (review wac-090 n07, n08, n17b): as probe copies, verify AND the live checks each refuse them
 for spec in "nonascii-dotted-i-inject|forward GET '/m/v1/watcher/trading/accounts'" \
             "double-slash-inject|forward GET '/m//v1/watcher/trading/accounts'" \
-            "host-middle-wildcard-inject|forward GET '/m/v1/watcher/status'"; do
+            "host-middle-wildcard-inject|forward GET '/m/v1/watcher/dialogs'" \
+            "v15-param-value-inject|forward PUT '/m/v1/watcher/trading/accounts/account-a'" \
+            "v16-media-png-inject|forward GET '/m/v1/watcher/media/x.png'" \
+            "v17-regexp-unanchored-inject|forward DELETE '/m/v1/watcher/trading/accounts/account-a'" \
+            "v18-middle-glob-inject|forward DELETE '/m/v1/watcher/trading/risks/BTCUSDT'" \
+            "v19-method-param-glob-inject|forward PUT '/m/v1/watcher/trading/accounts/account-a'"; do
   n="${spec%%|*}"; want="${spec#*|}"
   rc=0; probe --caddy "$CADDY" --caddyfile "$WORK/bad-$n.Caddyfile" > "$WORK/probe-$n.txt" 2>&1 || rc=$?
   if [ "$rc" != 0 ] && grep -q '^FAIL verify:' "$WORK/probe-$n.txt" && grep -q "^FAIL $want.*Authorization changed" "$WORK/probe-$n.txt" \
@@ -360,6 +391,29 @@ sig_case adapt-sigterm adapt-slow 143 '^CADDY_PROBE_INTERRUPTED signal=SIGTERM:'
 sig_case run-sigint run-wait 130 '^CADDY_PROBE_INTERRUPTED signal=SIGINT:' run:INT
 sig_case cleanup-sigterm slow-stop 143 '^CADDY_PROBE_INTERRUPTED signal=SIGTERM during cleanup' stopping:TERM
 sig_case sighup-then-sigint "run-wait slow-stop" 130 '^CADDY_PROBE_INTERRUPTED signal=SIGINT during cleanup' run:HUP stopping:INT
+
+# 4f'. wac-094 (review wac-092 🟡-2): SIGKILL of the probe leaves the .o0probe, the temporary dir and a RUNNING Caddy
+# (its own session); the next probe run with the same TMPDIR reports and cleans exactly those (owner record), then passes.
+PK="$WORK/ptkill"; MK="$WORK/mark-kill"; mkdir -p "$PK"; : > "$MK"
+TMPDIR="$PK" O0_WRAP_SIG=kill9 O0_WRAP_MARK="$MK" "${T[@]}" probe --paths "$PATHS" --snippet "$SNIP" --caddy "$WRAP" \
+  --caddyfile "$WORK/Caddyfile" > "$WORK/probe-kill1.txt" 2>&1 &
+kpid=$!
+for _ in $(seq 400); do grep -q '^run ' "$MK" && break; kill -0 "$kpid" 2>/dev/null || break; sleep 0.02; done
+kill -9 "$kpid" 2>/dev/null || true; wait "$kpid" 2>/dev/null || true
+cpid="$(awk '$1=="run"{print $2}' "$MK" | head -1)"
+kdir="$(ls -d "$PK"/o0-caddy-probe-xdg-* 2>/dev/null | head -1)"
+if [ -n "$cpid" ] && kill -0 "$cpid" 2>/dev/null && [ -e "$WORK/Caddyfile.o0probe" ] && [ -n "$kdir" ] && [ -f "$kdir/o0-probe-owner.json" ]; then
+  ok "SIGKILL of the probe leaves .o0probe, $(basename "$kdir") with its owner record and a running Caddy (pid $cpid) - the documented gap"
+else bad "SIGKILL residue setup: caddy=${cpid:-none} alive=$(kill -0 "${cpid:-0}" 2>/dev/null && echo y || echo n) o0probe=$([ -e "$WORK/Caddyfile.o0probe" ] && echo y || echo n) dir=${kdir:-none}"; fi
+rc=0; TMPDIR="$PK" probe --caddy "$CADDY" --caddyfile "$WORK/Caddyfile" > "$WORK/probe-kill2.txt" 2>&1 || rc=$?
+for _ in $(seq 100); do kill -0 "${cpid:-0}" 2>/dev/null || break; sleep 0.05; done
+if [ "$rc" = 0 ] && grep -q '^CADDY_PROBE_OK' "$WORK/probe-kill2.txt" \
+   && grep -Eq "^PROBE_RESIDUE_CLEANED dir=$(basename "${kdir:-none}") processes_stopped=1 o0probe=removed dir_removed=True\$" "$WORK/probe-kill2.txt" \
+   && ! kill -0 "${cpid:-0}" 2>/dev/null && [ ! -e "$WORK/Caddyfile.o0probe" ] && [ -z "$(find "$PK" -mindepth 1 -print -quit)" ] \
+   && [ -z "$(pgrep -f "$PK/" 2>/dev/null)" ]; then
+  ok "next probe run: $(grep -m1 '^PROBE_RESIDUE_SCAN' "$WORK/probe-kill2.txt"); the orphan Caddy stopped, .o0probe and the dir removed, then CADDY_PROBE_OK"
+else bad "residue cleanup rc=$rc caddy_alive=$(kill -0 "${cpid:-0}" 2>/dev/null && echo y || echo n) o0probe=$([ -e "$WORK/Caddyfile.o0probe" ] && echo LEFT || echo gone) tmp=[$(ls -A "$PK" | tr '\n' ' ')]"
+  grep -E '^PROBE_RESIDUE|CADDY_PROBE' "$WORK/probe-kill2.txt" | head -8; kill -9 "${cpid:-0}" 2>/dev/null || true; rm -f "$WORK/Caddyfile.o0probe"; fi
 
 # 4g. R10 (review wac-090 🟡-5): the caller's proxy and OTEL_* variables never reach the probe's Caddy
 EL="$WORK/wrap-env.log"; : > "$EL"

@@ -1,4 +1,4 @@
-# O-0 分阶段部署 runbook（wac-032 草案，wac-045 修订，wac-060 适配 WGW-1.0.2，wac-090 收紧 Caddy 核对）
+# O-0 分阶段部署 runbook（wac-032 草案，wac-045 修订，wac-060 适配 WGW-1.0.2，wac-090、wac-092、wac-094 收紧 Caddy 核对）
 
 > 草案。**没有执行任何生产动作**。每个带 O0-Axx 的步骤都要用户逐项授权后才执行（`o0-authorization-list.md`）；脚本阶段与授权号一一绑定，号不对脚本直接拒绝。
 > 范围：计划 §4.1 第 1 步"新增并验证"落到 jp-24：watcher 镜像（W-0）、控制面 operator-query（C-0 reader 开关保持关 + C-1 网关）、Caddy（浏览器入口清头注入 + 契约 WGW-1.0.2 的片段 `caddy-watcher-gateway.caddy`：16 条逐路径锚定路由 + 兜底 404）。**app 不需要部署**（A-0 只在 app 集成分支，真机联调另行授权 O0-A10）。快照开关在本 runbook 全程保持关闭；打开开关见 `o0-runbook-snapshot-switch.md`。
@@ -87,6 +87,11 @@ Caddy 只重启一次（阶段 C），operator-query 只重启一次（阶段 O�
    - **匹配器里有任何非 ASCII 字符**（例如 `İ`、开尔文符号 `K`、`ſ`）：Caddy 用 Go 的 `strings.ToLower` 转小写，`İ` 变成 `i`、`K` 变成 `k`，所以 `/m/v1/watcher/tradİng/accounts` 命中表内路径 `/m/v1/watcher/trading/accounts`；肉眼与 Python 都看不出来。
    - **路径里有 `//`**：模式含 `//` 时 Caddy **不合并**请求路径里的重复斜杠，而网关行的 `path_regexp` 总是先 clean。`request_header /m//v1/watcher/trading/accounts …` 对干净路径不生效，却会改写 `GET /m//v1/watcher/trading/accounts` 这个请求，它 clean 之后照样到达网关。
    - **`host` 匹配器里有 `*` 或 `{`**：`*` 按标签逐段比较，可以出现在任意一段（`jp-bot.*.wang` 命中 `jp-bot.balen.wang`）；`{…}` 按请求替换（`{http.request.host}` 命中任何主机）。另外，站点块**里面**的 `host` 匹配器，即使写的是别的名字，也按"可能命中"处理：站点可能应答多个名字，Host 头由调用方决定。
+   **审阅要点补充（U-6，wac-094，审查 wac-093 🟡-1）**：以下三类也一律先当作"可能命中前缀"，写明理由。它们都**没有打中任何固定样本路径**，但真实 Caddy 会对表内路径生效（审查用 v2.10.2 实测注入了 observer token）：
+   - **匹配器写的是某一个具体参数值**：例如 `/m/v1/watcher/trading/accounts/account-a`、`…/risks/BTCUSDT`。表内的 `{account_id}`、`{symbol}`、`{channel_id}`、`{filename}` 可以取任何值，写死一个值照样命中那一次请求。
+   - **后缀 glob 或中段 glob**：例如 `*.png`、`/m/v1/watcher/media/*.png`（`GET /m/v1/watcher/media/x.png` 被注入，而 media 允许 `system_observer`，不带凭据的调用方就能读图）、`*/risks/btcusdt`（匹配不区分大小写）、`/m/v1/watcher/trading/accounts/a*`，以及只有一个尾部 `*` 但前半段写到了参数位置的写法（`…/channels/[0-9]*` 在快速前缀比较里按字面处理，但 channel id 本身就可以以 `[0-9]` 开头）。
+   - **不锚定的 `path_regexp`**：没有以 `^` 开头（`account-a$`、`%2[fF]`）、带 `(?i)` 之类标志、顶层有 `|`（`^/api|watcher` 等于"以 /api 开头或含 watcher"），或 `^` 之后的字面前缀可能是 `/m/v1/watcher…` 的开头。
+   wac-094 起 verify 的遮蔽第 1 步不再只拿样本比较，而是按**整个 `/m/v1/watcher` 前缀空间**判定（任何参数值、任何后缀、任何大小写）：上面三类在 verify 里一律算命中；只有字面部分能排除整个前缀空间的写法（`/static/?ld`、`/old/*`、`^/static/`、`/m/v1/watcherx*`）才算不命中。`@static path *.js *.css` 配只改响应头的 `header` 仍然通过（白名单）。探针另外对每条带参数的清单行用一组常见取值（`account-a`、`ACCOUNT-A`、`BTCUSDT`、`btcusdt`、`-1001234567890`、`x.png`、`x.PNG`、`x.jpg`、长值、带点的值等 35 个）逐个方法各发一次。人工记录仍是第二道。
    verify 自 wac-090 起按 Caddy v2.10.2 `MatchPath` 的算法判定 `?`、`[...]`、`\`。执行者当时做的 18 万组差分**只用了 ASCII 字母表**，所以没有发现非 ASCII 的分歧；审查 wac-091 用真实 Caddy 做黑盒差分（69,750 组，含非 ASCII），发现 12 处漏判，全部来自 `İ`。wac-092 起，占位符、`%`、写坏的 glob、**任何非 ASCII 字符、`//`** 在遮蔽第 1 步一律算命中，在逐行模拟里判 UNCOMPARABLE；`host` 只在 server 顶层（选站点）按 Caddy `MatchHost` 比较，站点内的 `host` 匹配器从不排除。同一黑盒差分在 wac-092 上复跑：危险分歧 0 处。人工记录仍是契约要求的第二道，审阅时不因"工具已通过"而跳过这几类写法。
 5. 在现有 watcher basicauth handle 内、`basic_auth` 之后、`reverse_proxy` 之前加入（保持现有匹配器与 `uri strip_prefix /watcher` 不变）：
 
@@ -105,10 +110,17 @@ Caddy 只重启一次（阶段 C），operator-query 只重启一次（阶段 O�
 
    说明：`request_header` 在指令顺序上先于 `reverse_proxy` 执行，所以是"先清后注入"；浏览器的 basic `Authorization` 必须清掉（核对工具要求这一项）。**不要**在 `reverse_proxy` 里写 `header_up -X-Watcher-*`。必须用运行时占位符 `{env.…}`，不能用 `{$…}`。这几行在 basicauth handle **内部**，不是站点顶层，不属于第 4 条的记录范围。
 6. 若 S-03 显示 `/media/*` 目前不走 basicauth 块，而站点要显示图片，把 `/media/*` 并入 basicauth 块的匹配器。
-7. **本机 Caddy 探针（非生产，F-12、F-13 (3)；授权 O0-A05P，见授权清单；wac-090 重写，wac-092 收紧）**：**时机**：只在 wac-092 经 Reviewer PASS 并合入集成分支之后申请（在那之前，审查 wac-090 的 n08、n17b 这类注入探针看不见，而探针完成后副本即被删除，修完还得重新放一次副本）。在 C-1 之前，用与生产同版本的 Caddy（S-01 的 `caddy version`，当前按 v2.10.2 准备）对**候选 Caddyfile 的副本**跑探针。副本含 basic auth 的 bcrypt 哈希，所以副本怎么离开 jp-24 需要用户选定：
+7. **本机 Caddy 探针（非生产，F-12、F-13 (3)；授权 O0-A05P，见授权清单；wac-090 重写，wac-092、wac-094 收紧）**：**时机**：只在 wac-094 经 Reviewer PASS 并合入集成分支之后申请（在那之前，审查 wac-093 的 v15–v19 这类只对某个参数值、后缀或不锚定正则生效的注入，verify 与探针都看不见；而探针完成后副本即被删除，修完还得重新放一次副本）。在 C-1 之前，用与生产同版本的 Caddy（S-01 的 `caddy version`，当前按 v2.10.2 准备）对**候选 Caddyfile 的副本**跑探针。副本含 basic auth 的 bcrypt 哈希，所以副本怎么离开 jp-24 需要用户选定：
    - **推荐方案 (b)：用户自己放置副本。** 用户在本机建一个 0700 目录（例如 `~/o0-a05p-<UTC>/`：不在任何 git 仓库里、不在同步盘里），把 jp-24 上的 `$S/caddy/Caddyfile.candidate` 原样拷进去（文件名不变），再把本仓库的 `contracts/generated/caddy-watcher-gateway.caddy`（与 bundle 里的片段逐字节相同）放在同一目录。**Agent 不连 jp-24、不取副本、不打开或打印副本**；探针由用户运行，或由用户明确同意的执行者只运行下面这一条命令、只看它的输出（输出不含哈希，`caddy_real_test.sh` 对每一次探针输出都断言没有 `$2a$`）。
    - 方案 (a)：执行者用 `scp -P 53222` 取回副本。只在用户**另行授权** Agent 以 SSH 读取 jp-24、并接受哈希落到开发机时使用；本机目录与删除要求同 (b)。
    - 两种方案的共同前提：若 S-02/S-03 显示 Caddyfile 里有字面的头值或 token（`<literal len=N>` 而不是 `{env.…}` 占位符），副本就含明文凭据，**两种方案都先停下**，由用户决定是否先把字面值改成占位符。
+
+   **探针前确认项 PC-1…PC-5（审查 wac-093 §9 的 C-1…C-5；为免与阶段 C 的"C-1 前置门禁"混淆，本文改称 PC）**：放副本之前逐项确认，记进 O0-A05P 的授权记录。任一项答不上来就先停。
+   - **PC-1 生产 Caddy 版本**：S-01 的 `caddy version` 必须是 v2.10.2（探针用的二进制也必须是同一版本；探针会打印 `caddy version`）。版本不同，探针与 verify 的结论都不作数：先用同版本二进制重跑，或报 Planner 由 Architect 重新评估匹配语义。
+   - **PC-2 jp-bot 站点块里有没有 `host` 匹配器**（O0-A01 S-03 的 inventory 可以看出来，也可以由用户直接告知）。若有，并且它排在片段之前、用了白名单以外的处理器（`redir`、`rewrite`、`uri`、`respond`、`request_header`、`abort`、`basic_auth`、`reverse_proxy` 等），或者不论位置把流量转发到 8183、9090、9100，verify 会失败。处置是把它移到单独的站点块，这会改变候选，要重新探针；不放宽检查。
+   - **PC-3 站点头那一行的字面写法**：决定 `--site-address` 与 `--host`。裸的 `jp-bot.balen.wang {` 用默认值即可；写成 `{$CADDY_DOMAIN}`、带 scheme（`https://…`）、带端口或多个地址时，探针加 `--site-address <那一行里的字面地址记号> --host jp-bot.balen.wang`（`{$…}` 另加 `--adapt-env NAME=jp-bot.balen.wang`）。探针找不到这个地址记号会失败，不会猜。
+   - **PC-4 副本放置用方案 (b)**，并约定跑完后由用户做三项检查（见下面"完成之后"）：`ls -A` 副本目录、`ls -d "$TMPDIR"/o0-caddy-probe-xdg-*`、`pgrep -fl o0-caddy-probe-xdg`；然后删除副本目录。
+   - **PC-5 生产 Caddyfile 在 `/m/v1/watcher` 前缀下有没有写具体参数值、后缀或中段 glob、不锚定的 `path_regexp` 的匹配器**（第 4 条的 U-6 审阅要点）。wac-094 起 verify 按前缀空间把它们判为命中，这一项是第二道；若有，照实记录并说明它为什么不构成遮蔽，verify 失败时改候选，不放宽检查。
 
    命令（本机，不连 jp-24；探针发现自己跑在有 `/srv/trader-v3` 的主机上会拒绝运行）：
 
@@ -119,13 +131,25 @@ Caddy 只重启一次（阶段 C），operator-query 只重启一次（阶段 O�
    - 在副本旁写 `Caddyfile.candidate.o0probe`（0600）：只改站点地址（wac-092 起 → `http://<生产主机名>:<空闲端口>`，主机名默认取 `--site-address`，即 `jp-bot.balen.wang`，可用 `--host` 指定；监听仍由 `default_bind 127.0.0.1` 限定在回环，之后每个探针请求都带 `Host: <生产主机名>`，站点里依赖 `host` 的路由与生产行为一致）与全局选项 `admin off`、`persist_config off`、`auto_https off`、`default_bind 127.0.0.1`、`http_port`、`https_port`，逐行差异脱敏打印。上游地址**不在文本里改**。
    - 对 `.o0probe` 做 `caddy adapt`，用**生产上游地址与生产主机名**跑与 C-1 相同的 verify（operator-query 按端口 8183 识别，写成 `localhost:8183`、`[::1]:8183` 也算）。
    - 然后生成真正运行的配置：只保留探针站点那一个 server，只监听 `127.0.0.1:<端口>`；**每一个** `reverse_proxy` 上游（含 subroute、`handle_response`、错误路由里的）都改到本机桩：operator-query → 桩 oq，watcher → 桩 watcher，其他一切（别的服务、Tailscale 地址、unix socket、占位符）→ 桩 sink；删除主动健康检查与转发代理；不带任何其他 server 和 app（tls、pki、logging…）；admin 关闭、配置不落盘。逐条打印 `PROBE_PIN dial <原地址> -> <桩>`。运行前机器核对"只监听回环、只拨三个桩"，不满足就不启动 Caddy（`dynamic_upstreams` 无法改写，直接判失败）。Caddy 进程拿不到 `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY` 与 `OTEL_*` 环境变量，状态目录（autosave、数据目录）在临时目录。
-   - 真实启动后用原始请求行发送：§9.14.4 第 1 项的全部行级与兜底探针（含 `%0A` 换行结尾、`#`）；F-13 (3) 两类用例——**字面点段与 `//` 期望被 clean 后转发到桩**（`/m/v1/watcher/x/../status`、`/m/v1/watcher/./status`、`/m/v1/watcher//status` → 桩收到 `/v1/watcher/status`；`…/accounts/a/..` → `/v1/watcher/trading/accounts`；`/m/v1/watcher/x/../config` → 兜底 404），**不按 404 判定**；百分号编码形式与 `#` 原样转发（`/m/v1/watcher/x/%2e%2e/status` → `/v1/watcher/x/%2e%2e/status`，`/m/v1/watcher/media/a#x` → `/v1/watcher/media/a%23x`，到网关后由 `%` 规则 404）。**wac-092**：每条清单行再在每个斜杠处各多加一个 `/` 发一次（`//m/v1/watcher/status`、`/m//v1/watcher/status`、`/m/v1//watcher/status`、`/m/v1/watcher//status` 等），期望被 clean 后转发、`Authorization` 原样到达；`/m//v1/watcher/trading/accounts` 另发一次不带 `Authorization` 的。**每一次**转发到 operator-query 都带一个假的调用方 `Authorization`，桩必须原样收到、且没有 `X-Watcher-Proxy-Auth`（任何改写表内路径请求头的遮蔽都会在这里暴露，包括只对 `//` 请求或只对生产 Host 生效的）；不带 `Authorization` 的 `/m/v1/watcher/status` 与 `/m/v1/watcher/trading/accounts` 到桩时也不得多出一个；`/m/v1/watcherx`、`/m/v1/other` 等不得到达 oq 或 watcher 桩；`/m/v1/accounts` 保留调用方 `Authorization`；`/watcher/`、`/api/status`、`/media/<名>` 无凭据 401 且不到任何桩。
-   - 清理（wac-092 如实描述，审查 wac-090 🟡-4）：正常结束、检查失败、异常，以及收到 SIGINT（Ctrl-C）、SIGTERM、SIGHUP 时，`.o0probe` 与临时目录都会被删除，Caddy 进程组被停掉；清理顺序是先删 `.o0probe`，再停 Caddy，再删临时目录（里面是运行用的 JSON），最后才关本机桩。清理进行中再收到信号（第二次 Ctrl-C 等）会立即强杀 Caddy、删掉两处文件并退出（退出码 128+信号号，输出 `CADDY_PROBE_INTERRUPTED … during cleanup`）。**做不到的**：探针进程本身被 SIGKILL（`kill -9`）或断电，这时 `.o0probe`（0600）可能残留，所以下面"完成之后"的 `ls -A` 必须做。`--keep` 只用于排错，会保留含哈希的 `.o0probe`，用完自己删。
+   - 真实启动后用原始请求行发送：§9.14.4 第 1 项的全部行级与兜底探针（含 `%0A` 换行结尾、`#`）；F-13 (3) 两类用例——**字面点段与 `//` 期望被 clean 后转发到桩**（`/m/v1/watcher/x/../status`、`/m/v1/watcher/./status`、`/m/v1/watcher//status` → 桩收到 `/v1/watcher/status`；`…/accounts/a/..` → `/v1/watcher/trading/accounts`；`/m/v1/watcher/x/../config` → 兜底 404），**不按 404 判定**；百分号编码形式与 `#` 原样转发（`/m/v1/watcher/x/%2e%2e/status` → `/v1/watcher/x/%2e%2e/status`，`/m/v1/watcher/media/a#x` → `/v1/watcher/media/a%23x`，到网关后由 `%` 规则 404）。**wac-092**：每条清单行再在每个斜杠处各多加一个 `/` 发一次（`//m/v1/watcher/status`、`/m//v1/watcher/status`、`/m/v1//watcher/status`、`/m/v1/watcher//status` 等），期望被 clean 后转发、`Authorization` 原样到达；`/m//v1/watcher/trading/accounts` 另发一次不带 `Authorization` 的。**wac-094**：每条带参数的清单行（`media/{filename}`、`accounts/{account_id}`、`channels/{channel_id}`、`risks/{symbol}`）再用 35 个参数值各发一次，每个允许的方法都发：真实账户名与大写（`account-a`…`account-d`、`ACCOUNT-A`）、交易对的大小写（`BTCUSDT`、`btcusdt`、`1000PEPEUSDT`）、Telegram 形式的 id（`-1001234567890`）、短值、200 字符的长值、带点的值、`x.png`/`x.PNG`/`x.jpg`/`x.JPG`/`x.jpeg`/`x.gif`/`x.webp`/`x.mp4` 等文件名，都期望原样转发、`Authorization` 原样到达。**每一次**转发到 operator-query 都带一个假的调用方 `Authorization`，桩必须原样收到、且没有 `X-Watcher-Proxy-Auth`（任何改写表内路径请求头的遮蔽都会在这里暴露，包括只对 `//` 请求或只对生产 Host 生效的）；不带 `Authorization` 的 `/m/v1/watcher/status` 与 `/m/v1/watcher/trading/accounts` 到桩时也不得多出一个；`/m/v1/watcherx`、`/m/v1/other` 等不得到达 oq 或 watcher 桩；`/m/v1/accounts` 保留调用方 `Authorization`；`/watcher/`、`/api/status`、`/media/<名>` 无凭据 401 且不到任何桩。
+   - 清理（wac-092 如实描述，审查 wac-090 🟡-4）：正常结束、检查失败、异常，以及收到 SIGINT（Ctrl-C）、SIGTERM、SIGHUP 时，`.o0probe` 与临时目录都会被删除，Caddy 进程组被停掉；清理顺序是先删 `.o0probe`，再停 Caddy，再删临时目录（里面是运行用的 JSON），最后才关本机桩。清理进行中再收到信号（第二次 Ctrl-C 等）会立即强杀 Caddy、删掉两处文件并退出（退出码 128+信号号，输出 `CADDY_PROBE_INTERRUPTED … during cleanup`）。**做不到的**：探针进程本身被 SIGKILL（`kill -9`，包括被系统 OOM 杀掉）或断电。审查 wac-093 实测，这时会留下**三样东西**：副本旁的 `.o0probe`（0600，含 bcrypt 哈希）；`$TMPDIR/o0-caddy-probe-xdg-<随机>/` 临时目录（里面的 `probe-run.json` 同样含哈希）；以及**一个仍在运行的真实 Caddy**（探针让它在新会话里启动，以便整组停止，所以它不随探针退出），它带着钉住的配置监听一个回环端口，上游是已经不存在的本机桩。
+   wac-094 起的自清理：探针每次建临时目录时先在里面写一份属主记录 `o0-probe-owner.json`（探针自己的 pid、`.o0probe` 的路径与写入内容的 sha256、它启动的每个子进程 pid），**下一次运行探针时先扫描 `$TMPDIR`**：
+   - 属主记录有效、记录里的探针已经不在运行：停掉命令行里带这个临时目录路径的进程（即那个 `caddy run --config <目录>/probe-run.json`，先 SIGTERM 整组，5 秒后 SIGKILL），`.o0probe` 的内容与记录的 sha256 相同才删除，再删临时目录；打印 `PROBE_RESIDUE_CLEANED dir=<目录名> processes_stopped=<n> o0probe=removed|absent|kept(...) dir_removed=True`。
+   - 记录里的探针还在运行（另一次探针正在跑）：`PROBE_RESIDUE_BUSY`，不动。
+   - 没有本工具的属主记录的目录（wac-094 之前的版本留下的，或别的工具的）：`PROBE_RESIDUE_FOREIGN dir=<目录名>`，**不动**，由用户确认后自己删除（里面可能有哈希）。
+   - 命令行里带 `o0-caddy-probe-xdg-` 但不属于任何已证明目录的进程：`PROBE_RESIDUE_ORPHAN pid=<n>`，**不动**，由用户确认后自己 `kill`。
+   - 末尾一行汇总：`PROBE_RESIDUE_SCAN cleaned=<n> busy=<n> foreign=<n> orphans=<n> unproven=<n>`。只打印目录名与 pid，不打印路径内容。
+   - 扫描之后若副本旁已经有 `.o0probe`（被杀的探针留下、但内容与记录不符，或上次用了 `--keep`），探针**拒绝运行**：`CADDY_PROBE_FAILED Caddyfile.candidate.o0probe already exists …`，由用户看过后删除再重跑。
+   自清理只在"再跑一次探针"时发生，而且只清理能由属主记录证明是自己的东西；所以下面"完成之后"的三项检查**每次都要做**。`--keep` 只用于排错，会保留含哈希的 `.o0probe`，用完自己删。
 
-   期望输出：`PROBE_LOCAL_ONLY listen=127.0.0.1:<端口> host=jp-bot.balen.wang admin=off persist=off servers=1 apps=http dials=stubs_only`，末行 `CADDY_PROBE_OK caddy=v2.10.2 live_checks=<n> … host=jp-bot.balen.wang … stub_hits=oq:<n>,watcher:<n>,sink:<n> candidate_sha256=<…> snippet_sha256=<…>`（仿生产夹具上 `live_checks=420`、`oq:117`）。被信号打断时末行是 `CADDY_PROBE_INTERRUPTED signal=<名>…`，退出码 128+信号号：不算通过，确认 `ls -A` 后重跑。
+   期望输出：`PROBE_LOCAL_ONLY listen=127.0.0.1:<端口> host=jp-bot.balen.wang admin=off persist=off servers=1 apps=http dials=stubs_only`，末行 `CADDY_PROBE_OK caddy=v2.10.2 live_checks=<n> … host=jp-bot.balen.wang … stub_hits=oq:<n>,watcher:<n>,sink:<n> candidate_sha256=<…> snippet_sha256=<…>`（仿生产夹具上 wac-094 起 `live_checks=840`、`oq:327`；wac-092 时是 420、117）。另有一行 `PROBE_RESIDUE_SCAN …`（见上面的清理说明），正常情况下 `cleaned=0 busy=0 foreign=0 orphans=0`。被信号打断时末行是 `CADDY_PROBE_INTERRUPTED signal=<名>…`，退出码 128+信号号：不算通过，确认 `ls -A` 后重跑。
 
    完成之后：
-   - `ls -A ~/o0-a05p-<UTC>/` 应只剩 `Caddyfile.candidate` 与 `caddy-watcher-gateway.caddy`（没有 `.o0probe`）；然后 `rm -rf ~/o0-a05p-<UTC>/`，**删除副本**（方案 (b) 由用户删除）。
+   - 三项检查（PC-4，用户在运行探针的同一个 shell 里做，`$TMPDIR` 要与探针运行时相同；macOS 上是每个用户自己的 `/var/folders/…/T/`）：
+     1. `ls -A ~/o0-a05p-<UTC>/` 应只剩 `Caddyfile.candidate` 与 `caddy-watcher-gateway.caddy`（没有 `.o0probe`）。有 `.o0probe` → 它含哈希，确认后 `rm -f`。
+     2. `ls -d "$TMPDIR"/o0-caddy-probe-xdg-* 2>/dev/null` 应无输出。有 → 看探针输出里对应的 `PROBE_RESIDUE_*` 行；确认是探针留下的（目录名以 `o0-caddy-probe-xdg-` 开头，里面是 `probe-run.json`、`caddy-run.err`、`config/`、`data/` 之类）后 `rm -rf` 这些目录。
+     3. `pgrep -fl o0-caddy-probe-xdg` 应无输出。有 → 命令行里是 `caddy run --config …/o0-caddy-probe-xdg-…/probe-run.json` 的，就是探针留下的孤儿 Caddy，`kill <pid>`（不退出再 `kill -9 <pid>`）；命令行不是这种形状的，不要动，报 Planner。
+     三项都干净之后 `rm -rf ~/o0-a05p-<UTC>/`，**删除副本**（方案 (b) 由用户删除）。
    - 证据 `~/o0-a05p-evidence-<UTC>.txt` **只存本机**（不写到 jp-24 的 `$S/evidence/`，审查 wac-088 💭-4）：它含脱敏差异、上游地址与两个 sha，不含哈希。把它的 sha256 与末行的两个 sha 记进 O0-A05 的授权记录。
    - 两个 sha 是 C-1 的必填参数（`--probe-candidate-sha256`、`--probe-snippet-sha256`）：preflight 核对 staging 里的候选与 bundle 片段就是被探针测过的那两份（`PROBE_BINDING_OK`），不一致即中止；门禁文件记录这两个值，apply 再用手上的文件核对一遍。**探针之后候选有任何改动，都要重新做 O0-A05P。**
    - 失败处置：`CADDY_PROBE_FAILED` 或出现 `FAIL` 行 → 不申请 O0-A05；按 FAIL 行改候选（在 jp-24 的 staging 里，由用户或经授权的执行者），重新放副本、重跑探针。verify 与活体检查的 FAIL 行分开各打印最多 40 条（末行给出 `verify_failures=`、`live_failures=`）。`FAIL pin: …`（有无法改写到桩的上游）→ 报 Planner 与用户，不做变通。verify 报站点里某条带 `host` 匹配器的路由（遮蔽或转发）：wac-092 起站点内的 `host` 匹配器从不排除，若它确实只为别的主机名服务，把它移到单独的站点块，不放宽检查。
@@ -201,6 +225,10 @@ W-3 之后按 `docs/agent-operations.md` §1 核对重建窗口内有无漏信�
 | C-1 报 `PROBE_BINDING_FAILED` | staging 里的候选（或 bundle 片段）不是探针测过的那份：探针之后改过候选，或放错了副本 | 对当前候选重做 O0-A05P；不要改 sha 参数去凑 |
 | C-1 报 `LIVE_SNIPPET_DIFFERS`（wac-092） | `/etc/caddy/caddy-watcher-gateway.caddy` 已存在但不是 bundle 的片段，或是悬空软链 | 什么都没写。报用户：先弄清这个文件从哪来，不覆盖、不删除 |
 | O0-A05P 末行 `CADDY_PROBE_INTERRUPTED …`（wac-092） | 探针被 Ctrl-C、SIGTERM 或 SIGHUP 打断 | 不算通过。`ls -A` 确认副本目录里没有 `.o0probe`，再重跑探针 |
+| O0-A05P 没有末行、终端被关或探针被 `kill -9`（wac-094） | SIGKILL 或断电：`.o0probe`、`$TMPDIR/o0-caddy-probe-xdg-*`、一个孤儿 Caddy 都可能还在 | 做 §3.1 第 7 条"完成之后"的三项检查；或直接在同一 shell 里重跑探针，它会先打印 `PROBE_RESIDUE_CLEANED` 并清掉自己的残留，重跑之后仍做三项检查 |
+| O0-A05P 报 `CADDY_PROBE_FAILED … .o0probe already exists`（wac-094） | 副本旁有上一次留下的 `.o0probe`（被杀或 `--keep`），内容无法证明是本工具这次记录的 | 它含哈希：用户看过后 `rm -f`，再重跑；探针不代删 |
+| O0-A05P 打印 `PROBE_RESIDUE_FOREIGN` 或 `PROBE_RESIDUE_ORPHAN`（wac-094） | `$TMPDIR` 里有不带本工具属主记录的探针目录（旧版本留下的），或有命令行带 `o0-caddy-probe-xdg-` 却无法证明归属的进程 | 不影响本次探针结论；按"完成之后"第 2、3 项由用户确认后删除或 `kill`，Agent 不代删 |
+| verify 报 `shadow … hits 'the /m/v1/watcher prefix space …'`（wac-094） | 站点顶层某条可能改写请求的指令，匹配器只对某个参数值、后缀、中段 glob 或不锚定正则生效 | 改候选（把它限定到前缀之外，或移出 jp-bot 站点块）；不放宽检查 |
 | O0-A05P 报 `FAIL pin: …` 或 `CADDY_PROBE_FAILED … caddy was NOT started` | 副本里有无法改写到本机桩的上游（`dynamic_upstreams`）或其他不能证明只在本机的配置 | 报 Planner 与用户；不删配置去凑 |
 | C-1 报 `LIVE_SNIPPET` 不符或 SN3 类拒绝 | `/etc/caddy/caddy-watcher-gateway.caddy` 已存在且不是本 bundle 的片段 | 不覆盖；查清来源后报用户 |
 | 网关 503 `gateway_disabled` / `watcher_unavailable` | operator-query 没拿到或撞值；两边值不一致或 watcher 不可达 | O-2 内已自动回滚；重跑凭据 `check` |
