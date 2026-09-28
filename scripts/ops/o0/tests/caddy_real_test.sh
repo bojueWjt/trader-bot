@@ -41,6 +41,24 @@
 #      sends every parameter line with PROBE_PARAM_VALUES); a wrapper that injects on media/*.png in the RUN config
 #      only is caught by the live checks alone; SIGKILL of the probe leaves .o0probe, the temporary dir and a running
 #      Caddy, and the next probe run with the same TMPDIR stops that Caddy, removes both and passes.
+#   7. wac-097 (review wac-095 🟡-2, 🟡-3): path changes (g15..g18 of r095, handle_path to operator-query without an injection,
+#      a reverse_proxy's own rewrite into the prefix, uri strip_suffix x on /m/v1/watcherx*) and regexps whose top-level '|'
+#      hid behind []…], [^]…], \Q…\E or [[:alpha:]…] (g01c, g04c, g04d and a.bmp$ forms no probe value reaches) written
+#      as real Caddyfiles: verify FAILS; p03 (rewrite /healthz /api/status), p05, p06, uri strip_prefix /api on /api/v2/*
+#      and handle /reports/daily/* { uri strip_prefix /reports } to operator-query: verify passes (handle_path /reports/daily/*
+#      strips all of /reports/daily and fails); g16, g17, g18 as probe copies fail in verify AND
+#      in the live rewrite-entry checks, and so does uri strip_prefix /m/v1 on /m/m/* + an injection (the encoded '..'
+#      entry /m/v1/%2e%2e/m/v1/watcher/... found by the wac-097 differential); the fixture's own 10 entries pass.
+#      Review wac-096 🔴-1 / 🟡-1 (coordinator's addition to wac-097): reverse_proxy { rewrite /v1/watcher/dialogs } with an
+#      injected Authorization, the same with a placeholder, forward_auth { uri /v1/watcher/status }, handle_errors to
+#      operator-query, handle_path + invoke of a named route to operator-query, /m/* invoke, handle_response to
+#      operator-query: verify FAILS (the first and handle_errors also in the live checks: /foo/x reaches operator-query
+#      as /v1/watcher/dialogs with the injected header; a basic-auth 401 enters the error chain and is forwarded);
+#      forward_auth /bar/* { uri /v1/auth } and handle_errors { respond } pass.
+#      Review wac-096 second round (coordinator): reverse_proxy { rewrite ?a=1 } and { rewrite "#frag" } after handle_path's
+#      strip (q1, q4), handle_errors { reverse_proxy <oq> { rewrite ?a=1 } } (q2), and handle_response routes behind a proxy
+#      that rewrites its copy to /ping, in the error chain (q3) and after handle_path: verify FAILS; q1 as a probe copy also
+#      fails live; an injection made only when the caller sends NO Authorization is caught by the entries' second send.
 # Local only: 127.0.0.1 ports, a temporary directory, a random one-off basic-auth password.
 set -eo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -143,6 +161,54 @@ fine("mobile-handle-localhost", good.replace("\t\turi strip_prefix /m\n\t\trever
                                              "\t\turi strip_prefix /m\n\t\treverse_proxy localhost:8183\n\t}\n\thandle /v1/*"))
 fine("whitelisted-toplevel", good.replace(site_import, site_import + "\tvars o0probe 1\n\theader -Server\n\tmap {path} {o0m} {\n\t\tdefault x\n\t}\n"))
 fine("redir-non-hitting", good.replace(site_import, site_import + "\tredir /old/* /new/\n\trewrite /static/x /static/y\n"))
+# wac-097 (review wac-095 🟡-2): path changes that bring a path from outside the prefix into it (g15..g18 of r095)
+bad("g15-rewrite-static-into-prefix", good.replace(site_import, site_import + f"\t@s path /static/*\n\trequest_header @s {obs}\n\trewrite @s /m/v1/watcher/status\n"))
+bad("g16-uri-strip-prefix-into-prefix", good.replace(site_import, site_import + f"\t@s path /x/*\n\trequest_header @s {obs}\n\turi @s strip_prefix /x\n"))
+bad("g17-uri-replace-into-prefix", good.replace(site_import, site_import + f"\t@s path /s/*\n\trequest_header @s {obs}\n\turi @s replace /s/ /m/v1/watcher/ 1\n"))
+bad("g18-handle-path-to-oq-injected", good.replace(site_import, site_import + f"\thandle_path /x/* {{\n\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n"))
+bad("handle-path-to-oq-plain", good.replace(site_import, site_import + "\thandle_path /x/* {\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n"))
+bad("proxy-rewrite-into-prefix", good.replace(site_import, site_import + "\thandle /q/* {\n\t\treverse_proxy 127.0.0.1:8183 {\n\t\t\trewrite /m/v1/watcher/status\n\t\t}\n\t}\n"))
+bad("strip-suffix-watcherx", good.replace(site_import, site_import + "\turi /m/v1/watcherx* strip_suffix x\n"))
+# wac-097 real-Caddy differential: /m/v1/%2e%2e/m/v1/watcher/status is matched as /m/m/v1/watcher/status; the strip of
+# /m/v1 happens on the escaped path and the encoded '..' then pops only /v1: the snippet sees /m/v1/watcher/status
+bad("strip-prefix-multiseg-encoded-dots", good.replace(site_import, site_import + f"\t@s path /m/m/*\n\trequest_header @s {obs}\n\turi @s strip_prefix /m/v1\n"))
+# wac-097 (review wac-095 🟡-3): classes whose first member is ']', \Q...\E and POSIX classes before a top-level '|'
+bad("g01c-re-class-bracket-alt-acct", good.replace(site_import, site_import + f"\t@x path_regexp `^/static[](]|account-a$`\n\trequest_header @x {obs}\n"))
+bad("g04c-re-class-bracket-alt-png", good.replace(site_import, site_import + f"\t@x path_regexp `^/static[](]|\\.png$`\n\trequest_header @x {obs}\n"))
+bad("g04d-re-negated-class-bracket-alt-acct", good.replace(site_import, site_import + f"\t@x path_regexp `^/static[^](]|account-a$`\n\trequest_header @x {obs}\n"))
+bad("re-class-bracket-alt-bmp", good.replace(site_import, site_import + f"\t@x path_regexp `^/static[](]|a\\.bmp$`\n\trequest_header @x {obs}\n"))
+bad("re-qe-alt-bmp", good.replace(site_import, site_import + f"\t@x path_regexp `^/static\\Q(\\E|a\\.bmp$`\n\trequest_header @x {obs}\n"))
+bad("re-posix-alt-bmp", good.replace(site_import, site_import + f"\t@x path_regexp `^/static[[:alpha:](]|a\\.bmp$`\n\trequest_header @x {obs}\n"))
+fine("p03-healthz-rewrite", good.replace(site_import, site_import + "\trewrite /healthz /api/status\n"))
+fine("p05-regexp-static-assets", good.replace(site_import, site_import + "\t@assets path_regexp ^/static/.*\\.(js|css)$\n\trewrite @assets /static/bundle.js\n"))
+fine("p06-uri-strip-suffix-api", good.replace(site_import, site_import + "\turi /api/* strip_suffix /\n"))
+fine("uri-strip-prefix-api-v2", good.replace(site_import, site_import + "\turi /api/v2/* strip_prefix /api\n"))
+# handle_path /reports/daily/* would strip ALL of /reports/daily (Caddy strips the matched prefix): /reports/daily/m/v1/watcher/x
+# becomes a prefix path, so every handle_path to operator-query fails; a narrower explicit strip is proven outside
+fine("handle-uri-strip-reports-to-oq", good.replace(site_import, site_import + "\thandle /reports/daily/* {\n\t\turi strip_prefix /reports\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n"))
+bad("handle-path-reports-daily-to-oq", good.replace(site_import, site_import + "\thandle_path /reports/daily/* {\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n"))
+# wac-097 (review wac-096 🔴-1): a reverse_proxy's OWN rewrite (reverse_proxy { rewrite }, forward_auth's uri) is a path change
+bad("proxy-rewrite-v1-watcher-injected", good.replace(site_import, site_import + f"\thandle /foo/* {{\n\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\trewrite /v1/watcher/dialogs\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n"))
+bad("proxy-rewrite-v1-watcher-placeholder", good.replace(site_import, site_import + "\thandle /foo/* {\n\t\treverse_proxy 127.0.0.1:8183 {\n\t\t\trewrite /v1/watcher{path}\n\t\t}\n\t}\n"))
+bad("forward-auth-uri-v1-watcher", good.replace(site_import, site_import + "\tforward_auth /bar/* 127.0.0.1:8183 {\n\t\turi /v1/watcher/status\n\t}\n"))
+fine("forward-auth-uri-v1-auth-on-bar", good.replace(site_import, site_import + "\tforward_auth /bar/* 127.0.0.1:8183 {\n\t\turi /v1/auth\n\t}\n"))
+# wac-097 (review wac-096 🟡-1): the error chain, named routes reached by invoke, handle_response routes
+bad("handle-errors-to-oq-injected", good.replace(site_import, site_import + f"\thandle_errors {{\n\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n"))
+named_obs = f"&(obs) {{\n\treverse_proxy 127.0.0.1:8183 {{\n\t\theader_up {obs}\n\t}}\n}}\n"
+bad("invoke-named-oq-after-handle-path", good.replace(site_import, site_import + "\thandle_path /x/* {\n\t\tinvoke obs\n\t}\n") + named_obs)
+bad("handle-m-invoke-named-oq", good.replace(site_import, site_import + "\t@mm path /m/*\n\thandle @mm {\n\t\tinvoke obs\n\t}\n") + named_obs)
+bad("dead-extra-invoke-named-oq", good.replace(site_import, site_import + "\thandle /m/v1/watcher/extra {\n\t\tinvoke obs\n\t}\n") + named_obs)
+bad("handle-response-to-oq", good.replace(site_import, site_import + "\t@mm path /m/*\n\thandle @mm {\n\t\treverse_proxy 127.0.0.1:7000 {\n\t\t\t@err status 5xx\n\t\t\thandle_response @err {\n\t\t\t\treverse_proxy 127.0.0.1:8183\n\t\t\t}\n\t\t}\n\t}\n"))
+fine("handle-errors-respond", good.replace(site_import, site_import + "\thandle_errors {\n\t\trespond \"{err.status_code}\" 502\n\t}\n"))
+# review wac-096 second round (coordinator's second addition): an empty uri path part ('?a=1', '#frag') changes nothing and
+# proves nothing; handle_response routes get the ORIGINAL request, not the proxy's rewritten copy (q1..q4 of the review)
+bad("q1-handle-path-proxy-rewrite-query", good.replace(site_import, site_import + f"\thandle_path /x/* {{\n\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\trewrite ?a=1\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n"))
+bad("q2-handle-errors-proxy-rewrite-query", good.replace(site_import, site_import + f"\thandle_errors {{\n\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\trewrite ?a=1\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n"))
+bad("q3-handle-errors-handle-response-original-request", good.replace(site_import, site_import + f"\thandle_errors {{\n\t\treverse_proxy 127.0.0.1:18998 {{\n\t\t\trewrite /ping\n\t\t\t@any status 2xx 3xx 4xx 5xx\n\t\t\thandle_response @any {{\n\t\t\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\t\t\theader_up {obs}\n\t\t\t\t}}\n\t\t\t}}\n\t\t}}\n\t}}\n"))
+bad("q4-handle-path-proxy-rewrite-fragment", good.replace(site_import, site_import + f"\thandle_path /x/* {{\n\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\trewrite \"#frag\"\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n"))
+bad("handle-path-handle-response-original-request", good.replace(site_import, site_import + "\thandle_path /x/* {\n\t\treverse_proxy 127.0.0.1:7001 {\n\t\t\trewrite /ping\n\t\t\t@any status 2xx 3xx 4xx 5xx\n\t\t\thandle_response @any {\n\t\t\t\treverse_proxy 127.0.0.1:8183\n\t\t\t}\n\t\t}\n\t}\n"))
+# a "default token" shape: injected only when the caller sends NO Authorization (the probe sends each entry both ways)
+bad("g16-inject-only-without-auth", good.replace(site_import, site_import + f"\t@s {{\n\t\tpath /x/*\n\t\tnot header Authorization *\n\t}}\n\trequest_header @s {obs}\n\turi @s strip_prefix /x\n"))
 PY
 for f in "$WORK"/bad-*.Caddyfile; do
   n="$(basename "$f" .Caddyfile)"; adapt_verify "$f"
@@ -350,6 +416,28 @@ for spec in "nonascii-dotted-i-inject|forward GET '/m/v1/watcher/trading/account
     ok "probe copy $n: verify fails and the live checks see the injected Authorization ($want)"
   else bad "probe copy $n rc=$rc"; grep -E '^FAIL|CADDY_PROBE' "$WORK/probe-$n.txt" | grep -v '^FAIL verify:' | head -5; fi
 done
+
+# 4d''. wac-097 (review wac-095 🟡-2): g16, g17, g18 as probe copies: verify fails AND the live rewrite-entry checks see the
+# injected Authorization (the probe sends the entries its path changes turn into prefix-space paths)
+for spec in "g16-uri-strip-prefix-into-prefix|rewrite entry GET '/x/m/v1/watcher/" \
+            "g17-uri-replace-into-prefix|rewrite entry GET '/s/" \
+            "g18-handle-path-to-oq-injected|rewrite entry GET '/x/m/v1/watcher/" \
+            "strip-prefix-multiseg-encoded-dots|rewrite entry GET '/m/v1/%2e%2e/m/v1/watcher/" \
+            "proxy-rewrite-v1-watcher-injected|rewrite entry GET '/foo/x'" \
+            "handle-errors-to-oq-injected|browser /watcher/ without credentials -> 200, stub hits 1" \
+            "q1-handle-path-proxy-rewrite-query|rewrite entry GET '/x/m/v1/watcher/" \
+            "g16-inject-only-without-auth|rewrite entry GET '/x/m/v1/watcher/status' (without Authorization)"; do
+  n="${spec%%|*}"; want="${spec#*|}"
+  rc=0; probe --caddy "$CADDY" --caddyfile "$WORK/bad-$n.Caddyfile" > "$WORK/probe-$n.txt" 2>&1 || rc=$?
+  if [ "$rc" != 0 ] && grep -q '^FAIL verify:' "$WORK/probe-$n.txt" && grep -q "^FAIL $want" "$WORK/probe-$n.txt" \
+     && grep -q '^PROBE_REWRITE_ENTRIES targets=[1-9]' "$WORK/probe-$n.txt" && [ ! -e "$WORK/bad-$n.Caddyfile.o0probe" ]; then
+    ok "probe copy $n: verify fails and a live check sees it ($(grep -m1 "^FAIL $want" "$WORK/probe-$n.txt" | cut -c1-110))"
+  else bad "probe copy $n rc=$rc"; grep -E '^FAIL|CADDY_PROBE|PROBE_REWRITE' "$WORK/probe-$n.txt" | grep -v '^FAIL verify:' | head -5; fi
+done
+# the fixture's own path changes (@mobile strip /m, the browser strip /watcher) give entries that pass
+if grep -q '^PROBE_REWRITE_ENTRIES targets=10 ' "$WORK/probe.txt" && ! grep -q '^FAIL rewrite entry' "$WORK/probe.txt"; then
+  ok "fixture probe: 10 rewrite entries (/m + 4 tails; /watcher + 6 tails incl. /v1/watcher/...) sent with and without Authorization, none reaches a stub wrongly"
+else bad "fixture probe rewrite entries: $(grep -m1 '^PROBE_REWRITE_ENTRIES' "$WORK/probe.txt")"; fi
 
 # 4e. adapt fails: no .o0probe (bcrypt hash) and no temporary dir left behind
 PT2="$WORK/ptmp2"; mkdir -p "$PT2"

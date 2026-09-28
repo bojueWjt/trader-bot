@@ -44,7 +44,16 @@ Sub-commands
                  value (…/accounts/account-a), a suffix or middle glob (media/*.png,
                  */risks/btcusdt), a glob whose literal head may start a space path, or a
                  path_regexp not anchored with '^' / with flags / with a top-level '|' / whose
-                 literal prefix may start a space path, all count as a hit.
+                 literal prefix may start a space path, all count as a hit. wac-097 (review wac-095
+                 🟡-3): the top-level '|' is found with the RE2 class rules of _re2_compile ([]…],
+                 [^]…], [[:alpha:]], \\Q…\\E). wac-097 (🟡-2): a route that CHANGES THE PATH (rewrite
+                 with uri / strip_path_prefix / strip_path_suffix / uri_substring / path_regexp, incl.
+                 a reverse_proxy's own rewrite: the rewrite, uri, try_files, handle_path, forward_auth
+                 directives, reverse_proxy { rewrite }) counts as a hit WHATEVER its matcher unless the
+                 result is proven to stay outside the space AND operator-query's /v1/watcher gateway
+                 space (path_change_into_space: a constant clean path outside; strip_prefix cut
+                 patterns outside; strip_suffix on paths that cannot start with either prefix);
+                 handle_response routes and named routes reached by invoke are followed.
                  If it hits, every handler must be one of encode, headers
                  WITHOUT "request", vars, map, log_append, tracing, and the route must carry
                  neither "terminal" nor "group";
@@ -53,7 +62,13 @@ Sub-commands
                  proxies to operator-query (port 8183 on ANY host spelling: localhost, [::1],
                  tcp/127.0.0.1 ...) or the watcher (9090/9100); an unparsable dial (placeholder,
                  unix socket, port range) or dynamic_upstreams fails as UNCOMPARABLE
-                 (§9.14.3 merge rule, F-10 coverage);
+                 (§9.14.3 merge rule, F-10 coverage); wac-097: nor may a reverse_proxy to
+                 operator-query that runs after a path change on its own chain (handle_path, uri
+                 between matcher and proxy, the proxy's rewrite) unless the changed path is proven
+                 outside both spaces (_rewrite_forwarder_check; watcher ports: the browser checks);
+                 nested routes are followed in subroutes, handle_response and invoke -> named_routes,
+                 unknown containers fail as UNCOMPARABLE, and the error chain (errors.routes,
+                 handle_errors) is checked the same way (review wac-096 🟡-1);
              (e) emulated Caddy route selection per list line and method: exactly one ``/m``
                  strip, upstream 127.0.0.1:8183, Authorization and X-Watcher-* untouched, no
                  basic auth; §9.14.4 item 1 negatives never reach the gateway; the fallback
@@ -79,7 +94,10 @@ Sub-commands
              Authorization untouched (never expected as 404); percent-encoded forms and ``#`` are
              forwarded raw (``#`` as %23). wac-094: every parameter line is sent again with each
              PROBE_PARAM_VALUES entry (account ids, symbols in both cases, long, dotted and image
-             file names) with every method of the line.
+             file names) with every method of the line. wac-097: every path change outside the
+             snippet gives rewrite entry targets (rewrite_entry_targets: /x/m/v1/watcher/... for a
+             strip of /x, /s/status for a replace of /s/, …), each sent with and without the fake
+             Authorization; what reaches operator-query must carry exactly the caller's header.
              The .o0probe file and the temporary Caddy state dir are removed on normal exit, on
              failure, on an exception and on SIGINT/SIGTERM/SIGHUP, including a second signal
              during the cleanup (_ProbeRun); not on SIGKILL of the probe or power loss: then the
@@ -609,21 +627,32 @@ def _pattern_touches_prefix(pattern: str) -> bool:
 # or an unanchored path_regexp (account-a$) missed every sample and was taken as "cannot hit" although real
 # Caddy applied it to table paths. Now a matcher counts as a hit when it MAY select ANY path of the space.
 _SPACE_SEPARATORS = ("/", "\n")
+# wac-097 (review wac-096 🔴-1, coordinator): a path CHANGED on the way to operator-query is also judged against
+# operator-query's own gateway space: the prefix middleware triggers on /v1/watcher itself or /v1/watcher/..., /v1/watcher%...
+# (any ASCII case, backend-api.md §9.3 "触发条件"); '\n' is added to stay on the safe side.
+OQ_GATEWAY_PREFIX = APP_OUTER_PREFIX                        # /v1/watcher
+_OQ_SEPARATORS = ("/", "%", "\n")
+_SPACES = ((EXTERNAL_PREFIX, _SPACE_SEPARATORS), (OQ_GATEWAY_PREFIX, _OQ_SEPARATORS))
 
 
-def _in_space(path: str) -> bool:
-    """Is this (lower-cased, literal) path inside the prefix space?"""
+def _in_space(path: str, prefix: str = EXTERNAL_PREFIX, seps: tuple = _SPACE_SEPARATORS) -> bool:
+    """Is this (lower-cased, literal) path inside the prefix space (default: /m/v1/watcher)?"""
     p = path.lower()
-    return p == EXTERNAL_PREFIX or any(p.startswith(EXTERNAL_PREFIX + s) for s in _SPACE_SEPARATORS)
+    return p == prefix or any(p.startswith(prefix + s) for s in seps)
 
 
-def _head_meets_space(head: str) -> bool:
+def _head_meets_space(head: str, prefix: str = EXTERNAL_PREFIX, seps: tuple = _SPACE_SEPARATORS) -> bool:
     """Can some path of the prefix space START with this literal (lower-cased) head?"""
     h = head.lower()
-    return any((EXTERNAL_PREFIX + s).startswith(h) for s in _SPACE_SEPARATORS) or _in_space(h)
+    return any((prefix + s).startswith(h) for s in seps) or _in_space(h, prefix, seps)
 
 
-def _path_pattern_may_hit_space(pattern: str) -> bool:
+def _in_any_space(path: str) -> bool:
+    """/m/v1/watcher space or operator-query's /v1/watcher gateway space (wac-097)."""
+    return any(_in_space(path, pfx, seps) for pfx, seps in _SPACES)
+
+
+def _path_pattern_may_hit_space(pattern: str, prefix: str = EXTERNAL_PREFIX, seps: tuple = _SPACE_SEPARATORS) -> bool:
     """F-13 step 1 for one ``path`` pattern against the WHOLE prefix space, with Caddy v2.10.2 MatchPath
     structure: anything _caddy_path_match cannot evaluate (non-ASCII, placeholder, '//', '%', malformed
     glob) is a hit; '*' alone hits; ``*x*`` (substring) and ``*x`` (suffix) always hit (some parameter value
@@ -644,43 +673,85 @@ def _path_pattern_may_hit_space(pattern: str) -> bool:
     if stars == 1 and p.startswith("*"):
         return True
     if stars == 1 and p.endswith("*"):
-        return _head_meets_space(p[:-1])
+        return _head_meets_space(p[:-1], prefix, seps)
     head = _literal_head(p)
     if head == p:
-        return _in_space(p)
-    return head == "" or _head_meets_space(head)
+        return _in_space(p, prefix, seps)
+    return head == "" or _head_meets_space(head, prefix, seps)
 
 
 _RE_META = set("\\.+*?()|[]{}^$")
 
 
-def _regexp_may_hit_space(pattern: str) -> bool:
-    """F-13 step 1 for one ``path_regexp`` (RE2, case-sensitive, not multi-line) against the prefix space.
-    It can only EXCLUDE the space when it is anchored with a leading '^', carries no flags ('(?i)', '(?m)',
-    '(?s)', '(?U)'), has no top-level alternation ('^/a|watcher' also matches any path containing
-    'watcher'), and its literal prefix after '^' (up to the first regexp metacharacter; a '\\' before a
-    punctuation character is that character; a quantifier drops the character before it), compared without
-    case, rules the whole space out. Everything else counts as a hit (``account-a$``, ``%2[fF]``,
-    ``^.*watcher``, ``^/(m|x)/``...)."""
-    if not pattern.startswith("^") or re.search(r"\(\?[a-zA-Z-]", pattern):
-        return True
-    depth, in_class, i = 0, False, 0
+def _re_class_end(pattern: str, i: int) -> int | None:
+    """Index just after the character class that opens at ``pattern[i] == '['``, with the class rules of
+    _re2_compile / Go regexp/syntax ``parseClass`` (wac-097, review wac-095 🟡-3): an optional '^'; a ']' right
+    after '[' or '[^' is a LITERAL member (``[]…]``, ``[^]…]``); '\\' escapes the next character; '[:' up to the
+    next ':]' is a POSIX class (``[[:alpha:]]``) whose ']' does not close; the first other ']' closes. None when
+    the class never closes (Go rejects the pattern; the caller counts it as a hit)."""
+    j = i + 1
+    if pattern[j:j + 1] == "^":
+        j += 1
+    if pattern[j:j + 1] == "]":
+        j += 1
+    while j < len(pattern):
+        c = pattern[j]
+        if c == "\\":
+            j += 2
+            continue
+        if pattern.startswith("[:", j):
+            end = pattern.find(":]", j + 2)
+            if end >= 0:
+                j = end + 2
+                continue
+        if c == "]":
+            return j + 1
+        j += 1
+    return None
+
+
+def _re_top_level_alternation(pattern: str) -> bool:
+    """Has this RE2 pattern a '|' outside every group? Character classes are skipped with _re_class_end, ``\\Q…\\E``
+    is literal text up to ``\\E`` (or the end of the pattern), any other '\\' escapes one character. wac-097: the
+    wac-094 scanner closed ``[](]`` at its first ']' and counted the '(' as a group, so the top-level '|' of
+    ``^/static[](]|account-a$`` looked nested (g01c, g04c, g04d and 54 black-box patterns of review wac-095
+    passed verify although real Caddy injected). An unbalanced ')' or an unclosed class counts as top level."""
+    depth, i = 0, 0
     while i < len(pattern):
         c = pattern[i]
         if c == "\\":
+            if pattern[i + 1:i + 2] == "Q":
+                end = pattern.find("\\E", i + 2)
+                if end < 0:
+                    return False
+                i = end + 2
+                continue
             i += 2
             continue
-        if in_class:
-            in_class = c != "]"
-        elif c == "[":
-            in_class = True
-        elif c == "(":
+        if c == "[":
+            end = _re_class_end(pattern, i)
+            if end is None:
+                return True
+            i = end
+            continue
+        if c == "(":
             depth += 1
         elif c == ")":
             depth -= 1
-        elif c == "|" and depth == 0:
+        elif c == "|" and depth <= 0:
             return True
         i += 1
+    return False
+
+
+def _regexp_literal_head(pattern: str) -> tuple[str, bool] | None:
+    """(literal prefix after '^' in lower case, whether the pattern is exactly that literal path) or None when the
+    pattern is not anchored with a leading '^', carries flags, has a top-level alternation, or its literal prefix
+    is non-ASCII or has '%' (then nothing about the paths it selects is known)."""
+    if not pattern.startswith("^") or re.search(r"\(\?[a-zA-Z-]", pattern):
+        return None
+    if _re_top_level_alternation(pattern):
+        return None
     lit, i = "", 1
     while i < len(pattern):
         c = pattern[i]
@@ -696,10 +767,37 @@ def _regexp_may_hit_space(pattern: str) -> bool:
     if rest[:1] in ("?", "*", "+", "{"):
         lit = lit[:-1]
     if not lit.isascii() or "%" in lit:
+        return None
+    return lit.lower(), rest == "$"
+
+
+def _regexp_may_hit_space(pattern: str, prefix: str = EXTERNAL_PREFIX, seps: tuple = _SPACE_SEPARATORS) -> bool:
+    """F-13 step 1 for one ``path_regexp`` (RE2, case-sensitive, not multi-line) against the prefix space.
+    It can only EXCLUDE the space when it is anchored with a leading '^', carries no flags ('(?i)', '(?m)',
+    '(?s)', '(?U)'), has no top-level alternation ('^/a|watcher' also matches any path containing
+    'watcher'; classes and ``\\Q…\\E`` are skipped by the RE2 rules, wac-097), and its literal prefix after '^'
+    (up to the first regexp metacharacter; a '\\' before a punctuation character is that character; a
+    quantifier drops the character before it), compared without case, rules the whole space out. Everything
+    else counts as a hit (``account-a$``, ``%2[fF]``, ``^.*watcher``, ``^/(m|x)/``, ``^/static[](]|x$``...)."""
+    head = _regexp_literal_head(pattern)
+    if head is None:
         return True
-    if rest == "$":            # exact literal path
-        return _in_space(lit)
-    return _head_meets_space(lit)
+    lit, exact = head
+    if exact:                  # exact literal path
+        return _in_space(lit, prefix, seps)
+    return _head_meets_space(lit, prefix, seps)
+
+
+def _regexp_may_start_prefix(pattern: str, prefix: str = EXTERNAL_PREFIX) -> bool:
+    """May this path_regexp select a path that STARTS (any case) with the prefix (inside the space or not,
+    e.g. /m/v1/watcherx)? Same parse as _regexp_may_hit_space."""
+    head = _regexp_literal_head(pattern)
+    if head is None:
+        return True
+    lit, exact = head
+    if exact:
+        return lit.startswith(prefix)
+    return lit.startswith(prefix) or prefix.startswith(lit)
 
 
 def _mset_may_hit_space(mset: dict, host: str, host_exact: bool = True) -> bool:
@@ -725,6 +823,262 @@ def _may_hit_space(match: list | None, host: str, host_exact: bool = True) -> bo
 
 
 SPACE_LABEL = "the /m/v1/watcher prefix space (some parameter value, suffix or case of a table path)"
+
+
+# ---------------------------------------------------------------- path changes (wac-097, review wac-095 🟡-2)
+# A matcher decides which requests a route's handlers see; a handler that CHANGES THE PATH decides what every later
+# handler and route sees. Review wac-095 on real Caddy v2.10.2: `@s path /x/*` + `request_header @s <observer>` +
+# `uri @s strip_prefix /x` adapt into ONE route [rewrite, headers] (g16): `GET /x/m/v1/watcher/trading/accounts`
+# misses the prefix space by its matcher, leaves the route as /m/v1/watcher/trading/accounts with the injected token,
+# and the snippet forwards it. The same with `uri @s replace /s/ /m/v1/watcher/ 1` (g17), and `handle_path /x/*`
+# strips between its matcher and a reverse_proxy to operator-query (g18). So a path-changing handler - `rewrite` with
+# uri, strip_path_prefix, strip_path_suffix, uri_substring or path_regexp (the `rewrite`, `uri`, `try_files`,
+# `handle_path` directives), and the `rewrite` of a reverse_proxy - counts as "may put the path into the prefix
+# space" WHATEVER its matcher, unless the tool can prove the result stays outside:
+#   * uri: its path part (Caddy rewrite.go:167-199: up to the first '?' or '#') is a constant clean absolute path
+#     (_constant_path) outside the space, e.g. `rewrite /healthz /api/status`; a uri without a path part ("?a=b")
+#     does not change the path;
+#   * strip_path_prefix P (constant): Caddy cleans the path, then trims P without case (rewrite.go:259-268,
+#     trimPathPrefix). The cleaned result is the path itself (P absent, or an encoded '..' popped it again) or the path
+#     with P cut off: for every path pattern the cut pattern is added when its literal head starts with P; a pattern
+#     whose literal head is a proper start of P ('/*', '/a*'), a suffix/substring glob or a path_regexp: unknown;
+#   * strip_path_suffix S (constant, no '%', no '//', and either no '.' at all or no '/' and not only dots): the
+#     cleaned result is the cleaned path with trailing segments cut (and at most one more '..' pop), i.e. a start of
+#     it; when no possible path can START with /m/v1/watcher (any case), no start of it lies in the space;
+#   * anything else (a placeholder, uri_substring, path_regexp, strip on unknown paths): may enter.
+# The possible paths are a list of items ("path", Caddy path pattern) | ("re", RE2 pattern) | _OUTSIDE (cannot start
+# with /m/v1/watcher), or None (any path). A matcher replaces them by its own path / path_regexp items (the current
+# path must match it, so they are a superset of the intersection).
+_PATH_CHANGE_FIELDS = ("uri", "strip_path_prefix", "strip_path_suffix", "uri_substring", "path_regexp")
+_OUTSIDE = ("outside", "")
+_CONST_PATH_BAD = set(GLOB_META) | set("{}%#?")
+
+
+def _uri_path_part(uri: str) -> str:
+    """The path part of a rewrite ``uri`` as Caddy v2.10.2 splits it: up to the first '?' or '#'; empty when the uri
+    starts with '?' or '#' (then the path is not changed)."""
+    for i, c in enumerate(uri):
+        if c in "?#":
+            return uri[:i]
+    return uri
+
+
+def _constant_path(value: str) -> str | None:
+    """``value`` when a rewrite sets it literally as the path and every later matcher (which cleans the path) sees
+    exactly it: absolute, printable ASCII without whitespace, no placeholder, '%', glob character, backslash, '#',
+    '?', '//' or dot segment. None otherwise."""
+    if not value.startswith("/") or not value.isascii() or "//" in value:
+        return None
+    if any(c in _CONST_PATH_BAD or not c.isprintable() or c.isspace() for c in value):
+        return None
+    if any(seg in (".", "..") for seg in value.split("/")):
+        return None
+    return value
+
+
+def _path_pattern_may_start_prefix(pattern: str, prefix: str = EXTERNAL_PREFIX) -> bool:
+    """May a Caddy ``path`` pattern select a path that STARTS (any case) with the prefix?"""
+    try:
+        _caddy_path_match(pattern, prefix)
+    except Uncomparable:
+        return True
+    p = pattern.lower()
+    if p.startswith("*"):
+        return True
+    head = _literal_head(p)
+    if head == p:
+        return p.startswith(prefix)
+    return head.startswith(prefix) or prefix.startswith(head)
+
+
+def _item_may_hit_space(item: tuple[str, str]) -> bool:
+    """In the /m/v1/watcher space OR operator-query's /v1/watcher gateway space (wac-097: a changed path may reach
+    operator-query through any later route, e.g. a panel /v1/* forwarder, or be forwarded by the changing route)."""
+    kind, value = item
+    for pfx, seps in _SPACES:
+        if kind == "path" and _path_pattern_may_hit_space(value, pfx, seps):
+            return True
+        if kind == "re" and _regexp_may_hit_space(value, pfx, seps):
+            return True
+    return False
+
+
+def _item_may_start_prefix(item: tuple[str, str]) -> bool:
+    kind, value = item
+    for pfx, _seps in _SPACES:
+        if kind == "path" and _path_pattern_may_start_prefix(value, pfx):
+            return True
+        if kind == "re" and _regexp_may_start_prefix(value, pfx):
+            return True
+    return False
+
+
+def _paths_may_hit_space(paths: list | None) -> bool:
+    return paths is None or any(_item_may_hit_space(i) for i in paths)
+
+
+def _paths_union(a: list | None, b: list | None) -> list | None:
+    if a is None or b is None:
+        return None
+    return a + [i for i in b if i not in a]
+
+
+def _paths_after_match(paths: list | None, match: list | None) -> tuple[list | None, bool]:
+    """(possible paths inside a route with this matcher, whether the matcher itself constrains the path)."""
+    if not match:
+        return paths, False
+    items: list = []
+    constrained = True
+    for mset in match:
+        if "path" in mset:
+            items += [("path", str(p)) for p in mset.get("path") or []]
+        elif "path_regexp" in mset:
+            items.append(("re", str((mset.get("path_regexp") or {}).get("pattern", ""))))
+        else:
+            constrained = False
+            if paths is None:
+                return None, False
+            items += [i for i in paths if i not in items]
+    return items, constrained
+
+
+def _strip_prefix_paths(paths: list | None, prefix: str) -> list | None:
+    """Possible paths after ``strip_path_prefix prefix``. Caddy trims P from the DECODED path text but only cleans the
+    ESCAPED path first, so an encoded dot segment survives the trim and is resolved later by the matchers: with
+    P = /m/v1, ``/m/v1/%2e%2e/m/v1/watcher/status`` is matched as /m/m/v1/watcher/status and leaves the strip as
+    /../m/v1/watcher/status = /m/v1/watcher/status (found by the wac-097 real-Caddy differential). In cleaned terms
+    the result is the path with SOME segment-prefix of P removed (none, /m, /m/v1): every such cut is added, and
+    the full text of P for a P that ends inside a segment. A cut remainder that starts with '.', or a P with a dot
+    segment, '%', a placeholder, a glob character or '//', is unknown (None)."""
+    if paths is None:
+        return None
+    p = prefix if prefix.startswith("/") else "/" + prefix
+    if not p.isascii() or "//" in p or any(c in GLOB_META or c in "{}%" or c.isspace() for c in p):
+        return None
+    segs = p.strip("/").split("/") if p.strip("/") else []
+    if any(s in (".", "..") for s in segs):
+        return None
+    cuts = ["/" + "/".join(segs[:j]).lower() for j in range(1, len(segs) + 1)]
+    if p.lower() not in cuts:
+        cuts.append(p.lower())
+    out = list(paths)
+    for kind, value in paths:
+        if kind != "path":
+            return None
+        try:
+            _caddy_path_match(value, "/")
+        except Uncomparable:
+            return None
+        v = value.lower()
+        if v.startswith("*"):
+            return None
+        head = _literal_head(v)
+        for pl in cuts:
+            if head.startswith(pl):
+                rest = v[len(pl):]
+                if rest.startswith("."):
+                    return None
+                cut = ("path", rest if rest.startswith("/") else "/" + rest)
+                if cut not in out:
+                    out.append(cut)
+            elif head != v and pl.startswith(head):
+                return None
+    return out
+
+
+def _strip_suffix_safe(suffix: str) -> bool:
+    s = suffix
+    if not s or not s.isascii() or "//" in s or any(c in "{}%\\" or c.isspace() or not c.isprintable() for c in s):
+        return False
+    if "." not in s:
+        return True
+    return "/" not in s and s.strip(".") != ""
+
+
+def _paths_after_rewrite(spec: dict, paths: list | None) -> tuple[list | None, list[str]]:
+    """(possible paths after a rewrite handler, or a reverse_proxy's ``rewrite``; the path-changing fields that
+    applied). Caddy's order: uri, strip_path_prefix, strip_path_suffix, uri_substring, path_regexp."""
+    changed: list[str] = []
+    for f in _PATH_CHANGE_FIELDS:
+        value = spec.get(f)
+        if value in (None, "", []):
+            continue
+        if f == "uri":
+            # wac-097 (review wac-096 second round 🔴-A, coordinator): a uri whose path part is EMPTY ('?a=1', '#frag')
+            # does not change the path - Caddy forwards the original (or an earlier rewritten) path; it is never a
+            # proof: counted as unknown ("may hit"), like any non-constant path
+            part = _uri_path_part(str(value))
+            lit = _constant_path(part) if part else None
+            paths = None if lit is None else [("path", lit)]
+        elif f == "strip_path_prefix":
+            paths = _strip_prefix_paths(paths, str(value))
+        elif f == "strip_path_suffix":
+            ok = _strip_suffix_safe(str(value)) and paths is not None and not any(_item_may_start_prefix(i) for i in paths)
+            paths = [_OUTSIDE] if ok else None
+        else:
+            paths = None
+        changed.append(f)
+    return paths, changed
+
+
+def _path_changes(handlers: list, paths: list | None, out: list, named: dict | None = None, stack: tuple = ()) -> list | None:
+    """Follow the possible paths through a handler list; append (handler kind, fields, paths after) for every path
+    change. Containers followed (wac-097, review wac-096 🟡-1): subroute routes; a reverse_proxy's own ``rewrite``
+    (forward_auth, ``reverse_proxy { rewrite … }``: only the upstream COPY is rewritten, recorded, never carried on)
+    and its ``handle_response[].routes`` (they run with the ORIGINAL request - the paths before that rewrite, review
+    wac-096 second round 🔴-B - and, when they do not respond, forward_auth's 2xx branch, the chain continues); ``invoke`` -> the server's ``named_routes`` in the caller's context. An
+    unknown or recursive named route, or any other handler carrying nested routes, is recorded as an unknown change
+    (paths None). Returns the possible paths after the list."""
+    for h in handlers or []:
+        kind = h.get("handler")
+        if kind == "subroute":
+            paths = _route_list_changes(h.get("routes") or [], paths, out, named, stack)
+        elif kind == "rewrite":
+            new, fields = _paths_after_rewrite(h, paths)
+            if fields:
+                out.append((kind, fields, new))
+                paths = new
+        elif kind == "reverse_proxy":
+            if isinstance(h.get("rewrite"), dict):
+                new, fields = _paths_after_rewrite(h["rewrite"], paths)
+                if fields:
+                    out.append(("reverse_proxy rewrite", fields, new))
+            for hr in h.get("handle_response") or []:
+                paths = _route_list_changes(hr.get("routes") or [], paths, out, named, stack)
+        elif kind == "invoke":
+            name = str(h.get("name", ""))
+            route = (named or {}).get(name)
+            if not isinstance(route, dict) or name in stack:
+                out.append((f"invoke {name!r}", ["unknown or recursive named route"], None))
+                paths = None
+            else:
+                paths = _route_list_changes([route], paths, out, named, stack + (name,))
+        elif "routes" in h or "handle_response" in h:
+            out.append((str(kind), ["nested routes this tool does not enumerate"], None))
+            paths = None
+    return paths
+
+
+def _route_list_changes(routes: list, paths: list | None, out: list, named: dict | None, stack: tuple) -> list | None:
+    cur = paths
+    for r in routes or []:
+        inner, _c = _paths_after_match(cur, r.get("match"))
+        cur = _paths_union(cur, _path_changes(r.get("handle") or [], inner, out, named, stack))
+    return cur
+
+
+def path_change_into_space(route: dict, named: dict | None = None) -> str | None:
+    """F-13 step 1 addition (wac-097): the first path change of this route (containers as in _path_changes) whose
+    result may lie in the /m/v1/watcher prefix space or operator-query's /v1/watcher gateway space, described; None
+    when the route changes no path or every change is proven to stay outside both."""
+    changes: list = []
+    start, _c = _paths_after_match(None, route.get("match"))
+    _path_changes(route.get("handle") or [], start, changes, named)
+    for kind, fields, after in changes:
+        if _paths_may_hit_space(after):
+            return (f"the /m/v1/watcher prefix space after a path change ({kind} {'+'.join(fields)}; not proven to stay "
+                    f"outside it and operator-query's /v1/watcher space)")
+    return None
 
 
 def _host_match(hosts: list, host: str) -> bool:
@@ -784,9 +1138,19 @@ def _match_sets(msets: list | None, req: Request) -> bool:
 
 
 def _apply_rewrite(handler: dict, req: Request) -> None:
+    """Emulated rewrite: strip_path_prefix, strip_path_suffix and (wac-097, review wac-095 💭-4) a ``uri`` whose path
+    part is a constant clean absolute path (``rewrite /healthz /api/status``; a uri without a path part keeps the
+    path). Anything else (placeholders, uri_substring, path_regexp, method, query) is UNCOMPARABLE."""
     keys = set(handler) - {"handler"}
-    if not keys <= {"strip_path_prefix", "strip_path_suffix"}:
+    if not keys <= {"strip_path_prefix", "strip_path_suffix", "uri"}:
         raise Uncomparable(f"rewrite fields {sorted(keys)}")
+    if "uri" in handler:
+        part = _uri_path_part(str(handler.get("uri") or ""))
+        if part:
+            lit = _constant_path(part)
+            if lit is None:
+                raise Uncomparable(f"rewrite uri path {_redact_path(part)!r} is not a constant clean absolute path")
+            req.path = lit
     prefix = handler.get("strip_path_prefix")
     if prefix and req.path.lower().startswith(prefix.lower()):
         req.path = req.path[len(prefix):] or "/"
@@ -815,6 +1179,8 @@ def _eval_routes(routes: list, req: Request, trail: tuple[int, ...], out: Outcom
                 continue
             if kind == "rewrite":
                 _apply_rewrite(handler, req)
+            if kind == "invoke":      # wac-097: named routes are not emulated
+                raise Uncomparable(f"invoke {str(handler.get('name'))!r} (named routes are not emulated)")
             out.chain.append(Step(handler, here, list(here_matches)))
             if kind in RESPONDERS:
                 out.responded = True
@@ -970,6 +1336,27 @@ def _walk(routes: list, trail: tuple[int, ...] = ()):
                 yield from _walk(handler.get("routes", []), here)
 
 
+def _walk_all_routes(server: dict):
+    """(trail, route) of every route of a server in every container (wac-097, review wac-096 🟡-1): routes, subroute
+    routes, reverse_proxy handle_response routes, the error chain (``errors.routes``) and ``named_routes``. Trails of
+    the main chain are the same int tuples as _walk yields."""
+    def rec(routes: list, trail: tuple):
+        for i, r in enumerate(routes or []):
+            here = trail + (i,)
+            yield here, r
+            for h in r.get("handle") or []:
+                if h.get("handler") == "subroute":
+                    yield from rec(h.get("routes") or [], here)
+                elif h.get("handler") == "reverse_proxy":
+                    for j, hr in enumerate(h.get("handle_response") or []):
+                        yield from rec(hr.get("routes") or [], here + (f"handle_response{j}",))
+    yield from rec(server.get("routes") or [], ())
+    yield from rec((server.get("errors") or {}).get("routes") or [], ("errors",))
+    for name, r in sorted((server.get("named_routes") or {}).items()):
+        if isinstance(r, dict):
+            yield from rec([r], (f"named:{name}",))
+
+
 def _walk_lists(routes: list, ancestry: tuple = ()):
     """Yield (ancestry, routes, index, route); ancestry = ((list, index, handler_index), ...) down to ``routes``."""
     for index, route in enumerate(routes):
@@ -1035,6 +1422,12 @@ def _may_hit(match: list | None, path: str, host: str, host_exact: bool = True) 
     return any(_mset_may_hit(m, path, host, host_exact) for m in match)
 
 
+def _host_excludes_route(route: dict, host: str, host_exact: bool) -> bool:
+    """Every matcher set of the route has a host matcher that rules the site host out (server top level only)."""
+    match = route.get("match")
+    return bool(match) and all("host" in m and _host_may_exclude(m["host"], host, host_exact) for m in match)
+
+
 def _handler_shadow_problem(h: dict) -> str | None:
     kind = h.get("handler")
     if kind not in SHADOW_WHITELIST:
@@ -1079,7 +1472,8 @@ def shadow_probes(lines: list[Line]) -> tuple[str, ...]:
     return SHADOW_PROBES + tuple(dict.fromkeys(p for p in extra if p not in SHADOW_PROBES))
 
 
-def _shadow_check(rep: Report, levels: list[tuple], host: str, label: str, probes: tuple[str, ...] = SHADOW_PROBES) -> None:
+def _shadow_check(rep: Report, levels: list[tuple], host: str, label: str, probes: tuple[str, ...] = SHADOW_PROBES,
+                  named: dict | None = None) -> None:
     """F-13 two-step check on every route that runs before the anchor. levels = [(list, index, handler_index|None), ...]
     from the server's route list down to the list that holds the anchor (handler_index None on the last level)."""
     checked = 0
@@ -1092,6 +1486,12 @@ def _shadow_check(rep: Report, levels: list[tuple], host: str, label: str, probe
             # still select another parameter value, suffix or case of a table path
             if not hits and _may_hit_space(route.get("match"), host, host_exact=depth == 0):
                 hits = [SPACE_LABEL]
+            # wac-097 (review wac-095 🟡-2): whatever the matcher, a handler that changes the path may hand the
+            # snippet a prefix-space path (with whatever the route injected) unless the result is proven outside
+            if not hits and not _host_excludes_route(route, host, depth == 0):
+                moved = path_change_into_space(route, named)
+                if moved:
+                    hits = [moved]
             where = f"{label} level {depth} route {j} ({_route_matcher_summary(route.get('match'))})"
             if not hits:
                 print(f"INFO shadow {where}: no probe hit")
@@ -1212,14 +1612,18 @@ def _mset_written_for_prefix(mset: dict, host: str, host_exact: bool = True) -> 
 
 
 def _forwarder_check(rep: Report, routes: list, probes: list[str], host: str, upstream: str, skip: set[int], trail: tuple = (),
-                     inherited: bool = False) -> None:
+                     inherited: bool = False, named: dict | None = None, stack: tuple = (), chain: str = "") -> None:
     """§9.14.3 merge rule + F-10: no route but the snippet may proxy the prefix to operator-query or the
     watcher. Operator-query is recognised by the PORT of ``upstream`` on any host, the watcher by
     9090/9100 (``localhost:8183``, ``[::1]:8183``, ``tcp/127.0.0.1:8183`` ... are all caught); a
     reverse_proxy whose dial cannot be parsed (placeholder, unix socket, range) or that has
     dynamic_upstreams fails as UNCOMPARABLE. A route "may see the prefix" when a probe may hit it
     or when one of its path patterns is written for the prefix (_pattern_touches_prefix), so dead
-    forwarders behind the fallback fail too."""
+    forwarders behind the fallback fail too. wac-097 (review wac-096 🟡-1): nested routes are followed in every
+    container - subroute routes, a reverse_proxy's ``handle_response[].routes``, ``invoke`` -> the server's
+    ``named_routes`` (in the caller's context; an unknown or recursive name fails as UNCOMPARABLE) - and any other
+    handler that carries nested routes fails as UNCOMPARABLE; run_verify also runs this on the server's
+    ``errors.routes`` (handle_errors: a failing forward_auth or basic_auth sends the request there)."""
     gw_port = dial_endpoint(upstream)[1]
     for index, route in enumerate(routes):
         if id(route) in skip:
@@ -1231,12 +1635,28 @@ def _forwarder_check(rep: Report, routes: list, probes: list[str], host: str, up
         if not (hits or written or (inherited and not match)):
             continue
         what = repr(hits[0]) if hits else "the /m/v1/watcher prefix (path pattern written for it)"
-        where = f"route {'.'.join(map(str, trail + (index,)))} ({_route_matcher_summary(match)})"
+        here = trail + (index,)
+        where = f"{chain}route {'.'.join(map(str, here))} ({_route_matcher_summary(match)})"
+        nested_inherited = bool(written or inherited) and not hits
+
+        def nested(sub_routes: list, sub_trail: tuple, sub_stack: tuple) -> None:
+            _forwarder_check(rep, sub_routes or [], hits, host, upstream, skip, sub_trail, inherited=nested_inherited,
+                             named=named, stack=sub_stack, chain=chain)
+
         for h in route.get("handle", []) or []:
-            if h.get("handler") == "subroute":
-                _forwarder_check(rep, h.get("routes", []) or [], hits, host, upstream, skip, trail + (index,),
-                                 inherited=bool(written or inherited) and not hits)
-            elif h.get("handler") == "reverse_proxy":
+            kind = h.get("handler")
+            if kind == "subroute":
+                nested(h.get("routes", []) or [], here, stack)
+            elif kind == "invoke":
+                name = str(h.get("name", ""))
+                target = (named or {}).get(name)
+                if not isinstance(target, dict) or name in stack:
+                    rep.fail(f"UNCOMPARABLE {where} may pass {what} to named route {name!r} (unknown or recursive invoke)")
+                else:
+                    nested([target], here + (f"invoke:{name}",), stack + (name,))
+            elif kind == "reverse_proxy":
+                for i, hr in enumerate(h.get("handle_response") or []):
+                    nested(hr.get("routes") or [], here + (f"handle_response{i}",), stack)
                 dials = _dials(h)
                 if "dynamic_upstreams" in h or not dials:
                     rep.fail(f"UNCOMPARABLE {where} may forward {what} with dynamic or no static upstreams")
@@ -1250,6 +1670,101 @@ def _forwarder_check(rep: Report, routes: list, probes: list[str], host: str, up
                     if port == gw_port or port in WATCHER_PORTS:
                         rep.fail(f"{where} may forward {what} to {d} (port {port}): only the snippet may route the "
                                  "/m/v1/watcher prefix to operator-query or the watcher (§9.14.3, F-10)")
+            elif "routes" in h or "handle_response" in h:
+                rep.fail(f"UNCOMPARABLE {where} may pass {what} to nested routes of handler {kind!r} that this tool does not enumerate")
+
+
+def _rewrite_forwarder_check(rep: Report, routes: list, host: str, upstream: str, skip: set[int], named: dict | None = None,
+                             chain: str = "") -> int:
+    """wac-097 (review wac-095 🟡-2, g18; review wac-096 🔴-1, 🟡-1): a reverse_proxy to operator-query (recognised by
+    the PORT of ``upstream`` on any host spelling) that runs after a PATH CHANGE on its own chain - ``handle_path``,
+    ``uri strip_prefix`` / ``replace`` / ``path_regexp`` or ``rewrite`` between the matcher and the proxy, or the
+    proxy's OWN ``rewrite`` (``reverse_proxy { rewrite … }``, forward_auth's ``uri``) - forwards what the change
+    produced, not what its matcher saw: ``handle_path /x/*`` sends ``GET /x/m/v1/watcher/dialogs`` to operator-query as
+    /m/v1/watcher/dialogs, ``handle /foo/* { reverse_proxy <oq> { rewrite /v1/watcher/dialogs … } }`` sends every
+    /foo/... as GET /v1/watcher/dialogs. Such a forwarder fails unless the changed path is proven to stay outside the
+    /m/v1/watcher prefix space AND operator-query's /v1/watcher gateway space (same proofs as
+    path_change_into_space); ``handle @mobile { uri strip_prefix /m … }`` on /m/v1/accounts, /m/v1/operator/orders/*
+    passes (the cut patterns /v1/accounts, /v1/operator/orders/* are outside both). Containers followed: subroute
+    routes, ``handle_response[].routes`` (original request), ``invoke`` -> ``named_routes`` in the caller's context;
+    after a path change an unknown or recursive name, or another handler with nested routes, fails as UNCOMPARABLE.
+    Paths constrained again by a matcher AFTER the change are judged by _forwarder_check, which sees that matcher.
+    The watcher ports (9090/9100) are not judged here: every route to the watcher must pass the browser checks (basic
+    auth, cleared X-Watcher-* and Authorization, injected placeholder; an unexercised watcher route fails), and the
+    watcher serves no /m/... or /v1/... path. Returns the number of forwarders judged."""
+    gw_port = dial_endpoint(upstream)[1]
+    judged = 0
+
+    def walk(handlers: list, paths, changed: bool, trail: tuple, match, stack: tuple) -> tuple[list | None, bool]:
+        nonlocal judged
+        for h in handlers or []:
+            kind = h.get("handler")
+            if kind == "subroute":
+                paths, changed = walk_list(h.get("routes") or [], paths, changed, trail, match, stack)
+            elif kind == "invoke":
+                name = str(h.get("name", ""))
+                target = (named or {}).get(name)
+                if not isinstance(target, dict) or name in stack:
+                    if changed:
+                        rep.fail(f"UNCOMPARABLE {chain}route {'.'.join(map(str, trail))} invokes {name!r} after a path change "
+                                 "(unknown or recursive named route)")
+                    paths = None
+                else:
+                    paths, changed = walk_list([target], paths, changed, trail + (f"invoke:{name}",), match, stack + (name,))
+            elif kind == "rewrite":
+                new, fields = _paths_after_rewrite(h, paths)
+                if fields:
+                    paths, changed = new, True
+            elif kind == "reverse_proxy":
+                for i, hr in enumerate(h.get("handle_response") or []):
+                    after, after_changed = walk_list(hr.get("routes") or [], paths, changed, trail + (f"handle_response{i}",),
+                                                     match, stack)
+                    paths, changed = _paths_union(paths, after), changed or after_changed
+                sent, sent_changed = paths, changed
+                if isinstance(h.get("rewrite"), dict):
+                    new, fields = _paths_after_rewrite(h["rewrite"], sent)
+                    if fields:
+                        sent, sent_changed = new, True
+                if not sent_changed:
+                    continue
+                judged += 1
+                if not _paths_may_hit_space(sent):
+                    continue
+                where = f"{chain}route {'.'.join(map(str, trail))} ({_route_matcher_summary(match)})"
+                for d in _dials(h) or [""]:
+                    try:
+                        _host_class, port = dial_endpoint(d)
+                    except Uncomparable as exc:
+                        rep.fail(f"UNCOMPARABLE {where} may forward a path changed into the /m/v1/watcher or /v1/watcher space: {exc}")
+                        continue
+                    if port == gw_port:
+                        rep.fail(f"{where} may forward a path changed into the /m/v1/watcher prefix space or operator-query's "
+                                 f"/v1/watcher space to {d} (port {port}) (a strip/replace/rewrite between the matcher and "
+                                 "reverse_proxy - handle_path, uri, the proxy's own rewrite; not proven to stay outside): only the "
+                                 "snippet may route the prefix to operator-query (§9.14.3, wac-097)")
+            elif ("routes" in h or "handle_response" in h) and changed:
+                rep.fail(f"UNCOMPARABLE {chain}route {'.'.join(map(str, trail))}: handler {kind!r} carries nested routes this tool "
+                         "does not enumerate, after a path change")
+                paths = None
+        return paths, changed
+
+    def walk_list(sub: list, paths, changed: bool, trail: tuple, match, stack: tuple) -> tuple[list | None, bool]:
+        cur, cur_changed = paths, changed
+        for i, r in enumerate(sub or []):
+            if id(r) in skip:
+                continue
+            inner, constrained = _paths_after_match(cur, r.get("match"))
+            after, after_changed = walk(r.get("handle") or [], inner, False if constrained else cur_changed,
+                                        trail + (i,), r.get("match") or match, stack)
+            cur, cur_changed = _paths_union(cur, after), cur_changed or after_changed
+        return cur, cur_changed
+
+    for index, route in enumerate(routes):
+        if id(route) in skip or _host_excludes_route(route, host, True):
+            continue
+        start, _c = _paths_after_match(None, route.get("match"))
+        walk(route.get("handle") or [], start, False, (index,), route.get("match"), ())
+    return judged
 
 
 def _site_levels(config: dict, host: str, listen_port: str) -> tuple[list[tuple], list]:
@@ -1409,7 +1924,7 @@ def run_verify(config: dict, lines: list[Line], *, host: str, listen_port: str, 
             levels, site = _site_levels(config, host, listen_port)
             first_group = next((i for i, r in enumerate(site) if "group" in r), len(site))
             _shadow_check(rep, levels + [(site, first_group, None)], host, "prospective (routes before the first handle block)",
-                          shadow_probes(lines))
+                          shadow_probes(lines), server.get("named_routes") or {})
         except Uncomparable as exc:
             rep.fail(f"UNCOMPARABLE before-deploy site list: {exc}")
     else:
@@ -1425,13 +1940,24 @@ def run_verify(config: dict, lines: list[Line], *, host: str, listen_port: str, 
                     rep.ok(f"wgw routes sit in the top-level route list of the {host} site")
             except Uncomparable as exc:
                 rep.fail(f"UNCOMPARABLE site list: {exc}")
-            _shadow_check(rep, list(first.ancestry) + [(first.routes, first.index, None)], host, "snippet", shadow_probes(lines))
+            _shadow_check(rep, list(first.ancestry) + [(first.routes, first.index, None)], host, "snippet", shadow_probes(lines),
+                          server.get("named_routes") or {})
         for line in lines:
             for method in line.methods:
                 out = emu(method, line.sample())
                 if out is not None:
                     _check_gateway_outcome(rep, f"{method} {line.sample()}", out, line, upstream)
-    _forwarder_check(rep, server.get("routes", []), list(PREFIX_PROBES), host, upstream, skip)
+    named = server.get("named_routes") or {}
+    errors = (server.get("errors") or {}).get("routes") or []
+    _forwarder_check(rep, server.get("routes", []), list(PREFIX_PROBES), host, upstream, skip, named=named)
+    # wac-097 (review wac-096 🟡-1): the error chain (handle_errors) is a second entry; nothing in it may forward the prefix
+    _forwarder_check(rep, errors, list(PREFIX_PROBES), host, upstream, set(), named=named, chain="errors ")
+    before = len(rep.failures)
+    judged = _rewrite_forwarder_check(rep, server.get("routes", []), host, upstream, skip, named)
+    judged += _rewrite_forwarder_check(rep, errors, host, upstream, set(), named, chain="errors ")
+    if len(rep.failures) == before:
+        rep.ok(f"no forwarder to operator-query sends a path changed into the /m/v1/watcher or /v1/watcher space "
+               f"({judged} forwarder(s) after a path change judged; routes, errors, handle_response, named routes)")
     neg, pos = line_negatives(lines)
     neg += [("GET", p) for p in FALLBACK_NO_MATCH]
     for method, path in neg:
@@ -1474,7 +2000,7 @@ def run_verify(config: dict, lines: list[Line], *, host: str, listen_port: str, 
             rep.fail(f"mobile {sample}: strips={len(strips)} authorization_touched={touched}")
         else:
             rep.ok(f"mobile {sample} -> {upstream}{out.final_path} (one strip, Authorization untouched)")
-    watcher_routes = [(t, r) for t, r in _walk(server.get("routes", []))
+    watcher_routes = [(t, r) for t, r in _walk_all_routes(server)
                       if any(h.get("handler") == "reverse_proxy" and any(_is_watcher_dial(d) for d in _dials(h))
                              for h in r.get("handle", []))]
     covered: set[tuple[int, ...]] = set()
@@ -1918,6 +2444,98 @@ PROBE_PARAM_VALUES = (
 )
 
 
+REWRITE_ENTRY_TAILS = ("/m/v1/watcher/status", "/m/v1/watcher/dialogs", "/m/v1/watcher/trading/accounts", "/m/v1/watcher/media/x.png")
+OQ_ENTRY_TAILS = ("/v1/watcher/status", "/v1/watcher/dialogs")
+REWRITE_ENTRY_MAX = 128
+_ENTRY_TARGET = re.compile(r"/(?:[A-Za-z0-9/._~-]|%2e)*")
+
+
+def _is_wgw_route(route: dict) -> bool:
+    return any((m.get("path_regexp") or {}).get("pattern", "").startswith("^" + WATCHER_PREFIX)
+               or (m.get("path_regexp") or {}).get("pattern") == FALLBACK_REGEX for m in route.get("match") or [])
+
+
+def rewrite_entry_targets(config: dict, listen_port: str) -> list[str]:
+    """wac-097 (review wac-095 🟡-2, review wac-096 🔴-1): request targets OUTSIDE both the /m/v1/watcher space and
+    operator-query's /v1/watcher space that a path change in the site would turn into a path of either, derived from
+    the adapted config (snippet routes excluded; main routes, subroutes, handle_response routes, named routes reached
+    by invoke and the error chain): for a strip_path_prefix P, P + each tail (REWRITE_ENTRY_TAILS and OQ_ENTRY_TAILS;
+    g16, g18: /x/m/v1/watcher/..., /x/v1/watcher/...); for a uri_substring find F -> replace R, each tail with R
+    replaced by F (g17: /s/status); for a constant uri (a rewrite handler or a reverse_proxy's own rewrite) inside
+    either space, the route's path patterns with '*' and '?' filled (g15: /static/x; review wac-096: /foo/x for
+    ``reverse_proxy { rewrite /v1/watcher/dialogs }``); for a strip_path_suffix S, both prefixes + S and each tail + S;
+    for a P of k > 1 segments also P + '/%2e%2e' * i + tail (i < k: the encoded '..' that pops part of P after the
+    trim). Only plain targets (letters, digits, '/._~-', '%2e') are kept, at most REWRITE_ENTRY_MAX. path_regexp
+    rewrites and placeholders are left to verify's rule (path_change_into_space)."""
+    out: list[str] = []
+    tails = REWRITE_ENTRY_TAILS + OQ_ENTRY_TAILS
+
+    def add(target: str) -> None:
+        if len(out) < REWRITE_ENTRY_MAX and _ENTRY_TARGET.fullmatch(target) and not _in_any_space(target) and target not in out:
+            out.append(target)
+
+    def from_spec(spec: dict, pats: list[str]) -> None:
+        prefix = spec.get("strip_path_prefix")
+        if isinstance(prefix, str) and prefix and "{" not in prefix:
+            p = prefix if prefix.startswith("/") else "/" + prefix
+            nseg = len([s for s in p.split("/") if s])
+            for tail in tails:
+                add(p.rstrip("/") + tail)
+                for i in range(1, nseg):
+                    add(p.rstrip("/") + "/%2e%2e" * i + tail)
+        for rep_ in spec.get("uri_substring") or []:
+            find, repl = str(rep_.get("find", "")), str(rep_.get("replace", ""))
+            if find and repl and "{" not in find + repl:
+                for tail in tails:
+                    i = tail.lower().find(repl.lower())
+                    if i >= 0:
+                        add(tail[:i] + find + tail[i + len(repl):])
+        suffix = spec.get("strip_path_suffix")
+        if isinstance(suffix, str) and suffix and "{" not in suffix:
+            add(EXTERNAL_PREFIX + suffix)
+            add(OQ_GATEWAY_PREFIX + suffix)
+            for tail in tails:
+                add(tail + suffix)
+        part = _uri_path_part(str(spec.get("uri") or ""))
+        lit = _constant_path(part) if part else None
+        if lit and _in_any_space(lit):
+            for p in pats:
+                if not any(c in p for c in "[]\\{}%"):
+                    filled = p.replace("*", "x").replace("?", "x")
+                    add(filled if filled.startswith("/") else "/" + filled)
+
+    try:
+        server = _one_server(config, listen_port)
+    except Uncomparable:
+        return []
+    named = server.get("named_routes") or {}
+
+    def visit(routes: list, pats: list[str], stack: tuple) -> None:
+        for route in routes or []:
+            if _is_wgw_route(route):
+                continue
+            here = next((list(map(str, m["path"])) for m in route.get("match") or [] if m.get("path")), pats)
+            for h in route.get("handle") or []:
+                kind = h.get("handler")
+                if kind == "rewrite":
+                    from_spec(h, here)
+                elif kind == "reverse_proxy":
+                    if isinstance(h.get("rewrite"), dict):
+                        from_spec(h["rewrite"], here)
+                    for hr in h.get("handle_response") or []:
+                        visit(hr.get("routes") or [], here, stack)
+                elif kind == "subroute":
+                    visit(h.get("routes") or [], here, stack)
+                elif kind == "invoke":
+                    name = str(h.get("name", ""))
+                    if isinstance(named.get(name), dict) and name not in stack:
+                        visit([named[name]], here, stack + (name,))
+
+    visit(server.get("routes", []), [], ())
+    visit((server.get("errors") or {}).get("routes") or [], [], ())
+    return out
+
+
 def double_slash_variants(path: str) -> list[str]:
     """``path`` with ONE extra '/' next to each of its slashes (review wac-090 🟡-2):
     ``/m/v1/watcher/status`` -> ``//m/v1/...``, ``/m//v1/...``, ``/m/v1//watcher/...``, ``/m/v1/watcher//status``.
@@ -1927,11 +2545,15 @@ def double_slash_variants(path: str) -> list[str]:
     return [path[:i] + "/" + path[i:] for i, c in enumerate(path) if c == "/"]
 
 
-def _probe_live_checks(port: int, hits: list, lines: list[Line], host: str = "127.0.0.1") -> tuple[int, list[str]]:
+def _probe_live_checks(port: int, hits: list, lines: list[Line], host: str = "127.0.0.1",
+                       entries: list[str] | tuple = ()) -> tuple[int, list[str]]:
     """The raw-request checks against the running probe Caddy. Every forward to operator-query carries
     a fake caller Authorization that must arrive unchanged, without X-Watcher-Proxy-Auth (review
     wac-088 🟡-1: any header rewrite that shadows a table path shows up here). Every request carries
-    ``Host: <host>`` (the production site name, wac-092)."""
+    ``Host: <host>`` (the production site name, wac-092). wac-097: every rewrite entry target
+    (rewrite_entry_targets) is sent with and without the fake Authorization; whatever reaches operator-query
+    must carry exactly what the caller sent and no X-Watcher-Proxy-Auth, and nothing may reach the watcher
+    (the probe sends no basic credentials)."""
     fails: list[str] = []
     n = 0
 
@@ -2026,6 +2648,16 @@ def _probe_live_checks(port: int, hits: list, lines: list[Line], host: str = "12
         before = len(hits)
         status, _b = req("GET", target)
         expect(status == 401 and len(hits) == before, f"browser {target} without credentials -> {status}, stub hits {len(hits) - before}")
+    # wac-097 (review wac-095 🟡-2): entries that a path change in the site turns into prefix-space paths (g16-g18)
+    for target in entries:
+        for hdrs in ({"Authorization": PROBE_FAKE_AUTH}, {}):
+            before = len(hits)
+            status, _b = req("GET", target, hdrs)
+            new = hits[before:]
+            wrong = [h for h in new if h[0] == "watcher" or (h[0] == "oq" and (h[3] != hdrs.get("Authorization") or h[4]))]
+            expect(not wrong, f"rewrite entry GET {_redact_path(target)!r} ({'with' if hdrs else 'without'} Authorization) -> {status}: "
+                              f"reached {[(h[0], _redact_path(h[2])) for h in wrong]} with a changed Authorization, X-Watcher-Proxy-Auth, "
+                              "or the watcher without basic credentials")
     return n, fails
 
 
@@ -2421,7 +3053,9 @@ def cmd_probe(args: argparse.Namespace) -> int:
             last = (err_file.read_text(encoding="utf-8", errors="replace").strip().splitlines() or [""])[-1]
             print(f"CADDY_PROBE_FAILED caddy run exited rc={proc.returncode}: {redact_line(last)[:300]} {ident}")
             return 1
-        n, live_fails = _probe_live_checks(port, hits, lines, host)
+        entries = rewrite_entry_targets(config, str(port))
+        print(f"PROBE_REWRITE_ENTRIES targets={len(entries)} (path changes outside the snippet; each sent with and without Authorization)")
+        n, live_fails = _probe_live_checks(port, hits, lines, host, entries)
         fails += live_fails
     except ArtifactError as exc:
         print(f"CADDY_PROBE_FAILED {exc} {ident}")
@@ -2592,6 +3226,93 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     for pattern in ("^/static/", "^/m/v1$", "^/api/(a|b)", "^\\/api\\/", "^/m/v1/watcherx", "^/v1/watcher/", "^/static/.*\\.js$"):
         assert not _regexp_may_hit_space(pattern), ("path_regexp cannot hit the prefix space", pattern)
         checks += 1
+    # wac-097 (review wac-095 🟡-3): RE2 character classes whose first member is ']' ([]…], [^]…]), POSIX classes and
+    # \Q…\E no longer hide a top-level '|' (g01c, g04c, g04d; the review's black-box shapes); '|' inside a class, an
+    # escaped '|' and an unterminated \Q (all literal) are not alternations
+    for pattern in ("^/static[](]|account-a$", "^/static[^](]|account-a$", "^/static[](]|\\.png$", "^/static[](]|a\\.bmp$",
+                    "^/api[](][]|]|/", "^/api[^](][^]]|/status$", "^/api[](]\\(|/status$", "^/static\\Q(\\E|a\\.bmp$",
+                    "^/static[[:alpha:](]|a\\.bmp$", "^/api[^](][[:alpha:]]|\\.png$", "^/x[\\]]|a$", "^/x[(]|a$", "^/x(a|b))|c$"):
+        assert _re_top_level_alternation(pattern) and _regexp_may_hit_space(pattern), ("top-level '|' must be seen", pattern)
+        checks += 1
+    for pattern in ("^/static\\Q(|x", "^/static[]|]x", "^/static[^]|]x", "^/static[[:alpha:]|]x", "^/static\\|x", "^/static[(|]x",
+                    "^/static(a|b)x", "^/static\\Q|\\Ex"):
+        assert not _re_top_level_alternation(pattern) and not _regexp_may_hit_space(pattern), ("no top-level '|'", pattern)
+        checks += 1
+    assert _re_class_end("[]a]b", 0) == 4 and _re_class_end("[^]a]b", 0) == 5 and _re_class_end("[[:alpha:]]x", 0) == 11 \
+        and _re_class_end("[a", 0) is None and _re_top_level_alternation("^/x[a|b")   # unclosed class: counted as a hit
+    checks += 1
+    # wac-097 (review wac-095 🟡-2): path changes. Whatever the matcher, a change counts as "may enter the prefix
+    # space" unless proven outside (constant clean path outside; strip_prefix cut patterns outside; strip_suffix on
+    # paths that cannot start with /m/v1/watcher)
+    rw = lambda match, **h: {"match": match, "handle": [{"handler": "rewrite", **h}]}  # noqa: E731
+    for name, route in {
+            "g16 strip_prefix /x on /x/*": rw([{"path": ["/x/*"]}], strip_path_prefix="/x"),
+            "g17 uri_substring": rw([{"path": ["/s/*"]}], uri_substring=[{"find": "/s/", "replace": "/m/v1/watcher/", "limit": 1}]),
+            "path_regexp rewrite": rw([{"path": ["/x/*"]}], path_regexp=[{"find": "^/x", "replace": ""}]),
+            "try_files placeholder uri": rw([{"path": ["/x/*"]}], uri="{http.matchers.file.relative}"),
+            "g15 constant uri inside the space": rw([{"path": ["/static/*"]}], uri="/m/v1/watcher/status"),
+            "constant uri, upper case": rw([{"path": ["/static/*"]}], uri="/M/V1/WATCHER?x=1"),
+            "constant uri with a dot segment (cleaned later)": rw([{"path": ["/static/*"]}], uri="/m/v1/./watcher/status"),
+            "constant uri with '%'": rw([{"path": ["/static/*"]}], uri="/m/v1/%77atcher/status"),
+            "relative uri": rw([{"path": ["/static/*"]}], uri="m/v1/watcher/status"),
+            "strip_suffix x on /m/v1/watcherx*": rw([{"path": ["/m/v1/watcherx*"]}], strip_path_suffix="x"),
+            "strip_suffix on a path_regexp that may start with the prefix": rw([{"path_regexp": {"pattern": "^/m/v1/watch"}}], strip_path_suffix="x"),
+            "strip_suffix '.' only": rw([{"path": ["/api/*"]}], strip_path_suffix=".."),
+            "strip_prefix on ^/static/ (regexp paths unknown)": rw([{"path_regexp": {"pattern": "^/static/"}}], strip_path_prefix="/static"),
+            "strip_prefix /api on /a* (head is a start of the prefix)": rw([{"path": ["/a*"]}], strip_path_prefix="/api"),
+            "strip_prefix without matcher": rw(None, strip_path_prefix="/x"),
+            "strip_prefix on *.png": rw([{"path": ["*.png"]}], strip_path_prefix="/x"),
+            "strip_prefix /m on /m/m/*": rw([{"path": ["/m/m/*"]}], strip_path_prefix="/m"),
+            # wac-097 real-Caddy differential: /m/v1/%2e%2e/m/v1/watcher/status is matched as /m/m/v1/watcher/status and
+            # leaves the strip as /m/v1/watcher/status (the encoded '..' pops only the /v1 of the prefix)
+            "strip_prefix /m/v1 on /m/m/* (a segment-prefix of P cut)": rw([{"path": ["/m/m/*"]}], strip_path_prefix="/m/v1"),
+            "strip_prefix /x/y/z on /x/m/*": rw([{"path": ["/x/m/*"]}], strip_path_prefix="/x/y/z"),
+            "strip_prefix with a dot segment": rw([{"path": ["/api/*"]}], strip_path_prefix="/api/.."),
+            "strip_prefix leaving a dot-led remainder": rw([{"path": ["/m...x"]}], strip_path_prefix="/m"),
+            "strip_prefix with a placeholder": rw([{"path": ["/x/*"]}], strip_path_prefix="/{http.vars.p}"),
+            # review wac-096 second round 🔴-A: an empty path part changes nothing and proves nothing
+            "query-only uri (path part empty)": rw([{"path": ["/old/*"]}], uri="?v=1"),
+            "fragment-only uri '#frag'": rw([{"path": ["/old/*"]}], uri="#frag"),
+            "uri /v1/auth then uri_substring auth -> watcher/dialogs in one object": rw([{"path": ["/foo/*"]}], uri="/v1/auth",
+                                                                                     uri_substring=[{"find": "auth", "replace": "watcher/dialogs"}]),
+            "constant uri into operator-query's /v1/watcher": rw([{"path": ["/foo/*"]}], uri="/V1/Watcher/dialogs"),
+            "uri then strip_prefix into the space": rw([{"path": ["/x/*"]}], uri="/x/m/v1/watcher/status", strip_path_prefix="/x"),
+            "reverse_proxy rewrite strip": {"match": [{"path": ["/q/*"]}], "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}],
+                                                                                   "rewrite": {"strip_path_prefix": "/q"}}]},
+            "nested subroute strip": {"match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [
+                {"handler": "rewrite", "strip_path_prefix": "/x"}]}]}]},
+            # review wac-096 second round 🔴-B: handle_response routes see the ORIGINAL request, not the proxy's rewritten copy
+            "strip inside handle_response of a proxy that rewrites its copy to /ping": {"match": [{"path": ["/x/*"]}], "handle": [
+                {"handler": "reverse_proxy", "rewrite": {"uri": "/ping"}, "upstreams": [{"dial": "127.0.0.1:7001"}],
+                 "handle_response": [{"routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]}]}]}]},
+            "invoke of a named route that strips (named routes passed)": {"match": [{"path": ["/x/*"]}], "handle": [{"handler": "invoke", "name": "strip"}]},
+            "invoke of an unknown named route": {"match": [{"path": ["/x/*"]}], "handle": [{"handler": "invoke", "name": "nope"}]},
+            "unknown handler with nested routes": {"match": [{"path": ["/x/*"]}], "handle": [{"handler": "o0_plugin", "routes": []}]},
+    }.items():
+        assert path_change_into_space(route, {"strip": {"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]}}), \
+            ("path change must count as entering the prefix space", name)
+        checks += 1
+    for name, route in {
+            "p03 rewrite /healthz /api/status": rw([{"path": ["/healthz"]}], uri="/api/status"),
+            "method-only rewrite": rw([{"path": ["/old/*"]}], method="GET"),
+            "p05 regexp rewritten to a constant": rw([{"path_regexp": {"pattern": "^/static/.*\\.(js|css)$"}}], uri="/static/bundle.js"),
+            "p06 strip_suffix / on /api/*": rw([{"path": ["/api/*"]}], strip_path_suffix="/"),
+            "strip_suffix .html on /docs/*": rw([{"path": ["/docs/*"]}], strip_path_suffix=".html"),
+            "strip_suffix on an anchored regexp elsewhere": rw([{"path_regexp": {"pattern": "^/static/"}}], strip_path_suffix="/"),
+            "strip_prefix /api on /api/v2/*": rw([{"path": ["/api/v2/*"]}], strip_path_prefix="/api"),
+            "strip_prefix /m on the mobile paths": rw([{"path": ["/m/v1/accounts", "/m/v1/operator/orders/*"]}], strip_path_prefix="/m"),
+            "strip_prefix /reports on /reports/daily/*": rw([{"path": ["/reports/daily/*"]}], strip_path_prefix="reports"),
+            "strip_prefix /api on /static/* (never starts with it)": rw([{"path": ["/static/*"]}], strip_path_prefix="/api"),
+            "strip_prefix /api/v2 on /api/v2/x/* (every cut outside)": rw([{"path": ["/api/v2/x/*"]}], strip_path_prefix="/api/v2"),
+            "no path change at all": {"match": [{"path": ["/x/*"]}], "handle": [{"handler": "headers", "request": {"set": {"X": ["1"]}}}]},
+    }.items():
+        assert path_change_into_space(route) is None, ("path change proven outside the prefix space", name, path_change_into_space(route))
+        checks += 1
+    assert _paths_after_rewrite({"strip_path_prefix": "/m"}, [("path", "/m/v1/operator/orders/*")])[0] == \
+        [("path", "/m/v1/operator/orders/*"), ("path", "/v1/operator/orders/*")], "strip keeps the uncut pattern (encoded '..' pops) and adds the cut one"
+    assert _constant_path("/api/status") == "/api/status" and _uri_path_part("/a?b#c") == "/a" and _uri_path_part("?x") == "" \
+        and _constant_path("/a/../b") is None and _constant_path("/a//b") is None and _constant_path("/a b") is None
+    checks += 1
     assert _mset_may_hit_space({"method": ["PUT"], "path": ["/m/v1/watcher/trading/accounts/a*"]}, "jp-bot.balen.wang", False)
     assert not _mset_may_hit_space({"method": ["PUT"], "path": ["/old/*"]}, "jp-bot.balen.wang", False)
     assert not _mset_may_hit_space({"host": ["other.example"], "path": ["*.png"]}, "jp-bot.balen.wang", True)
@@ -2941,6 +3662,124 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             "match": [{"path": ["/m/v1/watcher/trading/channels/[0-9]*"]}], "handle": [{"handler": "rewrite", "uri": "/index.html"}]}),
         # isolated: dead forwarder of *.png to operator-query after the fallback (only the forwarder check's space rule)
         "dead *.png forwarder to operator-query after the fallback": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["*.png"]}])),
+        # wac-097 (review wac-095 🟡-2): path changes that bring a path from outside the prefix into it (g15..g18)
+        "g16 strip_prefix /x + request_header on /x/* (one route)": lambda s: s.insert(0, {"match": [{"path": ["/x/*"]}], "handle": [
+            {"handler": "rewrite", "strip_path_prefix": "/x"}, inject_observer()]}),
+        "g17 uri replace /s/ -> /m/v1/watcher/ + request_header on /s/*": lambda s: s.insert(0, {"match": [{"path": ["/s/*"]}], "handle": [
+            {"handler": "rewrite", "uri_substring": [{"find": "/s/", "limit": 1, "replace": "/m/v1/watcher/"}]}, inject_observer()]}),
+        "g15 rewrite /static/* to /m/v1/watcher/status (group)": lambda s: s.insert(0, {"group": "group22", "match": [{"path": ["/static/*"]}],
+            "handle": [{"handler": "rewrite", "uri": "/m/v1/watcher/status"}]}),
+        "g18 handle_path /x/* to operator-query with the observer token": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/x/*"]}],
+            "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}, {"handler": "reverse_proxy",
+                "upstreams": [{"dial": "127.0.0.1:8183"}], "headers": {"request": {"set": {"Authorization": ["Bearer {env.SYSTEM_OBSERVER_TOKEN}"]}}}}]}]}]}),
+        # isolated: behind the fallback, nothing injected, no probe or sample reaches /x/*: only the path-change forwarder rule
+        "handle_path /x/* to operator-query, nothing injected": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/x/*"]}],
+            "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"},
+                                                                     {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
+        "reverse_proxy's own rewrite (strip /q) to localhost:8183": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/q/*"]}],
+            "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "localhost:8183"}], "rewrite": {"strip_path_prefix": "/q"}}]}),
+        # isolated: CONNECT-only (emulation unaffected), matcher outside the space: only the path-change rule of step 1
+        "CONNECT strip_prefix /x on /x/* before the snippet": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"], "path": ["/x/*"]}],
+            "handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]}),
+        "CONNECT path_regexp rewrite on /x/*": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"], "path": ["/x/*"]}],
+            "handle": [{"handler": "rewrite", "path_regexp": [{"find": "^/x", "replace": ""}]}]}),
+        "CONNECT try_files-style placeholder uri on /x/*": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"], "path": ["/x/*"]}],
+            "handle": [{"handler": "rewrite", "uri": "{http.matchers.file.relative}"}]}),
+        "CONNECT strip_suffix x on /m/v1/watcherx* (/m/v1/watcherx -> /m/v1/watcher)": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"],
+            "path": ["/m/v1/watcherx*"]}], "handle": [{"handler": "rewrite", "strip_path_suffix": "x"}]}),
+        # was benign before wac-097: GET /static/m/v1/watcher/status leaves this route as /m/v1/watcher/status
+        "strip_prefix /static on ^/static/ before the snippet": lambda s: s.insert(0, {"match": [{"path_regexp": {"name": "st", "pattern": "^/static/"}}],
+            "handle": [{"handler": "rewrite", "strip_path_prefix": "/static"}]}),
+        # wac-097 (review wac-095 🟡-3): a class whose first member is ']' hid the top-level '|'
+        "g01c request_header on ^/static[](]|account-a$": lambda s: s.insert(0, {"match": [{"path_regexp": {"name": "x", "pattern": "^/static[](]|account-a$"}}],
+            "handle": [inject_observer()]}),
+        "g04c request_header on ^/static[](]|\\.png$": lambda s: s.insert(0, {"match": [{"path_regexp": {"name": "x", "pattern": "^/static[](]|\\.png$"}}],
+            "handle": [inject_observer()]}),
+        "g04d request_header on ^/static[^](]|account-a$": lambda s: s.insert(0, {"match": [{"path_regexp": {"name": "x", "pattern": "^/static[^](]|account-a$"}}],
+            "handle": [inject_observer()]}),
+        # no probe parameter value ends in .bmp: only verify's parse can refuse it
+        "request_header on ^/static[](]|a\\.bmp$": lambda s: s.insert(0, {"match": [{"path_regexp": {"name": "x", "pattern": "^/static[](]|a\\.bmp$"}}],
+            "handle": [inject_observer()]}),
+        "CONNECT rewrite on ^/api[^](][^]]|/status$": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"], "path_regexp": {"name": "x",
+            "pattern": "^/api[^](][^]]|/status$"}}], "handle": [{"handler": "rewrite", "strip_path_suffix": "/never-there"}]}),
+        # wac-097 (review wac-096 🔴-1): a reverse_proxy's OWN rewrite (reverse_proxy { rewrite … }, forward_auth's uri)
+        "review wac-096: handle /foo/* { reverse_proxy <oq> { rewrite /v1/watcher/dialogs; header_up observer } }": lambda s: s.insert(fb(s) + 1, {
+            "group": "group21", "match": [{"path": ["/foo/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "reverse_proxy",
+                "headers": {"request": {"set": {"Authorization": ["Bearer {env.SYSTEM_OBSERVER_TOKEN}"]}}}, "rewrite": {"uri": "/v1/watcher/dialogs"},
+                "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
+        "reverse_proxy <oq> { rewrite /v1/watcher{path} } on /foo/* (placeholder)": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+            "match": [{"path": ["/foo/*"]}], "handle": [{"handler": "reverse_proxy", "rewrite": {"uri": "/v1/watcher{http.request.uri.path}"},
+                                                         "upstreams": [{"dial": "127.0.0.1:8183"}]}]}),
+        "forward_auth /bar/* <oq> { uri /v1/watcher/status } before the snippet": lambda s: s.insert(0, {"match": [{"path": ["/bar/*"]}], "handle": [
+            {"handler": "reverse_proxy", "rewrite": {"method": "GET", "uri": "/v1/watcher/status"}, "upstreams": [{"dial": "127.0.0.1:8183"}],
+             "handle_response": [{"match": {"status_code": [2]}, "routes": [{"handle": [{"handler": "vars"}]}]}]}]}),
+        # wac-097 (review wac-096 🟡-1): handle_response routes and unknown containers are followed
+        "sink reverse_proxy on /m/* whose handle_response forwards to <oq>": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/m/*"]}],
+            "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:7000"}], "handle_response": [{"match": {"status_code": [5]},
+                "routes": [{"handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}]}),
+        "unknown handler with nested routes on /m/* (uncomparable)": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/m/*"]}],
+            "handle": [{"handler": "o0_plugin", "routes": [{"handle": [{"handler": "static_response", "status_code": 204}]}]}]}),
+        # isolated: dead behind the fallback (no emulated request reaches it, no path change): only the forwarder check's
+        # UNCOMPARABLE for a container it does not enumerate
+        "dead /m/v1/watcher/extra with an unknown nested-route container (uncomparable)": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+            "match": [{"path": ["/m/v1/watcher/extra"]}], "handle": [{"handler": "o0_plugin", "routes": [{"handle": [
+                {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
+        # review wac-096 second round (q1, q4, 🔴-A, 🔴-B; coordinator's second addition to wac-097)
+        "q1 handle_path /x/* { reverse_proxy <oq> { rewrite ?a=1 } }": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/x/*"]}],
+            "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]}, {"handle": [
+                {"handler": "reverse_proxy", "rewrite": {"uri": "?a=1"}, "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
+        "q4 handle_path /x/* { reverse_proxy <oq> { rewrite #frag } }": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/x/*"]}],
+            "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]}, {"handle": [
+                {"handler": "reverse_proxy", "rewrite": {"uri": "#frag"}, "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
+        # isolated: /foo/* cannot hit, no other change: only "an empty path part proves nothing"
+        "handle /foo/* { reverse_proxy <oq> { rewrite ?a=1 } } (empty path part)": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+            "match": [{"path": ["/foo/*"]}], "handle": [{"handler": "reverse_proxy", "rewrite": {"uri": "?a=1"}, "upstreams": [{"dial": "127.0.0.1:8183"}]}]}),
+        # isolated: handle_response routes get the ORIGINAL request (after the strip, before the proxy's own rewrite /ping)
+        "handle_path /x/* { reverse_proxy sink { rewrite /ping; handle_response { reverse_proxy <oq> } } }": lambda s: s.insert(fb(s) + 1, {
+            "group": "group21", "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [
+                {"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]},
+                {"handle": [{"handler": "reverse_proxy", "rewrite": {"uri": "/ping"}, "upstreams": [{"dial": "127.0.0.1:7001"}],
+                             "handle_response": [{"routes": [{"handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}]}]}]}),
+        "reverse_proxy <oq> { rewrite {uri /v1/auth, uri_substring auth -> watcher/dialogs} } on /foo/*": lambda s: s.insert(fb(s) + 1, {
+            "group": "group21", "match": [{"path": ["/foo/*"]}], "handle": [{"handler": "reverse_proxy", "rewrite": {"uri": "/v1/auth", "uri_substring": [
+                {"find": "auth", "replace": "watcher/dialogs"}]}, "upstreams": [{"dial": "127.0.0.1:8183"}]}]}),
+    }
+    oq_obs = {"handler": "reverse_proxy", "headers": {"request": {"set": {"Authorization": ["Bearer {env.SYSTEM_OBSERVER_TOKEN}"]}}},
+              "upstreams": [{"dial": "127.0.0.1:8183"}]}
+
+    def srv(cfg: dict) -> dict:
+        return cfg["apps"]["http"]["servers"]["srv0"]
+
+    def with_errors(cfg: dict, handlers: list, match: list | None = None) -> None:
+        inner = {"handle": handlers} if match is None else {"match": match, "handle": handlers}
+        srv(cfg)["errors"] = {"routes": [{"match": [{"host": ["jp-bot.balen.wang"]}], "handle": [{"handler": "subroute", "routes": [inner]}],
+                                          "terminal": True}]}
+
+    def with_named(cfg: dict, route_fn) -> None:
+        srv(cfg)["named_routes"] = {"obs": {"handle": [copy.deepcopy(oq_obs)]}}
+        route_fn(_site(cfg))
+
+    # wac-097 (review wac-096 🟡-1): server-level containers - the error chain and named routes reached by invoke
+    server_variants = {
+        "handle_errors { reverse_proxy <oq> + observer } (review wac-096)": lambda c: with_errors(c, [copy.deepcopy(oq_obs)]),
+        "handle_path /x/* { invoke obs }, obs -> <oq> + observer": lambda c: with_named(c, lambda s: s.insert(fb(s) + 1, {"group": "group21",
+            "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]},
+                                                                                         {"handle": [{"handler": "invoke", "name": "obs"}]}]}]})),
+        "handle /m/* { invoke obs } after the fallback, obs -> <oq>": lambda c: with_named(c, lambda s: s.insert(fb(s) + 1, {"group": "group21",
+            "match": [{"path": ["/m/*"]}], "handle": [{"handler": "invoke", "name": "obs"}]})),
+        # isolated: dead behind the fallback, so the emulator (which refuses invoke) never meets it: only the forwarder
+        # check's invoke following
+        "dead /m/v1/watcher/extra { invoke obs } behind the fallback, obs -> <oq>": lambda c: with_named(c, lambda s: s.insert(fb(s) + 1, {
+            "group": "group21", "match": [{"path": ["/m/v1/watcher/extra"]}], "handle": [{"handler": "invoke", "name": "obs"}]})),
+        "invoke of an unknown named route on /m/* (uncomparable)": lambda c: _site(c).insert(fb(_site(c)) + 1, {"group": "group21",
+            "match": [{"path": ["/m/*"]}], "handle": [{"handler": "invoke", "name": "nope"}]}),
+        "handle_errors forwards /api/* to the watcher (basic auth bypass by the error chain)": lambda c: with_errors(c, [{"handler": "reverse_proxy",
+            "upstreams": [{"dial": "127.0.0.1:9090"}]}], [{"path": ["/api/*"]}]),
+        "q2 handle_errors { reverse_proxy <oq> { rewrite ?a=1 } }": lambda c: with_errors(c, [{"handler": "reverse_proxy", "rewrite": {"uri": "?a=1"},
+                                                                                          "upstreams": [{"dial": "127.0.0.1:8183"}]}]),
+        "q3 handle_errors { reverse_proxy sink { rewrite /ping; handle_response { reverse_proxy <oq> } } }": lambda c: with_errors(c, [{
+            "handler": "reverse_proxy", "rewrite": {"uri": "/ping"}, "upstreams": [{"dial": "127.0.0.1:18998"}],
+            "handle_response": [{"routes": [{"handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}]),
     }
     caught = 0
     # a handler before the site's subroute inside the host route runs for every request (F-13, enclosing level)
@@ -2959,6 +3798,17 @@ def cmd_selftest(args: argparse.Namespace) -> int:
                 print(text_variant)
                 return 1
         caught += 1
+    for name, fn in server_variants.items():
+        cfg = copy.deepcopy(good)
+        fn(cfg)
+        for form, candidate in (("raw", cfg), ("skeleton", caddy_skeleton(cfg))):
+            ok_variant, text_variant = verdict(candidate)
+            if ok_variant:
+                print(f"SELFTEST_MISSED {name} ({form})")
+                print(text_variant)
+                return 1
+        caught += 1
+    variants_total = len(variants) + len(server_variants)
     # verify prints matcher summaries (INFO/FAIL): a token inside a path must come out redacted
     leak_cfg = mutated(lambda s: s.insert(0, {"match": [{"path": ["/hook/SENTINELpath0123456789/*"]}, {"path_regexp": {"name": "t", "pattern": "^/tg/SENTINELre0123456789ab/.*$"}}],
                                              "handle": [{"handler": "static_response", "status_code": 204}]}))
@@ -2970,8 +3820,29 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         "vars + map + log_append + tracing without matcher": lambda s: s.insert(0, {"handle": [{"handler": "vars", "root": "/x"}, {"handler": "map", "source": "{path}"},
                                                                                                 {"handler": "log_append", "key": "k"}, {"handler": "tracing", "span": "s"}]}),
         "redir on a path that cannot hit the probes": lambda s: s.insert(0, {"match": [{"path": ["/old/*"]}], "handle": [{"handler": "static_response", "status_code": 308}]}),
-        "rewrite on a case-sensitive regexp that cannot hit": lambda s: s.insert(0, {"match": [{"path_regexp": {"name": "st", "pattern": "^/static/"}}], "handle": [
-            {"handler": "rewrite", "strip_path_prefix": "/static"}]}),
+        # wac-097: a case-sensitive regexp that cannot hit, with a path change proven to stay outside (strip_suffix on
+        # paths that cannot start with /m/v1/watcher); its strip_prefix twin is now a variant
+        "strip_suffix on a case-sensitive regexp that cannot hit": lambda s: s.insert(0, {"match": [{"path_regexp": {"name": "st", "pattern": "^/static/"}}],
+            "handle": [{"handler": "rewrite", "strip_path_suffix": "/"}]}),
+        # wac-097 (review wac-095 💭-4, p03): a constant rewrite outside the space; the browser sample GET /healthz is
+        # emulated through it (/api/status -> the watcher route)
+        "p03 rewrite /healthz /api/status (group, before the snippet)": lambda s: s.insert(0, {"group": "group22", "match": [{"path": ["/healthz"]}],
+            "handle": [{"handler": "rewrite", "uri": "/api/status"}]}),
+        "p05 regexp assets rewritten to a constant": lambda s: s.insert(0, {"group": "group22", "match": [{"path_regexp": {"name": "assets",
+            "pattern": "^/static/.*\\.(js|css)$"}}], "handle": [{"handler": "rewrite", "uri": "/static/bundle.js"}]}),
+        "p06 uri strip_suffix / on /api/*": lambda s: s.insert(0, {"match": [{"path": ["/api/*"]}], "handle": [{"handler": "rewrite", "strip_path_suffix": "/"}]}),
+        "strip_prefix /api on /api/v2/* (cut /v2/* outside)": lambda s: s.insert(0, {"match": [{"path": ["/api/v2/*"]}], "handle": [
+            {"handler": "rewrite", "strip_path_prefix": "/api"}]}),
+        # (a query-only uri counts as "may hit" since review wac-096 second round 🔴-A: see 1b')
+        "method-only rewrite": lambda s: s.insert(0, {"match": [{"path": ["/old/*"]}], "handle": [{"handler": "rewrite", "method": "GET"}]}),
+        # wac-097 (review wac-096 🔴-1): forward_auth's own rewrite to a constant outside both spaces, on a matcher that cannot hit
+        "forward_auth /bar/* <oq> { uri /v1/auth } before the snippet": lambda s: s.insert(0, {"match": [{"path": ["/bar/*"]}], "handle": [
+            {"handler": "reverse_proxy", "rewrite": {"method": "GET", "uri": "/v1/auth"}, "upstreams": [{"dial": "127.0.0.1:8183"}],
+             "handle_response": [{"match": {"status_code": [2]}, "routes": [{"handle": [{"handler": "vars"}]}]}]}]}),
+        # (handle_path /reports/daily/* would strip all of /reports/daily - real adapt - and fail: see caddy_real_test)
+        "handle /reports/daily/* { uri strip_prefix /reports } to operator-query (cut /daily/* outside)": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+            "match": [{"path": ["/reports/daily/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [
+                {"handler": "rewrite", "strip_path_prefix": "/reports"}, {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
         "not-matcher with encode only": lambda s: s.insert(0, {"match": [{"not": [{"path": ["/x"]}]}], "handle": [{"handler": "encode", "encodings": {"zstd": {}}}]}),
         "other host before the site": lambda s: None,
         "glob rewrite that cannot hit (/static/?ld)": lambda s: s.insert(0, {"match": [{"path": ["/static/?ld"]}], "handle": [
@@ -2997,6 +3868,19 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         assert ok_b, (name, text_b)
         assert verdict(caddy_skeleton(cfg))[0], (name, "skeleton")
         checks += 1
+    # wac-097: server-level containers that must stay quiet: an error page, a named route to another service
+    for name, fn in {
+            "handle_errors { respond 502 }": lambda c: with_errors(c, [{"handler": "static_response", "status_code": 502}]),
+            "named route to another service invoked on /reports/*": lambda c: (srv(c).update({"named_routes": {"rep": {"handle": [
+                {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:7000"}]}]}}}), _site(c).insert(fb(_site(c)) + 1, {"group": "group21",
+                "match": [{"path": ["/reports/*"]}], "handle": [{"handler": "invoke", "name": "rep"}]})),
+    }.items():
+        cfg = copy.deepcopy(good)
+        fn(cfg)
+        ok_b, text_b = verdict(cfg)
+        assert ok_b, (name, text_b)
+        assert verdict(caddy_skeleton(cfg))[0], (name, "skeleton")
+        checks += 1
     # before-deploy (site check S-03/S-04): no snippet yet
     base_cfg = copy.deepcopy(good)
     site = _site(base_cfg)
@@ -3015,11 +3899,40 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         # isolated (G37): CONNECT-only, emulation unaffected; only the prospective shadow check sees it
         "prospective shadow: CONNECT rewrite on /m/v1/watcher/*": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"], "path": ["/m/v1/watcher/*"]}],
             "handle": [{"handler": "rewrite", "strip_path_suffix": "/never-there"}]}),
+        # wac-097: the same path-change rules before stage C
+        "prospective shadow: CONNECT strip_prefix /x on /x/*": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"], "path": ["/x/*"]}],
+            "handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]}),
+        "handle_path /x/* to operator-query before stage C": lambda s: s.insert(1, {"group": "group21", "match": [{"path": ["/x/*"]}],
+            "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"},
+                                                                     {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
     }.items():
         bad = copy.deepcopy(base_cfg)
         fn(_site(bad))
         assert not verdict(bad, before_deploy=True)[0], f"before-deploy must flag: {name}"
         checks += 1
+    # wac-097 (review wac-095 🟡-2): the probe's rewrite entries - outside the space, and the g15..g18 ones present
+    entry_cfg = mutated(lambda s: [s.insert(0, {"match": [{"path": ["/x/*"]}], "handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]}),
+                                   s.insert(0, {"match": [{"path": ["/m/m/*"]}], "handle": [{"handler": "rewrite", "strip_path_prefix": "/m/v1"}]}),
+                                   s.insert(0, {"match": [{"path": ["/s/*"]}], "handle": [{"handler": "rewrite", "uri_substring": [
+                                       {"find": "/s/", "replace": "/m/v1/watcher/"}]}]}),
+                                   s.insert(0, {"group": "g", "match": [{"path": ["/static/*"]}], "handle": [{"handler": "rewrite", "uri": "/m/v1/watcher/status"}]}),
+                                   s.insert(0, {"match": [{"path": ["/m/v1/watcherx*"]}], "handle": [{"handler": "rewrite", "strip_path_suffix": "x"}]})])
+    entries = rewrite_entry_targets(entry_cfg, "443")
+    assert {"/x/m/v1/watcher/status", "/x/m/v1/watcher/trading/accounts", "/s/status", "/s/trading/accounts", "/static/x", "/m/v1/watcherx",
+            "/watcher/m/v1/watcher/status", "/m/m/v1/watcher/status", "/m/v1/%2e%2e/m/v1/watcher/status"} <= set(entries), entries
+    assert not any(_in_any_space(t) for t in entries) and all(_ENTRY_TARGET.fullmatch(t) for t in entries), entries
+    good_entries = rewrite_entry_targets(good, "443")
+    all_tails = REWRITE_ENTRY_TAILS + OQ_ENTRY_TAILS
+    assert good_entries and set(good_entries) <= {"/m" + t for t in all_tails} | {"/watcher" + t for t in all_tails}, good_entries
+    # review wac-096 🔴-1 / 🟡-1: a reverse_proxy's own rewrite into /v1/watcher, invoke and the error chain are followed
+    rp_cfg = mutated(lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/foo/*"]}], "handle": [{"handler": "subroute", "routes": [
+        {"handle": [{"handler": "reverse_proxy", "rewrite": {"uri": "/v1/watcher/dialogs"}, "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}))
+    rp_cfg["apps"]["http"]["servers"]["srv0"]["named_routes"] = {"obs": {"handle": [{"handler": "rewrite", "strip_path_prefix": "/n"}]}}
+    _site(rp_cfg).insert(0, {"match": [{"path": ["/q/*"]}], "handle": [{"handler": "invoke", "name": "obs"}]})
+    rp_cfg["apps"]["http"]["servers"]["srv0"]["errors"] = {"routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/e"}]}]}
+    rp_entries = rewrite_entry_targets(rp_cfg, "443")
+    assert {"/foo/x", "/n/m/v1/watcher/status", "/n/v1/watcher/dialogs", "/e/v1/watcher/status"} <= set(rp_entries), rp_entries
+    checks += 1
     # 5. probe pinning (review wac-088 🟡-3): the config the probe RUNS listens on loopback only and dials only the stubs
     stubs = {"oq": "127.0.0.1:1", "watcher": "127.0.0.1:2", "sink": "127.0.0.1:3"}
     raw = copy.deepcopy(good)
@@ -3100,10 +4013,10 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         os.environ.update(saved_env)
     checks += 1
     checks += _selftest_probe_process(args, snippet_path)
-    print(f"SELFTEST_OK good_passes={passes} variants_caught={caught}/{len(variants)} (raw and skeleton) benign_two_step={len(benign)} "
+    print(f"SELFTEST_OK good_passes={passes} variants_caught={caught}/{variants_total} (raw and skeleton) benign_two_step={len(benign)} "
           f"checks={checks} lines={len(lines)} list_format=v2 snippet_verbatim=ok re2_pins=ok caddyfile_text=ok skeleton_verify=ok before_deploy_mode=ok "
           f"probe_pinning=ok matchpath_pins=ok non_ascii=uncomparable double_slash=uncomparable host_matchpins=ok probe_cleanup_signals=ok "
-          f"prefix_space=ok probe_residue=ok")
+          f"prefix_space=ok probe_residue=ok path_changes=ok re2_classes=ok rewrite_entries=ok")
     return 0
 
 
