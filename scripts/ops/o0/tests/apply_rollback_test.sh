@@ -26,6 +26,11 @@
 #   removed), SN3 a different file sits there (refused at the gate before any write). The
 #   reviewer's five restore-db failure points from wac-073 (R073 STOPFAIL/STARTFAIL/MVMID/
 #   WALMADE/RECSHA, review wac-072 🟡-4) are part of this file.
+# wac-092 (review wac-090 🟡-5): the Caddy PREFLIGHT phase executed in the sandbox (PF1..PF8): all markers and the gate
+#   (then apply accepts that gate), R13 snippet sha binding, candidate sha binding, R16 candidate / staged-snippet
+#   symlinks and the resolved-path layer, G29 a different live snippet (LIVE_SNIPPET_DIFFERS), an identical one;
+#   with O0_CADDY_BIN also PF-REAL: real Caddy validate + adapt of the prodlike fixture (gate written) and of the
+#   review n08 '//' injection (verify refuses, no gate).
 # All values are fakes generated here; nothing leaves the temporary directory.
 # --structure-only runs part 1 only (auth_gate_test.sh calls it that way).
 set -eo pipefail
@@ -218,6 +223,11 @@ STUB
 cat > "$BIN/caddy" <<'STUB'
 #!/usr/bin/env bash
 echo "caddy $1" >> "$CALLS"
+# wac-092: CADDY_REAL = the real Caddy v2.10.2 (O0_CADDY_BIN) for the real-Caddy preflight case; its state dirs go to
+# a test directory, never the caller's HOME
+if [ -n "${CADDY_REAL:-}" ]; then
+  HOME="$CADDY_REAL_HOME" XDG_CONFIG_HOME="$CADDY_REAL_HOME/config" XDG_DATA_HOME="$CADDY_REAL_HOME/data" exec "$CADDY_REAL" "$@"
+fi
 case "$1" in
   adapt) [ -z "${CADDY_ADAPT_FAIL:-}" ] || exit 1; cat "$GOOD_ADAPTED" ;;
   version) echo v2.8.4 ;;
@@ -404,6 +414,14 @@ if [ "$RC" -ne 0 ] && [ ! -e "$S/backup-caddy" ] && ! grep -q 'systemctl restart
    && sha256sum -c --quiet "$S/evidence/caddy-live.sha256" >/dev/null 2>&1 && ! printf '%s' "$OUT" | grep -q AUTO_ROLLBACK_ARMED; then
   ok "caddy SN3 (a different snippet file is live): refused at the gate, nothing backed up, written or restarted"
 else bad "caddy SN3: rc=$RC"; printf '%s\n' "$OUT" | grep -E 'STEP|FAIL' | tail -5 | sed 's/^/    /'; fi
+# SN4 (wac-092): a DANGLING symlink sits at the live snippet path (installing would write through it): refused before any write
+caddy_setup SN4
+ln -s "$SB/etc/caddy/nowhere.caddy" "$SB/etc/caddy/caddy-watcher-gateway.caddy"
+run_apply o0_deploy_caddy.sh O0-A05
+if [ "$RC" -ne 0 ] && [ ! -e "$S/backup-caddy" ] && ! grep -q 'systemctl restart' "$CALLS" && [ -L "$SB/etc/caddy/caddy-watcher-gateway.caddy" ] \
+   && [ ! -e "$SB/etc/caddy/nowhere.caddy" ] && sha256sum -c --quiet "$S/evidence/caddy-live.sha256" >/dev/null 2>&1 && ! printf '%s' "$OUT" | grep -q AUTO_ROLLBACK_ARMED; then
+  ok "caddy SN4 (a dangling symlink at the live snippet path): refused at the snippet gate, nothing backed up, written through or restarted"
+else bad "caddy SN4: rc=$RC"; printf '%s\n' "$OUT" | grep -E 'STEP|FAIL' | tail -5 | sed 's/^/    /'; fi
 # PB (wac-090, review wac-088 🟡-4): the preflight gate carries a probe sha that is not the candidate in hand
 caddy_setup PB
 printf 'probed but different\n' > "$WORK/other-candidate"
@@ -417,6 +435,114 @@ if [ "$RC" -ne 0 ] && [ ! -e "$S/backup-caddy" ] && ! grep -q 'systemctl restart
    && printf '%s' "$OUT" | grep -q 'gate field probe_candidate_sha256 differs' && sha256sum -c --quiet "$S/evidence/caddy-live.sha256" >/dev/null 2>&1; then
   ok "caddy PB (gate's probe sha is not the candidate's): refused at the gate, nothing backed up, written or restarted"
 else bad "caddy PB: rc=$RC"; printf '%s\n' "$OUT" | grep -E 'STEP|FAIL' | tail -5 | sed 's/^/    /'; fi
+
+# ---- Caddy PREFLIGHT executed in the sandbox (wac-092, review wac-090 🟡-5): until now the preflight was only
+# checked as plan output, so the probe-sha binding (R13), the symlink checks (R16) and the live-snippet comparison
+# (G29) had no executed test. Each case: what must be refused is refused BEFORE the staged snippet is written, no
+# gate file appears, the live Caddy directory is byte-for-byte unchanged, nothing is restarted.
+pf_setup() {  # pf_setup <name>: live files, a candidate in $S/caddy, a fake control-plane catalog; no gate yet
+  new_sandbox "caddy-pf-$1"
+  mkdir -p "$SB/etc/caddy" "$S/caddy"
+  printf 'old.example {\n\trespond 200\n}\n' > "$SB/etc/caddy/Caddyfile"
+  printf 'CADDY_DOMAIN=jp-bot.balen.wang\n' > "$SB/etc/caddy/v3.env"
+  printf 'import caddy-watcher-gateway.caddy\njp-bot.balen.wang {\n\timport watcher_gateway_routes\n\trespond 204\n}\n' > "$S/caddy/Caddyfile.candidate"
+  PF_CAT="$WORK/catalog-pf-$1.env"; fake_catalog "$PF_CAT"
+  seal_bundle
+  PF_CAND="$(sha256sum "$S/caddy/Caddyfile.candidate" | cut -d' ' -f1)"; PF_SNIP="$(sha256sum "$S/bundle/caddy/caddy-watcher-gateway.caddy" | cut -d' ' -f1)"
+  PF_CAND_ARG="$PF_CAND"; PF_SNIP_ARG="$PF_SNIP"
+}
+pf_live_snapshot() { (cd "$SB/etc/caddy" && find . -print | sort && find . -type f -print0 | sort -z | xargs -0 sha256sum) > "$WORK/pf-live-$1.txt"; }
+pf_live_unchanged() { (cd "$SB/etc/caddy" && find . -print | sort && find . -type f -print0 | sort -z | xargs -0 sha256sum) | cmp -s - "$WORK/pf-live-$1.txt"; }
+run_pf() {  # run_pf: the real preflight phase with --execute in the sandbox -> RC, OUT
+  RC=0
+  OUT="$(PATH="$BIN:$PATH" O0_SANDBOX="$SB" O0_FLEET_PARAMS_SANDBOX_SKIP=1 CALLS="$CALLS" O0_FLEET_NODES=account-a O0_FLEET_READY_PORTS=8081 \
+         bash "$O0/o0_deploy_caddy.sh" --execute --phase preflight --auth-id O0-A05 --stage-dir "$S" --catalog-env "$PF_CAT" \
+         --probe-candidate-sha256 "$PF_CAND_ARG" --probe-snippet-sha256 "$PF_SNIP_ARG" 2>&1)" || RC=$?
+}
+pf_refused() {  # pf_refused <label> <expected output ERE> <live-snapshot name>
+  if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -Eq "$2" && [ ! -e "$S/evidence/caddy-preflight.gate.json" ] \
+     && [ ! -e "$S/caddy/caddy-watcher-gateway.caddy" ] && [ ! -L "$S/caddy/caddy-watcher-gateway.caddy" ] && pf_live_unchanged "$3" \
+     && ! grep -qE 'systemctl (restart|reload)|caddy (validate|adapt)' "$CALLS"; then
+    ok "$1: refused before the staged snippet is written; no gate, live Caddy dir unchanged, no validate/adapt/restart"
+  else bad "$1: rc=$RC staged=$([ -e "$S/caddy/caddy-watcher-gateway.caddy" ] && echo yes || echo no) gate=$([ -e "$S/evidence/caddy-preflight.gate.json" ] && echo yes || echo no)"
+       printf '%s\n' "$OUT" | grep -E 'STEP|FAIL|ABORT|BINDING|symlink|outside' | tail -5 | sed 's/^/    /'; fi
+}
+# PF1: everything in order: every marker, the gate records both probe sha256 values; then apply ACCEPTS that gate
+pf_setup PF1; pf_live_snapshot PF1; run_pf
+gate="$S/evidence/caddy-preflight.gate.json"
+pf_markers() { local m; for m in "$@"; do printf '%s' "$OUT" | grep -q -- "$m" || { echo "    missing marker: $m"; return 1; }; done; }
+if [ "$RC" -eq 0 ] && pf_markers CANDIDATE_IN_STAGING FLEET_BASELINE_OK PROBE_BINDING_OK LIVE_SNIPPET_ABSENT SNIPPET_STAGED CADDYFILE_CHECK_OK \
+     'CADDY_WATCHER_ROUTES_OK mode=snippet lines=16' 'GATE_WRITTEN stage=caddy-preflight' \
+   && python3 -c 'import json,sys; f=json.load(open(sys.argv[1]))["fields"]; sys.exit(0 if f["probe_candidate_sha256"]==sys.argv[2] and f["probe_snippet_sha256"]==sys.argv[3] else 1)' "$gate" "$PF_CAND" "$PF_SNIP" \
+   && cmp -s "$S/caddy/caddy-watcher-gateway.caddy" "$S/bundle/caddy/caddy-watcher-gateway.caddy" && pf_live_unchanged PF1 && ! grep -q 'systemctl restart' "$CALLS"; then
+  ok "caddy PF1 preflight (sandbox, executed): all markers, gate records probe_candidate/snippet_sha256, staged snippet = bundle, live dir unchanged, no restart"
+else bad "caddy PF1 preflight: rc=$RC"; printf '%s\n' "$OUT" | grep -E 'STEP|FAIL|ABORT' | tail -6 | sed 's/^/    /'; fi
+: > "$CALLS"; rm -f "$CALLS.active"
+run_apply o0_deploy_caddy.sh O0-A05
+if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 'FLEET_UNCHANGED_ALL_SAMPLES' && [ "$(grep -c 'systemctl restart caddy' "$CALLS")" = 1 ] \
+   && cmp -s "$SB/etc/caddy/Caddyfile" "$S/caddy/Caddyfile.candidate" && cmp -s "$SB/etc/caddy/caddy-watcher-gateway.caddy" "$S/bundle/caddy/caddy-watcher-gateway.caddy"; then
+  ok "caddy PF1 -> apply: the executed preflight's gate is accepted; installed files = candidate and bundle snippet; one restart; fleet unchanged"
+else bad "caddy PF1 -> apply: rc=$RC"; printf '%s\n' "$OUT" | grep -E 'STEP|FAIL|ABORT' | tail -6 | sed 's/^/    /'; fi
+# PF2 (R13): the bundle snippet is not the probed one (a well-formed but different sha256)
+pf_setup PF2; pf_live_snapshot PF2; PF_SNIP_ARG="$PF_CAND"; run_pf
+pf_refused "caddy PF2 (R13, snippet sha is not the probed one)" 'PROBE_BINDING_FAILED bundle snippet sha256' PF2
+# PF3: the candidate is not the probed one
+pf_setup PF3; pf_live_snapshot PF3; PF_CAND_ARG="$PF_SNIP"; run_pf
+pf_refused "caddy PF3 (candidate sha is not the probed one)" 'PROBE_BINDING_FAILED candidate sha256' PF3
+# PF4 (R16): the candidate path is a symlink (to a file inside the stage dir)
+pf_setup PF4; mv "$S/caddy/Caddyfile.candidate" "$S/caddy/real.candidate"; ln -s real.candidate "$S/caddy/Caddyfile.candidate"; pf_live_snapshot PF4; run_pf
+pf_refused "caddy PF4 (R16, candidate is a symlink)" 'candidate or staged snippet path is a symlink' PF4
+# PF5 (R16): the staged snippet path is a dangling symlink INTO the live Caddy directory (install would write through it)
+pf_setup PF5; ln -s "$SB/etc/caddy/caddy-watcher-gateway.caddy" "$S/caddy/caddy-watcher-gateway.caddy"; pf_live_snapshot PF5; run_pf
+if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q 'candidate or staged snippet path is a symlink' && [ ! -e "$SB/etc/caddy/caddy-watcher-gateway.caddy" ] \
+   && [ ! -e "$S/evidence/caddy-preflight.gate.json" ] && pf_live_unchanged PF5; then
+  ok "caddy PF5 (R16, staged snippet path is a symlink into /etc/caddy): refused, nothing written through it, no gate"
+else bad "caddy PF5: rc=$RC live_snippet=$([ -e "$SB/etc/caddy/caddy-watcher-gateway.caddy" ] && echo WRITTEN || echo absent)"; fi
+# PF6 (G29): a DIFFERENT snippet file is already live
+pf_setup PF6; printf '(watcher_gateway_routes) {\n}\n' > "$SB/etc/caddy/caddy-watcher-gateway.caddy"; pf_live_snapshot PF6; run_pf
+pf_refused "caddy PF6 (G29, a different live snippet file)" 'LIVE_SNIPPET_DIFFERS' PF6
+# PF9 (wac-092): a dangling symlink at the live snippet path is not "absent"
+pf_setup PF9; ln -s "$SB/etc/caddy/nowhere.caddy" "$SB/etc/caddy/caddy-watcher-gateway.caddy"; pf_live_snapshot PF9; run_pf
+pf_refused "caddy PF9 (dangling symlink at the live snippet path)" 'LIVE_SNIPPET_DIFFERS' PF9
+# PF7: the same snippet is already live (re-run after a rollback that kept it): accepted
+pf_setup PF7; cp "$S/bundle/caddy/caddy-watcher-gateway.caddy" "$SB/etc/caddy/caddy-watcher-gateway.caddy"; pf_live_snapshot PF7; run_pf
+if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q LIVE_SNIPPET_EQUALS_BUNDLE && [ -e "$S/evidence/caddy-preflight.gate.json" ] && pf_live_unchanged PF7; then
+  ok "caddy PF7 (identical live snippet): LIVE_SNIPPET_EQUALS_BUNDLE, gate written, live dir unchanged"
+else bad "caddy PF7: rc=$RC"; printf '%s\n' "$OUT" | grep -E 'STEP|FAIL|ABORT' | tail -4 | sed 's/^/    /'; fi
+# PF8 (R16, the pwd -P layer): $S/caddy is a symlink to the live Caddy directory
+pf_setup PF8; mv "$S/caddy/Caddyfile.candidate" "$SB/etc/caddy/Caddyfile.candidate"; rmdir "$S/caddy"; ln -s "$SB/etc/caddy" "$S/caddy"
+pf_live_snapshot PF8; run_pf
+if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q 'is outside the stage dir' && [ ! -e "$SB/etc/caddy/caddy-watcher-gateway.caddy" ] \
+   && [ ! -e "$S/evidence/caddy-preflight.gate.json" ] && pf_live_unchanged PF8; then
+  ok "caddy PF8 (stage caddy/ dir is a symlink to /etc/caddy): refused by the resolved-path check, nothing written in the live dir"
+else bad "caddy PF8: rc=$RC"; printf '%s\n' "$OUT" | grep -E 'STEP|FAIL|ABORT|outside' | tail -4 | sed 's/^/    /'; fi
+# PF-REAL (only with O0_CADDY_BIN): the same preflight with the REAL Caddy v2.10.2 doing validate and adapt of a
+# production-shaped candidate (tests/fixtures/caddy/Caddyfile.prodlike.in, fresh one-off bcrypt): the gate is
+# written; a candidate with the review wac-090 n08 injection (`request_header /m//v1/...`) is refused by verify.
+if [ -n "${O0_CADDY_BIN:-}" ]; then
+  export CADDY_REAL_HOME="$WORK/caddy-real-home"; mkdir -p "$CADDY_REAL_HOME"
+  pf_hash="$("$O0_CADDY_BIN" hash-password --plaintext "$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')")"
+  for v in good n08; do
+    pf_setup "REAL-$v"
+    sed "s|@@BCRYPT@@|$pf_hash|" "$HERE/fixtures/caddy/Caddyfile.prodlike.in" > "$S/caddy/Caddyfile.candidate"
+    [ "$v" = good ] || python3 - "$S/caddy/Caddyfile.candidate" <<'PY'
+import sys
+p = sys.argv[1]; t = open(p).read(); imp = "\timport watcher_gateway_routes\n"
+open(p, "w").write(t.replace(imp, imp + '\trequest_header /m//v1/watcher/trading/accounts Authorization "Bearer {env.SYSTEM_OBSERVER_TOKEN}"\n', 1))
+PY
+    PF_CAND="$(sha256sum "$S/caddy/Caddyfile.candidate" | cut -d' ' -f1)"; PF_CAND_ARG="$PF_CAND"
+    pf_live_snapshot "REAL-$v"
+    CADDY_REAL="$O0_CADDY_BIN" run_pf
+    if [ "$v" = good ] && [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 'Valid configuration' && printf '%s' "$OUT" | grep -q 'CADDY_WATCHER_ROUTES_OK mode=snippet lines=16' \
+       && [ -e "$S/evidence/caddy-preflight.gate.json" ] && pf_live_unchanged "REAL-$v" && ! printf '%s' "$OUT" | grep -q '\$2a\$'; then
+      ok "caddy PF-REAL good: real Caddy validate + adapt, verify OK, gate written, live dir unchanged, no bcrypt hash in the output"
+    elif [ "$v" = n08 ] && [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q "FAIL shadow .*path=/m//v1/watcher/trading/accounts" \
+       && [ ! -e "$S/evidence/caddy-preflight.gate.json" ] && pf_live_unchanged "REAL-$v" && ! printf '%s' "$OUT" | grep -q '\$2a\$'; then
+      ok "caddy PF-REAL n08: real Caddy adapt, verify refuses the '//' injection, no gate, live dir unchanged"
+    else bad "caddy PF-REAL $v: rc=$RC"; printf '%s\n' "$OUT" | grep -E 'STEP|FAIL|ABORT' | tail -5 | sed 's/^/    /'; fi
+  done
+  unset CADDY_REAL_HOME
+else echo "INFO caddy PF-REAL skipped (O0_CADDY_BIN unset)"; fi
 
 # ---- watcher
 watcher_setup() {

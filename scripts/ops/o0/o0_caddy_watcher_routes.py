@@ -33,9 +33,12 @@ Sub-commands
                  enclosing subroute): does it hit /m/v1/watcher, /m/v1/watcher/status,
                  /M/V1/WATCHER/dialogs or (wac-090) any list line's sample path in either case?
                  path: Caddy v2.10.2 MatchPath (case-insensitive; the fast */prefix/suffix
-                 cases; otherwise Go path.Match with ?, [...], \\); a {placeholder}, '%' or a
-                 malformed glob counts as a hit; path_regexp: RE2 semantics; any other matcher
-                 counts as a hit.  If it hits, every handler must be one of encode, headers
+                 cases; otherwise Go path.Match with ?, [...], \\); a {placeholder}, '%', a
+                 malformed glob, any non-ASCII character or a '//' (wac-092) counts as a hit;
+                 path_regexp: RE2 semantics; host: Caddy MatchHost, compared only on the
+                 server's own routes (site selection) - inside a site a host matcher never
+                 excludes (wac-092); any other matcher (header, remote_ip, client_ip,
+                 expression, not, ...) counts as a hit.  If it hits, every handler must be one of encode, headers
                  WITHOUT "request", vars, map, log_append, tracing, and the route must carry
                  neither "terminal" nor "group";
              (d) no other route that may see the prefix (incl. /m/v1/watcherx, "\\r", "#", and
@@ -55,7 +58,8 @@ Sub-commands
   probe      local (NON-production; refuses to run on a host with /srv/trader-v3) Caddy probe on a
              COPY of the candidate Caddyfile (F-12, F-13 (3)). Prints the sha256 of the copy and of
              the snippet next to it (stage C C-1 binds them to the gated candidate). Writes
-             <copy>.o0probe (0600; site address -> http://127.0.0.1:<port>, admin off,
+             <copy>.o0probe (0600; site address -> http://<production host>:<port> (wac-092: the
+             real name, every request sends Host: <production host>), admin off,
              persist_config off, auto_https off, default_bind 127.0.0.1, free http/https ports;
              the line diff is printed), adapts it and verifies the adapted JSON with the
              production upstream addresses; then RUNS a pinned copy of that JSON: only the probe
@@ -63,9 +67,14 @@ Sub-commands
              local stub (operator-query, watcher, or a sink for everything else), no other app,
              refused if anything still listens or dials elsewhere. Sends raw request lines;
              every forward carries a fake caller Authorization that must arrive unchanged.
-             Literal dot segments and ``//`` are expected to be CLEANED and forwarded (never
-             expected as 404); percent-encoded forms and ``#`` are forwarded raw (``#`` as %23).
-             The .o0probe file and the temporary Caddy state dir are removed on every path.
+             Literal dot segments and ``//`` (wac-092: every list line with a doubled slash at
+             every position) are expected to be CLEANED and forwarded with the caller's
+             Authorization untouched (never expected as 404); percent-encoded forms and ``#`` are
+             forwarded raw (``#`` as %23).
+             The .o0probe file and the temporary Caddy state dir are removed on normal exit, on
+             failure, on an exception and on SIGINT/SIGTERM/SIGHUP, including a second signal
+             during the cleanup (_ProbeRun); not on SIGKILL of the probe or power loss (the
+             runbook keeps `ls -A` afterwards).
   selftest   fixture-based self-test shaped like real ``caddy adapt`` output (good config +
              broken variants, raw and skeleton), artifact parser negatives, RE2 pins.
 
@@ -84,6 +93,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -510,13 +520,28 @@ def _caddy_path_match(pattern: str, path: str) -> bool:
     characters are LITERAL there, as in Caddy); otherwise Go path.Match (``?``, ``[...]``, ``\\``).
     Raises Uncomparable where the answer depends on the request or is not modelled here:
     a ``{placeholder}`` (replaced per request, unknown ones by ""), ``%`` (compared in escaped
-    space), a malformed glob (Caddy ignores the error). Callers treat Uncomparable as a hit."""
+    space), a malformed glob (Caddy ignores the error). Callers treat Uncomparable as a hit.
+    wac-092 (review wac-090 🟡-1, 🟡-2, 💭-2):
+      * any non-ASCII character in the pattern or the path: Go ``strings.ToLower`` (simple case
+        mapping, e.g. U+0130 'İ' -> 'i', U+212A Kelvin -> 'k') and Python ``str.lower`` (full
+        mapping, 'İ' -> 'i̇'; final-sigma context) disagree, so it is not evaluated here;
+      * ``//`` in the pattern: Caddy then does NOT merge doubled slashes in the request path
+        (``mergeSlashes := !strings.Contains(matchPattern, "//")``), while the gateway's
+        ``path_regexp`` always cleans them, so ``/m//v1/watcher/<line>`` reaches the gateway
+        although no clean probe path equals it."""
+    if not pattern.isascii():
+        raise Uncomparable(f"path matcher {_redact_path(pattern)!r} has a non-ASCII character (Go and Python lower-case it differently)")
+    if not path.isascii():
+        raise Uncomparable(f"request path {_redact_path(path)!r} has a non-ASCII character")
     p = pattern.lower()
     s = path.lower()
     if "{" in p or "}" in p:
         raise Uncomparable(f"path matcher {_redact_path(pattern)!r} has a placeholder (value depends on the request)")
     if p == "*":
         return True
+    if "//" in p:
+        raise Uncomparable(f"path matcher {_redact_path(pattern)!r} has '//' (Caddy keeps doubled slashes of the request for it; "
+                           "the gateway's path_regexp cleans them)")
     if "%" in p:
         raise Uncomparable(f"path matcher {_redact_path(pattern)!r} has '%' (Caddy compares it in escaped space)")
     stars = p.count("*")
@@ -541,12 +566,12 @@ def _path_may_hit(pattern: str, path: str) -> bool:
 
 
 def _literal_head(pattern: str) -> str:
-    """Lower-cased pattern up to its first glob character, placeholder or '%'."""
-    p = pattern.lower()
-    for i, c in enumerate(p):
-        if c in GLOB_META or c in "{}%":
-            return p[:i]
-    return p
+    """Lower-cased pattern up to its first glob character, placeholder, '%' or non-ASCII character
+    (wac-092: a non-ASCII character may lower-case to an ASCII letter in Go, e.g. 'İ' -> 'i')."""
+    for i, c in enumerate(pattern):
+        if c in GLOB_META or c in "{}%" or not c.isascii():
+            return pattern[:i].lower()
+    return pattern.lower()
 
 
 def _pattern_touches_prefix(pattern: str) -> bool:
@@ -562,10 +587,26 @@ def _pattern_touches_prefix(pattern: str) -> bool:
 
 
 def _host_match(hosts: list, host: str) -> bool:
-    host = host.lower()
+    """Caddy v2.10.2 MatchHost.MatchWithError (modules/caddyhttp/matchers.go) for a request Host
+    without port: a pattern with '*' is compared label by label (same number of labels; a label
+    that is exactly '*' matches any one label, any other label compares case-insensitively and
+    LITERALLY, so 'jp-*' only matches 'jp-*'); otherwise case-insensitive equality.
+    Raises Uncomparable (wac-092, review wac-090 🟡-3) for a ``{placeholder}`` (replaced per
+    request: '{http.request.host}' matches every host) and for a non-ASCII name (Caddy converts
+    it with IDNA). Callers in the F-13 step 1 treat Uncomparable as a hit."""
+    req = host.lower()
     for h in hosts:
-        h = str(h).lower()
-        if h == host or (h.startswith("*.") and host.endswith(h[1:])):
+        h = str(h)
+        if "{" in h or "}" in h:
+            raise Uncomparable(f"host matcher {h!r} has a placeholder (value depends on the request)")
+        if not h.isascii():
+            raise Uncomparable("host matcher has a non-ASCII name (IDNA conversion is not modelled here)")
+        h = h.lower()
+        if "*" in h:
+            want, got = h.split("."), req.split(".")
+            if len(want) == len(got) and all(w == "*" or w == g for w, g in zip(want, got)):
+                return True
+        elif h == req:
             return True
     return False
 
@@ -812,9 +853,25 @@ def _flat_handlers(route: dict) -> list[dict]:
     return out
 
 
-def _mset_may_hit(mset: dict, path: str, host: str) -> bool:
-    """F-13 step 1: may this matcher set match the probe? Only path, path_regexp (RE2) and host can
-    exclude; method/protocol/not/expression/any other or unknown matcher counts as a hit."""
+def _host_may_exclude(value: list, host: str, host_exact: bool) -> bool:
+    """F-13 step 1 for a host matcher. Only at the server's top level (the Caddyfile's site
+    selection, host_exact=True) is the host compared, with Caddy's MatchHost semantics and
+    placeholders counting as a hit. Inside a site (host_exact=False) a host matcher NEVER excludes
+    (wac-092, review wac-090 🟡-3): the site may answer to several names, the Host header is the
+    caller's choice, and the local probe cannot reproduce every name; so a host-conditioned route
+    that runs before the snippet must pass the F-13 whitelist like any other."""
+    if not host_exact:
+        return False
+    try:
+        return not _host_match(value, host)
+    except Uncomparable:
+        return False
+
+
+def _mset_may_hit(mset: dict, path: str, host: str, host_exact: bool = True) -> bool:
+    """F-13 step 1: may this matcher set match the probe? Only path, path_regexp (RE2) and host (at
+    the server's top level only, see _host_may_exclude) can exclude; method/protocol/not/expression/
+    header/remote_ip/client_ip/any other or unknown matcher counts as a hit."""
     for kind, value in mset.items():
         if kind == "path":
             if not any(_path_may_hit(p, path) for p in value):
@@ -826,15 +883,15 @@ def _mset_may_hit(mset: dict, path: str, host: str) -> bool:
             except Uncomparable:
                 pass
         elif kind == "host":
-            if not _host_match(value, host):
+            if _host_may_exclude(value, host, host_exact):
                 return False
     return True
 
 
-def _may_hit(match: list | None, path: str, host: str) -> bool:
+def _may_hit(match: list | None, path: str, host: str, host_exact: bool = True) -> bool:
     if not match:
         return True
-    return any(_mset_may_hit(m, path, host) for m in match)
+    return any(_mset_may_hit(m, path, host, host_exact) for m in match)
 
 
 def _handler_shadow_problem(h: dict) -> str | None:
@@ -888,7 +945,8 @@ def _shadow_check(rep: Report, levels: list[tuple], host: str, label: str, probe
     for depth, (routes, index, hi) in enumerate(levels):
         for j in range(index):
             route = routes[j]
-            hits = [p for p in probes if _may_hit(route.get("match"), p, host)]
+            # depth 0 = the server's route list (site selection by host); deeper = inside the site
+            hits = [p for p in probes if _may_hit(route.get("match"), p, host, host_exact=depth == 0)]
             where = f"{label} level {depth} route {j} ({_route_matcher_summary(route.get('match'))})"
             if not hits:
                 print(f"INFO shadow {where}: no probe hit")
@@ -998,8 +1056,8 @@ def _check_wgw_structure(rep: Report, config: dict, lines: list[Line], listen_po
     return wgw
 
 
-def _mset_written_for_prefix(mset: dict, host: str) -> bool:
-    if "host" in mset and not _host_match(mset["host"], host):
+def _mset_written_for_prefix(mset: dict, host: str, host_exact: bool = True) -> bool:
+    if "host" in mset and _host_may_exclude(mset["host"], host, host_exact):
         return False
     return any(_pattern_touches_prefix(str(p)) for p in mset.get("path") or [])
 
@@ -1018,8 +1076,9 @@ def _forwarder_check(rep: Report, routes: list, probes: list[str], host: str, up
         if id(route) in skip:
             continue
         match = route.get("match")
-        hits = [p for p in probes if _may_hit(match, p, host)]
-        written = any(_mset_written_for_prefix(m, host) for m in match or [])
+        exact = not trail   # host compared only for the server's own routes (site selection); wac-092
+        hits = [p for p in probes if _may_hit(match, p, host, exact)]
+        written = any(_mset_written_for_prefix(m, host, exact) for m in match or [])
         if not (hits or written or (inherited and not match)):
             continue
         what = repr(hits[0]) if hits else "the /m/v1/watcher prefix (path pattern written for it)"
@@ -1489,11 +1548,21 @@ PROBE_FAKE_AUTH = "Bearer o0-probe-not-a-token"
 PROBE_ENV_DROP = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "FTP_PROXY")
 
 
-def probe_caddyfile(text: str, site_address: str, site_port: int, http_port: int, https_port: int) -> str:
+PROBE_HOST_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?")
+
+
+def probe_caddyfile(text: str, site_address: str, site_port: int, http_port: int, https_port: int, site_host: str = "") -> str:
     """Copy of the production Caddyfile for the local probe: ONLY the site address and the global
     admin/persist_config/auto_https/default_bind/http_port/https_port options change (the line diff
     is printed). Upstreams are NOT touched here: every dial is pinned on the adapted JSON
-    (pin_probe_config), whatever its spelling."""
+    (pin_probe_config), whatever its spelling.
+    wac-092 (review wac-090 🟡-3): the site header becomes ``http://<site_host>:<port>`` with the
+    PRODUCTION host name (default: the site address), not 127.0.0.1; ``default_bind 127.0.0.1``
+    keeps the listener on loopback and every probe request carries ``Host: <site_host>``, so a
+    ``host`` matcher inside the site (``@h host jp-bot.*.wang``) behaves as in production."""
+    site_host = site_host or site_address
+    if not PROBE_HOST_RE.fullmatch(site_host):
+        raise ArtifactError(f"probe host {site_host!r} is not a plain host name (pass --host <production site name>)")
     lines = text.splitlines()
     first = next((i for i, l in enumerate(lines) if l.strip() and not l.strip().startswith("#")), None)
     probe_opts = ["\tadmin off", "\tpersist_config off", "\tauto_https off", "\tdefault_bind 127.0.0.1",
@@ -1513,7 +1582,7 @@ def probe_caddyfile(text: str, site_address: str, site_port: int, http_port: int
             addrs = [a.strip() for a in re.split(r"[\s,]+", head) if a.strip()]
             if site_address in addrs:
                 hits += 1
-                lines[i] = f"http://127.0.0.1:{site_port} {{"
+                lines[i] = f"http://{site_host}:{site_port} {{"
     if hits != 1:
         raise ArtifactError(f"site address {site_address!r} found in {hits} site header line(s), want exactly 1")
     return "\n".join(lines) + "\n"
@@ -1642,17 +1711,19 @@ class _Stub:
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.port = self.server.server_address[1]
         self.addr = f"127.0.0.1:{self.port}"
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        # short poll interval: shutdown() returns within ~50 ms (review wac-090 🟡-4: the 0.5 s default
+        # made the cleanup window long enough to be hit by a Ctrl-C)
+        threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
 
     def close(self) -> None:
         self.server.shutdown()
         self.server.server_close()
 
 
-def _raw_request(port: int, method: str, target: str, headers: dict[str, str] | None = None) -> tuple[int, bytes]:
+def _raw_request(port: int, method: str, target: str, headers: dict[str, str] | None = None, host: str = "127.0.0.1") -> tuple[int, bytes]:
     s = socket.create_connection(("127.0.0.1", port), timeout=5)
     extra = "".join(f"{k}: {v}\r\n" for k, v in (headers or {}).items())
-    s.sendall(f"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{extra}Content-Length: 0\r\nConnection: close\r\n\r\n".encode("latin1"))
+    s.sendall(f"{method} {target} HTTP/1.1\r\nHost: {host}\r\n{extra}Content-Length: 0\r\nConnection: close\r\n\r\n".encode("latin1"))
     data = b""
     while True:
         chunk = s.recv(65536)
@@ -1673,18 +1744,33 @@ def _probe_env(xdg: Path, adapt_env: list[str] | None) -> dict[str, str]:
     # Caddy's autosave.json and data dir go to a throwaway directory, never ~/.config/caddy,
     # ~/Library/Application Support/Caddy or /var/lib/caddy (review wac-088 §5.2, G24)
     env.update(XDG_CONFIG_HOME=str(xdg / "config"), XDG_DATA_HOME=str(xdg / "data"), HOME=str(xdg))
+    # review wac-090 💭-1: a `tracing` handler would export to localhost:4317 by default
+    env["OTEL_SDK_DISABLED"] = "true"
     for kv in adapt_env or []:
         k, _, v = kv.partition("=")
         env[k] = v
     return env
 
 
-def _probe_live_checks(port: int, hits: list, lines: list[Line]) -> tuple[int, list[str]]:
+def double_slash_variants(path: str) -> list[str]:
+    """``path`` with ONE extra '/' next to each of its slashes (review wac-090 🟡-2):
+    ``/m/v1/watcher/status`` -> ``//m/v1/...``, ``/m//v1/...``, ``/m/v1//watcher/...``, ``/m/v1/watcher//status``.
+    The snippet's ``path_regexp`` and ``uri strip_prefix`` clean them away; a ``path`` pattern that
+    itself contains ``//`` does not, so a header rewrite written as ``/m//v1/watcher/<line>`` only
+    shows up on these requests."""
+    return [path[:i] + "/" + path[i:] for i, c in enumerate(path) if c == "/"]
+
+
+def _probe_live_checks(port: int, hits: list, lines: list[Line], host: str = "127.0.0.1") -> tuple[int, list[str]]:
     """The raw-request checks against the running probe Caddy. Every forward to operator-query carries
     a fake caller Authorization that must arrive unchanged, without X-Watcher-Proxy-Auth (review
-    wac-088 🟡-1: any header rewrite that shadows a table path shows up here)."""
+    wac-088 🟡-1: any header rewrite that shadows a table path shows up here). Every request carries
+    ``Host: <host>`` (the production site name, wac-092)."""
     fails: list[str] = []
     n = 0
+
+    def req(method, target, headers=None):
+        return _raw_request(port, method, target, headers, host)
 
     def expect(cond: bool, msg: str) -> None:
         nonlocal n
@@ -1695,7 +1781,7 @@ def _probe_live_checks(port: int, hits: list, lines: list[Line]) -> tuple[int, l
     def forwarded(method, target, path, headers=None):
         hdrs = {"Authorization": PROBE_FAKE_AUTH} if headers is None else headers
         before = len(hits)
-        status, _body = _raw_request(port, method, target, hdrs)
+        status, _body = req(method, target, hdrs)
         new = hits[before:]
         ok = status == 200 and len(new) == 1 and new[0][:3] == ("oq", method, path)
         expect(ok, f"forward {method} {target!r} -> {status} hits={[h[:3] for h in new]} want oq {path!r}")
@@ -1706,12 +1792,12 @@ def _probe_live_checks(port: int, hits: list, lines: list[Line]) -> tuple[int, l
 
     def fallback404(method, target):
         before = len(hits)
-        status, body = _raw_request(port, method, target)
+        status, body = req(method, target)
         expect(status == 404 and body == b"" and len(hits) == before, f"fallback {method} {target!r} -> {status} body={len(body)}B hits={len(hits) - before}")
 
     def not_forwarded(method, target):
         before = len(hits)
-        status, _body = _raw_request(port, method, target)
+        status, _body = req(method, target)
         new = [h for h in hits[before:] if h[0] in ("oq", "watcher")]
         expect(not new, f"{method} {target!r} -> {status} reached operator-query or the watcher {[h[:3] for h in new]}")
 
@@ -1735,6 +1821,10 @@ def _probe_live_checks(port: int, hits: list, lines: list[Line]) -> tuple[int, l
             fallback404(m0, ex + "/x")
             fallback404(m0, ex + "%0A")
             fallback404(m0, ex + "#x")
+        # wac-092 (review wac-090 🟡-2): the same line with a doubled slash at every position is cleaned
+        # and forwarded with the caller's Authorization untouched
+        for target in double_slash_variants(ex):
+            forwarded(m0, target, ex[len(MOBILE_PREFIX):])
     for target in ("/m/v1/watcher", "/m/v1/watcher/", "/M/V1/WATCHER/login/start", "/m/v1/watcher/login/start", "/m/v1/watcher%0A",
                    "/M/V1/WATCHER%0A", "/m/v1/watcher/status%0A", "/m/v1/watcher/status#x", "/m/v1/watcher/config", "/m/V1/watcher/status"):
         fallback404("GET", target)
@@ -1752,16 +1842,163 @@ def _probe_live_checks(port: int, hits: list, lines: list[Line]) -> tuple[int, l
     # no caller Authorization: nothing may be injected on the way to operator-query
     forwarded("GET", "/m/v1/watcher/status", "/v1/watcher/status", {})
     forwarded("GET", "/m/v1/watcher/trading/accounts", "/v1/watcher/trading/accounts", {})
+    forwarded("GET", "/m//v1/watcher/trading/accounts", "/v1/watcher/trading/accounts", {})
     before = len(hits)
-    _status, _b = _raw_request(port, "GET", "/m/v1/accounts", {"Authorization": PROBE_FAKE_AUTH})
+    _status, _b = req("GET", "/m/v1/accounts", {"Authorization": PROBE_FAKE_AUTH})
     mob = hits[before:]
     expect(len(mob) == 1 and mob[0][:3] == ("oq", "GET", "/v1/accounts") and mob[0][3] == PROBE_FAKE_AUTH and not mob[0][4],
            f"/m/v1/accounts: want oq /v1/accounts with the caller's Authorization (got {[h[:3] for h in mob]})")
     for target in ("/watcher/", "/api/status", "/media/1700000000000-1.jpg"):
         before = len(hits)
-        status, _b = _raw_request(port, "GET", target)
+        status, _b = req("GET", target)
         expect(status == 401 and len(hits) == before, f"browser {target} without credentials -> {status}, stub hits {len(hits) - before}")
     return n, fails
+
+
+PROBE_SIGNALS = tuple(getattr(signal, name) for name in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, name))
+
+
+class _ProbeInterrupted(BaseException):
+    """SIGINT/SIGTERM/SIGHUP during the probe. A BaseException, so no ``except Exception`` (or
+    ``except OSError`` in the connect loop) swallows it."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+class _ProbeRun:
+    """Everything the probe must remove or stop, whatever ends it (review wac-090 🟡-4): the
+    ``.o0probe`` copy and the temporary state dir (the pinned run JSON) both hold the basic-auth
+    bcrypt hash; the ``caddy run`` process group; a running ``caddy version``/``adapt`` child; the stubs.
+
+    * First SIGINT/SIGTERM/SIGHUP: ``_ProbeInterrupted`` is raised in the main flow; cmd_probe's
+      ``finally`` sets ``cleaning`` as its FIRST statement and calls cleanup().
+    * A signal inside a critical section (creating the temp dir, starting a child and registering
+      it) is held until the section ends, so nothing exists that cleanup() does not know about.
+    * Any signal while ``cleaning`` is set (a second signal, or the first one landing in the
+      ``finally``) runs emergency(): unlink ``.o0probe``, SIGKILL the child process groups, wait at
+      most 2 s, remove the temp dir, exit 128+signal. It never waits for the stubs.
+    cleanup() removes ``.o0probe`` FIRST (the running Caddy never reads it), then stops Caddy
+    (SIGTERM to its process group, SIGKILL after 10 s), then removes the temp dir (Caddy can no
+    longer write into it), and only then closes the stubs.
+    Not covered: SIGKILL of the probe itself, power loss; the runbook keeps ``ls -A`` afterwards."""
+
+    def __init__(self, probe_file: Path, keep: bool) -> None:
+        self.probe_file = probe_file
+        self.keep = keep
+        self.xdg: Path | None = None
+        self.procs: list[subprocess.Popen] = []
+        self.stubs: list[_Stub] = []
+        self.cleaning = False
+        self.defer = 0
+        self.pending: int | None = None
+        self.old: dict = {}
+
+    def install(self) -> None:
+        for s in PROBE_SIGNALS:
+            self.old[s] = signal.signal(s, self._on_signal)
+
+    def restore(self) -> None:
+        for s, handler in self.old.items():
+            signal.signal(s, handler)
+        self.old = {}
+
+    def _on_signal(self, signum, _frame) -> None:
+        if self.cleaning:
+            self.emergency(signum)
+        if self.defer:
+            self.pending = signum
+            return
+        raise _ProbeInterrupted(signum)
+
+    def critical(self):
+        run = self
+
+        class _Critical:
+            def __enter__(self):
+                run.defer += 1
+
+            def __exit__(self, exc_type, _exc, _tb):
+                run.defer -= 1
+                if not run.defer and run.pending is not None and exc_type is None:
+                    signum, run.pending = run.pending, None
+                    raise _ProbeInterrupted(signum)
+                return False
+
+        return _Critical()
+
+    def mkdtemp(self) -> Path:
+        with self.critical():
+            self.xdg = Path(tempfile.mkdtemp(prefix="o0-caddy-probe-xdg-"))
+        return self.xdg
+
+    def add_stub(self, label: str, hits: list) -> _Stub:
+        with self.critical():
+            stub = _Stub(label, hits)
+            self.stubs.append(stub)
+        return stub
+
+    def spawn(self, cmd: list[str], **kw) -> subprocess.Popen:
+        """Popen in a NEW process group (a wrapper script and the Caddy it starts are stopped
+        together), registered before any signal can be handled."""
+        with self.critical():
+            proc = subprocess.Popen(cmd, start_new_session=True, **kw)
+            self.procs.append(proc)
+        return proc
+
+    def run_capture(self, cmd: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
+        proc = self.spawn(cmd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        out, err = proc.communicate()
+        self.procs.remove(proc)
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+    @staticmethod
+    def _killpg(proc: subprocess.Popen, sig: int) -> None:
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    def _remove_probe_file(self) -> None:
+        if not self.keep:
+            try:
+                self.probe_file.unlink()
+            except FileNotFoundError:
+                pass
+
+    def cleanup(self) -> None:
+        self.cleaning = True
+        self._remove_probe_file()
+        for proc in list(self.procs):
+            if proc.poll() is None:
+                self._killpg(proc, signal.SIGTERM)
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    self._killpg(proc, signal.SIGKILL)
+                    proc.wait()
+            self._killpg(proc, signal.SIGKILL)      # anything the leader left behind in its group
+        self.procs = []
+        if self.xdg is not None:
+            shutil.rmtree(self.xdg, ignore_errors=True)
+        for stub in self.stubs:
+            stub.close()
+        self.stubs = []
+
+    def emergency(self, signum: int) -> None:
+        self._remove_probe_file()
+        for proc in self.procs:
+            self._killpg(proc, signal.SIGKILL)
+        deadline = time.monotonic() + 2
+        while any(p.poll() is None for p in self.procs) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if self.xdg is not None:
+            shutil.rmtree(self.xdg, ignore_errors=True)
+        name = signal.Signals(signum).name
+        # os.write, not print: the main flow may be inside a print when the signal lands
+        os.write(1, f"CADDY_PROBE_INTERRUPTED signal={name} during cleanup: .o0probe and the temporary dir removed, caddy killed\n".encode())
+        os._exit(128 + signum)
 
 
 def cmd_probe(args: argparse.Namespace) -> int:
@@ -1778,27 +2015,30 @@ def cmd_probe(args: argparse.Namespace) -> int:
     if not copy_path.is_file() or not staged.is_file() or staged.read_bytes() != (args.snippet or args.paths.parent / SNIPPET_FILE).read_bytes():
         print(f"CADDY_PROBE_FAILED {copy_path.name} must exist and {SNIPPET_FILE} next to it must be a byte-identical copy of the committed snippet (the import is relative)")
         return 1
+    host = args.host or args.site_address
+    if not PROBE_HOST_RE.fullmatch(host):
+        print(f"CADDY_PROBE_FAILED --host {host!r} is not a plain host name (pass the production site name)")
+        return 1
     cand_sha, snip_sha = _sha256_file(copy_path), _sha256_file(staged)
     ident = f"candidate_sha256={cand_sha} snippet_sha256={snip_sha}"
     print(f"PROBE_INPUT {ident}  (stage C C-1: --probe-candidate-sha256 {cand_sha} --probe-snippet-sha256 {snip_sha})")
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from o0_tool import redact_line
     probe_file = copy_path.with_name(copy_path.name + ".o0probe")
-    xdg: Path | None = None
-    proc = None
-    stubs: list[_Stub] = []
+    run = _ProbeRun(probe_file, args.keep)
     hits: list = []
     fails: list[str] = []
     n, version, verify_passes = 0, "?", 0
+    interrupted: int | None = None
+    run.install()
     try:
         # everything that writes (the .o0probe copy holds the bcrypt hash, the temp dir the pinned JSON)
-        # is inside this try: the finally removes both on every path (review wac-088 🟡-4)
-        xdg = Path(tempfile.mkdtemp(prefix="o0-caddy-probe-xdg-"))
-        oq, wa, sink = _Stub("oq", hits), _Stub("watcher", hits), _Stub("sink", hits)
-        stubs = [oq, wa, sink]
+        # or starts a process is inside this try and registered with `run` first (review wac-090 🟡-4)
+        xdg = run.mkdtemp()
+        oq, wa, sink = run.add_stub("oq", hits), run.add_stub("watcher", hits), run.add_stub("sink", hits)
         port, hp, hsp = _free_port(), _free_port(), _free_port()
         original = copy_path.read_text(encoding="utf-8")
-        text = probe_caddyfile(original, args.site_address, port, hp, hsp)
+        text = probe_caddyfile(original, args.site_address, port, hp, hsp, host)
         fd = os.open(probe_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
@@ -1806,16 +2046,15 @@ def cmd_probe(args: argparse.Namespace) -> int:
         print("---- probe copy vs production copy (line diff, redacted)")
         print("\n".join(diff))
         env = _probe_env(xdg, args.adapt_env)
-        version = subprocess.run([args.caddy, "version"], capture_output=True, text=True, env=env).stdout.strip().split(" ")[0]
+        version = (run.run_capture([args.caddy, "version"], env).stdout.strip().split(" ") or ["?"])[0]
         print(f"caddy version {version}")
-        adapted = subprocess.run([args.caddy, "adapt", "--adapter", "caddyfile", "--config", str(probe_file)], env=env,
-                                 stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        adapted = run.run_capture([args.caddy, "adapt", "--adapter", "caddyfile", "--config", str(probe_file)], env)
         if adapted.returncode != 0:
             print(f"CADDY_PROBE_FAILED adapt rc={adapted.returncode} stderr_lines={len(adapted.stderr.splitlines())} {ident}")
             return 1
         config = json.loads(adapted.stdout)
-        # verify the copy as written (production upstream addresses), exactly like stage C preflight
-        rep = run_verify(config, lines, host="127.0.0.1", listen_port=str(port), upstream=args.upstream,
+        # verify the copy as written (production upstream addresses and site name), exactly like stage C preflight
+        rep = run_verify(config, lines, host=host, listen_port=str(port), upstream=args.upstream,
                          mobile_samples=DEFAULT_MOBILE_SAMPLES, browser_samples=DEFAULT_BROWSER_SAMPLES)
         verify_passes = rep.passes
         fails = [f"verify: {f}" for f in rep.failures]
@@ -1829,15 +2068,14 @@ def cmd_probe(args: argparse.Namespace) -> int:
                 print(f"FAIL pin: {redact_line(p)}")
             print(f"CADDY_PROBE_FAILED the pinned config is not local-only; caddy was NOT started {ident}")
             return 1
-        print(f"PROBE_LOCAL_ONLY listen=127.0.0.1:{port} admin=off persist=off servers=1 apps=http dials=stubs_only")
+        print(f"PROBE_LOCAL_ONLY listen=127.0.0.1:{port} host={host} admin=off persist=off servers=1 apps=http dials=stubs_only")
         run_file = xdg / "probe-run.json"
         fd = os.open(run_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(pinned, handle)
         err_file = xdg / "caddy-run.err"
         with open(err_file, "wb") as err:
-            proc = subprocess.Popen([args.caddy, "run", "--config", str(run_file)], env=env,
-                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
+            proc = run.spawn([args.caddy, "run", "--config", str(run_file)], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
         for _ in range(150):
             if proc.poll() is not None:
                 break
@@ -1850,35 +2088,38 @@ def cmd_probe(args: argparse.Namespace) -> int:
             last = (err_file.read_text(encoding="utf-8", errors="replace").strip().splitlines() or [""])[-1]
             print(f"CADDY_PROBE_FAILED caddy run exited rc={proc.returncode}: {redact_line(last)[:300]} {ident}")
             return 1
-        n, live_fails = _probe_live_checks(port, hits, lines)
+        n, live_fails = _probe_live_checks(port, hits, lines, host)
         fails += live_fails
     except ArtifactError as exc:
         print(f"CADDY_PROBE_FAILED {exc} {ident}")
         return 1
+    except _ProbeInterrupted as exc:
+        interrupted = exc.signum
     finally:
-        if proc is not None and proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-        for stub in stubs:
-            stub.close()
+        run.cleaning = True     # FIRST: from here on any signal takes the emergency path (never aborts the cleanup)
+        run.cleanup()
+        run.restore()
         if args.keep and probe_file.exists():
             print(f"NOTE --keep: {probe_file.name} kept; it contains the basic-auth bcrypt hash: delete it yourself after reading")
-        elif probe_file.exists():
-            probe_file.unlink()
-        if xdg is not None:
-            shutil.rmtree(xdg, ignore_errors=True)
+    if interrupted is not None:
+        print(f"CADDY_PROBE_INTERRUPTED signal={signal.Signals(interrupted).name}: .o0probe and the temporary dir removed, caddy stopped {ident}")
+        return 128 + interrupted
     counts = {label: sum(1 for h in hits if h[0] == label) for label in ("oq", "watcher", "sink")}
     stub_hits = f"stub_hits=oq:{counts['oq']},watcher:{counts['watcher']},sink:{counts['sink']}"
-    for f in fails[:40]:
-        print(f"FAIL {f}")
+    # verify and live failures are capped SEPARATELY: an UNCOMPARABLE matcher makes verify fail on every emulated
+    # request, which must not hide what the running Caddy did (wac-092)
+    verify_fails = [f for f in fails if f.startswith("verify: ")]
+    live_only = [f for f in fails if not f.startswith("verify: ")]
+    for group in (verify_fails, live_only):
+        for f in group[:40]:
+            print(f"FAIL {f}")
+        if len(group) > 40:
+            print(f"NOTE {len(group) - 40} more {'verify' if group is verify_fails else 'live'} failure(s) not printed")
     if fails:
-        print(f"CADDY_PROBE_FAILED caddy={version} checks={n} verify_passes={verify_passes} failures={len(fails)} {stub_hits} {ident}")
+        print(f"CADDY_PROBE_FAILED caddy={version} checks={n} verify_passes={verify_passes} failures={len(fails)} "
+              f"verify_failures={len(verify_fails)} live_failures={len(live_only)} {stub_hits} {ident}")
         return 1
-    print(f"CADDY_PROBE_OK caddy={version} live_checks={n} verify_passes={verify_passes} lines={len(lines)} "
+    print(f"CADDY_PROBE_OK caddy={version} live_checks={n} verify_passes={verify_passes} lines={len(lines)} host={host} "
           f"yaml_sha256={meta['_yaml_sha256']} phase_max={meta['_phase_max']} dot_and_double_slash=cleaned_and_forwarded {stub_hits} {ident}")
     return 0
 
@@ -1989,6 +2230,58 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         checks += 1
     assert _pattern_touches_prefix("/m/v1/watcher/extra") and _pattern_touches_prefix("/M/V1/WATCHER*") and \
         _pattern_touches_prefix("/m/v1/w?tcher/extra") and not _pattern_touches_prefix("/m/v1/other") and not _pattern_touches_prefix("*.js")
+    checks += 1
+
+    def must_uncomparable(fn, *a):
+        try:
+            fn(*a)
+        except Uncomparable:
+            return
+        raise AssertionError(("must be uncomparable", fn.__name__, a))
+
+    # 1c. wac-092 (review wac-090 🟡-1): non-ASCII. The reviewer's 12 dangerous black-box cases (tool "no hit",
+    # real Caddy v2.10.2 "hit"; all U+0130, which Go lower-cases to 'i') plus other shapes: UNCOMPARABLE = hit
+    review_091_dangerous = (
+        ("/m/v1/watcher/dİalogs", "/M/V1/WATCHER/dialogs"),
+        ("/m/v1/watcher/tradİng/accounts", "/M/V1/WATCHER/TRADING/ACCOUNTS"),
+        ("/m/v1/watcher/tradİng/accounts", "/m/v1/watcher/trading/accounts"),
+        ("/M/V1/Wat[a-z]her/Dİa[l]ogs", "/M/V1/WATCHER/dialogs"),
+        ("/m/v1/watcher/dİalogs", "/M/V1/WATCHER/dialogs"),
+        ("/m/v1/watcher/media[İ]/1700000000000-1.jpg", "/M/V1/WATCHER/MEDIAİ/1700000000000-1.JPG"),
+        ("/m/v1/watcher/media[İ]/1700000000000-1.jpg", "/m/v1/watcher/mediaİ/1700000000000-1.jpg"),
+        ("/m/v1/watcher/tradİng/accounts", "/m/v1/watcher/trading/accounts"),
+        ("/m/v1/watcher/tradİng/accounts", "/M/V1/WATCHER/TRADING/ACCOUNTS"),
+        ("/M/V1/WATCHER/DI[İ^z]LOGS", "/M/V1/WATCHER/DIİLOGS"),
+        ("/m/v1/watcher/dİalogs", "/M/V1/WATCHER/dialogs"),
+        ("/m/v1/watcher/tradİng/accounts", "/m/v1/watcher/trading/accounts"),
+    )
+    for pattern, path in review_091_dangerous + (("/m/v1/watcher/trading/risKs", "/m/v1/watcher/trading/risks"),   # Kelvin sign
+                                                 ("/m/v1/watcher/ſtatus", "/m/v1/watcher/status"),                 # long s
+                                                 ("/m/v1/watcher/*", "/m/v1/watcher/stİtus")):                     # 💭-2: path side
+        must_uncomparable(_caddy_path_match, pattern, path)
+        assert _path_may_hit(pattern, path), ("non-ASCII must count as a hit", pattern, path)
+        checks += 1
+    assert _literal_head("/m/v1/watcİer/x") == "/m/v1/watc" and _pattern_touches_prefix("/m/v1/watcİer/x"), "non-ASCII ends the literal head"
+    # 🟡-2: '//' in a path pattern (Caddy keeps the request's doubled slashes for it; the gateway's path_regexp cleans them)
+    for pattern in ("/m//v1/watcher/trading/accounts", "/m/v1//watcher/status", "//m/v1/watcher/*", "/m/v1/watcher//*"):
+        must_uncomparable(_caddy_path_match, pattern, "/m/v1/watcher/status")
+        assert _path_may_hit(pattern, "/m/v1/watcher/status")
+        checks += 1
+    assert double_slash_variants("/m/v1/watcher/status") == ["//m/v1/watcher/status", "/m//v1/watcher/status",
+                                                            "/m/v1//watcher/status", "/m/v1/watcher//status"], "probe '//' variants"
+    # 🟡-3: Caddy MatchHost (label-wise '*', literal partial labels), placeholders and non-ASCII names UNCOMPARABLE
+    for hosts, want in ((["jp-bot.*.wang"], True), (["*.balen.wang"], True), (["*.wang"], False), (["JP-BOT.Balen.Wang"], True),
+                        (["jp-*.balen.wang"], False), (["*.*.*"], True), (["*.*"], False), (["other.example"], False),
+                        (["other.example", "*.balen.wang"], True)):
+        assert _host_match(hosts, "jp-bot.balen.wang") is want, ("MatchHost pin", hosts, want)
+        checks += 1
+    for hosts in (["{http.request.host}"], ["jp-bot.{env.O0_DOMAIN}"], ["jp-böt.balen.wang"]):
+        must_uncomparable(_host_match, hosts, "jp-bot.balen.wang")
+        assert _mset_may_hit({"host": hosts}, "/m/v1/watcher", "jp-bot.balen.wang", host_exact=True), ("uncomparable host = hit", hosts)
+        checks += 1
+    # F-13 step 1: at the server's top level the host is compared; inside a site it never excludes
+    assert not _mset_may_hit({"host": ["other.example"]}, "/m/v1/watcher", "jp-bot.balen.wang", host_exact=True)
+    assert _mset_may_hit({"host": ["other.example"]}, "/m/v1/watcher", "jp-bot.balen.wang", host_exact=False)
     checks += 1
 
     # 2. artifact parser negatives (list v2 + snippet)
@@ -2116,6 +2409,9 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         if group:
             r["group"] = group
         return r
+
+    def inject_observer():
+        return {"handler": "headers", "request": {"set": {"Authorization": ["Bearer {env.SYSTEM_OBSERVER_TOKEN}"]}}}
 
     def wrap_in_route(site):  # import wrapped in route { } -> nested list after the handle blocks
         i, j = first_wgw(site), fb(site)
@@ -2245,6 +2541,30 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             dial="unix//run/oq.sock")),
         "dead dynamic_upstreams forwarder behind the fallback (uncomparable)": lambda s: s.insert(fb(s) + 1, {"group": "group21",
             "match": [{"path": ["/m/v1/watcher/extra"]}], "handle": [{"handler": "reverse_proxy", "dynamic_upstreams": {"source": "srv", "name": "oq"}}]}),
+        # wac-092 (review wac-090 🟡-1): non-ASCII path patterns
+        "request_header on /m/v1/watcher/tradİng/accounts injects the observer token (review n07)": lambda s: s.insert(0, {
+            "match": [{"path": ["/m/v1/watcher/tradİng/accounts"]}], "handle": [inject_observer()]}),
+        # isolated: CONNECT-only (emulation never evaluates the path), Kelvin sign: only "non-ASCII = hit" reaches step 2
+        "CONNECT rewrite on /m/v1/watcher/trading/risKs (Kelvin sign)": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"],
+            "path": ["/m/v1/watcher/trading/risKs"]}], "handle": [{"handler": "rewrite", "strip_path_suffix": "/never-there"}]}),
+        # 🟡-2: '//' in a path pattern
+        "request_header on /m//v1/watcher/trading/accounts injects the observer token (review n08)": lambda s: s.insert(0, {
+            "match": [{"path": ["/m//v1/watcher/trading/accounts"]}], "handle": [inject_observer()]}),
+        "CONNECT rewrite on /m/v1//watcher/status (only the '//' rule)": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"],
+            "path": ["/m/v1//watcher/status"]}], "handle": [{"handler": "rewrite", "strip_path_suffix": "/never-there"}]}),
+        "'//' forwarder of the prefix to operator-query after the fallback": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m//v1/watcher/*"]}])),
+        # 🟡-3: host matchers inside the site
+        "host jp-bot.*.wang + request_header injection (review n17b)": lambda s: s.insert(0, {"match": [{"host": ["jp-bot.*.wang"]}],
+            "handle": [inject_observer()]}),
+        "host {http.request.host} + request_header injection (review n18)": lambda s: s.insert(0, {"match": [{"host": ["{http.request.host}"]}],
+            "handle": [inject_observer()]}),
+        # isolated: another name, CONNECT-only; the emulation (Host jp-bot.balen.wang) never enters it, only "a host matcher
+        # inside the site never excludes" sends it to step 2
+        "CONNECT rewrite behind a host matcher for another name": lambda s: s.insert(0, {"match": [{"host": ["alias.balen.wang"], "method": ["CONNECT"],
+            "path": ["/m/v1/watcher/*"]}], "handle": [{"handler": "rewrite", "strip_path_suffix": "/never-there"}]}),
+        # isolated: a /m/* forwarder to operator-query for another name after the fallback: only the forwarder check's host rule
+        "operator-query forwarder of /m/* behind a host matcher for another name": lambda s: s.insert(fb(s) + 1, strip_proxy_route(
+            [{"host": ["alias.balen.wang"], "path": ["/m/*"]}])),
     }
     caught = 0
     # a handler before the site's subroute inside the host route runs for every request (F-13, enclosing level)
@@ -2356,10 +2676,186 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     text_probe = probe_caddyfile("{\n\tadmin localhost:2019\n\tdefault_bind 0.0.0.0\n}\njp-bot.balen.wang {\n\trespond 204\n}\n", "jp-bot.balen.wang", 1, 2, 3)
     assert all(f"\t{o}\n" in text_probe for o in ("admin off", "persist_config off", "auto_https off", "default_bind 127.0.0.1")) \
         and "0.0.0.0" not in text_probe and "localhost:2019" not in text_probe, text_probe
+    # wac-092 (🟡-3): the probe site keeps the production name (Host-dependent routes behave as in production)
+    assert "\nhttp://jp-bot.balen.wang:1 {\n" in text_probe, text_probe
+    assert "\nhttp://alias.balen.wang:1 {\n" in probe_caddyfile("jp-bot.balen.wang {\n\trespond 204\n}\n", "jp-bot.balen.wang", 1, 2, 3, "alias.balen.wang")
+    for bad_host in ("jp-bot.balen.wang/x", "{http.request.host}", "a b", "-x.example"):
+        try:
+            probe_caddyfile("jp-bot.balen.wang {\n\trespond 204\n}\n", "jp-bot.balen.wang", 1, 2, 3, bad_host)
+            raise AssertionError(("probe host accepted", bad_host))
+        except ArtifactError:
+            pass
     checks += 1
+    # R05 (review wac-090 🟡-5): assert_probe_pinned refuses any listener that is not exactly 127.0.0.1:<port>
+    for listen in (["0.0.0.0:443"], [":443"], ["127.0.0.1:443", "0.0.0.0:443"], ["[::]:443"]):
+        bad_listen = copy.deepcopy(pinned)
+        bad_listen["apps"]["http"]["servers"]["srv0"]["listen"] = listen
+        assert any("listen" in p for p in assert_probe_pinned(bad_listen, set(stubs.values()), 443)), ("listen accepted", listen)
+        checks += 1
+    # R10: the probe's Caddy gets no proxy or OTEL_* variable (OTEL_SDK_DISABLED=true is set), whatever the caller exports
+    saved_env = dict(os.environ)
+    try:
+        os.environ.update({"HTTP_PROXY": "http://10.0.0.9:3128", "https_proxy": "http://10.0.0.9:3128", "ALL_PROXY": "socks5://10.0.0.9:1080",
+                           "no_proxy": "x", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://10.0.0.9:4317", "OTEL_SDK_DISABLED": "false"})
+        penv = _probe_env(Path("/nonexistent-o0-xdg"), ["O0_FAKE=1"])
+        leaked = [k for k in penv if k.upper() in PROBE_ENV_DROP or (k.upper().startswith("OTEL_") and k != "OTEL_SDK_DISABLED")]
+        assert not leaked, ("proxy/OTEL variable names reach Caddy", leaked)   # names only, never values
+        assert penv["OTEL_SDK_DISABLED"] == "true" and penv["HOME"] == "/nonexistent-o0-xdg" and penv["O0_FAKE"] == "1"
+    finally:
+        os.environ.clear()
+        os.environ.update(saved_env)
+    checks += 1
+    checks += _selftest_probe_process(args, snippet_path)
     print(f"SELFTEST_OK good_passes={passes} variants_caught={caught}/{len(variants)} (raw and skeleton) benign_two_step={len(benign)} "
-          f"checks={checks} lines={len(lines)} list_format=v2 snippet_verbatim=ok re2_pins=ok caddyfile_text=ok skeleton_verify=ok before_deploy_mode=ok probe_pinning=ok matchpath_pins=ok")
+          f"checks={checks} lines={len(lines)} list_format=v2 snippet_verbatim=ok re2_pins=ok caddyfile_text=ok skeleton_verify=ok before_deploy_mode=ok "
+          f"probe_pinning=ok matchpath_pins=ok non_ascii=uncomparable double_slash=uncomparable host_matchpins=ok probe_cleanup_signals=ok")
     return 0
+
+
+FAKE_CADDY = r'''#!@PYTHON@
+# wac-092 selftest stand-in for `caddy` (NOT Caddy): version / adapt / run, with slow modes for the signal tests
+import http.server, json, os, re, signal, sys, time
+mode, mark = os.environ.get("O0_FAKE_MODE", ""), os.environ["O0_FAKE_MARK"]
+def note(s):
+    with open(mark, "a") as f:
+        f.write(s + "\n")
+cmd = sys.argv[1]
+if cmd == "version":
+    print("v2.10.2 o0-fake"); sys.exit(0)
+if cmd == "adapt":
+    note(f"adapt {os.getpid()}")
+    if "adapt-hang" in mode:
+        time.sleep(60); sys.exit(1)
+    text = open(sys.argv[sys.argv.index("--config") + 1]).read()
+    port = re.search(r"^http://\S+:([0-9]+) \{$", text, re.M).group(1)
+    print(json.dumps({"admin": {"disabled": True}, "apps": {"http": {"servers": {"s": {"listen": [":" + port], "routes": []}}}}}))
+    sys.exit(0)
+if cmd == "run":
+    cfg = json.load(open(sys.argv[sys.argv.index("--config") + 1]))
+    host, port = cfg["apps"]["http"]["servers"]["s"]["listen"][0].rsplit(":", 1)
+    if "slow-stop" in mode:
+        def on_term(*_a):
+            note("stopping"); time.sleep(60); os._exit(0)
+        signal.signal(signal.SIGTERM, on_term)
+    class H(http.server.BaseHTTPRequestHandler):
+        def _r(self):
+            if "slow-requests" in mode:
+                note("request"); time.sleep(0.3)
+            self.send_response(200); self.send_header("Content-Length", "1"); self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(b"x")
+        do_GET = do_POST = do_PUT = do_DELETE = do_HEAD = do_PATCH = do_OPTIONS = _r
+        def log_message(self, *_a):
+            pass
+    srv = http.server.ThreadingHTTPServer((host, int(port)), H)
+    note(f"run {os.getpid()}")
+    srv.serve_forever()
+sys.exit(2)
+'''
+
+
+def _selftest_probe_process(args: argparse.Namespace, snippet_path: Path) -> int:
+    """wac-092 (review wac-090 🟡-4, 🟡-5 R06/R12): the probe as a separate process against a fake `caddy`
+    (so this runs without O0_CADDY_BIN; tests/caddy_real_test.sh repeats the signal cases with the real Caddy).
+    Every scenario must leave no .o0probe, an empty TMPDIR (the probe's temporary state dir is gone) and no
+    live child process: R06 a probe whose checks FAIL; a SIGTERM while `caddy adapt` runs; a SIGINT during the
+    live checks; a SIGTERM that lands while the cleanup waits for Caddy to stop; a SIGHUP during the live checks
+    followed by a SIGINT during that cleanup. R12: the jp-24 refusal (Path.exists patched)."""
+    import contextlib
+    import io
+    base = Path(tempfile.mkdtemp(prefix="o0-probe-selftest-"))
+    checks = 0
+    try:
+        work = base / "copy"
+        work.mkdir()
+        (work / "Caddyfile").write_text("jp-bot.balen.wang {\n\timport watcher_gateway_routes\n\trespond 204\n}\n", encoding="utf-8")
+        shutil.copyfile(snippet_path, work / SNIPPET_FILE)
+        fake = base / "caddy"
+        fake.write_text(FAKE_CADDY.replace("@PYTHON@", sys.executable), encoding="utf-8")
+        fake.chmod(0o700)
+        probe_file = work / "Caddyfile.o0probe"
+
+        # R12: refused on a host with /srv/trader-v3, before anything is written
+        orig_exists = Path.exists
+        Path.exists = lambda self, *a, **k: True if str(self) == "/srv/trader-v3" else orig_exists(self, *a, **k)  # type: ignore[method-assign]
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cmd_probe(build_parser().parse_args(["probe", "--caddy", str(fake), "--caddyfile", str(work / "Caddyfile"),
+                                                          "--paths", str(args.paths), "--snippet", str(snippet_path)]))
+        finally:
+            Path.exists = orig_exists  # type: ignore[method-assign]
+        assert rc == 1 and "CADDY_PROBE_REFUSED" in buf.getvalue() and not probe_file.exists(), ("jp-24 refusal", rc, buf.getvalue())
+        checks += 1
+
+        def alive(pid: int) -> bool:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+            return True
+
+        def scenario(name: str, mode: str, steps: list[tuple[str, int]], want_rc: int, want_line: str) -> None:
+            tmp, mark = base / f"tmp-{name}", base / f"mark-{name}"
+            tmp.mkdir()
+            mark.write_text("")
+            env = {**os.environ, "TMPDIR": str(tmp), "O0_FAKE_MODE": mode, "O0_FAKE_MARK": str(mark)}
+            proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "probe", "--caddy", str(fake), "--caddyfile", str(work / "Caddyfile"),
+                                     "--paths", str(args.paths), "--snippet", str(snippet_path)],
+                                    env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            try:
+                for wait_for, sig in steps:
+                    deadline = time.monotonic() + 30
+                    while wait_for not in mark.read_text() and proc.poll() is None and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    assert wait_for in mark.read_text(), (name, "never reached", wait_for)
+                    proc.send_signal(sig)
+                out, _ = proc.communicate(timeout=60)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+            pids = [int(x.split()[1]) for x in mark.read_text().splitlines() if x.split()[0] in ("adapt", "run")]
+            deadline = time.monotonic() + 5
+            while any(alive(p) for p in pids) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            problems = []
+            if proc.returncode != want_rc or want_line not in out:
+                problems.append(f"rc={proc.returncode} (want {want_rc}), line {want_line!r} missing")
+            if probe_file.exists():
+                problems.append(".o0probe left behind")
+            if any(tmp.iterdir()):
+                problems.append(f"temporary dir left: {[p.name for p in tmp.iterdir()]}")
+            if any(alive(p) for p in pids):
+                problems.append(f"child still alive: {pids}")
+            if "$2a$" in out:
+                problems.append("bcrypt-like text in the output")
+            assert not problems, (name, problems, out[-1500:])
+
+        # emergency() on its own (the path a second signal takes): removes .o0probe and the temp dir, exits 128+n
+        probe_file.write_text("x")
+        em_tmp = base / "em-xdg"
+        (em_tmp / "data").mkdir(parents=True)
+        (em_tmp / "probe-run.json").write_text("{}")
+        em = subprocess.run([sys.executable, "-c", "import pathlib, signal, sys; sys.path.insert(0, sys.argv[1]); import o0_caddy_watcher_routes as r; "
+                             "run = r._ProbeRun(pathlib.Path(sys.argv[2]), False); run.xdg = pathlib.Path(sys.argv[3]); run.emergency(signal.SIGTERM)",
+                             str(Path(__file__).resolve().parent), str(probe_file), str(em_tmp)], capture_output=True, text=True, timeout=30)
+        assert em.returncode == 128 + signal.SIGTERM and "CADDY_PROBE_INTERRUPTED signal=SIGTERM during cleanup" in em.stdout \
+            and not probe_file.exists() and not em_tmp.exists(), ("emergency()", em.returncode, em.stdout[-300:], em.stderr[-300:])
+        checks += 1
+        scenario("R06-checks-fail", "", [], 1, "CADDY_PROBE_FAILED caddy=v2.10.2")
+        scenario("SIGTERM-in-adapt", "adapt-hang", [("adapt ", signal.SIGTERM)], 128 + signal.SIGTERM, "CADDY_PROBE_INTERRUPTED signal=SIGTERM:")
+        scenario("SIGINT-in-live-checks", "slow-requests", [("request", signal.SIGINT)], 128 + signal.SIGINT, "CADDY_PROBE_INTERRUPTED signal=SIGINT:")
+        scenario("SIGTERM-in-cleanup", "slow-stop", [("stopping", signal.SIGTERM)], 128 + signal.SIGTERM,
+                 "CADDY_PROBE_INTERRUPTED signal=SIGTERM during cleanup")
+        scenario("SIGHUP-then-SIGINT-in-cleanup", "slow-requests slow-stop", [("request", signal.SIGHUP), ("stopping", signal.SIGINT)],
+                 128 + signal.SIGINT, "CADDY_PROBE_INTERRUPTED signal=SIGINT during cleanup")
+        checks += 5
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    return checks
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2401,7 +2897,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--caddyfile", type=Path, required=True, help=f"copy of the production Caddyfile; {SNIPPET_FILE} must sit next to it")
     p.add_argument("--paths", type=Path, default=default_paths)
     p.add_argument("--snippet", type=Path, help=snippet_help)
-    p.add_argument("--site-address", default="jp-bot.balen.wang")
+    p.add_argument("--site-address", default="jp-bot.balen.wang", help="the site address token on the site header line of the copy")
+    p.add_argument("--host", default="", help="production host name the probe site keeps and every probe request sends as Host (default: --site-address)")
     p.add_argument("--upstream", default=DEFAULT_GATEWAY_UPSTREAM, help="operator-query as the copy writes it (any loopback spelling maps to the stub)")
     p.add_argument("--watcher-upstream", default=DEFAULT_WATCHER_UPSTREAM)
     p.add_argument("--adapt-env", action="append", help="NAME=VALUE for {$NAME} adapt-time placeholders (fake values only)")
@@ -2417,7 +2914,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except _ProbeInterrupted as exc:     # a signal outside the probe's own try (its finally already cleaned up)
+        print(f"CADDY_PROBE_INTERRUPTED signal={signal.Signals(exc.signum).name}")
+        return 128 + exc.signum
 
 
 if __name__ == "__main__":
