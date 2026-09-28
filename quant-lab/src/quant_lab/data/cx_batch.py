@@ -243,14 +243,14 @@ def wire_message(row):
     return {"key": row["key"], "schema_name": row["schema_name"], **user}
 
 
-def _run_batch(batch, directory, executable, batch_id, retries, timeout, backoff=0):
+def _run_batch(batch, directory, executable, batch_id, retries, timeout, backoff=0, model="gpt-6-astra"):
     prompt = dumps({"instructions": BATCH_RULES, "messages": [wire_message(r) for r in batch]})
     schema_path = directory / "schema.json"
     attempts = []
     for attempt in range(retries + 1):
         prefix = directory / "raw" / f"{batch_id}-{attempt}"
         out = prefix.with_suffix(".json")
-        command = [executable, "exec", "-m", "gpt-6-astra", "-s", "read-only", "--skip-git-repo-check",
+        command = [executable, "exec", "-m", model, "-s", "read-only", "--skip-git-repo-check",
                    "--ephemeral", "--output-schema", str(schema_path), "-o", str(out), "-"]
         started = time.monotonic()
         stdout, stderr, error = "", "", None
@@ -304,7 +304,7 @@ def length_batches(rows, batch_size=20, max_chars=12000):
         yield batch
 
 
-def run_batches(prompts: Path, directory: Path, *, executable=None, batch_size=20, max_chars=12000, concurrency=3, retries=2, timeout=600, backoff=0):
+def run_batches(prompts: Path, directory: Path, *, executable=None, batch_size=20, max_chars=12000, concurrency=3, retries=2, timeout=600, backoff=0, model="gpt-6-astra"):
     import fcntl
     from .llm import record_key, SCHEMA_NAME_EXTRACT
     if batch_size < 1 or max_chars < 1 or concurrency < 1 or retries < 0 or not math.isfinite(timeout) or timeout <= 0 or backoff < 0:
@@ -352,7 +352,7 @@ def run_batches(prompts: Path, directory: Path, *, executable=None, batch_size=2
             futures = []
             for index, batch in enumerate(length_batches(pending, batch_size, max_chars)):
                 bid = f"{invocation}-{index:06d}"
-                future = pool.submit(_run_batch, batch, directory, executable, bid, retries, timeout, backoff)
+                future = pool.submit(_run_batch, batch, directory, executable, bid, retries, timeout, backoff, model)
                 futures.append((future, bid))
             ids = {f: bid for f, bid in futures}
             for future in as_completed(ids):
@@ -484,6 +484,7 @@ def main(argv=None):
     parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--backoff", type=float, default=30, help="seconds before the 2nd attempt, doubling; 0 disables")
+    parser.add_argument("--model", default="gpt-6-astra", help="codex model; recorded in stats.json")
     parser = sub.add_parser("import")
     parser.add_argument("--responses", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -491,7 +492,7 @@ def main(argv=None):
     if args.command == "run":
         report = run_batches(args.prompts, args.output_dir, executable=args.codex, batch_size=args.batch_size,
                              max_chars=args.max_chars, concurrency=args.concurrency, retries=args.retries, timeout=args.timeout,
-                             backoff=args.backoff)
+                             backoff=args.backoff, model=args.model)
     elif args.command == "import":
         report = import_responses(args.responses, args.output)
     else:
