@@ -423,6 +423,32 @@
 
 探针输出另一处改动：verify 与活体检查的 FAIL 行分开各打印最多 40 条（原来合计 40 条，UNCOMPARABLE 匹配器让 verify 对每个模拟请求都失败，会把活体失败挤掉），末行加 `verify_failures=`、`live_failures=`。
 
+### 12.2 本机实跑（未连 jp-24；打包门禁 `--report-only`，未带 `--execute`）
+
+代码提交 `c21259a`（`auto/wac-092`，基于集成分支 `b7c688c`，含 wac-090 合并 `dbbc29e`）。Caddy 二进制同 §10.4（审查者构建的 v2.10.2，经 `O0_CADDY_BIN` 使用，不进仓库）。
+
+| 命令 | 结果 |
+|---|---|
+| `O0_CADDY_BIN=<v2.10.2> O0_WAL_REPRO_DB=<审查 walt/w.db> O0_FLEET_REPRO_DIR=<审查 fleet/evidence> bash -o pipefail scripts/ops/o0/tests/run_all.sh` | 退出 0，末行 `ALL_O0_OFFLINE_CHECKS_OK real_caddy=ok`：`BASH_N_OK files=13`、`PY_COMPILE_OK`；o0_tool `SELFTEST_OK checks=104`；credentials `scenarios=13`；`CADDY_ARTIFACTS_OK lines=16`；Caddy 工具 `SELFTEST_OK good_passes=241 variants_caught=77/77 (raw and skeleton) benign_two_step=8 checks=130 … non_ascii=uncomparable double_slash=uncomparable host_matchpins=ok probe_cleanup_signals=ok`（原 68/68、86）；`REDACTION_PARITY_OK corpus=83`；`LEAK_TEST_OK sections=19 sentinels=38 leaks=0`；`FLEET_GUARD_TEST_OK cases=7`；`AUTH_GATE_TEST_OK checks=24`；`APPLY_ROLLBACK_TEST_OK checks=152`（原 139）；`CADDY_REAL_TEST OK checks=68 failures=0 caddy=v2.10.2`（原 49）；`PLAN_MODE_OK scripts=5` |
+| 同上但不设 `O0_CADDY_BIN` | 退出 0，`CADDY_REAL_TEST_SKIPPED`、`APPLY_ROLLBACK_TEST_OK checks=150`（PF-REAL 跳过），末行 `O0_OFFLINE_CHECKS_OK_WITHOUT_REAL_CADDY real_caddy=skipped` |
+| 13 个 shell 脚本逐个 `bash -n` | 13/13 |
+| 真实 Caddy 探针（仿生产夹具） | `CADDY_PROBE_OK caddy=v2.10.2 live_checks=420 verify_passes=241 lines=16 host=jp-bot.balen.wang … stub_hits=oq:117,watcher:0,sink:0`（原 `live_checks=260`、`oq:37`；多出的是 `//` 变体） |
+| 审查 r091 的 68 个真实 Caddy 变体（`cv/gen.py`，复制到本任务目录重跑，未改审查证据） | n07、n08、n15、n15b、n17、n18、n19 由 verify 通过变为失败；其余与审查记录相同（包括审查已说明预期写错或由 `caddyfile-check` 抓住的 6 个），期望通过的 6 个仍通过 |
+| 审查 r091 的黑盒 glob 差分（`globdiff/diff.py`，种子 1–3 × 1500 模式，69,750 组） | 三个种子都是 `DANGEROUS tool=F caddy=HIT: 0`、`CONSERVATIVE tool=T caddy=MISS: 0`（审查时危险分歧 3/6/3） |
+| 本机 `~/Library/Application Support/Caddy/` | 本任务开工前快照（逐文件 `stat` 修改时间、大小、权限与 sha256，与审查 `caddyhome-final.txt` 一致）；之后经历全部 `run_all`、真实 Caddy 测试、探针、差分、49 次完整运行（变异 48、基线 1）与打包门禁，最终快照与开工前逐文件相同（`USER_CADDY_DIR_UNCHANGED`）。只做了检查，没有删除任何东西 |
+| `bash scripts/ops/o0/o0_package.sh --candidate c21259a --out <scratchpad> --report-only --run-tests`（未带 `--execute`） | **G1–G12 全部 PASS**：G2 `ROUTES_DIFF_EMPTY rows=63 … phase_max=P2`；G3 `META_OK`；G4 `CLOSURE_OK closure=16 whitelist=36`；G5 `COMPOSE_OK env_file=True`；G8 5 个文件；G9 pytest `35 passed`、watcher `tests 155 / pass 155 / fail 0 / skipped 0`；G10 17 个候选工具与 runbook 文件无禁用动词；G11 14 个工具文件；G12 `RUNTIME_MANIFEST_OK files=36`。`PACKAGE_OK`，`RELEASE.json`：`candidate c21259a…`、`deploy_candidate: true`、`failed_gates: 0`、`phase_max P2` |
+| 残留进程 | 全部运行之后没有残留的 Caddy、包装器或探针进程 |
+
+证据文件（scratchpad `w092/`）：`runall-caddy-final.log`、`runall-nocaddy-final.log`、`caddyreal-2.log`、`applyrb-2.log`、`pkg.log`、`pkg/`、`cv/run-final.txt`、`globdiff/final-{1,2,3}.txt`、`mut/`（`muts092.py`、`runmut.sh`、`results.txt`、`results-r2.txt`）、`caddyhome-{before,final-before,final-after}.stat`。
+
+### 12.3 变异复跑（scratchpad `w092/mut/`，pristine = 本任务代码，测试集 = 带真实 Caddy 的完整 `run_all.sh`，串行）
+
+| 变异集 | 结果 |
+|---|---|
+| 基线（未变异的 pristine） | 全绿 |
+| 审查 r091 `muts091` 的 16 个（R06 因清理代码改写重定锚为"cleanup 不删 `.o0probe`"）+ r088 的 G29（重定锚为"线上片段比对恒真"） | **17/17 KILLED**。审查时存活的 R05、R06、R10、R12、R13、R16 与 G29 全部转为被抓：R05 由 `assert_probe_pinned` 的 4 个 listen 负例，R06 由 selftest 假 Caddy 场景与真实 Caddy 的失败后断言，R10 由 `_probe_env` 单测，R12 由打桩 `Path.exists`，R13/R16/G29 由 preflight 沙箱 PF2、PF4/PF5、PF6 |
+| 本任务 N01–N25（非 ASCII 3、`//` 3、host 8、清理与信号 8、输出与门禁 3） | 首轮 21/25 KILLED。存活：N05（去掉每行 `//` 变体）与 N06（去掉不带 `Authorization` 的 `//` 请求）互相掩护——包装器注入的都是同一条路径；把包装器的 `//` 注入改到 `/m/v1//watcher/status`（只有每行变体会发），并新增"只在调用方不带 `Authorization` 时注入"的模式后复跑，两个都 KILLED。N16（紧急路径不删 `.o0probe`）：`cleanup()` 第一步已删掉，第二个信号落进来时文件早已不在；新增对 `emergency()` 的独立子进程单测后复跑，N16 与 N17 都 KILLED。**N01–N25 合计 24/25 KILLED**，只剩 N22（`finally` 第一条语句的 `cleaning = True`；`cleanup()` 自己第一句也会置位，只差进入 `finally` 到调用之间的几条字节码），判为纵深防御。另写了更严的 N20b（临界区的信号挂起整个去掉；首轮 N20 是因计数失衡被抓，不能说明挂起本身被测到）：**存活**，信号恰好落在"创建与登记之间"的时序测试无法稳定复现，见 §12.4 第 3 条。全部变异合计 41/43 KILLED，2 个存活均已说明 |
+
 ### 12.4 剩余限制
 
 1. **更保守 = 可能误拦生产写法**：站点内任何带 `host` 的、会改写或终止请求的路由（例如 `@alias host 别名` + `redir`）、任何含非 ASCII 或 `//` 的 `path` 匹配器，在 C-1 都会失败。这是有意的：若生产副本因此失败，把别名移到单独的站点块或改写匹配器，不放宽检查；需要例外时由 Architect 裁定。
