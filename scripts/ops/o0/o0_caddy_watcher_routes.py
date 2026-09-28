@@ -3353,6 +3353,61 @@ def _selftest_probe_residue(args: argparse.Namespace, snippet_path: Path, base: 
     for h in (ghost, busy_owner):
         h.kill()
         h.wait()
+    # the owner record exists as soon as the temporary dir does (a SIGKILL before the first child still leaves a
+    # directory the next scan can prove and remove)
+    saved_tempdir = tempfile.tempdir
+    tempfile.tempdir = str(tmp)
+    try:
+        r0 = _ProbeRun(base / "never.o0probe", False)
+        x0 = r0.mkdtemp()
+        rec = json.loads((x0 / OWNER_FILE).read_text())
+        assert rec["format"] == OWNER_FORMAT and rec["probe_pid"] == os.getpid() and rec["pids"] == [] and rec["probe_file_sha256"] is None, rec
+        shutil.rmtree(x0)
+    finally:
+        tempfile.tempdir = saved_tempdir
+    checks += 1
+    # a process that names the dir but is NOT a recorded group leader and ignores SIGTERM: SIGTERM first, SIGKILL after 5 s
+    d = tmp / (PROBE_TMP_PREFIX + "stubborn1")
+    d.mkdir()
+    (d / OWNER_FILE).write_text(json.dumps({"format": OWNER_FORMAT, "probe_pid": 2 ** 22 + 9, "probe_file": str(base / "none.o0probe"),
+                                            "probe_file_sha256": None, "pids": []}))
+    note = base / "stubborn-note"
+    stubborn = subprocess.Popen([sys.executable, "-c", "import signal, sys, time\n"
+                                 "signal.signal(signal.SIGTERM, lambda *a: open(sys.argv[1], 'a').write('term\\n'))\n"
+                                 "open(sys.argv[1], 'a').write('ready\\n')\ntime.sleep(120)", str(note), str(d / "probe-run.json")],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    helpers.append(stubborn)
+    deadline = time.monotonic() + 10
+    while not (note.exists() and "ready" in note.read_text()) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    lines = []
+    scan_probe_residue(tmp, out=lines.append)
+    stubborn.wait(timeout=10)
+    assert any(l.startswith(f"PROBE_RESIDUE_CLEANED dir={d.name} processes_stopped=1 ") for l in lines) and "term" in note.read_text() \
+        and stubborn.returncode == -signal.SIGKILL and not d.exists(), ("SIGTERM then SIGKILL", lines, note.read_text(), stubborn.returncode)
+    checks += 1
+    # SIGKILL of the probe while `caddy adapt` hangs: the orphan adapt names only the .o0probe; the next scan stops it
+    # because its pid is RECORDED, and removes the .o0probe (recorded sha) and the dir
+    mark.write_text("")
+    proc = subprocess.Popen(cmd, env={**env, "O0_FAKE_MODE": "adapt-hang"}, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    helpers.append(proc)
+    deadline = time.monotonic() + 30
+    while "adapt " not in mark.read_text() and proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    proc.kill()
+    proc.wait()
+    adapt_pid = next(int(x.split()[1]) for x in mark.read_text().splitlines() if x.startswith("adapt "))
+    left = sorted(tmp.glob(PROBE_TMP_PREFIX + "*"))
+    assert alive(adapt_pid) and probe_file.exists() and len(left) == 1, ("adapt orphan setup", alive(adapt_pid), probe_file.exists(), left)
+    lines = []
+    scan_probe_residue(tmp, out=lines.append)
+    deadline = time.monotonic() + 5
+    while alive(adapt_pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert any(l == f"PROBE_RESIDUE_CLEANED dir={left[0].name} processes_stopped=1 o0probe=removed dir_removed=True" for l in lines) \
+        and not alive(adapt_pid) and not probe_file.exists() and not any(tmp.iterdir()), ("adapt orphan", lines)
+    checks += 1
     return checks
 
 
