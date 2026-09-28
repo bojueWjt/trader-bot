@@ -128,7 +128,7 @@
 > 状态：**frozen（WGW-1.0.2，2026-09-26）**——WGW-1.0（同日冻结、审查 wac-001 PASS、合入 `90e96d0`）的第二次勘误版（含合并前追补 F-09..F-12，仍为 WGW-1.0.2）。WGW-1.0.1 写入 Planner 裁定 R1–R9 与审查 wac-001 的 🟡-1..🟡-11；WGW-1.0.2 写入 `never_allowed` 进生成物、R10–R14、Caddy 单段语义（用户裁决 2026-09-26）与 A-6 价格提醒身份作用域（P3 只定契约、不启用），逐条见 §9.16。§9 的接口都还没有部署，两次勘误都不构成对已发布接口的破坏性变更。设计真相：`docs/plans/2026-09-11-watcher-to-app-migration.md` v0.6 §2.1–§2.3、§3、§4.2/§4.3（含附录 E 吸收的 v0.3 review P1-12..P1-19、P2-03）。
 > **路由字段以 `contracts/watcher-gateway-routes.yaml` 为准**（method、outer/inner path、identity、roles、query、body allow/deny/required、response omit/mask/headers、phase、budget、write 元数据）；本节规定语义（鉴权顺序、错误码、事务顺序、状态机、媒体规则）。两者冲突时路由字段听 YAML、语义听本节；任一与计划冲突，停工并由 Planner 召回 Architect。
 > 本节只新增 `/v1/watcher/*` 与 watcher 内部契约；§1–§8 既有端点的字段、状态码、错误体一律不变（见 §9.13）。
-> **WGW-1.0.3（2026-09-28，勘误 G-01..G-10，第二轮 G-11..G-19，见 §9.16）**：operator-query 的非移动入口（面板 `/v1/*` 等）不得把请求交给网关，新增 §9.14.6。本次只改 §9 的文字与 Caddy 片段的生成规则：路由真源 YAML **零改动**（其 `contract_version` 字段仍为 `WGW-1.0.2`，`yaml_sha256` 不变），两份代码生成物与 Caddy 清单逐字节不变，只有 Caddy 片段改为格式 v2（`watcher-gateway-caddy-snippet.v2`）。网关代码、角色 scope（§9.3 四角色读）、既有 `/v1` 端点都不变。
+> **WGW-1.0.3（2026-09-28，勘误 G-01..G-10，第二轮 G-11..G-19，第三轮 G-20..G-29，见 §9.16）**：operator-query 的非移动入口（面板 `/v1/*` 等）不得把请求交给网关，新增 §9.14.6。本次只改 §9 的文字与 Caddy 片段的生成规则：路由真源 YAML **零改动**（其 `contract_version` 字段仍为 `WGW-1.0.2`，`yaml_sha256` 不变），两份代码生成物与 Caddy 清单逐字节不变，只有 Caddy 片段改为格式 v2（`watcher-gateway-caddy-snippet.v2`）。网关代码、角色 scope（§9.3 四角色读）、既有 `/v1` 端点都不变。
 
 ### 9.1 现状事实（worktree `auto/wac-001`，基线 `integ/watcher-app-crew`；app 基线 `0f7d26d`）
 
@@ -736,7 +736,7 @@ CREATE TABLE IF NOT EXISTS config_audit (
 - **O-0 并入规则（规范性）**：
   - Caddyfile 在全局位置 `import` 该片段文件（定义 snippet），并手写 snippet `(watcher_gateway_upstream)`：恰好一次 `uri strip_prefix /m`，然后 `reverse_proxy` 到 operator-query；不注入 `X-Watcher-Proxy-Auth`，不含任何其他匹配逻辑。
   - 在 app 所用站点块的**顶层**（`/m` 尚未被剥离的位置）`import watcher_gateway_routes`；不得放进 `handle_path /m*` 之类会先剥前缀的块。站点中不得有其他处理器把 `/m/v1/watcher` 前缀（任意大小写）转发到 operator-query 或 watcher（沿用审查 wac-026 🟡-1 (d)）；browser 凭据沿用运行时占位符 `{env.WATCHER_BROWSER_PROXY_TOKEN}`（(g)）。
-  - （WGW-1.0.3）非移动入口：面板 `/v1/*` 等其他转发到 operator-query 的路由，受 §9.14.6 的入口不变式 I-1 与并入规则 N-1..N-4 约束；app 站点经上一条的 import 已带直连守卫，其他转发到 operator-query 的站点须 `import watcher_gateway_direct_guard`。
+  - （WGW-1.0.3）非移动入口：面板 `/v1/*` 等其他转发到 operator-query 的路由，受 §9.14.6 的入口不变式 I-1 与并入规则 N-1..N-3（第三轮起 N-3 为封闭白名单）约束；app 站点经上一条的 import 已带直连守卫，其他转发到 operator-query 的站点须 `import watcher_gateway_direct_guard`。
   - **import 的位置（WGW-1.0.2 追补 F-12，审查 wac-049 🟡-3）**：该 `import` 必须写在该站点块中**所有** `handle`、`handle_path`、`route` 指令之前。依据 Caddy v2.10.2 `httpcaddyfile` 的路由排序（`caddyconfig/httpcaddyfile/directives.go:437-530`）：同为 `handle` 时，只有两边都是单个路径匹配器才按路径长度排序；片段用的是命名匹配器，与站点里的 `handle /m/*` 之类比较时按出现顺序稳定排序，`handle` 块之间互斥、先匹配者生效。因此写在 import 之前的 `handle /m/*` 会先吃掉 `/m/v1/watcher/*`，片段里的逐路径处理器与兜底都不再生效，而"兜底在逐路径处理器之后"这一检查照样通过。不得把 import 包进 `route { … }` 来"固定顺序"：`route` 指令整体排在 `handle` 之后，结果更糟。
   - **import 位置管不到的指令（WGW-1.0.2 追补 F-13，审查 wac-058 🟡-2 (a)）**：import 的位置只决定片段在 `handle` 组内的先后。Caddyfile 先按指令顺序排序，写在站点块里的先后不影响这一步。Caddy v2.10.2 默认指令顺序（`caddyconfig/httpcaddyfile/directives.go:47-84`）中排在 `handle` 之前的指令，无论写在 import 之前还是之后，都先于片段执行。这些指令是：`tracing`、`map`、`vars`、`fs`、`root`、`log_append`、`skip_log`/`log_skip`、`log_name`、`header`、`request_body`、`redir`、`method`、`rewrite`、`uri`、`try_files`、`basicauth`/`basic_auth`、`forward_auth`、`request_header`、`encode`、`push`、`intercept`、`templates`、`invoke`。此外，全局 `order` 选项可以把任何指令（含插件指令）移到 `handle` 之前。其中改写路径或方法的指令（`rewrite`、`uri`、`method`、`try_files`）会让片段看到改写后的请求；审查 wac-058 用真实 Caddy 实测：import 之后写的顶层 `rewrite /m/v1/watcher/dialogs /m/v1/watcher/status` 仍然先生效，`GET /m/v1/watcher/dialogs` 被转成 `GET /v1/watcher/status`。其余指令中，`redir`、`basic_auth`、`forward_auth` 可能直接终结请求，`request_header` 会改写 `Authorization` 等网关鉴权输入。规则：站点块顶层这一类指令的匹配器不得命中 `/m/v1/watcher` 前缀（任意大小写）；无匹配器、或匹配器可能命中该前缀的，只允许下一条遮蔽检查白名单中的 handler 类型。这条规则由遮蔽检查在 adapt 后的 JSON 上机械兜底，JSON 已经反映了全局 `order` 与指令排序的结果。O-0 另须人工核对并记录：Caddyfile 全局块中的全部 `order` 选项，以及 app 站点块顶层所有排在 `handle` 之前的指令（逐条列出指令名、匹配器，说明它是否可能命中 `/m/v1/watcher` 前缀、为何不构成遮蔽）。
   - O-0 核对脚本：`caddy adapt` 后解析 JSON，抽取 `path_regexp` 模式以 `^/m/v1/watcher/` 开头的全部 `(pattern, methods)`，与清单的 `(regex, methods)` 逐行比较，对称差为空且行数 > 0；兜底匹配器存在（模式与片段逐字相同）且在这些处理器之后求值。（WGW-1.0.2 追补 F-12）另加**遮蔽检查**：在 app 站点的路由链中（adapt 后该站点 host 匹配下的 subroute 路由列表，以及其中与 wgw 路由同处一层的列表），检查第一条 wgw 路由之前的每一条路由。（WGW-1.0.2 追补 F-13 修订，审查 wac-058 🟡-2 (b)：原文要求"匹配器对探针都不得命中"，对无匹配器的 `encode`、`header` 会误判失败；改为按 handler 类型判定）判定分两步：
@@ -779,51 +779,105 @@ CREATE TABLE IF NOT EXISTS config_audit (
   - **触发空间 T**（上游路径的集合；WGW-1.0.3 第二轮按代码的顺序重写）：记 `trig(s)` = `ascii_lower(s)` 等于 `/v1/watcher`，或以 `/v1/watcher/`、`/v1/watcher%` 开头。路径 `p`（上游收到的 raw path）属于 T，当且仅当 `trig(path_part(p))` 或 `trig(path_part(unquote(p)))`，其中 `unquote` 是一次百分号解码（ASGI 的 `scope["path"]` 即 `unquote(raw_path)`），**先解码、再取 `path_part`**。这与 §9.4 的触发条件及 `watcher_gateway.py:184-189` 逐步相同。例：`/v1/watche%72%3F` 解码为 `/v1/watcher?`，取路径部分得 `/v1/watcher`，属于 T（网关会触发，并按 `%` 规则返回 404）。
   - **直连守卫空间 D**：Caddy 对解码并 clean 后的请求路径，用直连守卫正则 `^(?i:/v1/watcher)(?:[/\n%]|$)`（§9.14.3 格式 v2）判定为命中的集合。
   - **operator-query 转发路由**：`caddy adapt` 后的 JSON 中，只要某条路由的 handler 链含 `reverse_proxy`（含 `forward_auth` 生成的那种），且某个 dial 的端口等于 operator-query 的端口（verify 的 `--upstream` 的端口，现为 8183；按 verify 现行的 `dial_endpoint` 识别，任何 host 写法都算；解析不了按 UNCOMPARABLE 判失败），这条路由就属于这一类。（WGW-1.0.3 第二轮，审查 wac-098 🟡-1）**枚举范围**逐一列出，缺一不可：每个 server 的 `routes`、`errors.routes`（`handle_errors`）、`named_routes` 的每一项（经 `invoke` 到达）；以及在这些位置之下任意深度的 `subroute` 的 `routes`、`reverse_proxy` 与 `intercept` 的 `handle_response[].routes`。遇到上述之外、含有 `routes` 或路由列表的 handler 或容器（插件、未知字段），一律按 UNCOMPARABLE 判失败，不得跳过。
-  - **改路径**（WGW-1.0.3 第二轮更正，审查 wac-098 🔴-1）：下列两种对象，只要带 `uri`、`strip_path_prefix`、`strip_path_suffix`、`uri_substring`、`path_regexp` 中任一字段，就算改路径；只带 `method` 的不算。
-    - (i) 独立的 `rewrite` handler。`handle_path`、`uri`、`rewrite`、`try_files` 指令生成的都是它。
-    - (ii) `reverse_proxy` handler 自带的 `rewrite` 对象。`forward_auth`（例如 `{"handler":"reverse_proxy","rewrite":{"method":"GET","uri":"/v1/auth"},…}`）与 `reverse_proxy { rewrite … }` 生成的都是它。它只改写发往上游的那一份请求，在 `reverse_proxy` 这一步本身生效。
-    
-    WGW-1.0.3 首轮的括注说 `forward_auth` 生成的是 (i)，这是错的，以本条为准。
+  - **改路径动作**（WGW-1.0.3 第三轮按 Planner 裁定 R22 重写，取代第二轮的"改路径"定义；审查 wac-098 r2 🔴-A、🔴-B）：判定**不区分字段、不模拟 Caddy 的改写语义**。以下任一对象出现，就算一次改路径动作：
+    - (i) 任何 `rewrite` handler，无论带什么键，也包括只带 `method` 的。`handle_path`、`uri`、`rewrite`、`try_files`、`method` 指令生成的都是它。
+    - (ii) 任何 `reverse_proxy` handler 上的 `rewrite` 对象，无论带什么键。`forward_auth` 与 `reverse_proxy { rewrite … }` 生成的都是它。
+
+    为什么不再逐字段建模：两轮审查各找到 Caddy 改写语义中的一处细节，按"规则加例外"的写法每一处都会成为旁路。这些细节包括：`uri` 的路径分量为空（`?a=1`、`#frag`）时不改路径；同一对象中 `strip_*`/`uri_substring`/`path_regexp` 在 `uri` 之后执行；`reverse_proxy.rewrite` 只作用于发往上游的副本，而 `handle_response` 路由收到的是原请求（Caddy v2.10.2 `rewrite/rewrite.go:158-290`、`reverseproxy/reverseproxy.go:157-167`、`:630-637`、`:982`）。所以本契约只认 N-3 的三种精确形状，其余一律失败。
   - **片段转发路由**：`(watcher_gateway_routes)` 的逐路径组（经 `watcher_gateway_upstream` 转发）。
 - **入口不变式 I-1**：除片段转发路由之外，任何 operator-query 转发路由都不得把 T 内的上游路径交给 operator-query，**无论它是否注入凭据**。I-1 的范围是 Caddyfile 中的全部站点与 server，不限于 app 站点。jp-24 上 Caddy 以外、能到达 `127.0.0.1:8183` 的代理进程，机器检查看不到，由 PC-6 (iii) 人工确认。
-- **引理 L-1（为什么守卫加 G1 就够了）**：设某条转发路由在转发前**不改写路径**，于是 operator-query 收到的 raw path 是 Go 的 `URL.EscapedPath()`：要么等于客户端请求的原始路径，要么是它的重新编码，而重新编码的结果必含 `%`（WGW-1.0.3 第二轮更正；例如原始的 `\` 与 `#` 被转发为 `%5C`、`%23`）。网关在认证之前（G1）拒绝 raw path 含 `%`、`//`、点段的请求，所以能通过 G1、进入认证的请求，其 raw path 就是原文，且原文不含这三类形式。对这样的路径，Caddy 的解码结果等于原文，clean 也不改变它，所以守卫正则判定的正是原文。原文以 `/v1/watcher/` 开头（通过 G1 的都是表内路由），属于 D，因此在 Caddy 被守卫回 404，到不了该转发路由。T 中其余的形状（例如 `/v1/watcher/../accounts`、`/v1/watcher/..%2Faccounts`、`/v1/watcher%2e%2e/x`；`/v1/watcherx` 则根本不在 T 内，网关不触发）可能绕过守卫到达 operator-query，但都会在 G1 得到 404 `route_not_found`，先于认证，不发上游请求。**改写路径的转发路由不适用 L-1**：改写可以把 D 以外的请求路径（例如 `/x/v1/watcher/dialogs`，经 `handle_path /x/*`；或者任意请求，经 `reverse_proxy { rewrite /v1/watcher/dialogs }`）变成 T 内的上游路径，所以要单独限制（N-3）。**不经守卫的路由链也不适用 L-1**：错误链与经 `invoke` 到达的命名路由，另见 N-5。L-1 的前提由 §9.4 的承重说明与 B-5 测试锁定。
+- **引理 L-1（为什么守卫加 G1 就够了）**：设某条转发路由在转发前**不改写路径**，于是 operator-query 收到的 raw path 是 Go 的 `URL.EscapedPath()`：要么等于客户端请求的原始路径，要么是它的重新编码，而重新编码的结果必含 `%`（WGW-1.0.3 第二轮更正；例如原始的 `\` 与 `#` 被转发为 `%5C`、`%23`）。网关在认证之前（G1）拒绝 raw path 含 `%`、`//`、点段的请求，所以能通过 G1、进入认证的请求，其 raw path 就是原文，且原文不含这三类形式。对这样的路径，Caddy 的解码结果等于原文，clean 也不改变它，所以守卫正则判定的正是原文。原文以 `/v1/watcher/` 开头（通过 G1 的都是表内路由），属于 D，因此在 Caddy 被守卫回 404，到不了该转发路由。T 中其余的形状（例如 `/v1/watcher/../accounts`、`/v1/watcher/..%2Faccounts`、`/v1/watcher%2e%2e/x`；`/v1/watcherx` 则根本不在 T 内，网关不触发）可能绕过守卫到达 operator-query，但都会在 G1 得到 404 `route_not_found`，先于认证，不发上游请求。**改写路径的转发路由不适用 L-1**：改写可以把 D 以外的请求路径（例如 `/x/v1/watcher/dialogs`，经 `handle_path /x/*`；或者任意请求，经 `reverse_proxy { rewrite /v1/watcher/dialogs }`）变成 T 内的上游路径，所以由 N-3 的封闭白名单处理：只有 W-2、W-3 两种精确形状的改写可以通过，其余一律失败。**不经守卫的路由链也不适用 L-1**：错误链、命名路由与 `handle_response` 中的转发器，按 N-3 的容器规则一律失败（WGW-1.0.3 第三轮）。L-1 的前提由 §9.4 的承重说明与 B-5 测试锁定。
 - **本机实测**（Caddy v2.10.2，O-0 仿生产夹具加格式 v2 片段，另加一个只 import `watcher_gateway_direct_guard`、同样用 `handle /v1/*` 注入 observer 的第二站点；上游换成本机桩，`HOME`/`XDG_*` 指向临时目录，不连 jp-24）。两个站点对以下请求都回 404 空 body，桩计数为 0：`/v1/watcher/status`、`/v1/watcher/dialogs`、`/V1/WATCHER/status`、`//v1/watcher/status`、`/v1//watcher/status`、`/v1/./watcher/status`、`/x/../v1/watcher/status`、`/v1/watcher/media/1700000000000-1.png`（GET 与 HEAD）、`/v1/watcher`、`/v1/watcher/`、`/v1/watcher%2Fstatus`、`/v1%2Fwatcher/status`、`/v1/watcher%0A`、`/v1/watcher%25`、`/v1/watcher%25x`、`/v1/watcher/status?x=1`、`PUT /v1/watcher/trading/accounts/account-a`、`/v1/watcher/login/start`、`/v1/watcher/status#x`。以下请求带着注入的 token 到达桩：`/v1/watcherx`（不在 T 内）；`/v1/watcher/../accounts`、`/v1/watcher/..%2Faccounts`、`/v1/watcher%2e%2e/accounts`（桩收到的 raw path 含点段或 `%`，G1 会返回 404）。`/v1/accounts` 仍按现状被注入并转发。`/m/v1/watcher/status` 以 `/v1/watcher/status` 到达桩，没有注入。同一站点同时 import 两个 snippet 时，adapt 报 `matcher is defined more than once: @wgw_direct`。
   - （WGW-1.0.3 第二轮，条件同上，token 用 `secrets.token_hex` 随机生成）已 import 守卫的站点中，以下四种转发都绕过了守卫：
     - `handle /foo/* { reverse_proxy 8183 { rewrite /v1/watcher/dialogs; header_up Authorization … } }`：`GET /foo/x` 以 `/v1/watcher/dialogs` 带注入到达桩；
     - `handle_path /x/* { invoke obs }`（命名路由 `obs` 注入 observer 并转发到 8183）：`GET /x/v1/watcher/dialogs` 带注入到达桩；
     - 站点里 `forward_auth` 指向一个不可达的端口、`handle_errors { reverse_proxy 8183 { header_up Authorization … } }`：`GET /v1/watcher/dialogs` 经错误链带注入到达桩。
     
-    以下三种写法仍被守卫挡住（空 404）：`handle /v1/* { invoke obs }`；站点顶层不带匹配器的 `forward_auth 8183 { uri /v1/auth }`（它只向 8183 发 `GET /v1/auth`，不注入；原请求随后由守卫回 404）；在已 import 守卫的站点的 `handle_errors` 里再 import `watcher_gateway_direct_guard`，adapt 报 `matcher is defined more than once: @wgw_direct`（命名匹配器按站点块计，含 `handle_errors`），所以错误链里无法再放一份守卫（N-5）。`adapt` 的形状：`forward_auth` 与 `reverse_proxy { rewrite … }` 都是 `reverse_proxy` handler 带 `rewrite` 对象；`handle_errors` 在 `servers.*.errors.routes`，`&(obs)` 在 `servers.*.named_routes.obs`。守卫的 404 对 GET 与 HEAD 都没有 `Content-Type`（`size_download=0`、`content_type` 为空）；桩的 200 带 `text/plain`。
+    以下三种写法仍被守卫挡住（空 404）：`handle /v1/* { invoke obs }`；站点顶层不带匹配器的 `forward_auth 8183 { uri /v1/auth }`（它只向 8183 发 `GET /v1/auth`，不注入；原请求随后由守卫回 404）；在已 import 守卫的站点的 `handle_errors` 里再 import `watcher_gateway_direct_guard`，adapt 报 `matcher is defined more than once: @wgw_direct`（命名匹配器按站点块计，含 `handle_errors`），所以错误链里无法再放一份守卫（第三轮起由 N-3 的容器规则处理）。`adapt` 的形状：`forward_auth` 与 `reverse_proxy { rewrite … }` 都是 `reverse_proxy` handler 带 `rewrite` 对象；`handle_errors` 在 `servers.*.errors.routes`，`&(obs)` 在 `servers.*.named_routes.obs`。守卫的 404 对 GET 与 HEAD 都没有 `Content-Type`（`size_download=0`、`content_type` 为空）；桩的 200 带 `text/plain`。
+  - （WGW-1.0.3 第三轮，条件同上）把两轮审查的全部旁路形状（含 q1–q4），与仿生产夹具放在同一个 Caddyfile 里，共 16 个站点，adapt 后用 N-3 白名单的原型（scratchpad，仅作验证，不进仓库）逐一判定，再用真实 Caddy 对每个站点发触发请求。
+    - 判 PASS 的四个转发器：夹具的 `@mobile`（W-2）与面板（W-1），`forward_auth 8183 { uri /v1/auth }`（W-3），只有守卫的站点中站点顶层的 `reverse_proxy /v1/*`（W-1）。触发请求都没有让 G1 能放行的 T 内路径带注入到达桩。
+    - 判 FAIL 且实测确有旁路（桩收到 `/v1/watcher/dialogs` 或 `/v1/watcher/dialogs?a=1`，带注入或不带）：`reverse_proxy { rewrite /v1/watcher/dialogs }`、q1、q2、q3、q4、错误链转发、`handle_path /x/* { invoke obs }`、`@m path /m/v1/*`、`handle_path /p/*`，以及合成 JSON `{"uri":"/v1/auth","uri_substring":[…]}`（发 `GET /anything`，桩收到 `/v1/watcher/dialogs`）。
+    - 判 FAIL 但属于保守失败（实测没有 G1 能放行的旁路）：`forward_auth` 排在面板之前时的面板、同站点另有带改写 `handle` 块时的站点顶层 `reverse_proxy /v1/*`、`rewrite v1/watcher/dialogs`（桩收到不以 `/` 开头的 `v1/watcher/dialogs`）、`rewrite /v1/./watcher/dialogs`、`handle /v1/* { invoke obs }`。
+    
+    原型必须把"不同站点"（`host` 字面值不相交）视为互斥，否则面板会因为别的站点的路由而误判 FAIL。这一条已写进 N-3 的"链"定义。
 - **并入规则（O-0，规范性）**
   - **N-1** app 站点：沿用 F-12，站点顶层、所有 `handle`/`handle_path`/`route` 之前 `import watcher_gateway_routes`。格式 v2 的守卫已经包含在内，不另加 import。
   - **N-2** 其他站点：Caddyfile 中含任何 operator-query 转发路由的其他站点块，都在站点顶层、所有 `handle`/`handle_path`/`route` 之前 `import watcher_gateway_direct_guard`。同一站点不得同时 import 两个 snippet。
-  - **N-3** 改写路径的转发路由：对某条非片段的 operator-query 转发路由，同一请求上在转发之前可能执行的改路径（按上面"改路径"的定义，(i)、(ii) 两种都算），都算它的改写。范围包括：该 `reverse_proxy` 自身的 `rewrite` 对象；它自身 handle 链中排在它之前的 `rewrite` handler；外层路由中的；同层或外层排在它之前、匹配器可能同时命中的非互斥路由中的（判不了是否同时命中，就算同时命中）；以及经 `invoke` 到达时，调用方路由链上的（N-5）。（WGW-1.0.3 第二轮删去首轮"`forward_auth` 生成 `rewrite` handler"的错误括注。）有改写时，只有下面两种白名单形式可以通过：
-    - (a) 只有 `strip_path_prefix S`（`handle_path`、`uri strip_prefix`），并且该路由的匹配器只是 `path`，每个模式都是纯 ASCII，不含占位符。模式要么是字面路径，要么只在末尾有一个 `*`（前缀 glob）。把每个模式 `P` 做 `ascii_lower`，要求它以 `ascii_lower(S)` 开头（否则按 UNCOMPARABLE 判失败），令 `H = P[len(S):]`，去掉末尾的 `*`。字面模式要求 `H` 不在 T 内；前缀 glob 要求 `ascii_lower(H)` 既不以 `/v1/watcher` 开头，也不是 `/v1/watcher` 的前缀（`H` 为空或为 `/` 时判失败）。现行的 `@mobile` 块（`/m/v1/accounts`、`/m/v1/operator/orders/*` 等）按这条通过。
-    - (b) 常量 `uri`（不含 `{`），且其路径部分（`?` 之前）不在 T 内。它可以出现在 `rewrite` handler 中（`rewrite /healthz /api/status`），也可以出现在 `reverse_proxy` 的 `rewrite` 对象中（`forward_auth 8183 { uri /v1/auth }`、`reverse_proxy 8183 { rewrite /v1/ping }`）。（WGW-1.0.3 第二轮）当常量 `uri` 位于该 `reverse_proxy` 自己的 `rewrite` 对象中时，发往 8183 的路径就是这个常量，与请求路径以及之前的任何改写都无关。因此之前的改写不算"叠加"，该转发器按 (b) 判定后即告结束，**不再适用 N-4**，与它排在守卫之前还是之后无关。例如站点顶层不带匹配器的 `forward_auth 8183 { uri /v1/auth }`，adapt 后排在 `wgw_direct` 之前，判 PASS。原请求在认证通过后继续往下走，由它后面的路由（守卫、面板等）各自按本节判定；`forward_auth` 从认证响应复制到原请求上的头，不改变原请求的路径。
-    
-    其他情形一律判失败，包括 `strip_path_suffix`、`uri_substring`、`path_regexp` 替换、带占位符的 `uri`（例如 `reverse_proxy 8183 { rewrite /v1/watcher{path} }`，或 `forward_auth 8183 { uri {uri} }`）、白名单以外的匹配器（`path_regexp`、`expression`、`not`、插件等）、算不出改写结果，以及多个改写叠加（上面 (b) 所说的"自身 `rewrite` 对象里的常量 `uri`"除外）。常量 `uri` 落在 T 内的也判失败，例如 `reverse_proxy 8183 { rewrite /v1/watcher/dialogs }`、`forward_auth 8183 { uri /v1/watcher/status }`。白名单只能经契约修订扩充。审查 wac-094 的 g16、g17、g18，以及审查 wac-098 的 `reverse_proxy { rewrite … }` 旁路，按这条都判失败。
-  - **N-4** 不改写路径的转发路由（按"改路径"的定义，(i)、(ii) 在它的链上都不存在）：匹配器可能命中 D 的（按 verify 现行的"判不了就算命中"），必须排在守卫之后：同一个 host 的路由链中，`wgw_direct` 守卫路由位于同一列表的更早位置，或位于某个外层列表中、排在包含它的那条路由之前。排在守卫之前、又不满足 N-3 的，判失败。面板的 `handle /v1/*`，以及站点顶层不包在 `handle` 里的 `reverse_proxy /v1/* …`（`reverse_proxy` 指令排在 `handle` 之后，守卫的 `respond` 会终结请求），按这条都通过。
-  - **N-5 错误链、命名路由与 `handle_response`**（WGW-1.0.3 第二轮，审查 wac-098 🟡-1）：
-    - **错误链**（`errors.routes`）：主链出错时才进入错误链。主链的守卫对它不起作用，而且在已 import 守卫的站点里，`handle_errors` 中无法再放一份守卫（见上面的本机实测）。因此，错误链中的 operator-query 转发器只能按 N-3 通过；不改写路径、且匹配器可能命中 D 的，一律判失败。攻击者可以主动触发错误链，例如让 `basic_auth` 返回 401，或让 `forward_auth` 失败。
-    - **命名路由**（`named_routes`，经 `invoke` 到达）：对每一处 `invoke`，都按"调用方路由"的上下文判定：调用方链上的改写算作它的改写（N-3）；它与守卫的先后，按调用方路由的位置算（N-4）。例如 `handle /v1/* { invoke obs }` 排在守卫之后，判 PASS；`handle_path /x/* { invoke obs }` 的剥后头部是 `/`，按 N-3 (a) 判失败。从未被 `invoke` 的命名路由中的转发器也要列出，按"没有守卫在前"判定，也就是只能按 N-3 通过。
-    - **`handle_response[].routes`**：按外层路由的上下文判定，外层 `reverse_proxy` 的 `rewrite` 对象也算在链上；判不了的按 UNCOMPARABLE 判失败。
+  - **N-3 封闭白名单**（WGW-1.0.3 第三轮，Planner 裁定 R22；取代第一、二轮的 N-3、N-4、N-5，那两轮的条文作废）。除片段转发路由外，adapt 后 JSON 中每一个 operator-query 转发器，都必须**恰好符合** W-1、W-2、W-3 三种形状之一，否则判 FAIL。"转发器"指上游端口是 operator-query 端口的 `reverse_proxy` handler，含 `forward_auth` 生成的那种。遍历范围是"operator-query 转发路由"定义中列出的全部容器。未知容器、无法判定的情形，一律按 UNCOMPARABLE 处理，也就是 FAIL。
+    - **容器规则**：转发器位于错误链（`errors.routes`）、命名路由（`named_routes`，无论是否被 `invoke`、经几层 `invoke`）、`reverse_proxy` 或 `intercept` 的 `handle_response[].routes` 中，一律 FAIL，不区分语境，也不看它是否改写。三种形状都只允许出现在**主链**上。主链指 server 的 `routes` 及其下任意深度的 `subroute`，不经过上述三类容器。
+    - **片段转发路由的认定**：由 §9.14.3 的 O-0 核对与 wgw 结构检查逐字认定。认定条件：匹配器是清单中的 `path_regexp` 与 `method`；处理链恰为 `watcher_gateway_upstream`，即唯一的 `rewrite{strip_path_prefix: "/m"}` 加一个无 `rewrite` 对象的 `reverse_proxy`；位于 wgw 连续块内。认定不了的，按普通转发器判定。它的匹配器是 `path_regexp`，不符合 W-2，所以判 FAIL。兜底与守卫是 `static_response`，不是转发器。
+    - **链**：转发器 F 的"链"指同一请求上可能先于 F 执行的全部 handler。从 server 的 `routes` 一层层走到 F 所在的路由，每一层取三部分：
+      - (1) 同一列表中、排在含 F 的那条路由之前的每条路由里的全部 handler，递归展开其中的 `subroute`；
+      - (2) 含 F 的那条路由自身、排在通往下一层的 handler 之前的 handler；
+      - (3) 最内层中排在 F 之前的 handler。
+
+      第 (1) 部分只排除两类路由：与含 F 的路由**互斥**的路由，以及已认定的 wgw 路由（片段转发路由、兜底、守卫都自己应答请求）。互斥只认两种情况：两条路由带相同的非空 `group`（`handle` 块），或者两条路由的 `host` 匹配器都是不含 `*`、`{` 的字面主机名，且两个集合不相交（不同站点）。其余一律视为可能先于 F 执行。
+    - **链白名单**：链上每个 handler 的类型都必须属于 {`subroute`、`encode`、`headers`、`vars`、`map`、`log_append`、`tracing`、`authentication`、`request_body`}，只有 W-2 允许的那一个 `rewrite` 例外。链上出现其他类型，包括 `rewrite`、`reverse_proxy`（`forward_auth` 也算）、`invoke`、`static_response`、`file_server`、`intercept`、插件或未知类型，F 判 FAIL。白名单只能经契约修订扩充。
+    - **W-1 面板形状**（例：面板 `handle /v1/*`）：F 在主链上；F 上没有 `rewrite` 对象；链上没有任何改路径动作，且满足链白名单；在同一站点内，F 排在已认定的 `@wgw_direct` 守卫**之后**。"排在之后"指守卫所在的路由位于含 F 的路由（或它的某个外层路由）所在的同一列表中，且下标更小。F 的匹配器不限，所以 W-1 靠守卫加 G1（L-1）保证安全。
+    - **W-2 移动端剥前缀形状**（例：仿生产夹具与生产的 `@mobile` 块）：
+      - F 在主链上，F 上没有 `rewrite` 对象；
+      - 链上恰好有一个改路径动作，它是 `rewrite` handler，键集合恰为 `{strip_path_prefix}`，值恰为 `paths.caddy_external_prefix`（`/m`），其余 handler 满足链白名单；
+      - 含 F 的最近一条带匹配器的路由（站点的 `host` 路由除外），其匹配器恰为一个匹配器集合，且只有 `path` 一个键；
+      - 每个模式都是可打印 ASCII，不含 `%`、`{`、`}`，`*` 只能作为以 `/` 结尾的前缀的最后一个字符出现，`ascii_lower` 后以 `/m/` 开头；
+      - 令 `H` 为模式 `ascii_lower` 后去掉开头的 `/m`：字面模式要求 `H` 不在 T 内，且不被守卫正则 D 命中；前缀 glob 去掉末尾的 `*` 后，要求 `H` 不以 `/v1/watcher` 开头，也不是 `/v1/watcher/` 的前缀。
+      
+      说明："逐字等于生成物"只对片段转发路由成立。`@mobile` 是站点手写块，不来自生成物，所以按上述形状精确判定（这是对 R22 第 2 条措辞的落实）。
+    - **W-3 常量改写形状**（例：`forward_auth 8183 { uri /v1/auth }`）：
+      - F 在主链上；
+      - F 的 `rewrite` 对象键集合 ⊆ `{uri, method}`，且 `uri` 存在；
+      - `uri` 是字符串常量，以 `/` 开头，只含可打印 ASCII，不含 `{`、`}`、`?`、`#`、`%`，不含 `//`，也没有 `.`、`..` 段；
+      - `uri` 不在 T 内，也不被 D 命中；
+      - 链上没有任何改路径动作，且满足链白名单。
+      
+      满足时，发往 8183 的路径就是这个常量。W-3 与守卫的先后无关。F 的 `handle_response` 路由中若另有转发器，按容器规则判 FAIL。
+    - **反例**（全部判 FAIL；★ 表示本机真实 Caddy 实测确有旁路，即 G1 能放行的 `/v1/watcher/dialogs` 带注入到达 8183 桩；未标 ★ 的是保守失败）：
+      - ★ `reverse_proxy 8183 { rewrite /v1/watcher/dialogs }`：`uri` 在 T 内；
+      - ★ `handle_path /x/* { reverse_proxy 8183 { rewrite ?a=1 } }`（q1）与 ★ `rewrite "#frag"`（q4）：`uri` 不以 `/` 开头，链上还有 `rewrite`；
+      - ★ `handle_errors { reverse_proxy 8183 { rewrite ?a=1 } }`（q2）与 ★ `handle_errors { reverse_proxy 8183 }`：在错误链中；
+      - ★ `handle_errors { reverse_proxy 其他 { rewrite /ping; handle_response { reverse_proxy 8183 } } }`（q3）：在 `handle_response` 中；
+      - ★ `handle_path /x/* { invoke obs }`，以及 `handle /v1/* { invoke obs }`（后者被守卫挡住，保守失败）：命名路由；
+      - ★ 合成 JSON `{"uri":"/v1/auth","uri_substring":[…]}`：键超出 `{uri, method}`；
+      - ★ `@m path /m/v1/*` 加 `uri strip_prefix /m`：前缀 glob 的 `H = /v1/` 是 `/v1/watcher/` 的前缀；
+      - ★ `handle_path /p/* { reverse_proxy 8183 }`：剥前缀的值不是 `/m`；
+      - `rewrite v1/watcher/dialogs`（不以 `/` 开头）、`rewrite /v1/./watcher/dialogs`（含点段）；
+      - 站点里 `forward_auth` 排在面板 `handle /v1/*` 之前：`forward_auth` 本身符合 W-3，但面板的链上有 `reverse_proxy`，面板判 FAIL；
+      - 站点顶层 `reverse_proxy /v1/* …`，同一站点另有带改写的 `handle` 块：不在同一 `group`，改写进入链中。
+      
+      通过的例子：仿生产夹具的 `@mobile`（W-2）与面板 `handle /v1/*`（W-1）；站点顶层不带匹配器的 `forward_auth 8183 { uri /v1/auth }`（W-3）；只有守卫的站点中，站点顶层的 `reverse_proxy /v1/* …`（W-1）。
+    - **失败方向与代价**：白名单是保守的。生产写法若落在三种形状之外，即使实际无害（例如 `forward_auth` 排在面板之前），verify 也会失败，挡住 A05/A08。处置是改候选 Caddyfile，使其落入三种形状之一，并重新做探针；或者由 Planner 召回 Architect 修订契约扩充白名单。O-0 不得临时加例外。
+  - **N-4、N-5**：WGW-1.0.3 第三轮起并入 N-3 的封闭白名单（N-4 对应 W-1 的"排在守卫之后"，N-5 对应容器规则），原条文作废。
 - **检查（由 Release Steward 实现，见 §9.16 WGW-1.0.3 的 RS 清单）**
-  - **V-1 verify 静态检查**（全部 server，按"operator-query 转发路由"定义中的枚举范围，含 `errors.routes`、`named_routes`、`handle_response[].routes`；WGW-1.0.3 第二轮）：逐条列出 operator-query 转发路由，每条输出一行 `DIRECT_ENTRY`：server、所在容器（`routes`/`errors`/`named_routes:<name>`/`handle_response`）、站点 host、trail（经 `invoke` 到达的，另列调用方的 trail）、匹配器摘要、改写摘要（逐项标明来源是 `rewrite` handler 还是 `reverse_proxy.rewrite`）、`Authorization` 操作（只写头名与 `{env.NAME}` 占位符名；字面值一律写成 `<literal len=N>`）、判定。然后按 N-2 至 N-5 判定，任一违例输出 `DIRECT_ENTRY_FAIL`，verify 失败。遇到未知容器输出 `DIRECT_ENTRY_FAIL … UNCOMPARABLE`。列出的行同时是 PC-6 的机器底稿。
-  - **V-2 verify 模拟**：对含 operator-query 转发路由的每个（server，host）组合（host 取自 host 匹配器；没有 host 匹配器的站点用 `--host`），模拟探针集 `P_D`。`P_D` 包括：`/v1/watcher`、`/v1/watcher/`、`/v1/watcher/status`、`/V1/WATCHER/status`、`/V1/Watcher/Status`、`//v1/watcher/status`、`/v1//watcher/status`、`/v1/./watcher/status`、`/x/../v1/watcher/status`、`/v1/watcher/config`、`/v1/watcher/login/start`、`/v1/watcher/healthz`，以及清单每行去掉 `/m`、参数取 `x` 的路径（逐一用该行的全部方法，另加 GET；媒体行另加 HEAD）。每个探针都必须由 `wgw_direct` 路由的静态 404 应答，不到达任何上游。反向对照：`GET /v1/watcherx` 不得由守卫应答（证明守卫不比规定的宽）。百分号形式不进 `P_D`（模拟器按解码后的路径工作，这类形式只在 V-3 活体检查）。
+  - **V-1 verify 静态检查**（全部 server，按"operator-query 转发路由"定义中的枚举范围，含 `errors.routes`、`named_routes`、`handle_response[].routes`；WGW-1.0.3 第二轮）：逐条列出 operator-query 转发路由，每条输出一行 `DIRECT_ENTRY`：server、所在容器（`routes`/`errors`/`named_routes:<name>`/`handle_response`）、站点 host、trail（经 `invoke` 到达的，另列调用方的 trail）、匹配器摘要、改写摘要（逐项标明来源是 `rewrite` handler 还是 `reverse_proxy.rewrite`）、`Authorization` 操作（只写头名与 `{env.NAME}` 占位符名；字面值一律写成 `<literal len=N>`）、判定。然后按 N-2 与 N-3 判定（WGW-1.0.3 第三轮：N-3 为封闭白名单），每条的判定写成 `W-1`、`W-2`、`W-3`、`SNIPPET`（已认定的片段转发路由）或 `FAIL <原因>`，原因如容器、链上的 handler 类型、`rewrite` 的键、`uri` 不合格、不在守卫之后等。任一 FAIL 输出 `DIRECT_ENTRY_FAIL`，verify 失败。遇到未知容器输出 `DIRECT_ENTRY_FAIL … UNCOMPARABLE`。列出的行同时是 PC-6 的机器底稿。
+  - **V-2 verify 模拟**：（WGW-1.0.3 第三轮，审查 wac-098 r2 🟢-A）模拟器遇到 `invoke`（含链式调用或成环）一律按 UNCOMPARABLE 判失败，不展开。V-1 不需要展开 `invoke`：命名路由中的转发器按容器规则直接失败，主链上的 `invoke` handler 不在链白名单内。对含 operator-query 转发路由的每个（server，host）组合（host 取自 host 匹配器；没有 host 匹配器的站点用 `--host`），模拟探针集 `P_D`。`P_D` 包括：`/v1/watcher`、`/v1/watcher/`、`/v1/watcher/status`、`/V1/WATCHER/status`、`/V1/Watcher/Status`、`//v1/watcher/status`、`/v1//watcher/status`、`/v1/./watcher/status`、`/x/../v1/watcher/status`、`/v1/watcher/config`、`/v1/watcher/login/start`、`/v1/watcher/healthz`，以及清单每行去掉 `/m`、参数取 `x` 的路径（逐一用该行的全部方法，另加 GET；媒体行另加 HEAD）。每个探针都必须由 `wgw_direct` 路由的静态 404 应答，不到达任何上游。反向对照：`GET /v1/watcherx` 不得由守卫应答（证明守卫不比规定的宽）。百分号形式不进 `P_D`（模拟器按解码后的路径工作，这类形式只在 V-3 活体检查）。
   - **V-3 探针活体检查**（本机 Caddy，上游全部是桩）：（WGW-1.0.3 第二轮，审查 wac-098 🟡-4）探针必须覆盖**每一个**含 operator-query 转发路由的 server。每个这样的 server 都改成只监听回环端口、上游改到桩，与 app 站点所在的 server 一样运行。有任何一个没有被探测（固定不了、改不了上游、端口冲突等），就对它输出 `DIRECT_ENTRY_NOT_PROBED server=<名>`，探针判失败（`CADDY_PROBE_FAILED`）；不得静默跳过，也不得只靠 V-1、V-2 放行。在这些 server 上，对含 operator-query 转发路由的每个 host，都带该 host 的 `Host` 头发送 `P_D`，外加 `/v1/watcher%2Fstatus`、`/v1%2Fwatcher/status`、`/v1/watcher%0A`、`/v1/watcher%25`、`/v1/watcher%25x`、`/v1/watcher/status?x=1`，以及清单每行去掉 `/m` 后，参数逐个取 `PROBE_PARAM_VALUES` 的路径与它的 `//` 变体（该行的全部方法）。期望：状态码 404、body 长度 0、`Content-Type` 为空，operator-query 桩与 watcher 桩计数都不变。**残余形状**（WGW-1.0.3 第二轮按审查 wac-098 🟢-4 扩充）：`/v1/watcher/../accounts`、`/v1/watcher/..%2Faccounts`、`/v1/watcher%2e%2e/accounts`、`/v1/watcher%3Fx`、`/v1/watche%72%3F`、`/v1/watcher%23x`、`/v1/watcher%00`、`/v1/watcher%0D`、`/v1/watcher%20`、`/v1/watcher%5Cstatus`、`/v1/watcher;x/status`，以及原始请求行中的 `/v1/watcher#x`、`/v1/watcher\status`（用原始 socket 发送；curl 会改写 `#` 与 `..`）。它们可以到达桩，但桩收到的 raw path 必须满足下面两者之一：不在 T 内（网关不触发，例如 `/v1/watcher;x/status`、`/v1/watcherx`）；或者含 `%`、`//`、点段（G1 会拒绝）。两者都不满足就判失败。另记录（不作断言）`GET /v1/accounts` 是否到达 operator-query 桩、到达时是否被加了 `Authorization`（只输出 `injected=yes|no`），作为 PC-6 与范围外告知的证据。已有检查不变，包括 `/m/v1/watcher/status` 以 `/v1/watcher/status` 到达桩、且不被注入。
+    - **逐转发器标记探针**（WGW-1.0.3 第三轮，审查 wac-098 r2 Gap Analysis 方向 2，作为 N-3 之外的第二道防线）：对 V-1 列出的每个非片段转发器，按它所在路由的匹配器构造触发请求，全部带该站点的 `Host` 头：
+      - 字面 `path` 模式发该路径本身；
+      - 前缀 glob `P*` 发 `P` + `v1/watcher/dialogs` 与 `P` + `x`；
+      - 没有匹配器的，发 `/v1/watcher/dialogs` 与 `/x/v1/watcher/dialogs`；
+      - 其他匹配器（这类转发器在 V-1 已判 FAIL）不构造。
+
+      断言：经非片段转发器到达 operator-query 桩的每条 raw path，都满足"不在 T 内"，或"含 `%`、`//`、点段"。违反即探针失败，并输出触发请求与桩收到的请求行（不含头值）。
+    - **已知旁路回放**（在 RS-6 的自测与真实 Caddy 测试中进行，不在生产副本上）：两轮审查与本契约列出的全部旁路形状（N-3"反例"中标 ★ 的，含 q1–q4），每一个都必须同时满足两点：V-1 静态判 FAIL，且判定原因与 N-3 的条文对应；活体触发时，桩确实收到了 G1 能放行的 T 内路径，以此证明判定理由是真实旁路而不是误报。标为保守失败的形状只断言 V-1 判 FAIL，并记录活体结果为"没有 G1 能放行的旁路"。
   - **V-4 caddyfile-check（文本）**：N-1 沿用 F-12。N-2：文本中含指向 operator-query 端口的 `reverse_proxy` 或 `forward_auth` 的每个站点块，都必须在站点顶层、所有 `handle`/`handle_path`/`route` 之前 import 两个 snippet 之一；import 了两个的判失败。上游写成占位符、无法识别端口的，判 UNCOMPARABLE。（WGW-1.0.3 第二轮）V-4 只是文本层的早期检查：经用户 snippet、`&(name)` 命名路由、`handle_errors` 引入的转发器，文本层不一定看得出来。结论**以 V-1 在 adapt JSON 上的结果为准**，V-4 通过不能代替 V-1。
   - **V-5 生产公网检查**（只读；不带 `Authorization`、不带 Cookie；只输出状态码、`size_download`、`content_type`，**不落盘、不打印 body**）。对 jp-bot 站点，以及 PC-6 列出的、其他转发到 8183 的站点主机名，发送 `GET /v1/watcher/status`、`GET /V1/WATCHER/status`、`GET //v1/watcher/status`、`GET /v1/watcher/dialogs`、`GET /v1/watcher/media/1700000000000-1.png`（WGW-1.0.3 第二轮把媒体探针由 HEAD 改为 GET：HEAD 响应本来就没有 body，`size_download` 恒为 0，不能区分守卫与上游的 404）。**判据**：五个请求全部满足"状态码 404、`size_download == 0`、`content_type` 为空"。守卫的 404 没有 `Content-Type`（本机实测）。网关上线之前，没有守卫的路径会得到 operator-query 的 FastAPI JSON 404（`{"detail":"Not Found"}`）；上线之后会得到网关的 JSON 或 200。这两种都带 `application/json`，三项判据任一不满足即不通过。
     - **发起位置**（WGW-1.0.3 第二轮，审查 wac-098 🟡-3，规范性）：**必做**的是外部检查，要同时满足四点：从 jp-24 以外的机器发起（例如操作者的开发机）；目标是公网主机名；经真实公网 DNS 解析；不用 `--resolve`、`--connect-to`、hosts 覆盖或任何代理。这样测到的才是"公网入口"，包括 CDN、前置代理、其他公网 IP 等 I-1 要覆盖的路径。在 jp-24 上用回环 `--resolve` 发起的检查（现行 C-3 的做法，`o0-runbook-deploy.md:165`）只测 Caddy 本身，只能作补充，不满足本条。五个请求都用 `curl --noproxy '*'` 发出；`//v1/…` 会被 curl 原样发送；列表中没有 `/./`、`/../`，所以不需要 `--path-as-is`。每个执行点的外部检查都是一次对生产公网的请求，授权清单必须逐点写明（发起机器、主机名、五个请求），**由用户授权后才执行**。执行点：
     - O0-A05 的 `--phase verify`（Caddy 重启之后）：脚本在 jp-24 上做回环补充检查；外部检查由操作者在同一授权窗口内完成，结果写进证据。任一不通过即 verify 失败，按 O0-A05 verify 失败的现行处置办理；修好并重新通过之前，不得申请 O0-A08。
-    - O0-A08 的 O-1 preflight：外部检查的结果（证据文件或参数，只含状态码、`size_download`、`content_type` 与时间）是必需输入，缺失或不通过都输出 `DIRECT_GUARD_MISSING`，阻断阶段 O，不写任何东西。回环补充检查照做。
+    - O0-A08 的 O-1 preflight：外部检查的证据是必需输入，回环补充检查照做。（WGW-1.0.3 第三轮，审查 wac-098 r2 🟡-A）证据必须同时满足以下四条，任一不满足（含证据缺失或外部检查不通过）即输出 `DIRECT_GUARD_MISSING`，阻断阶段 O，不写任何东西：
+      - (1) **内容**：五个请求的状态码、`size_download`、`content_type`，外部检查完成时刻 `t_ext`（UTC），主机名列表。另有一条在 jp-24 上用 admin API 只读取得的 Caddy 运行配置摘要 `caddy_running_config_sha256`（取法与 C-3 相同，只记录 sha），以及它的取得时刻 `t_sha`，要求 `|t_sha − t_ext| ≤ 5 分钟`；
+      - (2) **时效**：O-1 执行时 `now − t_ext ≤ 60 分钟`，与 C-2 门禁、fault report 的 1 小时时效一致；
+      - (3) **绑定**：O-1 当场再用 admin API 取一次运行配置 sha，必须等于证据中的 `caddy_running_config_sha256`；
+      - (4) 证据中五个请求全部满足 V-5 判据。
+      
+      所以 A05 窗口里做的外部检查通常已经过期，A08 需要在授权窗口内重做一次外部检查。
     - O0-A08 的 O-2 apply：重启 operator-query 之后、在自动回滚窗口内，由脚本做回环补充检查。不通过说明匿名读已经暴露，按重启之后的失败处理：自动回滚（O-4）。窗口内做不了外部检查，所以外部检查放在 O-3。
-    - O0-A08 的 O-3 verify：外部检查必做，不通过即执行 O-4。同时并入现有检查（现有的"公网 `/m/v1/watcher/status` 无 token 401"保留）。
+    - O0-A08 的 O-3 verify：外部检查必做，不通过即执行 O-4。同时并入现有检查（现有的"公网 `/m/v1/watcher/status` 无 token 401"保留）。（WGW-1.0.3 第三轮，审查 wac-098 r2 🟢-D）如果外部检查没有拿到授权、或做不成，O-3 的结论是**未完成**：不得宣告 O0-A08 或 O-0 上线完成。由用户决定是补授权后重做外部检查，还是执行 O-4 回滚。这种情况不计为通过。
     - 以后任何 Caddyfile 变更之后，都建议重跑 V-5（只读，但仍须单独授权）。
 - **PC-6（探针前确认项，O0-A05P 授权记录的一部分；契约依据为 I-1、N-2、N-3）**：放副本之前逐项确认，任一项答不上来就先停。
   - (i) 候选 Caddyfile 中**全部**把请求转发到 8183 的块（任何 host 写法；包括面板 `handle /v1/*`、`handle_path`、`route`、站点顶层 `reverse_proxy`、`forward_auth`、其他站点与其他 server 中的），逐块写明：所在站点地址、指令与匹配器原文、是否改写路径（改成什么）、是否设置、覆盖或删除 `Authorization`（只写占位符名，字面值写成 `<literal len=N>`）。来源是 O0-A01 S-02 大纲、L-A5 的"面板注入块的匹配器"，以及 `o0_caddy_watcher_routes.py inventory` 与 V-1 的 `DIRECT_ENTRY` 行，不需要新的生产动作。
   - (ii) 每个含这类块的站点，按 N-1、N-2 import 了哪个 snippet，写在什么位置。
   - (iii) jp-24 上 Caddy 以外，是否还有进程把外部请求代理到 `127.0.0.1:8183`（例如别的反向代理、SSH 隧道、端口转发）。由用户确认；S-06 只证明 8183 只监听回环，证明不了没有本机代理。（WGW-1.0.3 第二轮，审查 wac-098 🟢-7，可选）可以在 O0-A01 中增加只读的 `ss -tnp` 连接归属检查，看哪些进程与 `127.0.0.1:8183` 有连接，作为佐证。这是生产上的读操作，需要用户授权。
-- **U-13（用户确认项，O0-A08 的硬前置；契约依据为本小节）**：(i) 用户确认生产 jp-bot 站点面板 `/v1/*` 块的真实写法（是否无条件注入 `SYSTEM_OBSERVER_TOKEN`），以及 PC-6 (i)–(iii) 的结果；(ii) 用户认可本小节的修法：Caddy 直连守卫加 I-1 的机器检查（V-1 至 V-5），网关与角色 scope 不变。(iii) 用户决定是否另外采用下面"方案比较"中的 (c′)（默认不采用）。**WGW-1.0.3 的实现经审查合入之前，U-13 (i)、(ii) 确认之前，O0-A05 的 V-5 通过之前，都不得申请 O0-A08。**同时，O0-A05P 要等这批实现合入之后才申请：片段改为格式 v2 会改变 `snippet_sha256`；如果 PC-6 显示有其他站点，候选 Caddyfile 还要加 N-2 的 import，`candidate_sha256` 也会变。
+  - (iv) （WGW-1.0.3 第三轮，审查 wac-098 r2 🟢-C）公网主机名前面有没有 CDN、前置代理或其他中间层，它会不会改写 404 响应（补 `Content-Type`、补 body、换状态码）。若有，V-5 的判据会误判为不通过。失败方向是安全的，但会挡住 A05、A08。这时由用户决定：可以让中间层对该前缀直通；也可以由 Planner 召回 Architect，在契约中写明中间层的预期形状，再相应修订 V-5 判据。O-0 不得临时放宽判据。
+- **U-13（用户确认项，O0-A08 的硬前置；契约依据为本小节）**：(i) 用户确认生产 jp-bot 站点面板 `/v1/*` 块的真实写法（是否无条件注入 `SYSTEM_OBSERVER_TOKEN`），以及 PC-6 (i)–(iv) 的结果；(ii) 用户认可本小节的修法：Caddy 直连守卫加 I-1 的机器检查（V-1 至 V-5），网关与角色 scope 不变。(iii) 用户决定是否另外采用下面"方案比较"中的 (c′)（默认不采用）。**WGW-1.0.3 的实现经审查合入之前，U-13 (i)、(ii) 确认之前，O0-A05 的 V-5 通过之前，都不得申请 O0-A08。**同时，O0-A05P 要等这批实现合入之后才申请：片段改为格式 v2 会改变 `snippet_sha256`；如果 PC-6 显示有其他站点，候选 Caddyfile 还要加 N-2 的 import，`candidate_sha256` 也会变。
 - **方案比较与裁定依据**
   - **(a) Caddy 侧对非 `/m` 入口的 `/v1/watcher` 前缀回 404**。**采纳**，写法是守卫组进片段、另附独立 snippet，并配 I-1 与 V-1 至 V-5。理由：(1) 网关看不出请求来自哪个入口，所以边界只能画在能看到入口的地方，也就是 Caddy；(2) 守卫由真源生成、随片段做逐字节 diff，F-12 已经规定了 import 位置，app 站点的候选 Caddyfile 不需要为守卫改动；(3) 按 L-1，守卫加上现有 G1 就能覆盖全部不改写路径的转发，改写的情形由 N-3 的白名单机器判定；(4) 不改任何接口、角色、token 或网关代码；(5) 在网关上线（A08）之前就能用 V-5 在生产上验证（区分空 404 与 FastAPI JSON 404）。"只收窄面板匹配器"（`not path_regexp …`）不作为主修法：它是逐站点手写的，不来自真源，漏改一处就重新暴露。不过它满足 I-1 时不禁止。
   - **(b) 网关只接受经 `/m` 入口到达的请求（Caddy 在 `/m` 入口注入专用头，网关校验）**。**否决**。不带秘密的标记头，公网调用方可以自己加上；面板 `/v1/*` 会把它原样转发，再替它注入 observer。要堵住，就得让每个非 `/m` 入口都删掉这个头。这与 (a) 一样要逐站点改 Caddy，而且失败方向更差：漏删一处，就又是匿名读。带秘密的标记头则是一把新的服务端凭据（要生成、互异校验、轮换、放进 Caddy env），违反计划 §2.1"不新增 token"。此外，§9.2 拓扑、§9.3 的 G 步都要改。
@@ -871,8 +925,12 @@ CREATE TABLE IF NOT EXISTS config_audit (
 
 **WGW-1.0.3 待用户确认**（审查 wac-094 🟡-1；Planner 转达，任何 Agent 的转述都不算确认）：
 
-- **U-13**（O0-A08 的硬前置）：(i) 面板 `/v1/*` 的真实写法与 PC-6 (i)–(iii)；(ii) 认可 §9.14.6 的修法（(a) 加 V-1 至 V-5，网关与角色不变）；(iii) 是否另外采用 (c′)（默认不采用；采用需先修订计划，再出 WGW-1.0.4）。依据与前置顺序见 §9.14.6。
+- **U-13**（O0-A08 的硬前置）：(i) 面板 `/v1/*` 的真实写法与 PC-6 (i)–(iv)；(ii) 认可 §9.14.6 的修法（(a) 加 V-1 至 V-5，网关与角色不变）；(iii) 是否另外采用 (c′)（默认不采用；采用需先修订计划，再出 WGW-1.0.4）。依据与前置顺序见 §9.14.6。
 - **PC-6**（O0-A05P 的探针前确认项）：见 §9.14.6。
+
+**O-0 之后的加固选项（WGW-1.0.3 第三轮登记，由用户决定是否立项）**：
+
+- **(e) 网关单独占一个监听端口**（§9.14.6"方案比较"(e)，审查 wac-098 🟢-5 与 r2 Gap Analysis 方向 3）：operator-query 只在一个专用端口上服务 `/v1/watcher/*`，只有片段的 `watcher_gateway_upstream` 拨这个端口，8183 上不再注册网关路由。这样，"任何转发到 8183 的路由都可能触达网关"这一类问题会从结构上消失，N-3 白名单也可以大幅收窄。代价是新增监听或单元、修改 §9.2 拓扑、§9.7 的 worker 与槽位核算、S-06 端口检查与阶段 O，需要单独的计划修订与契约版本。**Architect 不自行启动**；用户决定立项后，由 Planner 召回 Architect。
 
 **范围外，但需告知用户**（WGW-1.0.3 不处理，也不改 §1–§8；由用户判断是否另开任务）：
 
@@ -988,35 +1046,57 @@ CREATE TABLE IF NOT EXISTS config_audit (
 **Release Steward 清单（RS-1..RS-10；文件范围：`scripts/ops/o0/`、`docs/agent-team/release/`；与 wac-097 的 🟡-2、🟡-3 同批）**
 
 1. **RS-1 生成物核对**：`o0_caddy_watcher_routes.py` 的 `expected_snippet`、`load_snippet`、`cmd_check_artifacts`（`:290-338`）按格式 v2，从清单独立推导两个 snippet 与守卫组并逐字节比对；`_find_wgw`、`_check_wgw_structure`（`:1129-1202`）认出 `wgw_direct` 路由（正则逐字，handler 为 `static_response`、状态 404），要求它与兜底同处 wgw 连续块的尾部，顺序为兜底、守卫。R12 的核对表述"兜底逐字相同且在最后"改为"兜底之后紧跟直连守卫"。
-2. **RS-2 V-1**：把 `_forwarder_check`（`:1214-1252`）从"只管 `/m/v1/watcher` 前缀"推广到 I-1。覆盖全部 server，并按 §9.14.6 的枚举范围遍历：`routes`、`errors.routes`、`named_routes`（按每处 `invoke` 的调用方上下文）、`subroute`、`handle_response[].routes`；未知容器判 UNCOMPARABLE。对每条非片段的 operator-query 转发路由输出 `DIRECT_ENTRY` 行，按 N-2 至 N-5 判定，违例输出 `DIRECT_ENTRY_FAIL`。**改路径识别必须同时看 `rewrite` handler 与 `reverse_proxy.rewrite` 对象**（WGW-1.0.3 第二轮）：现行代码只认 `handler == "rewrite"`（`o0_caddy_watcher_routes.py:1275`、`:1471`、`:1649`），这个盲区不得继承。N-3 的"改写模型"与 wac-097 的 🟡-2 共用一套实现：凡是改路径的都算命中，常量 `uri` 例外。判不了即失败。
-3. **RS-3 V-2**：对含 operator-query 转发的每个（server，host）组合，模拟 `P_D` 与反向对照 `/v1/watcherx`。
-4. **RS-4 V-3**：扩展 `_probe_live_checks`（`:1930` 起）与 `pin_probe_config`（约 `:1751`）。现行代码只运行探针站点所在的 server、丢弃其他 server；改为运行每一个含 operator-query 转发路由的 server。无法运行的，输出 `DIRECT_ENTRY_NOT_PROBED server=…`，探针判失败（WGW-1.0.3 第二轮）。按 host 发送 `P_D`、百分号形式、`PROBE_PARAM_VALUES` 取值与 `//` 变体，期望 404、body 长度 0、`Content-Type` 为空、两类桩计数不变；残余形状按 V-3 的扩充列表发送（`#` 与 `\` 形式用原始 socket），只允许以"不在 T 内"或"含 `%`、`//`、点段"的 raw path 到达桩；另记录 `/v1/accounts` 的 `injected=yes|no`，不作断言，不打印头值。
+2. **RS-2 V-1（WGW-1.0.3 第三轮按 R22 重写：白名单形状匹配，不模拟改写语义）**：以 `_forwarder_check`（`:1214-1252`）为起点，改为 §9.14.6 N-3 的封闭白名单：
+   - **遍历**：全部 server 的 `routes`、`errors.routes`、`named_routes`，以及其下任意深度的 `subroute`、`reverse_proxy`/`intercept` 的 `handle_response[].routes`。任何其他含路由的字段，或 server 级未知键，都判 UNCOMPARABLE。
+   - **转发器**：`reverse_proxy` 且某个 dial 的端口等于 `--upstream` 的端口，沿用 `dial_endpoint`；解析不了判 UNCOMPARABLE。
+   - **判定顺序**：
+     - (1) 容器不是主链 → FAIL；
+     - (2) 已认定的片段转发路由 → `SNIPPET`；
+     - (3) 按 N-3 的"链"定义算出链；互斥只认相同的非空 `group`，或字面 `host` 集合不相交；
+     - (4) F 带 `rewrite` 对象 → 只能是 W-3，按 W-3 的逐项条件判定；
+     - (5) 链上没有白名单外的 handler，且守卫在前 → W-1；
+     - (6) 链上唯一的白名单外 handler 是 `rewrite{strip_path_prefix:"/m"}` → 按 W-2 的匹配器与头部条件判定；
+     - (7) 其余 → FAIL，原因写明第一个不合格项。
+   - **禁止**：保留现行"只认 `handler == "rewrite"`"的写法（`:1275`、`:1471`、`:1649`），以及任何按 `rewrite` 字段语义推算上游路径的逻辑。白名单之外不得有任何"算得出就放行"的分支。
+   - N-3 与 wac-097 🟡-2 的前置遮蔽检查各自独立：后者管 `/m/v1/watcher` 前缀空间，前者管 I-1。
+3. **RS-3 V-2**：对含 operator-query 转发的每个（server，host）组合，模拟 `P_D` 与反向对照 `/v1/watcherx`。（WGW-1.0.3 第三轮）模拟器遇到 `invoke`（含链式与成环）直接判 UNCOMPARABLE，不展开；selftest 覆盖链式与成环两种情形。
+4. **RS-4 V-3**：扩展 `_probe_live_checks`（`:1930` 起）与 `pin_probe_config`（约 `:1751`）。现行代码只运行探针站点所在的 server、丢弃其他 server；改为运行每一个含 operator-query 转发路由的 server。无法运行的，输出 `DIRECT_ENTRY_NOT_PROBED server=…`，探针判失败（WGW-1.0.3 第二轮）。按 host 发送 `P_D`、百分号形式、`PROBE_PARAM_VALUES` 取值与 `//` 变体，期望 404、body 长度 0、`Content-Type` 为空、两类桩计数不变；残余形状按 V-3 的扩充列表发送（`#` 与 `\` 形式用原始 socket），只允许以"不在 T 内"或"含 `%`、`//`、点段"的 raw path 到达桩；另记录 `/v1/accounts` 的 `injected=yes|no`，不作断言，不打印头值。（WGW-1.0.3 第三轮）另实现 V-3 的"逐转发器标记探针"：按 V-1 列出的转发器与其匹配器构造触发请求，断言经非片段转发器到达桩的 raw path 不在 T 内，或者含 `%`、`//`、点段。
 5. **RS-5 V-4**：`caddyfile_check`（`:1559` 起）增加 N-2 的文本检查：import 位置在所有 `handle`/`handle_path`/`route` 之前；同一站点 import 了两个 snippet 判失败；端口识别不了判 UNCOMPARABLE。
-6. **RS-6 自测与真实 Caddy 测试**（selftest、`tests/caddy_real_test.sh`，每个判定都用真实 Caddy v2.10.2 复核）：
-   - 仿生产夹具加 v2 片段 → PASS。
-   - 删去守卫组、守卫正则去掉 `%` 或 `(?i:`、把 `import watcher_gateway_routes` 挪到 `handle /v1/*` 之后 → FAIL。
-   - 第二站点用 `handle /v1/*` 转发到 8183 并注入：不 import 守卫 → FAIL，import `watcher_gateway_direct_guard` → PASS，两个 snippet 都 import → FAIL。
-   - g16、g17、g18 → FAIL；`handle_path /p/*` 转发到 8183（剥后头部为 `/`）→ FAIL。
-   - 站点顶层 `reverse_proxy /v1/* 127.0.0.1:8183 { header_up Authorization … }` 加守卫（import 写在它之后也算）→ PASS。本机实测：守卫仍先生效。
-   - 站点顶层不带匹配器的 `forward_auth 127.0.0.1:8183 { uri /v1/auth }`（adapt 后排在守卫之前）→ PASS，依据 N-3 (b)：自身 `rewrite` 对象中的常量 `uri` 不在 T 内，因此不适用 N-4（WGW-1.0.3 第二轮消除首轮的自相矛盾）。`forward_auth 127.0.0.1:8183 { uri /v1/watcher/status }` → FAIL；`forward_auth 127.0.0.1:8183 { uri {uri} }` → FAIL。
-   - （WGW-1.0.3 第二轮，`reverse_proxy.rewrite`）以下写法都 → FAIL：
-     - 审查 wac-098 的旁路原样：`handle /foo/* { reverse_proxy 127.0.0.1:8183 { rewrite /v1/watcher/dialogs; header_up Authorization "Bearer {env.SYSTEM_OBSERVER_TOKEN}" } }`，站点已 import 守卫；
-     - `handle /foo/* { reverse_proxy 127.0.0.1:8183 { rewrite /v1/watcher/status } }`，不注入同样判失败；
-     - `reverse_proxy 127.0.0.1:8183 { rewrite /v1/watcher{path} }`（带占位符）。
-     
-     `handle /foo/* { reverse_proxy 127.0.0.1:8183 { rewrite /v1/ping } }` → PASS。
-   - （WGW-1.0.3 第二轮，N-5）以下写法 → FAIL：
-     - `handle_errors { reverse_proxy 127.0.0.1:8183 { header_up Authorization … } }`，主链有 `forward_auth` 或 `basic_auth`，站点已 import 守卫；
-     - `handle_errors { reverse_proxy 127.0.0.1:8183 }`，不注入同样判失败：不改写，且匹配器可能命中 D；
-     - `handle_path /x/* { invoke obs }`，命名路由 `&(obs)` 转发到 8183；
-     - 容器中出现未知的 `routes` 字段（合成 JSON）。
-     
-     以下写法 → PASS：`handle /v1/* { invoke obs }`，排在守卫之后；`handle_errors { reverse_proxy 127.0.0.1:8183 { rewrite /v1/ping } }`，按 N-3 (b)。
-   - 以上每个 FAIL 用例，都用真实 Caddy 确认对应的请求确实到达 8183 桩；每个 PASS 用例都确认没有 T 内路径到达桩。
-   - 仿生产 `@mobile` 块 → PASS。
+6. **RS-6 自测与真实 Caddy 测试（WGW-1.0.3 第三轮按 R22 重写；每个用例都用真实 Caddy v2.10.2 adapt 后交给 V-1，并做 V-3"已知旁路回放"）**：
+   - 期望 V-1 判 PASS，活体上没有 G1 能放行的 T 内路径到达桩：
+     - 仿生产夹具加 v2 片段：`@mobile` → W-2，面板 → W-1，片段 → SNIPPET；
+     - 只有守卫的站点中，站点顶层 `reverse_proxy /v1/* 127.0.0.1:8183 { header_up Authorization … }` → W-1，import 写在它之后也一样；
+     - 站点顶层不带匹配器的 `forward_auth 127.0.0.1:8183 { uri /v1/auth }` → W-3；
+     - `handle /foo/* { reverse_proxy 127.0.0.1:8183 { rewrite /v1/ping } }` → W-3；
+     - 第二站点 import 守卫并用 `handle /v1/*` 注入 → W-1。
+   - 期望 V-1 判 FAIL，而且活体确有旁路（桩收到 G1 能放行的 T 内路径）：
+     - `handle /foo/* { reverse_proxy 127.0.0.1:8183 { rewrite /v1/watcher/dialogs; header_up Authorization … } }`，触发 `/foo/x`；
+     - q1 `handle_path /x/* { reverse_proxy 127.0.0.1:8183 { rewrite ?a=1; header_up … } }`，触发 `/x/v1/watcher/dialogs`；
+     - q2 `handle_errors { reverse_proxy 127.0.0.1:8183 { rewrite ?a=1; header_up … } }`，主链 `forward_auth` 到不可达端口，触发 `/v1/watcher/dialogs`；
+     - q3 `handle_errors { reverse_proxy <另一个桩> { rewrite /ping; @ok status 2xx; handle_response @ok { reverse_proxy 127.0.0.1:8183 { header_up … } } } }`，触发同 q2；
+     - q4 `handle_path /x/* { reverse_proxy 127.0.0.1:8183 { rewrite "#frag"; header_up … } }`；
+     - `handle_errors { reverse_proxy 127.0.0.1:8183 { header_up … } }`；
+     - `handle_path /x/* { invoke obs }`，`&(obs)` 转发到 8183；
+     - `@m path /m/v1/*` 加 `uri strip_prefix /m` 转发到 8183；
+     - `handle_path /p/* { reverse_proxy 127.0.0.1:8183 }`；
+     - 合成 JSON：`forward_auth` 的 `rewrite` 为 `{"method":"GET","uri":"/v1/auth","uri_substring":[{"find":"auth","replace":"watcher/dialogs"}]}`，用 `caddy run --config <json>` 运行，任意请求都触发；
+     - wac-094 的 g16、g17、g18。
+   - 期望 V-1 判 FAIL，属于保守失败（只断言静态 FAIL，活体结果记录为"没有 G1 能放行的旁路"）：
+     - `forward_auth 127.0.0.1:8183 { uri /v1/auth }` 排在面板 `handle /v1/*` 之前时的面板；
+     - 站点顶层 `reverse_proxy /v1/* …`，同站点另有 `handle /w/* { uri strip_prefix /w; reverse_proxy … }`；
+     - `reverse_proxy 127.0.0.1:8183 { rewrite v1/watcher/dialogs }`、`{ rewrite /v1/./watcher/dialogs }`、`{ rewrite /v1/watcher/../watcher/dialogs }`；
+     - `handle /v1/* { invoke obs }`；
+     - `reverse_proxy 127.0.0.1:8183 { rewrite /v1/watcher{path} }`；
+     - `forward_auth 127.0.0.1:8183 { uri /v1/watcher/status }`、`{ uri {uri} }`；
+     - 链上有 `method GET` 指令的面板（`rewrite` 只带 `method`）。
+   - 期望 UNCOMPARABLE（判 FAIL）：
+     - 合成 JSON 中某个 handler 带未知的路由列表字段；
+     - server 级未知键；
+     - dial 写成占位符或 unix socket。
+   - 结构类用例（沿用第一轮）：删去守卫组、守卫正则去掉 `%` 或 `(?i:`、`import watcher_gateway_routes` 挪到 `handle /v1/*` 之后 → FAIL；同一站点 import 两个 snippet → adapt 失败，判 FAIL。
    - 夹具 `Caddyfile.prodlike.in` 不需要为守卫改动。
 7. **RS-7 V-5 @ O0-A05**：`o0_deploy_caddy.sh --phase verify` 加入 V-5 的回环补充检查；另提供一个在外部机器上运行的只读命令（例如 `o0_tool.py public-direct-check --host <公网主机名>`）：用真实 DNS，不用 `--resolve`、不用代理，五个 GET 只输出状态码、`size_download`、`content_type`，不落盘、不打印 body。它的输出作为证据交给 verify。判据为 404、长度 0、`content_type` 为空。任一不通过即 verify 失败，按现行处置办理。
-8. **RS-8 V-5 @ O0-A08**：`o0_deploy_operator_query.sh` 的三处检查：O-1 preflight 要求外部检查证据作为输入，缺失或不通过都输出 `DIRECT_GUARD_MISSING` 并阻断，不写任何东西；O-2 apply 在重启之后、自动回滚窗口之内做回环补充检查，不通过即 O-4；O-3 verify 外部检查必做，不通过即 O-4。公网请求一律不带凭据与 Cookie，只输出状态码、`size_download`、`content_type`。授权清单逐点写明外部请求。
+8. **RS-8 V-5 @ O0-A08**：`o0_deploy_operator_query.sh` 的三处检查：O-1 preflight 要求外部检查证据作为输入，并按 V-5 的四条逐项核对（WGW-1.0.3 第三轮）：内容、`t_sha` 与 `t_ext` 相差 ≤ 5 分钟、证据产生后 ≤ 60 分钟、当场用 admin API 取的运行配置 sha 与证据一致。缺失、过期、不符或不通过，都输出 `DIRECT_GUARD_MISSING` 并阻断，不写任何东西。取 sha 的只读命令须另行提供，与外部检查同时运行，只输出 sha 与时刻；O-2 apply 在重启之后、自动回滚窗口之内做回环补充检查，不通过即 O-4；O-3 verify 外部检查必做，不通过即 O-4；拿不到授权或做不成时，输出 `DIRECT_GUARD_UNVERIFIED`，结论为"未完成"，脚本不得输出任何"上线完成"类标记（WGW-1.0.3 第三轮）。公网请求一律不带凭据与 Cookie，只输出状态码、`size_download`、`content_type`。授权清单逐点写明外部请求。
 9. **RS-9 打包门禁**：`o0_package.sh` 对片段 `_format` 的期望改为 v2；其余门禁不变。A05P 与 A05 的绑定改用新的 `snippet_sha256`。
 10. **RS-10 文档**：
     - `o0-runbook-deploy.md`：§3.1 第 7 条加入 PC-6（文字取自 §9.14.6）；阶段 C 的 verify 行与 O-1、O-2、O-3 行加入 V-5。
@@ -1040,3 +1120,22 @@ CREATE TABLE IF NOT EXISTS config_audit (
 | G-19 | wac-098 🟢-5、🟢-8 | 属于 Planner 的事项，契约只记录建议，不改规范：把 (e)"网关单独占一个监听端口"登记为 O-0 之后的加固项；B 清单与 RS 清单同批推进，并以 B-1..B-3 合入为 RS 的前提，缩短"契约写 v2、生成物仍是 v1、check 照样通过"的窗口 | §9.16（本条） |
 
 本轮对两份实现清单的增量都已直接写进上文 B-5、RS-2、RS-4、RS-6、RS-7、RS-8 的条目。首轮 G-06 表格中"HEAD `/v1/watcher/media/…`"与"判据为 404 且长度 0"的写法，以 G-13 为准。
+
+**WGW-1.0.3 第三轮（2026-09-28，版本号不变）**。来源：审查报告 `docs/agent-team/reviews/wac-096.md`"第二轮"（复审 wac-098 r2，FAIL：2 🔴、1 🟡、4 🟢）与其 Gap Analysis；Planner 裁定 R22（N-3/N-4/N-5 收敛为封闭白名单）。WGW-1.0.3 仍未合入，不另起版本号；本轮条目优先于第一、二轮中与之冲突的内容，第一、二轮的 N-3、N-4、N-5 条文作废，G-04、G-11、G-12 中与之相关的描述仅作历史记录。只改 §9 文字：§1–§8、YAML、四份生成物不变；既有 `/v1` 端点不变。本轮实测条件与前两轮相同：真实 Caddy v2.10.2，`HOME`/`XDG_*` 指向临时目录，token 随机生成，上游全部是本机桩，不连 jp-24，不访问生产 URL。
+
+| # | 来源 | 改动 | 位置 |
+|---|---|---|---|
+| G-20 | R22；r2 Gap Analysis 方向 1 | N-3 改为封闭白名单：非片段的 operator-query 转发器只允许 W-1（面板形状）、W-2（`/m` 剥前缀形状）、W-3（`uri`/`method` 常量改写形状）三种，其余与无法判定的一律 FAIL；给出"链"（含互斥的两种情形）与链 handler 白名单的精确定义；"改路径"改为"改路径动作"，不区分字段；N-4、N-5 并入 N-3。R22 第 2 条"逐字等于生成物"只对片段转发路由成立，`@mobile` 按 W-2 的形状精确判定 | §9.14.6 定义、N-3、N-4/N-5 |
+| G-21 | r2 🔴-A | 路径分量为空的 `uri`（`?a=1`、`#frag`）、不以 `/` 开头的 `uri`、键超出 `{uri, method}` 的 `rewrite` 对象（如 `uri` 加 `uri_substring`），都不满足 W-3，判 FAIL，并写进 N-3 反例；W-3 另排除 `//` 与点段 | §9.14.6 N-3 W-3 与反例 |
+| G-22 | r2 🔴-B | 删去"外层 `reverse_proxy` 的 `rewrite` 算在 `handle_response` 链上"的错误表述；改为容器规则：`handle_response`（`reverse_proxy` 与 `intercept`）、错误链、命名路由中的转发器一律 FAIL，不区分语境 | §9.14.6 N-3 容器规则；删除第二轮 N-5 |
+| G-23 | r2 🟡-A | O-1 的外部证据：内容（含 jp-24 上 admin API 取得的运行配置 sha，取得时刻与外部检查相差 ≤ 5 分钟）、时效（≤ 60 分钟）、绑定（O-1 当场取的 sha 必须一致），任一不满足即 `DIRECT_GUARD_MISSING` | §9.14.6 V-5；§9.16 RS-8 |
+| G-24 | r2 🟢-A | V-2 模拟器遇到 `invoke`（含链式与成环）判 UNCOMPARABLE，不展开；V-1 不需要展开 `invoke` | §9.14.6 V-2；§9.16 RS-3 |
+| G-25 | r2 🟢-B | 由 W-3 的"以 `/` 开头"覆盖；不以 `/` 开头的常量判 FAIL，不再依赖上游服务器不规范化请求目标 | §9.14.6 W-3 |
+| G-26 | r2 🟢-C | PC-6 (iv)：确认公网前面有没有会改写 404 的 CDN 或中间层；有的话由用户决定让它直通，或召回 Architect 修订判据，O-0 不得临时放宽 | §9.14.6 PC-6 |
+| G-27 | r2 🟢-D | O-3 的外部检查拿不到授权或做不成时，结论为"未完成"（`DIRECT_GUARD_UNVERIFIED`），不得宣告上线完成，由用户决定补授权还是执行 O-4 | §9.14.6 V-5；§9.16 RS-8 |
+| G-28 | Planner 要求；r2 Gap Analysis 方向 2 | V-3 增加"逐转发器标记探针"（第二道防线）与"已知旁路回放"（每个 ★ 形状都要静态 FAIL，并在活体上证明确有旁路；保守失败的形状只断言静态 FAIL）；RS-2 改为白名单形状匹配的实现要求，RS-6 改为按 PASS、FAIL 有旁路、FAIL 保守、UNCOMPARABLE、结构五类列全部用例 | §9.14.6 V-3；§9.16 RS-2、RS-4、RS-6 |
+| G-29 | r2 Gap Analysis 方向 3；wac-098 🟢-5 | (e)"网关单独占一个监听端口"在 §9.15 登记为 O-0 之后的加固选项，由用户决定是否立项，Architect 不自行启动 | §9.15 |
+
+白名单的代价（写入 N-3"失败方向与代价"）：它是保守的，生产写法若落在三种形状之外，即使实际无害也会挡住 A05、A08。处置只有两种：改候选使其落入白名单，或召回 Architect 扩充白名单。本机原型对两轮全部已知形状的判定，以及真实 Caddy 的活体结果，见 §9.14.6"本机实测"第三轮一条。
+
+对 B 清单无增量（B-1..B-7 不变）。RS 清单的增量已直接写进 RS-2、RS-3、RS-4、RS-6、RS-8。
