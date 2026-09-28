@@ -19,6 +19,13 @@
 #              reached the restart; then fleet guard vs the apply baseline, recorded
 # Execute: bash o0_deploy_caddy.sh --execute --auth-id O0-A05 --phase apply --stage-dir ... \
 #            [--candidate <stage>/caddy/Caddyfile.candidate] [--cred-set <stage>/creds/set-initial]
+#   preflight additionally needs --probe-candidate-sha256 <hex> --probe-snippet-sha256 <hex>, the two
+#   sha256 values printed on the CADDY_PROBE_OK line of the O0-A05P local probe (wac-090, review
+#   wac-088 🟡-4): preflight refuses unless the candidate and the bundle snippet are exactly what
+#   the probe passed; the gate records both, and apply re-checks them against the files in hand.
+# The candidate must live inside the stage dir (review wac-088 🟡-6): preflight stages the snippet
+#   next to it, so a candidate in /etc/caddy would make the read-only preflight write the live
+#   snippet file. Refused before anything else runs.
 #
 # RISK (declared, not hidden; decision D-02): `systemctl restart caddy` briefly interrupts
 # the node channel (site check S-06 confirms the address, default 172.30.1.1:8080) to the
@@ -30,7 +37,7 @@ set -eo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/o0_common.sh"
 o0_parse_common "$@"
 set -- "${O0_REST[@]}"
-CANDIDATE="" CRED_SET="" HOST="jp-bot.balen.wang" NODE_CHANNEL="172.30.1.1:8080"
+CANDIDATE="" CRED_SET="" HOST="jp-bot.balen.wang" NODE_CHANNEL="172.30.1.1:8080" PROBE_CAND_SHA="" PROBE_SNIP_SHA=""
 CADDYFILE="/etc/caddy/Caddyfile" CADDY_ENV="/etc/caddy/v3.env" SNIPPET_LIVE="/etc/caddy/caddy-watcher-gateway.caddy"
 CATALOG_ENVS=()
 while [ "$#" -gt 0 ]; do
@@ -40,6 +47,8 @@ while [ "$#" -gt 0 ]; do
     --host) HOST="$2"; shift ;;
     --node-channel) NODE_CHANNEL="$2"; shift ;;   # confirm with site check S-06
     --catalog-env) CATALOG_ENVS+=("$2"); shift ;;  # repeat: every control-plane env file from S-10/S-11
+    --probe-candidate-sha256) PROBE_CAND_SHA="$2"; shift ;;   # from the O0-A05P CADDY_PROBE_OK line
+    --probe-snippet-sha256) PROBE_SNIP_SHA="$2"; shift ;;
     *) o0_die "unknown argument: $1" ;;
   esac
   shift
@@ -56,6 +65,21 @@ EV="$O0_STAGE_DIR/evidence"
 SNIPPET_BUNDLE="$BUNDLE/caddy/caddy-watcher-gateway.caddy"
 PATHS_BUNDLE="$BUNDLE/caddy/caddy-watcher-gateway-paths.txt"
 SNIPPET_STAGED="$(dirname "$CANDIDATE")/caddy-watcher-gateway.caddy"   # the candidate's relative import resolves here
+# review wac-088 🟡-6: the candidate (and so the staged snippet) only ever inside the stage dir
+case "$CANDIDATE" in
+  "$O0_STAGE_DIR"/*) ;;
+  *) o0_die "--candidate must be inside the stage dir $O0_STAGE_DIR (preflight stages the snippet next to it; never /etc/caddy or any live config dir): $CANDIDATE" ;;
+esac
+case "$CANDIDATE" in *..*|*' '*) o0_die "--candidate must not contain '..' or spaces: $CANDIDATE" ;; esac
+[ "$SNIPPET_STAGED" != "$SNIPPET_LIVE" ] && [ "$(dirname "$CANDIDATE")" != "$(dirname "$CADDYFILE")" ] \
+  || o0_die "--candidate sits in the live Caddy directory: $CANDIDATE"
+# review wac-088 🟡-4: preflight is bound to the O0-A05P probe result
+if [ "$O0_MODE" = "execute" ] && [ "$O0_PHASE" = "preflight" ]; then
+  [[ "$PROBE_CAND_SHA" =~ ^[0-9a-f]{64}$ && "$PROBE_SNIP_SHA" =~ ^[0-9a-f]{64}$ ]] \
+    || o0_die "preflight needs --probe-candidate-sha256 and --probe-snippet-sha256 (64 hex each) from the CADDY_PROBE_OK line of the O0-A05P local probe"
+fi
+PROBE_CAND_SHA="${PROBE_CAND_SHA:-<CADDY_PROBE_OK candidate_sha256>}"
+PROBE_SNIP_SHA="${PROBE_SNIP_SHA:-<CADDY_PROBE_OK snippet_sha256>}"
 VERIFY=("$O0_PY" "$TOOLS/o0_caddy_watcher_routes.py" verify --paths "$PATHS_BUNDLE" --snippet "$SNIPPET_BUNDLE" --host "$HOST")
 ENVX=("$O0_PY" "$TOOLS/o0_tool.py" env-exec --env-file "$CADDY_ENV" --env-file "$CRED_SET/caddy.env" --)
 CATALOG_ARGS=()
@@ -81,6 +105,12 @@ probe_public() {
 
 phase_preflight() {
   o0_gate_clear caddy-preflight
+  o0_sh "candidate resolves inside the stage dir, not in the live Caddy directory, no symlinks (review wac-088 🟡-6)" \
+    "d=\$(cd \"\$(dirname '$CANDIDATE')\" && pwd -P); s=\$(cd '$O0_STAGE_DIR' && pwd -P); l=\$(cd \"\$(dirname '$CADDYFILE')\" && pwd -P)
+     case \"\$d/\" in \"\$s\"/*) ;; *) echo \"candidate dir \$d is outside the stage dir \$s\"; exit 1 ;; esac
+     [ \"\$d\" != \"\$l\" ] || { echo 'the candidate sits in the live Caddy directory'; exit 1; }
+     [ ! -L '$CANDIDATE' ] && [ ! -L '$SNIPPET_STAGED' ] || { echo 'candidate or staged snippet path is a symlink'; exit 1; }
+     echo CANDIDATE_IN_STAGING"
   o0_fleet_baseline preflight-caddy
   o0_bundle_recheck
   o0_step "Caddy version (wac-026 🟡-1 f: path cleaning semantics depend on it)" caddy version
@@ -90,6 +120,11 @@ phase_preflight() {
     "$O0_PY" "$TOOLS/o0_caddy_watcher_routes.py" check-artifacts --paths "$PATHS_BUNDLE" --snippet "$SNIPPET_BUNDLE" --expect-phase-max P2
   o0_sh "live snippet file absent (first deploy) or byte-identical to the bundle's (never a different file)" \
     "if [ -e '$SNIPPET_LIVE' ]; then cmp -s '$SNIPPET_LIVE' '$SNIPPET_BUNDLE' && echo LIVE_SNIPPET_EQUALS_BUNDLE; else echo LIVE_SNIPPET_ABSENT; fi"
+  o0_sh "candidate and bundle snippet are exactly what the O0-A05P local probe passed (CADDY_PROBE_OK sha256)" \
+    "c=\$(sha256sum '$CANDIDATE' | cut -d' ' -f1); n=\$(sha256sum '$SNIPPET_BUNDLE' | cut -d' ' -f1)
+     [ \"\$c\" = '$PROBE_CAND_SHA' ] || { echo \"PROBE_BINDING_FAILED candidate sha256 \$c is not the probed one: re-run O0-A05P on this candidate\"; exit 1; }
+     [ \"\$n\" = '$PROBE_SNIP_SHA' ] || { echo \"PROBE_BINDING_FAILED bundle snippet sha256 \$n is not the probed one\"; exit 1; }
+     echo PROBE_BINDING_OK candidate_sha256=\$c snippet_sha256=\$n"
   o0_sh "stage the bundle's snippet next to the candidate (relative import) and prove it is the same bytes" \
     "install -m 0644 '$SNIPPET_BUNDLE' '$SNIPPET_STAGED' && cmp '$SNIPPET_STAGED' '$SNIPPET_BUNDLE' && echo SNIPPET_STAGED"
   o0_step "candidate text: snippet file imported once at the top level, 'import watcher_gateway_routes' before every handle (F-12); F-13 (2) record of global order options and pre-handle directives" \
@@ -109,7 +144,8 @@ phase_preflight() {
   o0_step "verify adapted candidate: list set equality, fallback verbatim and last, F-13 shadow check, no other forwarder of the prefix, per-line emulation, browser clear+inject" \
     "${VERIFY[@]}" --adapted "$O0_STAGE_DIR/caddy/candidate.adapted.json"
   o0_gate_write caddy-preflight --file-sha "candidate_caddyfile=$CANDIDATE" --file-sha "live_caddyfile=$CADDYFILE" \
-    --file-sha "live_caddy_env=$CADDY_ENV" --file-sha "cred_caddy_env=$CRED_SET/caddy.env" --file-sha "staged_snippet=$SNIPPET_STAGED"
+    --file-sha "live_caddy_env=$CADDY_ENV" --file-sha "cred_caddy_env=$CRED_SET/caddy.env" --file-sha "staged_snippet=$SNIPPET_STAGED" \
+    --field "probe_candidate_sha256=$PROBE_CAND_SHA" --field "probe_snippet_sha256=$PROBE_SNIP_SHA"
 }
 
 rollback_files() {
@@ -131,7 +167,8 @@ phase_apply() {
   # ---- gates first: nothing below this block writes before all of them pass
   o0_gate_require caddy-preflight "$O0_GATE_MAX_AGE_S" --expect-file-sha "candidate_caddyfile=$CANDIDATE" \
     --expect-file-sha "live_caddyfile=$CADDYFILE" --expect-file-sha "live_caddy_env=$CADDY_ENV" --expect-file-sha "cred_caddy_env=$CRED_SET/caddy.env" \
-    --expect-file-sha "staged_snippet=$SNIPPET_STAGED"
+    --expect-file-sha "staged_snippet=$SNIPPET_STAGED" \
+    --expect-file-sha "probe_candidate_sha256=$CANDIDATE" --expect-file-sha "probe_snippet_sha256=$SNIPPET_BUNDLE"
   o0_bundle_recheck
   o0_sh "staged snippet is still the bundle's; the live snippet file is absent or identical" \
     "cmp '$SNIPPET_STAGED' '$SNIPPET_BUNDLE' && { [ ! -e '$SNIPPET_LIVE' ] || cmp -s '$SNIPPET_LIVE' '$SNIPPET_BUNDLE'; } && echo SNIPPET_GATE_OK"

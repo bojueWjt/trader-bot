@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Every offline O-0 check in one go (no network, no production access).
 # Optional: O0_WAL_REPRO_DB=<review scratchpad walt/w.db>, O0_FLEET_REPRO_DIR=<review scratchpad fleet/evidence>,
-#           O0_CADDY_BIN=<Caddy v2.10.2 binary> (real adapt + local probe, tests/caddy_real_test.sh; the last
-#           line says real_caddy=skipped when it is unset, so a skip is never read as a pass)
+#           O0_CADDY_BIN=<Caddy v2.10.2 binary> (real adapt + local probe, tests/caddy_real_test.sh).
+# Last line: ALL_O0_OFFLINE_CHECKS_OK real_caddy=ok only when the real-Caddy test ran and passed;
+# without O0_CADDY_BIN it is O0_OFFLINE_CHECKS_OK_WITHOUT_REAL_CADDY real_caddy=skipped (wac-090, review
+# wac-088 💭-1: a skip never starts with ALL_O0_OFFLINE_CHECKS_OK, so no prefix match reads it as a pass).
 set -eo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 O0="$HERE/.."
@@ -24,4 +26,4 @@ for s in o0_deploy_caddy.sh o0_deploy_watcher.sh o0_deploy_operator_query.sh o0_
   bash "$O0/$s" >/dev/null
 done
 echo "PLAN_MODE_OK scripts=5 (no execution)"
-echo "ALL_O0_OFFLINE_CHECKS_OK real_caddy=$REAL_CADDY"
+if [ "$REAL_CADDY" = ok ]; then echo "ALL_O0_OFFLINE_CHECKS_OK real_caddy=ok"; else echo "O0_OFFLINE_CHECKS_OK_WITHOUT_REAL_CADDY real_caddy=$REAL_CADDY"; fi

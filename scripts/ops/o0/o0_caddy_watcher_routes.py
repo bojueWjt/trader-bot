@@ -31,12 +31,19 @@ Sub-commands
              (c) F-13 shadow check, two steps, on every route that runs before the first wgw
                  route (same list and every enclosing list, plus handlers that precede the
                  enclosing subroute): does it hit /m/v1/watcher, /m/v1/watcher/status,
-                 /M/V1/WATCHER/dialogs (path: Caddy semantics, path_regexp: RE2 semantics,
-                 anything else counts as a hit)?  If it hits, every handler must be one of
-                 encode, headers WITHOUT "request", vars, map, log_append, tracing, and the
-                 route must carry neither "terminal" nor "group";
-             (d) no other route that may see the prefix (incl. /m/v1/watcherx, "\\r", "#")
-                 proxies to operator-query or the watcher (§9.14.3 merge rule, F-10 coverage);
+                 /M/V1/WATCHER/dialogs or (wac-090) any list line's sample path in either case?
+                 path: Caddy v2.10.2 MatchPath (case-insensitive; the fast */prefix/suffix
+                 cases; otherwise Go path.Match with ?, [...], \\); a {placeholder}, '%' or a
+                 malformed glob counts as a hit; path_regexp: RE2 semantics; any other matcher
+                 counts as a hit.  If it hits, every handler must be one of encode, headers
+                 WITHOUT "request", vars, map, log_append, tracing, and the route must carry
+                 neither "terminal" nor "group";
+             (d) no other route that may see the prefix (incl. /m/v1/watcherx, "\\r", "#", and
+                 any path pattern written for the prefix, even a dead one behind the fallback)
+                 proxies to operator-query (port 8183 on ANY host spelling: localhost, [::1],
+                 tcp/127.0.0.1 ...) or the watcher (9090/9100); an unparsable dial (placeholder,
+                 unix socket, port range) or dynamic_upstreams fails as UNCOMPARABLE
+                 (§9.14.3 merge rule, F-10 coverage);
              (e) emulated Caddy route selection per list line and method: exactly one ``/m``
                  strip, upstream 127.0.0.1:8183, Authorization and X-Watcher-* untouched, no
                  basic auth; §9.14.4 item 1 negatives never reach the gateway; the fallback
@@ -45,12 +52,20 @@ Sub-commands
                  ``{env.WATCHER_BROWSER_PROXY_TOKEN}``.
              Anything the emulator cannot evaluate is reported UNCOMPARABLE and fails.
   inventory  structural summary of every route (no header values, no hashes).
-  probe      local (NON-production) Caddy probe on a COPY of the production Caddyfile (F-12,
-             F-13 (3)): writes <copy>.o0probe next to the copy (site address -> 127.0.0.1,
-             upstreams -> local stubs, admin off, auto_https off, free http/https ports; the
-             line diff is recorded), adapts + verifies it, runs it and sends raw request lines.
+  probe      local (NON-production; refuses to run on a host with /srv/trader-v3) Caddy probe on a
+             COPY of the candidate Caddyfile (F-12, F-13 (3)). Prints the sha256 of the copy and of
+             the snippet next to it (stage C C-1 binds them to the gated candidate). Writes
+             <copy>.o0probe (0600; site address -> http://127.0.0.1:<port>, admin off,
+             persist_config off, auto_https off, default_bind 127.0.0.1, free http/https ports;
+             the line diff is printed), adapts it and verifies the adapted JSON with the
+             production upstream addresses; then RUNS a pinned copy of that JSON: only the probe
+             site's server, listening on 127.0.0.1 only, every reverse_proxy dial pinned to a
+             local stub (operator-query, watcher, or a sink for everything else), no other app,
+             refused if anything still listens or dials elsewhere. Sends raw request lines;
+             every forward carries a fake caller Authorization that must arrive unchanged.
              Literal dot segments and ``//`` are expected to be CLEANED and forwarded (never
              expected as 404); percent-encoded forms and ``#`` are forwarded raw (``#`` as %23).
+             The .o0probe file and the temporary Caddy state dir are removed on every path.
   selftest   fixture-based self-test shaped like real ``caddy adapt`` output (good config +
              broken variants, raw and skeleton), artifact parser negatives, RE2 pins.
 
@@ -63,9 +78,12 @@ from __future__ import annotations
 import argparse
 import copy
 import difflib
+import hashlib
+import ipaddress
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -365,22 +383,182 @@ class Outcome:
     final_path: str = ""
 
 
+class _BadGlob(Exception):
+    pass
+
+
+def _go_scan_chunk(pattern: str) -> tuple[bool, str, str]:
+    """Go path.scanChunk (go1.26 src/path/match.go)."""
+    star = False
+    while pattern.startswith("*"):
+        pattern, star = pattern[1:], True
+    inrange, i = False, 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "\\":
+            if i + 1 < len(pattern):
+                i += 1
+        elif c == "[":
+            inrange = True
+        elif c == "]":
+            inrange = False
+        elif c == "*" and not inrange:
+            break
+        i += 1
+    return star, pattern[:i], pattern[i:]
+
+
+def _go_get_esc(chunk: str) -> tuple[str, str]:
+    if not chunk or chunk[0] in "-]":
+        raise _BadGlob
+    if chunk[0] == "\\":
+        chunk = chunk[1:]
+        if not chunk:
+            raise _BadGlob
+    rest = chunk[1:]
+    if not rest:
+        raise _BadGlob
+    return chunk[0], rest
+
+
+def _go_match_chunk(chunk: str, s: str) -> tuple[str, bool]:
+    """Go path.matchChunk; a malformed chunk raises _BadGlob (Go: ErrBadPattern)."""
+    failed = False
+    while chunk:
+        if not failed and not s:
+            failed = True
+        c = chunk[0]
+        if c == "[":
+            r = None
+            if not failed:
+                r, s = s[0], s[1:]
+            chunk = chunk[1:]
+            negated = False
+            if chunk and chunk[0] == "^":
+                negated, chunk = True, chunk[1:]
+            match, nrange = False, 0
+            while True:
+                if chunk and chunk[0] == "]" and nrange > 0:
+                    chunk = chunk[1:]
+                    break
+                lo, chunk = _go_get_esc(chunk)
+                hi = lo
+                if chunk[0] == "-":
+                    hi, chunk = _go_get_esc(chunk[1:])
+                if r is not None and lo <= r <= hi:
+                    match = True
+                nrange += 1
+            if match == negated:
+                failed = True
+        elif c == "?":
+            if not failed:
+                if s[0] == "/":
+                    failed = True
+                s = s[1:]
+            chunk = chunk[1:]
+        else:
+            if c == "\\":
+                chunk = chunk[1:]
+                if not chunk:
+                    raise _BadGlob
+            if not failed:
+                if chunk[0] != s[0]:
+                    failed = True
+                s = s[1:]
+            chunk = chunk[1:]
+    return ("", False) if failed else (s, True)
+
+
+def go_path_match(pattern: str, name: str) -> bool:
+    """Go path.Match (``*`` never crosses '/', ``?`` one non-'/' character, ``[...]`` classes with
+    ``^`` and ranges, ``\\`` escapes). Malformed pattern: raises _BadGlob (Go: ErrBadPattern)."""
+    while pattern:
+        star, chunk, pattern = _go_scan_chunk(pattern)
+        if star and chunk == "":
+            return "/" not in name
+        t, ok = _go_match_chunk(chunk, name)
+        if ok and (not t or pattern):
+            name = t
+            continue
+        if star:
+            advanced = False
+            i = 0
+            while i < len(name) and name[i] != "/":
+                t, ok = _go_match_chunk(chunk, name[i + 1:])
+                if ok:
+                    if not pattern and t:
+                        i += 1
+                        continue
+                    name, advanced = t, True
+                    break
+                i += 1
+            if advanced:
+                continue
+        while pattern:
+            _star, chunk, pattern = _go_scan_chunk(pattern)
+            _go_match_chunk(chunk, "")
+        return False
+    return not name
+
+
+GLOB_META = set("*?[]\\")
+
+
 def _caddy_path_match(pattern: str, path: str) -> bool:
+    """Caddy v2.10.2 MatchPath.MatchWithError (modules/caddyhttp/matchers.go) for one pattern:
+    pattern and path lower-cased; ``*`` alone; the fast substring/suffix/prefix cases (their other
+    characters are LITERAL there, as in Caddy); otherwise Go path.Match (``?``, ``[...]``, ``\\``).
+    Raises Uncomparable where the answer depends on the request or is not modelled here:
+    a ``{placeholder}`` (replaced per request, unknown ones by ""), ``%`` (compared in escaped
+    space), a malformed glob (Caddy ignores the error). Callers treat Uncomparable as a hit."""
     p = pattern.lower()
     s = path.lower()
+    if "{" in p or "}" in p:
+        raise Uncomparable(f"path matcher {_redact_path(pattern)!r} has a placeholder (value depends on the request)")
     if p == "*":
         return True
+    if "%" in p:
+        raise Uncomparable(f"path matcher {_redact_path(pattern)!r} has '%' (Caddy compares it in escaped space)")
     stars = p.count("*")
-    if stars == 0:
-        return s == p
     if stars == 2 and p.startswith("*") and p.endswith("*"):
         return p[1:-1] in s
-    if stars == 1 and p.endswith("*"):
-        return s.startswith(p[:-1])
     if stars == 1 and p.startswith("*"):
         return s.endswith(p[1:])
-    rx = "^" + "".join("[^/]*" if c == "*" else re.escape(c) for c in p) + r"\Z"
-    return re.match(rx, s) is not None
+    if stars == 1 and p.endswith("*"):
+        return s.startswith(p[:-1])
+    try:
+        return go_path_match(p, s)
+    except _BadGlob:
+        raise Uncomparable(f"path matcher {_redact_path(pattern)!r} is a malformed glob") from None
+
+
+def _path_may_hit(pattern: str, path: str) -> bool:
+    """F-13 step 1 for one path pattern: anything not evaluable counts as a hit."""
+    try:
+        return _caddy_path_match(pattern, path)
+    except Uncomparable:
+        return True
+
+
+def _literal_head(pattern: str) -> str:
+    """Lower-cased pattern up to its first glob character, placeholder or '%'."""
+    p = pattern.lower()
+    for i, c in enumerate(p):
+        if c in GLOB_META or c in "{}%":
+            return p[:i]
+    return p
+
+
+def _pattern_touches_prefix(pattern: str) -> bool:
+    """A path pattern that is written for the /m/v1/watcher prefix (any case) even when no fixed
+    probe hits it (e.g. a dead ``handle /m/v1/watcher/extra`` after the fallback, or
+    ``/m/v1/w?tcher/...``): its literal head starts with the prefix, or it has a wildcard and its
+    literal head is a non-trivial start of the prefix."""
+    p = pattern.lower()
+    head = _literal_head(pattern)
+    if p.startswith(EXTERNAL_PREFIX) or head.startswith(EXTERNAL_PREFIX):
+        return True
+    return head != p and len(head) >= 2 and EXTERNAL_PREFIX.startswith(head)
 
 
 def _host_match(hosts: list, host: str) -> bool:
@@ -489,7 +667,57 @@ def emulate(config: dict, req: Request, listen_port: str) -> Outcome:
 
 # ---------------------------------------------------------------- structure helpers
 def _dials(handler: dict) -> list[str]:
-    return [str(u.get("dial", "")) for u in handler.get("upstreams", [])]
+    return [str(u.get("dial", "")) for u in handler.get("upstreams", []) or []]
+
+
+def dial_endpoint(dial: str) -> tuple[str, str]:
+    """(host class, port) of a reverse_proxy dial. Loopback spellings (``localhost``, ``127.0.0.0/8``,
+    ``::1``, ``[::1]``, ``::ffff:127.x``, an empty host, ``0.0.0.0``/``::`` which Go dials locally)
+    all become ``loopback``. Raises Uncomparable for a placeholder, a non-tcp network (unix socket,
+    udp, ...), a missing or non-numeric port (range) or an unparsable address."""
+    d = str(dial).strip()
+    if not d or "{" in d or "}" in d:
+        raise Uncomparable(f"upstream dial {d!r} is empty or has a placeholder")
+    if "/" in d:
+        network, _, d = d.partition("/")
+        if network.lower() not in ("tcp", "tcp4", "tcp6"):
+            raise Uncomparable(f"upstream dial network {network!r} (unix socket or non-tcp)")
+    m = re.fullmatch(r"\[([^\]]*)\]:([^:]*)|([^:\[\]]*):([^:]*)", d)
+    if not m:
+        raise Uncomparable(f"upstream dial {d!r} is not host:port")
+    host, port = (m.group(1), m.group(2)) if m.group(1) is not None else (m.group(3), m.group(4))
+    if not re.fullmatch(r"[0-9]{1,5}", port or ""):
+        raise Uncomparable(f"upstream dial {d!r}: port {port!r} is not a single number")
+    h = host.lower().rstrip(".")
+    if h in ("", "localhost") or h.endswith(".localhost"):
+        return "loopback", str(int(port))
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return h, str(int(port))
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if ip.is_loopback or ip.is_unspecified or (mapped is not None and (mapped.is_loopback or mapped.is_unspecified)):
+        return "loopback", str(int(port))
+    return str(ip), str(int(port))
+
+
+def dial_port(dial: str) -> str | None:
+    try:
+        return dial_endpoint(dial)[1]
+    except Uncomparable:
+        return None
+
+
+def same_endpoint(dial: str, upstream: str) -> bool | None:
+    """True/False when both parse; None (unknown) when the dial does not."""
+    try:
+        return dial_endpoint(dial) == dial_endpoint(upstream)
+    except Uncomparable:
+        return None
+
+
+def _is_watcher_dial(dial: str) -> bool:
+    return dial_port(dial) in WATCHER_PORTS
 
 
 def _header_ops(handler: dict) -> dict:
@@ -589,7 +817,7 @@ def _mset_may_hit(mset: dict, path: str, host: str) -> bool:
     exclude; method/protocol/not/expression/any other or unknown matcher counts as a hit."""
     for kind, value in mset.items():
         if kind == "path":
-            if not any(_caddy_path_match(p, path) for p in value):
+            if not any(_path_may_hit(p, path) for p in value):
                 return False
         elif kind == "path_regexp":
             try:
@@ -645,14 +873,22 @@ class Report:
         print(f"FAIL {msg}")
 
 
-def _shadow_check(rep: Report, levels: list[tuple], host: str, label: str) -> None:
+def shadow_probes(lines: list[Line]) -> tuple[str, ...]:
+    """F-13's three probes, then every list line's sample path as written and upper-cased (wac-090:
+    a handler that only hits one table path, e.g. ``request_header /m/v1/w?tcher/trading/accounts``,
+    must reach step 2 as well)."""
+    extra = [s for line in lines for s in (line.sample(), line.sample().upper())]
+    return SHADOW_PROBES + tuple(dict.fromkeys(p for p in extra if p not in SHADOW_PROBES))
+
+
+def _shadow_check(rep: Report, levels: list[tuple], host: str, label: str, probes: tuple[str, ...] = SHADOW_PROBES) -> None:
     """F-13 two-step check on every route that runs before the anchor. levels = [(list, index, handler_index|None), ...]
     from the server's route list down to the list that holds the anchor (handler_index None on the last level)."""
     checked = 0
     for depth, (routes, index, hi) in enumerate(levels):
         for j in range(index):
             route = routes[j]
-            hits = [p for p in SHADOW_PROBES if _may_hit(route.get("match"), p, host)]
+            hits = [p for p in probes if _may_hit(route.get("match"), p, host)]
             where = f"{label} level {depth} route {j} ({_route_matcher_summary(route.get('match'))})"
             if not hits:
                 print(f"INFO shadow {where}: no probe hit")
@@ -762,21 +998,50 @@ def _check_wgw_structure(rep: Report, config: dict, lines: list[Line], listen_po
     return wgw
 
 
-def _forwarder_check(rep: Report, routes: list, probes: list[str], host: str, upstream: str, skip: set[int], trail: tuple = ()) -> None:
+def _mset_written_for_prefix(mset: dict, host: str) -> bool:
+    if "host" in mset and not _host_match(mset["host"], host):
+        return False
+    return any(_pattern_touches_prefix(str(p)) for p in mset.get("path") or [])
+
+
+def _forwarder_check(rep: Report, routes: list, probes: list[str], host: str, upstream: str, skip: set[int], trail: tuple = (),
+                     inherited: bool = False) -> None:
+    """§9.14.3 merge rule + F-10: no route but the snippet may proxy the prefix to operator-query or the
+    watcher. Operator-query is recognised by the PORT of ``upstream`` on any host, the watcher by
+    9090/9100 (``localhost:8183``, ``[::1]:8183``, ``tcp/127.0.0.1:8183`` ... are all caught); a
+    reverse_proxy whose dial cannot be parsed (placeholder, unix socket, range) or that has
+    dynamic_upstreams fails as UNCOMPARABLE. A route "may see the prefix" when a probe may hit it
+    or when one of its path patterns is written for the prefix (_pattern_touches_prefix), so dead
+    forwarders behind the fallback fail too."""
+    gw_port = dial_endpoint(upstream)[1]
     for index, route in enumerate(routes):
         if id(route) in skip:
             continue
-        hits = [p for p in probes if _may_hit(route.get("match"), p, host)]
-        if not hits:
+        match = route.get("match")
+        hits = [p for p in probes if _may_hit(match, p, host)]
+        written = any(_mset_written_for_prefix(m, host) for m in match or [])
+        if not (hits or written or (inherited and not match)):
             continue
+        what = repr(hits[0]) if hits else "the /m/v1/watcher prefix (path pattern written for it)"
+        where = f"route {'.'.join(map(str, trail + (index,)))} ({_route_matcher_summary(match)})"
         for h in route.get("handle", []) or []:
             if h.get("handler") == "subroute":
-                _forwarder_check(rep, h.get("routes", []) or [], hits, host, upstream, skip, trail + (index,))
+                _forwarder_check(rep, h.get("routes", []) or [], hits, host, upstream, skip, trail + (index,),
+                                 inherited=bool(written or inherited) and not hits)
             elif h.get("handler") == "reverse_proxy":
                 dials = _dials(h)
-                if upstream in dials or any(d.rsplit(":", 1)[-1] in WATCHER_PORTS for d in dials):
-                    rep.fail(f"route {'.'.join(map(str, trail + (index,)))} ({_route_matcher_summary(route.get('match'))}) may forward "
-                             f"{hits[0]!r} to {','.join(dials)}: only the snippet may route the /m/v1/watcher prefix (§9.14.3, F-10)")
+                if "dynamic_upstreams" in h or not dials:
+                    rep.fail(f"UNCOMPARABLE {where} may forward {what} with dynamic or no static upstreams")
+                    continue
+                for d in dials:
+                    try:
+                        _host_class, port = dial_endpoint(d)
+                    except Uncomparable as exc:
+                        rep.fail(f"UNCOMPARABLE {where} may forward {what}: {exc}")
+                        continue
+                    if port == gw_port or port in WATCHER_PORTS:
+                        rep.fail(f"{where} may forward {what} to {d} (port {port}): only the snippet may route the "
+                                 "/m/v1/watcher prefix to operator-query or the watcher (§9.14.3, F-10)")
 
 
 def _site_levels(config: dict, host: str, listen_port: str) -> tuple[list[tuple], list]:
@@ -827,7 +1092,8 @@ def _reaches_gateway(out: Outcome, upstream: str) -> bool:
     return (
         out.responded
         and out.chain[-1].handler.get("handler") == "reverse_proxy"
-        and upstream in _dials(out.chain[-1].handler)
+        # an unparsable dial (None) counts as reaching the gateway: fail-safe for the negatives
+        and any(same_endpoint(d, upstream) is not False for d in _dials(out.chain[-1].handler) or [""])
         and out.final_path.lower().startswith(APP_OUTER_PREFIX)
     )
 
@@ -842,7 +1108,7 @@ def _check_browser_outcome(rep: Report, label: str, out: Outcome) -> bool:
     if not out.responded or out.chain[-1].handler.get("handler") != "reverse_proxy":
         return False
     dials = _dials(out.chain[-1].handler)
-    if not any(d.rsplit(":", 1)[-1] in WATCHER_PORTS for d in dials):
+    if not any(_is_watcher_dial(d) for d in dials):
         return False
     auth_seen = cleared_actor = cleared_fp = cleared_auth = False
     for step in out.chain[:-1]:
@@ -934,7 +1200,8 @@ def run_verify(config: dict, lines: list[Line], *, host: str, listen_port: str, 
         try:
             levels, site = _site_levels(config, host, listen_port)
             first_group = next((i for i, r in enumerate(site) if "group" in r), len(site))
-            _shadow_check(rep, levels + [(site, first_group, None)], host, "prospective (routes before the first handle block)")
+            _shadow_check(rep, levels + [(site, first_group, None)], host, "prospective (routes before the first handle block)",
+                          shadow_probes(lines))
         except Uncomparable as exc:
             rep.fail(f"UNCOMPARABLE before-deploy site list: {exc}")
     else:
@@ -950,7 +1217,7 @@ def run_verify(config: dict, lines: list[Line], *, host: str, listen_port: str, 
                     rep.ok(f"wgw routes sit in the top-level route list of the {host} site")
             except Uncomparable as exc:
                 rep.fail(f"UNCOMPARABLE site list: {exc}")
-            _shadow_check(rep, list(first.ancestry) + [(first.routes, first.index, None)], host, "snippet")
+            _shadow_check(rep, list(first.ancestry) + [(first.routes, first.index, None)], host, "snippet", shadow_probes(lines))
         for line in lines:
             for method in line.methods:
                 out = emu(method, line.sample())
@@ -990,7 +1257,7 @@ def run_verify(config: dict, lines: list[Line], *, host: str, listen_port: str, 
         out = emu(method, path)
         if out is None:
             continue
-        if not out.responded or upstream not in _dials(out.chain[-1].handler):
+        if not out.responded or not any(same_endpoint(d, upstream) for d in _dials(out.chain[-1].handler)):
             rep.fail(f"mobile {sample}: does not reach {upstream}")
             continue
         strips = [s for s in out.chain if s.handler.get("handler") == "rewrite"]
@@ -1000,7 +1267,7 @@ def run_verify(config: dict, lines: list[Line], *, host: str, listen_port: str, 
         else:
             rep.ok(f"mobile {sample} -> {upstream}{out.final_path} (one strip, Authorization untouched)")
     watcher_routes = [(t, r) for t, r in _walk(server.get("routes", []))
-                      if any(h.get("handler") == "reverse_proxy" and any(d.rsplit(":", 1)[-1] in WATCHER_PORTS for d in _dials(h))
+                      if any(h.get("handler") == "reverse_proxy" and any(_is_watcher_dial(d) for d in _dials(h))
                              for h in r.get("handle", []))]
     covered: set[tuple[int, ...]] = set()
     for sample in browser_samples:
@@ -1009,7 +1276,7 @@ def run_verify(config: dict, lines: list[Line], *, host: str, listen_port: str, 
         if out is None:
             continue
         if before_deploy and out.responded and out.chain[-1].handler.get("handler") == "reverse_proxy" \
-                and any(d.rsplit(":", 1)[-1] in WATCHER_PORTS for d in _dials(out.chain[-1].handler)):
+                and any(_is_watcher_dial(d) for d in _dials(out.chain[-1].handler)):
             if any(s.handler.get("handler") == "authentication" for s in out.chain[:-1]):
                 rep.ok(f"before-deploy browser {sample} -> watcher behind basic auth (injection not expected yet)")
             else:
@@ -1216,17 +1483,26 @@ def _free_port() -> int:
     return port
 
 
-def probe_caddyfile(text: str, site_address: str, site_port: int, rewrites: dict[str, str], http_port: int, https_port: int) -> str:
-    """Copy of the production Caddyfile for the local probe: ONLY the site address, the upstreams and
-    the global admin/auto_https/http_port/https_port options change (the diff is recorded)."""
+PROBE_GLOBAL_KEYS = ("admin", "persist_config", "auto_https", "default_bind", "http_port", "https_port")
+PROBE_FAKE_AUTH = "Bearer o0-probe-not-a-token"
+# never inherited by the probe's Caddy: a proxy would carry stub-bound requests elsewhere, OTEL_* would point tracing at a collector
+PROBE_ENV_DROP = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "FTP_PROXY")
+
+
+def probe_caddyfile(text: str, site_address: str, site_port: int, http_port: int, https_port: int) -> str:
+    """Copy of the production Caddyfile for the local probe: ONLY the site address and the global
+    admin/persist_config/auto_https/default_bind/http_port/https_port options change (the line diff
+    is printed). Upstreams are NOT touched here: every dial is pinned on the adapted JSON
+    (pin_probe_config), whatever its spelling."""
     lines = text.splitlines()
     first = next((i for i, l in enumerate(lines) if l.strip() and not l.strip().startswith("#")), None)
-    probe_opts = ["\tadmin off", "\tauto_https off", f"\thttp_port {http_port}", f"\thttps_port {https_port}"]
+    probe_opts = ["\tadmin off", "\tpersist_config off", "\tauto_https off", "\tdefault_bind 127.0.0.1",
+                  f"\thttp_port {http_port}", f"\thttps_port {https_port}"]
     if first is not None and lines[first].strip() == "{":
         end = next(i for i in range(first + 1, len(lines)) if lines[i].strip() == "}" and not lines[i].startswith(("\t", " ")))
-        body = [l for l in lines[first + 1:end] if l.strip().split(" ")[0] not in ("admin", "auto_https", "http_port", "https_port")]
-        if any(l.strip().split(" ")[0] == "admin" and l.rstrip().endswith("{") for l in lines[first + 1:end]):
-            raise ArtifactError("global 'admin { ... }' block: edit it by hand in the copy (the probe only rewrites one-line options)")
+        if any(l.strip().split(" ")[0] in PROBE_GLOBAL_KEYS and l.rstrip().endswith("{") for l in lines[first + 1:end]):
+            raise ArtifactError("global option block ('admin { ... }' etc.): edit it by hand in the copy (the probe only rewrites one-line options)")
+        body = [l for l in lines[first + 1:end] if l.strip().split(" ")[0] not in PROBE_GLOBAL_KEYS]
         lines = lines[:first + 1] + probe_opts + body + lines[end:]
     else:
         lines = ["{"] + probe_opts + ["}"] + lines
@@ -1240,12 +1516,109 @@ def probe_caddyfile(text: str, site_address: str, site_port: int, rewrites: dict
                 lines[i] = f"http://127.0.0.1:{site_port} {{"
     if hits != 1:
         raise ArtifactError(f"site address {site_address!r} found in {hits} site header line(s), want exactly 1")
-    out = "\n".join(lines) + "\n"
-    for old, new in rewrites.items():
-        if old not in out:
-            raise ArtifactError(f"upstream {old} not found in the copy")
-        out = out.replace(old, new)
-    return out
+    return "\n".join(lines) + "\n"
+
+
+def _walk_json(node, fn) -> None:
+    if isinstance(node, dict):
+        fn(node)
+        for v in list(node.values()):
+            _walk_json(v, fn)
+    elif isinstance(node, list):
+        for v in node:
+            _walk_json(v, fn)
+
+
+def pin_probe_config(adapted: dict, site_port: int, gateway_upstream: str, watcher_upstream: str,
+                     stubs: dict[str, str]) -> tuple[dict, list[str]]:
+    """The config the probe RUNS (review wac-088 🟡-3): only the server of the probe site, listening
+    on 127.0.0.1:<site_port>; every reverse_proxy upstream anywhere in it (handle, subroutes,
+    handle_response, errors, named routes) pinned to a local stub: operator-query (any loopback
+    spelling of ``gateway_upstream``) -> stubs["oq"], the watcher -> stubs["watcher"], everything
+    else (other services, Tailscale addresses, unix sockets, placeholders) -> stubs["sink"];
+    forward proxies and active health checks removed; admin off, config not persisted; no other
+    server and no other app (tls, pki, logging ...). dynamic_upstreams cannot be pinned: refused."""
+    admin = adapted.get("admin") or {}
+    if admin.get("disabled") is not True:
+        raise ArtifactError("the adapted probe copy does not say 'admin off' (the probe never opens an admin endpoint)")
+    servers = (adapted.get("apps") or {}).get("http", {}).get("servers", {}) or {}
+    site = [(n, s) for n, s in servers.items() if any(str(a).endswith(f":{site_port}") for a in s.get("listen", []))]
+    if len(site) != 1:
+        raise ArtifactError(f"{len(site)} servers listen on the probe site port, want exactly 1")
+    name, server = site[0][0], copy.deepcopy(site[0][1])
+    notes = [f"servers dropped (not probed): {len(servers) - 1}",
+             f"apps dropped: {','.join(sorted(k for k in adapted.get('apps', {}) if k != 'http')) or '-'}",
+             f"top-level keys dropped: {','.join(sorted(k for k in adapted if k not in ('admin', 'apps'))) or '-'}"]
+    server["listen"] = [f"127.0.0.1:{site_port}"]
+    server["automatic_https"] = {"disable": True}
+    for key in ("tls_connection_policies", "logs"):
+        if server.pop(key, None) is not None:
+            notes.append(f"server {key} removed")
+    counts = {"oq": 0, "watcher": 0, "sink": 0}
+    seen: dict[str, str] = {}
+
+    def pin(node: dict) -> None:
+        if node.get("handler") != "reverse_proxy":
+            return
+        if "dynamic_upstreams" in node:
+            raise ArtifactError("a reverse_proxy uses dynamic_upstreams: it cannot be pinned to a stub, the probe does not run")
+        ups = node.get("upstreams") or []
+        if not ups:
+            raise ArtifactError("a reverse_proxy has no static upstreams: it cannot be pinned to a stub")
+        new = []
+        for u in ups:
+            dial = str(u.get("dial", ""))
+            label = "oq" if same_endpoint(dial, gateway_upstream) else "watcher" if same_endpoint(dial, watcher_upstream) else "sink"
+            counts[label] += 1
+            seen.setdefault(dial, label)
+            new.append({"dial": stubs[label]})
+        node["upstreams"] = new
+        if node.pop("health_checks", None) is not None:
+            notes.append("reverse_proxy health_checks removed (active checks dial their own upstream)")
+        transport = node.get("transport") or {}
+        for key in ("forward_proxy_url", "network_proxy"):
+            if transport.pop(key, None) is not None:
+                notes.append(f"reverse_proxy transport {key} removed")
+
+    _walk_json(server, pin)
+    notes += [f"dial {d} -> {label}" for d, label in sorted(seen.items())]
+    notes.append(f"dials pinned: oq={counts['oq']} watcher={counts['watcher']} sink={counts['sink']}")
+    http = {k: v for k, v in adapted["apps"]["http"].items() if k in ("http_port", "https_port")}
+    pinned = {"admin": {"disabled": True, "config": {"persist": False}}, "apps": {"http": {**http, "servers": {name: server}}}}
+    return pinned, notes
+
+
+def assert_probe_pinned(cfg: dict, allowed_dials: set[str], site_port: int) -> list[str]:
+    """Machine check right before `caddy run`: nothing in the config may listen off loopback or dial
+    anything but the three stubs. Returns the problems (empty = safe to run)."""
+    problems = []
+    admin = cfg.get("admin") or {}
+    if admin.get("disabled") is not True or (admin.get("config") or {}).get("persist") is not False:
+        problems.append("admin must be disabled and the config not persisted")
+    if set(cfg) - {"admin", "apps"}:
+        problems.append(f"unexpected top-level keys {sorted(set(cfg) - {'admin', 'apps'})}")
+    if set(cfg.get("apps") or {}) != {"http"}:
+        problems.append(f"apps must be exactly ['http'] (got {sorted(cfg.get('apps') or {})})")
+    servers = ((cfg.get("apps") or {}).get("http") or {}).get("servers") or {}
+    if len(servers) != 1:
+        problems.append(f"{len(servers)} servers, want exactly 1")
+    for s in servers.values():
+        if s.get("listen") != [f"127.0.0.1:{site_port}"]:
+            problems.append(f"listen {s.get('listen')} is not exactly 127.0.0.1:{site_port}")
+
+    def check(node: dict) -> None:
+        if "dial" in node and str(node["dial"]) not in allowed_dials:
+            problems.append(f"dial {node['dial']} is not a local stub")
+        if node.get("handler") == "reverse_proxy":
+            if "dynamic_upstreams" in node or not node.get("upstreams"):
+                problems.append("reverse_proxy without pinned static upstreams")
+            if "health_checks" in node:
+                problems.append("reverse_proxy health_checks left in")
+            if set(node.get("transport") or {}) & {"forward_proxy_url", "network_proxy"}:
+                problems.append("reverse_proxy transport goes through a forward proxy")
+
+    _walk_json(cfg, check)
+    return problems
 
 
 class _Stub:
@@ -1266,9 +1639,14 @@ class _Stub:
             def log_message(self, *_a):
                 pass
 
-        self.port = _free_port()
-        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        self.addr = f"127.0.0.1:{self.port}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
 
 
 def _raw_request(port: int, method: str, target: str, headers: dict[str, str] | None = None) -> tuple[int, bytes]:
@@ -1286,7 +1664,110 @@ def _raw_request(port: int, method: str, target: str, headers: dict[str, str] | 
     return int(head.split(b" ")[1]), body
 
 
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _probe_env(xdg: Path, adapt_env: list[str] | None) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k.upper() not in PROBE_ENV_DROP and not k.upper().startswith("OTEL_")}
+    # Caddy's autosave.json and data dir go to a throwaway directory, never ~/.config/caddy,
+    # ~/Library/Application Support/Caddy or /var/lib/caddy (review wac-088 §5.2, G24)
+    env.update(XDG_CONFIG_HOME=str(xdg / "config"), XDG_DATA_HOME=str(xdg / "data"), HOME=str(xdg))
+    for kv in adapt_env or []:
+        k, _, v = kv.partition("=")
+        env[k] = v
+    return env
+
+
+def _probe_live_checks(port: int, hits: list, lines: list[Line]) -> tuple[int, list[str]]:
+    """The raw-request checks against the running probe Caddy. Every forward to operator-query carries
+    a fake caller Authorization that must arrive unchanged, without X-Watcher-Proxy-Auth (review
+    wac-088 🟡-1: any header rewrite that shadows a table path shows up here)."""
+    fails: list[str] = []
+    n = 0
+
+    def expect(cond: bool, msg: str) -> None:
+        nonlocal n
+        n += 1
+        if not cond:
+            fails.append(msg)
+
+    def forwarded(method, target, path, headers=None):
+        hdrs = {"Authorization": PROBE_FAKE_AUTH} if headers is None else headers
+        before = len(hits)
+        status, _body = _raw_request(port, method, target, hdrs)
+        new = hits[before:]
+        ok = status == 200 and len(new) == 1 and new[0][:3] == ("oq", method, path)
+        expect(ok, f"forward {method} {target!r} -> {status} hits={[h[:3] for h in new]} want oq {path!r}")
+        if ok:
+            expect(new[0][3] == hdrs.get("Authorization") and not new[0][4],
+                   f"forward {method} {target!r}: the caller's Authorization changed or X-Watcher-Proxy-Auth injected on the way to operator-query")
+        return new[0] if ok else None
+
+    def fallback404(method, target):
+        before = len(hits)
+        status, body = _raw_request(port, method, target)
+        expect(status == 404 and body == b"" and len(hits) == before, f"fallback {method} {target!r} -> {status} body={len(body)}B hits={len(hits) - before}")
+
+    def not_forwarded(method, target):
+        before = len(hits)
+        status, _body = _raw_request(port, method, target)
+        new = [h for h in hits[before:] if h[0] in ("oq", "watcher")]
+        expect(not new, f"{method} {target!r} -> {status} reached operator-query or the watcher {[h[:3] for h in new]}")
+
+    for line in lines:
+        ex = line.sample("x")
+        for m in HTTP_METHODS:
+            if m in line.methods:
+                forwarded(m, ex, ex[len(MOBILE_PREFIX):])
+            else:
+                fallback404(m, ex)
+        m0 = line.methods[0]
+        fallback404(m0, ex.upper())
+        fallback404(m0, ex + "/")
+        for k in range(line.param_count()):
+            fallback404(m0, line.sample("", only=k))
+            fallback404(m0, line.sample("x/y", only=k))
+        if line.last_is_param:
+            forwarded(m0, ex + "%0A", ex[len(MOBILE_PREFIX):] + "%0A")
+            forwarded(m0, ex + "#x", ex[len(MOBILE_PREFIX):] + "%23x")
+        else:
+            fallback404(m0, ex + "/x")
+            fallback404(m0, ex + "%0A")
+            fallback404(m0, ex + "#x")
+    for target in ("/m/v1/watcher", "/m/v1/watcher/", "/M/V1/WATCHER/login/start", "/m/v1/watcher/login/start", "/m/v1/watcher%0A",
+                   "/M/V1/WATCHER%0A", "/m/v1/watcher/status%0A", "/m/v1/watcher/status#x", "/m/v1/watcher/config", "/m/V1/watcher/status"):
+        fallback404("GET", target)
+    for target in ("/m/v1/watcherx", "/m/v1/other", "/m/v1/watcherx%0A", "/m/v1/watcher%0D", "/m/v1/watcher#x"):
+        not_forwarded("GET", target)
+    # F-13 (3): literal dot segments and // are CLEANED by uri strip_prefix and forwarded (never expected as 404)
+    forwarded("GET", "/m/v1/watcher/x/../status", "/v1/watcher/status")
+    forwarded("GET", "/m/v1/watcher/./status", "/v1/watcher/status")
+    forwarded("GET", "/m/v1/watcher//status", "/v1/watcher/status")
+    forwarded("GET", "/m/v1/watcher/trading/accounts/a/..", "/v1/watcher/trading/accounts")
+    fallback404("GET", "/m/v1/watcher/x/../config")
+    # encoded forms and '#' are forwarded raw (the gateway's '%' rule answers 404 there)
+    forwarded("GET", "/m/v1/watcher/x/%2e%2e/status", "/v1/watcher/x/%2e%2e/status")
+    forwarded("GET", "/m/v1/watcher/media/a#x", "/v1/watcher/media/a%23x")
+    # no caller Authorization: nothing may be injected on the way to operator-query
+    forwarded("GET", "/m/v1/watcher/status", "/v1/watcher/status", {})
+    forwarded("GET", "/m/v1/watcher/trading/accounts", "/v1/watcher/trading/accounts", {})
+    before = len(hits)
+    _status, _b = _raw_request(port, "GET", "/m/v1/accounts", {"Authorization": PROBE_FAKE_AUTH})
+    mob = hits[before:]
+    expect(len(mob) == 1 and mob[0][:3] == ("oq", "GET", "/v1/accounts") and mob[0][3] == PROBE_FAKE_AUTH and not mob[0][4],
+           f"/m/v1/accounts: want oq /v1/accounts with the caller's Authorization (got {[h[:3] for h in mob]})")
+    for target in ("/watcher/", "/api/status", "/media/1700000000000-1.jpg"):
+        before = len(hits)
+        status, _b = _raw_request(port, "GET", target)
+        expect(status == 401 and len(hits) == before, f"browser {target} without credentials -> {status}, stub hits {len(hits) - before}")
+    return n, fails
+
+
 def cmd_probe(args: argparse.Namespace) -> int:
+    if Path("/srv/trader-v3").exists():
+        print("CADDY_PROBE_REFUSED this host has /srv/trader-v3 (jp-24): the probe is a LOCAL, non-production command")
+        return 1
     try:
         lines, meta = load_artifacts(args.paths, args.snippet)
     except ArtifactError as exc:
@@ -1294,141 +1775,111 @@ def cmd_probe(args: argparse.Namespace) -> int:
         return 1
     copy_path = args.caddyfile.resolve()
     staged = copy_path.parent / SNIPPET_FILE
-    if not staged.is_file() or staged.read_bytes() != (args.snippet or args.paths.parent / SNIPPET_FILE).read_bytes():
-        print(f"CADDY_PROBE_FAILED {staged} must be a byte-identical copy of the committed snippet (the import is relative)")
+    if not copy_path.is_file() or not staged.is_file() or staged.read_bytes() != (args.snippet or args.paths.parent / SNIPPET_FILE).read_bytes():
+        print(f"CADDY_PROBE_FAILED {copy_path.name} must exist and {SNIPPET_FILE} next to it must be a byte-identical copy of the committed snippet (the import is relative)")
         return 1
-    hits: list = []
-    oq, wa = _Stub("oq", hits), _Stub("watcher", hits)
-    port, hp, hsp = _free_port(), _free_port(), _free_port()
-    original = copy_path.read_text(encoding="utf-8")
-    try:
-        text = probe_caddyfile(original, args.site_address, port, {args.upstream: f"127.0.0.1:{oq.port}",
-                                                                   args.watcher_upstream: f"127.0.0.1:{wa.port}"}, hp, hsp)
-    except ArtifactError as exc:
-        print(f"CADDY_PROBE_FAILED {exc}")
-        return 1
-    probe_file = copy_path.with_name(copy_path.name + ".o0probe")
-    probe_file.write_text(text, encoding="utf-8")
+    cand_sha, snip_sha = _sha256_file(copy_path), _sha256_file(staged)
+    ident = f"candidate_sha256={cand_sha} snippet_sha256={snip_sha}"
+    print(f"PROBE_INPUT {ident}  (stage C C-1: --probe-candidate-sha256 {cand_sha} --probe-snippet-sha256 {snip_sha})")
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from o0_tool import redact_line
-    diff = [redact_line(d) for d in difflib.unified_diff(original.splitlines(), text.splitlines(), "production-copy", "probe", n=0, lineterm="")]
-    print("---- probe copy vs production copy (line diff, redacted)")
-    print("\n".join(diff))
-    env = dict(os.environ)
-    # Caddy's autosave.json and data dir go to a throwaway directory, never ~/.config/caddy or /var/lib/caddy
-    xdg = Path(tempfile.mkdtemp(prefix="o0-caddy-probe-xdg-"))
-    env.update(XDG_CONFIG_HOME=str(xdg / "config"), XDG_DATA_HOME=str(xdg / "data"), HOME=str(xdg))
-    for kv in args.adapt_env or []:
-        k, _, v = kv.partition("=")
-        env[k] = v
-    version = subprocess.run([args.caddy, "version"], capture_output=True, text=True).stdout.strip().split(" ")[0]
-    print(f"caddy version {version}")
-    adapted = subprocess.run([args.caddy, "adapt", "--adapter", "caddyfile", "--config", str(probe_file)], env=env,
-                             stdin=subprocess.DEVNULL, capture_output=True, text=True)
-    if adapted.returncode != 0:
-        print(f"CADDY_PROBE_FAILED adapt rc={adapted.returncode} stderr_lines={len(adapted.stderr.splitlines())}")
-        return 1
-    rep = run_verify(json.loads(adapted.stdout), lines, host="127.0.0.1", listen_port=str(port), upstream=f"127.0.0.1:{oq.port}",
-                     mobile_samples=DEFAULT_MOBILE_SAMPLES, browser_samples=DEFAULT_BROWSER_SAMPLES)
-    fails = [f"verify: {f}" for f in rep.failures]
-    n = 0
-    proc = subprocess.Popen([args.caddy, "run", "--config", str(probe_file), "--adapter", "caddyfile"], env=env,
-                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    probe_file = copy_path.with_name(copy_path.name + ".o0probe")
+    xdg: Path | None = None
+    proc = None
+    stubs: list[_Stub] = []
+    hits: list = []
+    fails: list[str] = []
+    n, version, verify_passes = 0, "?", 0
     try:
+        # everything that writes (the .o0probe copy holds the bcrypt hash, the temp dir the pinned JSON)
+        # is inside this try: the finally removes both on every path (review wac-088 🟡-4)
+        xdg = Path(tempfile.mkdtemp(prefix="o0-caddy-probe-xdg-"))
+        oq, wa, sink = _Stub("oq", hits), _Stub("watcher", hits), _Stub("sink", hits)
+        stubs = [oq, wa, sink]
+        port, hp, hsp = _free_port(), _free_port(), _free_port()
+        original = copy_path.read_text(encoding="utf-8")
+        text = probe_caddyfile(original, args.site_address, port, hp, hsp)
+        fd = os.open(probe_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        diff = [redact_line(d) for d in difflib.unified_diff(original.splitlines(), text.splitlines(), "production-copy", "probe", n=0, lineterm="")]
+        print("---- probe copy vs production copy (line diff, redacted)")
+        print("\n".join(diff))
+        env = _probe_env(xdg, args.adapt_env)
+        version = subprocess.run([args.caddy, "version"], capture_output=True, text=True, env=env).stdout.strip().split(" ")[0]
+        print(f"caddy version {version}")
+        adapted = subprocess.run([args.caddy, "adapt", "--adapter", "caddyfile", "--config", str(probe_file)], env=env,
+                                 stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        if adapted.returncode != 0:
+            print(f"CADDY_PROBE_FAILED adapt rc={adapted.returncode} stderr_lines={len(adapted.stderr.splitlines())} {ident}")
+            return 1
+        config = json.loads(adapted.stdout)
+        # verify the copy as written (production upstream addresses), exactly like stage C preflight
+        rep = run_verify(config, lines, host="127.0.0.1", listen_port=str(port), upstream=args.upstream,
+                         mobile_samples=DEFAULT_MOBILE_SAMPLES, browser_samples=DEFAULT_BROWSER_SAMPLES)
+        verify_passes = rep.passes
+        fails = [f"verify: {f}" for f in rep.failures]
+        pinned, notes = pin_probe_config(config, port, args.upstream, args.watcher_upstream,
+                                         {"oq": oq.addr, "watcher": wa.addr, "sink": sink.addr})
+        problems = assert_probe_pinned(pinned, {oq.addr, wa.addr, sink.addr}, port)
+        for note in notes:
+            print(f"PROBE_PIN {redact_line(note)}")
+        if problems:
+            for p in problems:
+                print(f"FAIL pin: {redact_line(p)}")
+            print(f"CADDY_PROBE_FAILED the pinned config is not local-only; caddy was NOT started {ident}")
+            return 1
+        print(f"PROBE_LOCAL_ONLY listen=127.0.0.1:{port} admin=off persist=off servers=1 apps=http dials=stubs_only")
+        run_file = xdg / "probe-run.json"
+        fd = os.open(run_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(pinned, handle)
+        err_file = xdg / "caddy-run.err"
+        with open(err_file, "wb") as err:
+            proc = subprocess.Popen([args.caddy, "run", "--config", str(run_file)], env=env,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
         for _ in range(150):
+            if proc.poll() is not None:
+                break
             try:
                 socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
                 break
             except OSError:
                 time.sleep(0.1)
-
-        def expect(cond: bool, msg: str) -> None:
-            nonlocal n
-            n += 1
-            if not cond:
-                fails.append(msg)
-
-        def forwarded(method, target, path, headers=None):
-            before = len(hits)
-            status, body = _raw_request(port, method, target, headers)
-            ok = status == 200 and len(hits) == before + 1 and hits[-1][:3] == ("oq", method, path)
-            expect(ok, f"forward {method} {target!r} -> {status} hits={[h[:3] for h in hits[before:]]} want oq {path!r}")
-            return hits[-1] if ok else None
-
-        def fallback404(method, target):
-            before = len(hits)
-            status, body = _raw_request(port, method, target)
-            expect(status == 404 and body == b"" and len(hits) == before, f"fallback {method} {target!r} -> {status} body={len(body)}B hits={len(hits) - before}")
-
-        def not_forwarded(method, target):
-            before = len(hits)
-            status, _body = _raw_request(port, method, target)
-            expect(len(hits) == before, f"{method} {target!r} -> {status} reached a stub {[h[:3] for h in hits[before:]]}")
-
-        for line in lines:
-            ex = line.sample("x")
-            for m in HTTP_METHODS:
-                if m in line.methods:
-                    forwarded(m, ex, ex[len(MOBILE_PREFIX):])
-                else:
-                    fallback404(m, ex)
-            m0 = line.methods[0]
-            fallback404(m0, ex.upper())
-            fallback404(m0, ex + "/")
-            for k in range(line.param_count()):
-                fallback404(m0, line.sample("", only=k))
-                fallback404(m0, line.sample("x/y", only=k))
-            if line.last_is_param:
-                forwarded(m0, ex + "%0A", ex[len(MOBILE_PREFIX):] + "%0A")
-                forwarded(m0, ex + "#x", ex[len(MOBILE_PREFIX):] + "%23x")
-            else:
-                fallback404(m0, ex + "/x")
-                fallback404(m0, ex + "%0A")
-                fallback404(m0, ex + "#x")
-        for target in ("/m/v1/watcher", "/m/v1/watcher/", "/M/V1/WATCHER/login/start", "/m/v1/watcher/login/start", "/m/v1/watcher%0A",
-                       "/M/V1/WATCHER%0A", "/m/v1/watcher/status%0A", "/m/v1/watcher/status#x", "/m/v1/watcher/config", "/m/V1/watcher/status"):
-            fallback404("GET", target)
-        for target in ("/m/v1/watcherx", "/m/v1/other", "/m/v1/watcherx%0A", "/m/v1/watcher%0D", "/m/v1/watcher#x"):
-            not_forwarded("GET", target)
-        # F-13 (3): literal dot segments and // are CLEANED by uri strip_prefix and forwarded (never expected as 404)
-        forwarded("GET", "/m/v1/watcher/x/../status", "/v1/watcher/status")
-        forwarded("GET", "/m/v1/watcher/./status", "/v1/watcher/status")
-        forwarded("GET", "/m/v1/watcher//status", "/v1/watcher/status")
-        forwarded("GET", "/m/v1/watcher/trading/accounts/a/..", "/v1/watcher/trading/accounts")
-        fallback404("GET", "/m/v1/watcher/x/../config")
-        # encoded forms and '#' are forwarded raw (the gateway's '%' rule answers 404 there)
-        forwarded("GET", "/m/v1/watcher/x/%2e%2e/status", "/v1/watcher/x/%2e%2e/status")
-        forwarded("GET", "/m/v1/watcher/media/a#x", "/v1/watcher/media/a%23x")
-        # mobile Authorization kept, nothing injected; browser paths behind basic auth
-        fake = "Bearer o0-probe-not-a-token"
-        hit = forwarded("GET", "/m/v1/watcher/status", "/v1/watcher/status", {"Authorization": fake})
-        expect(bool(hit) and hit[3] == fake and not hit[4], "watcher gateway path: Authorization changed or X-Watcher-Proxy-Auth injected")
-        before = len(hits)
-        status, _b = _raw_request(port, "GET", "/m/v1/accounts", {"Authorization": fake})
-        mob = hits[before:]
-        expect(len(mob) == 1 and mob[0][:3] == ("oq", "GET", "/v1/accounts") and mob[0][3] == fake and not mob[0][4],
-               f"/m/v1/accounts: want oq /v1/accounts with the caller's Authorization (got {[h[:3] for h in mob]})")
-        for target in ("/watcher/", "/api/status", "/media/1700000000000-1.jpg"):
-            before = len(hits)
-            status, _b = _raw_request(port, "GET", target)
-            expect(status == 401 and len(hits) == before, f"browser {target} without credentials -> {status}, stub hits {len(hits) - before}")
+        if proc.poll() is not None:
+            last = (err_file.read_text(encoding="utf-8", errors="replace").strip().splitlines() or [""])[-1]
+            print(f"CADDY_PROBE_FAILED caddy run exited rc={proc.returncode}: {redact_line(last)[:300]} {ident}")
+            return 1
+        n, live_fails = _probe_live_checks(port, hits, lines)
+        fails += live_fails
+    except ArtifactError as exc:
+        print(f"CADDY_PROBE_FAILED {exc} {ident}")
+        return 1
     finally:
-        proc.terminate()
-        proc.wait()
-        oq.server.shutdown()
-        wa.server.shutdown()
-        if not args.keep:
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        for stub in stubs:
+            stub.close()
+        if args.keep and probe_file.exists():
+            print(f"NOTE --keep: {probe_file.name} kept; it contains the basic-auth bcrypt hash: delete it yourself after reading")
+        elif probe_file.exists():
             probe_file.unlink()
-        for q in sorted(xdg.rglob("*"), reverse=True):
-            q.unlink() if (q.is_symlink() or q.is_file()) else q.rmdir()
-        xdg.rmdir()
+        if xdg is not None:
+            shutil.rmtree(xdg, ignore_errors=True)
+    counts = {label: sum(1 for h in hits if h[0] == label) for label in ("oq", "watcher", "sink")}
+    stub_hits = f"stub_hits=oq:{counts['oq']},watcher:{counts['watcher']},sink:{counts['sink']}"
     for f in fails[:40]:
         print(f"FAIL {f}")
     if fails:
-        print(f"CADDY_PROBE_FAILED caddy={version} checks={n} verify_passes={rep.passes} failures={len(fails)}")
+        print(f"CADDY_PROBE_FAILED caddy={version} checks={n} verify_passes={verify_passes} failures={len(fails)} {stub_hits} {ident}")
         return 1
-    print(f"CADDY_PROBE_OK caddy={version} live_checks={n} verify_passes={rep.passes} lines={len(lines)} "
-          f"yaml_sha256={meta['_yaml_sha256']} phase_max={meta['_phase_max']} dot_and_double_slash=cleaned_and_forwarded")
+    print(f"CADDY_PROBE_OK caddy={version} live_checks={n} verify_passes={verify_passes} lines={len(lines)} "
+          f"yaml_sha256={meta['_yaml_sha256']} phase_max={meta['_phase_max']} dot_and_double_slash=cleaned_and_forwarded {stub_hits} {ident}")
     return 0
 
 
@@ -1504,6 +1955,41 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     except Uncomparable:
         pass
     checks += 7
+    # 1b. Caddy v2.10.2 MatchPath pins (wac-090; the port was compared with Go path.Match and Caddy's MatchPath)
+    for pattern, path, want in (
+            ("/m/v1/w?tcher/status", "/m/v1/watcher/status", True), ("/m/v1/[w]atcher/dialogs", "/M/V1/WATCHER/dialogs", True),
+            ("/m/v1/[^x]atcher", "/m/v1/watcher", True), ("/m/v1/[a-z]atcher/*/x", "/m/v1/watcher/a/x", True),
+            ("/m/v1/watch\\er/status", "/m/v1/watcher/status", True), ("/M/V1/Watcher/*", "/m/v1/watcher/status", True),
+            ("/m/*/watcher", "/m/v1/watcher", True), ("/m/*/watcher", "/m/v1/x/watcher", False),
+            ("/m/v1/w?tcher*", "/m/v1/watcher/x", False),       # one trailing '*': Caddy's fast prefix match, '?' literal
+            ("*w?tcher*", "/m/v1/watcher", False),               # '*...*': fast substring match, '?' literal
+            ("/m/v1/watcher/[^s]*", "/m/v1/watcher/status", False), ("/m/v1/w?tcher", "/m/v1/w/tcher", False)):
+        assert _caddy_path_match(pattern, path) is want, ("MatchPath pin", pattern, path, want)
+        checks += 1
+    for pattern in ("/m/v1/{http.request.uri.query.zz}watcher/status", "/m/v1/%77atcher/status", "/m/v1/[watcher", "/m/v1/watcher\\"):
+        try:
+            _caddy_path_match(pattern, "/m/v1/watcher/status")
+            raise AssertionError(("must be uncomparable", pattern))
+        except Uncomparable:
+            pass
+        assert _path_may_hit(pattern, "/m/v1/watcher/status"), ("uncomparable must count as a hit", pattern)
+        checks += 1
+    for dial, want in (("127.0.0.1:8183", ("loopback", "8183")), ("localhost:8183", ("loopback", "8183")), ("[::1]:8183", ("loopback", "8183")),
+                       ("tcp/127.0.0.1:8183", ("loopback", "8183")), (":8183", ("loopback", "8183")), ("0.0.0.0:8183", ("loopback", "8183")),
+                       ("127.0.0.2:8183", ("loopback", "8183")), ("[::ffff:127.0.0.1]:8183", ("loopback", "8183")),
+                       ("LOCALHOST:9090", ("loopback", "9090")), ("100.89.58.40:8183", ("100.89.58.40", "8183"))):
+        assert dial_endpoint(dial) == want, ("dial", dial, dial_endpoint(dial))
+        checks += 1
+    for dial in ("unix//run/oq.sock", "{env.OQ}:8183", "127.0.0.1:8000-8010", "127.0.0.1", "udp/127.0.0.1:8183", ""):
+        try:
+            dial_endpoint(dial)
+            raise AssertionError(("dial must be uncomparable", dial))
+        except Uncomparable:
+            pass
+        checks += 1
+    assert _pattern_touches_prefix("/m/v1/watcher/extra") and _pattern_touches_prefix("/M/V1/WATCHER*") and \
+        _pattern_touches_prefix("/m/v1/w?tcher/extra") and not _pattern_touches_prefix("/m/v1/other") and not _pattern_touches_prefix("*.js")
+    checks += 1
 
     # 2. artifact parser negatives (list v2 + snippet)
     base = Path(tempfile.mkdtemp(prefix="o0-caddy-selftest-"))
@@ -1624,9 +2110,9 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     def fb(site):
         return gw_index(site, "(?i:")
 
-    def strip_proxy_route(match, group="group21"):
+    def strip_proxy_route(match, group="group21", dial="127.0.0.1:8183"):
         r = {"match": match, "handle": [{"handler": "subroute", "routes": [{"handle": [
-            {"handler": "rewrite", "strip_path_prefix": "/m"}, {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}
+            {"handler": "rewrite", "strip_path_prefix": "/m"}, {"handler": "reverse_proxy", "upstreams": [{"dial": dial}]}]}]}]}
         if group:
             r["group"] = group
         return r
@@ -1720,6 +2206,45 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         "browser keeps basic Authorization": lambda s: browser(s).pop(5),
         "unauthenticated watcher route for /media": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/media/*"]}], "handle": [
             {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:9090"}]}]}),
+        # wac-090 (review wac-088 🟡-1): path matchers with Caddy glob semantics and placeholders
+        "glob '?' rewrite hits a table path": lambda s: s.insert(0, {"match": [{"path": ["/m/v1/w?tcher/status"]}], "handle": [
+            {"handler": "rewrite", "uri": "/index.html"}]}),
+        "glob class [w] rewrite hits the upper-case probe": lambda s: s.insert(0, {"match": [{"path": ["/m/v1/[w]atcher/dialogs"]}], "handle": [
+            {"handler": "rewrite", "uri": "/index.html"}]}),
+        "placeholder in a path matcher (uncomparable = hit)": lambda s: s.insert(0, {"match": [{"path": ["/m/v1/{http.request.uri.query.zz}watcher/status"]}],
+            "handle": [{"handler": "rewrite", "uri": "/index.html"}]}),
+        "request_header via glob injects the observer token (wac-088 §2.3)": lambda s: s.insert(0, {"match": [{"path": ["/m/v1/w?tcher/trading/accounts"]}],
+            "handle": [{"handler": "headers", "request": {"set": {"Authorization": ["Bearer {env.SYSTEM_OBSERVER_TOKEN}"]}}}]}),
+        # isolated: CONNECT-only, so emulation is unaffected; only case-insensitive path matching makes it hit (G10)
+        "mixed-case path matcher /M/V1/Watcher/* (case-insensitive)": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"], "path": ["/M/V1/Watcher/*"]}],
+            "handle": [{"handler": "rewrite", "strip_path_suffix": "/never-there"}]}),
+        # isolated: behind the fallback, answers without proxying: only "touches the prefix but is neither a line nor the fallback" (G13)
+        "(?i) extra route after the fallback": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path_regexp": {
+            "name": "wx", "pattern": "(?i)^/m/v1/watcher/extra$"}}], "handle": [{"handler": "static_response", "status_code": 204}]}),
+        # isolated: a correct browser route for /healthz that ALSO lists /m/v1/watcher/* (dead behind the fallback): only the
+        # watcher-port rule of the forwarder check can refuse it (G17)
+        "watcher-port forwarder of the prefix hidden in a browser route": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+            "match": [{"path": ["/m/v1/watcher/*", "/healthz"]}], "handle": copy.deepcopy(s[-2]["handle"])}),
+        # isolated: basic auth on the mobile path inside the upstream snippet (G18)
+        "basic auth in the upstream snippet": lambda s: s[gw_index(s, "watcher/status")]["handle"][0]["routes"][0]["handle"].insert(0,
+            {"handler": "authentication", "providers": {"http_basic": {"accounts": [{"password": "HASH", "username": "u"}]}}}),
+        # review wac-088 🟡-2: operator-query by port on every spelling, unparsable dials, dead forwarders
+        "localhost:8183 forwarder of /m/* after the fallback": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m/*"]}], dial="localhost:8183")),
+        "[::1]:8183 forwarder of /m/* after the fallback": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m/*"]}], dial="[::1]:8183")),
+        "unix-socket forwarder of /m/* (uncomparable)": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m/*"]}], dial="unix//run/oq.sock")),
+        "dead /m/v1/watcher/extra forwarder behind the fallback": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m/v1/watcher/extra"]}])),
+        # isolated: CONNECT-only (emulation unaffected) and the pattern hits ONE table path, none of F-13's three probes:
+        # only the list-line shadow probes (shadow_probes) reach step 2
+        "CONNECT rewrite on a single table path": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"], "path": ["/m/v1/watcher/trading/accounts"]}],
+            "handle": [{"handler": "rewrite", "strip_path_suffix": "/never-there"}]}),
+        # isolated: dead behind the fallback (no negative reaches it), operator-query spelled differently / unparsable:
+        # only the port rule and the UNCOMPARABLE dial rule of the forwarder check see them
+        "dead /m/v1/watcher/extra forwarder spelled localhost:8183": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m/v1/watcher/extra"]}],
+            dial="localhost:8183")),
+        "dead /m/v1/watcher/extra forwarder to a unix socket (uncomparable)": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m/v1/watcher/extra"]}],
+            dial="unix//run/oq.sock")),
+        "dead dynamic_upstreams forwarder behind the fallback (uncomparable)": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+            "match": [{"path": ["/m/v1/watcher/extra"]}], "handle": [{"handler": "reverse_proxy", "dynamic_upstreams": {"source": "srv", "name": "oq"}}]}),
     }
     caught = 0
     # a handler before the site's subroute inside the host route runs for every request (F-13, enclosing level)
@@ -1753,6 +2278,11 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             {"handler": "rewrite", "strip_path_prefix": "/static"}]}),
         "not-matcher with encode only": lambda s: s.insert(0, {"match": [{"not": [{"path": ["/x"]}]}], "handle": [{"handler": "encode", "encodings": {"zstd": {}}}]}),
         "other host before the site": lambda s: None,
+        "glob rewrite that cannot hit (/static/?ld)": lambda s: s.insert(0, {"match": [{"path": ["/static/?ld"]}], "handle": [
+            {"handler": "rewrite", "uri": "/static/old"}]}),
+        "'?' in a one-star prefix pattern is literal in Caddy": lambda s: s.insert(0, {"match": [{"path": ["/m/v1/w?tcher*"]}], "handle": [
+            {"handler": "rewrite", "uri": "/index.html"}]}),
+        "mobile handle spelled localhost:8183": lambda s: s[-4]["handle"][0]["routes"][0]["handle"][1]["upstreams"][0].update({"dial": "localhost:8183"}),
     }
     for name, fn in benign.items():
         cfg = mutated(fn)
@@ -1778,13 +2308,57 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         "watcher route without basic auth": lambda s: s[-2]["handle"][0]["routes"][0]["handle"].pop(1),
         "top-level rewrite before the handle blocks": lambda s: s.insert(0, {"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]}),
         "snippet already present": lambda s: s.insert(1, copy.deepcopy(_site(good)[1])),
+        # isolated (G37): CONNECT-only, emulation unaffected; only the prospective shadow check sees it
+        "prospective shadow: CONNECT rewrite on /m/v1/watcher/*": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"], "path": ["/m/v1/watcher/*"]}],
+            "handle": [{"handler": "rewrite", "strip_path_suffix": "/never-there"}]}),
     }.items():
         bad = copy.deepcopy(base_cfg)
         fn(_site(bad))
         assert not verdict(bad, before_deploy=True)[0], f"before-deploy must flag: {name}"
         checks += 1
+    # 5. probe pinning (review wac-088 🟡-3): the config the probe RUNS listens on loopback only and dials only the stubs
+    stubs = {"oq": "127.0.0.1:1", "watcher": "127.0.0.1:2", "sink": "127.0.0.1:3"}
+    raw = copy.deepcopy(good)
+    raw["admin"] = {"disabled": True}
+    raw["logging"] = {"logs": {"default": {"writer": {"output": "file", "filename": "/var/log/caddy/x.log"}}}}
+    raw["apps"]["tls"] = {"automation": {"policies": [{"subjects": ["jp-bot.balen.wang"]}]}}
+    raw["apps"]["http"]["servers"]["srv2"] = {"listen": ["0.0.0.0:8080"], "routes": [{"handle": [
+        {"handler": "reverse_proxy", "upstreams": [{"dial": "100.89.58.40:8183"}]}]}]}
+    site_r = _site(raw)
+    site_r.insert(fb(site_r) + 1, {"group": "group21", "match": [{"path": ["/o0/*"]}], "handle": [{
+        "handler": "reverse_proxy", "upstreams": [{"dial": "[::1]:8183"}, {"dial": "unix//run/x.sock"}, {"dial": "localhost:9090", "max_requests": 1}],
+        "health_checks": {"active": {"uri": "/h", "upstream": "10.0.0.1:1"}},
+        "transport": {"protocol": "http", "network_proxy": {"from": "url", "url": "http://10.0.0.2:3128"}},
+        "handle_response": [{"routes": [{"handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "10.0.0.3:80"}]}]}]}]}]})
+    raw_problems = assert_probe_pinned(raw, set(stubs.values()), 443)
+    assert any("not a local stub" in x for x in raw_problems) and any("apps must be" in x for x in raw_problems), raw_problems
+    pinned, _notes = pin_probe_config(raw, 443, DEFAULT_GATEWAY_UPSTREAM, DEFAULT_WATCHER_UPSTREAM, stubs)
+    assert assert_probe_pinned(pinned, set(stubs.values()), 443) == [], assert_probe_pinned(pinned, set(stubs.values()), 443)
+    srv = pinned["apps"]["http"]["servers"]
+    assert list(srv) == ["srv0"] and srv["srv0"]["listen"] == ["127.0.0.1:443"] and set(pinned) == {"admin", "apps"}, "one loopback server only"
+    all_dials: list[str] = []
+    _walk_json(pinned, lambda node: all_dials.append(node["dial"]) if "dial" in node else None)
+    o0_route = next(r for r in _site(pinned) if (r.get("match") or [{}])[0].get("path") == ["/o0/*"])["handle"][0]
+    assert [u["dial"] for u in o0_route["upstreams"]] == [stubs["oq"], stubs["sink"], stubs["watcher"]], o0_route["upstreams"]
+    assert o0_route["handle_response"][0]["routes"][0]["handle"][0]["upstreams"] == [{"dial": stubs["sink"]}], "nested reverse_proxy pinned"
+    assert "health_checks" not in o0_route and "network_proxy" not in o0_route["transport"], "no own dialing left"
+    assert set(all_dials) <= set(stubs.values()) and all_dials.count(stubs["oq"]) == len(lines) + 3, all_dials  # lines, mobile, /v1/*, [::1]:8183
+    for name, cfg in (("admin not off", {**copy.deepcopy(raw), "admin": {}}),
+                      ("dynamic_upstreams", mutated(lambda s: s.insert(0, {"handle": [{"handler": "reverse_proxy", "dynamic_upstreams": {"source": "srv"}}]})))):
+        if name == "dynamic_upstreams":
+            cfg["admin"] = {"disabled": True}
+        try:
+            pin_probe_config(cfg, 443, DEFAULT_GATEWAY_UPSTREAM, DEFAULT_WATCHER_UPSTREAM, stubs)
+            raise AssertionError(("probe pinning accepted", name))
+        except ArtifactError:
+            pass
+    checks += 3
+    text_probe = probe_caddyfile("{\n\tadmin localhost:2019\n\tdefault_bind 0.0.0.0\n}\njp-bot.balen.wang {\n\trespond 204\n}\n", "jp-bot.balen.wang", 1, 2, 3)
+    assert all(f"\t{o}\n" in text_probe for o in ("admin off", "persist_config off", "auto_https off", "default_bind 127.0.0.1")) \
+        and "0.0.0.0" not in text_probe and "localhost:2019" not in text_probe, text_probe
+    checks += 1
     print(f"SELFTEST_OK good_passes={passes} variants_caught={caught}/{len(variants)} (raw and skeleton) benign_two_step={len(benign)} "
-          f"checks={checks} lines={len(lines)} list_format=v2 snippet_verbatim=ok re2_pins=ok caddyfile_text=ok skeleton_verify=ok before_deploy_mode=ok")
+          f"checks={checks} lines={len(lines)} list_format=v2 snippet_verbatim=ok re2_pins=ok caddyfile_text=ok skeleton_verify=ok before_deploy_mode=ok probe_pinning=ok matchpath_pins=ok")
     return 0
 
 
@@ -1828,10 +2402,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--paths", type=Path, default=default_paths)
     p.add_argument("--snippet", type=Path, help=snippet_help)
     p.add_argument("--site-address", default="jp-bot.balen.wang")
-    p.add_argument("--upstream", default=DEFAULT_GATEWAY_UPSTREAM)
+    p.add_argument("--upstream", default=DEFAULT_GATEWAY_UPSTREAM, help="operator-query as the copy writes it (any loopback spelling maps to the stub)")
     p.add_argument("--watcher-upstream", default=DEFAULT_WATCHER_UPSTREAM)
     p.add_argument("--adapt-env", action="append", help="NAME=VALUE for {$NAME} adapt-time placeholders (fake values only)")
-    p.add_argument("--keep", action="store_true", help="keep <copy>.o0probe")
+    p.add_argument("--keep", action="store_true", help="keep <copy>.o0probe (it contains the bcrypt hash: delete it yourself)")
     p.set_defaults(func=cmd_probe)
 
     p = sub.add_parser("selftest")
