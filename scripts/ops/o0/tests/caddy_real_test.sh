@@ -25,6 +25,15 @@
 #      a fallback 404 with a body (G26) and an Authorization rewrite on a table path; the
 #      §2.3 copy fails in verify AND in the live checks; adapt failure leaves no .o0probe and
 #      no temporary dir.
+#   5. wac-092 (review wac-090 🟡-1..🟡-5): non-ASCII path patterns ('İ', Kelvin sign), '//' path
+#      patterns (request_header, rewrite, forwarder) and host matchers inside the site (a
+#      middle-label '*', a placeholder, another name) written as real Caddyfiles: verify FAILS; the
+#      n07 / n08 / n17b copies fail in verify AND in the live checks; wrapper modes that edit only
+#      the RUN config show the live checks alone catch a '//'-only and a Host-only injection (the
+#      probe keeps the production host name); a failing probe leaves no .o0probe or temporary dir
+#      (R06); SIGTERM during `caddy adapt`, SIGINT while `caddy run` starts, SIGTERM while the
+#      cleanup waits for Caddy, SIGHUP then SIGINT: each leaves no .o0probe, no temporary dir, no
+#      wrapper or Caddy process; the caller's proxy/OTEL_* variables never reach Caddy (R10).
 # Local only: 127.0.0.1 ports, a temporary directory, a random one-off basic-auth password.
 set -eo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -99,6 +108,16 @@ bad("handle-m-ipv6-loopback", good.replace(site_import, site_import + mobile_han
 bad("handle-m-unix-socket", good.replace(site_import, site_import + mobile_handle.replace("127.0.0.1:8183", "unix//run/oq.sock")))
 bad("dead-extra-forwarder", good.replace(site_import, site_import + "\thandle /m/v1/watcher/extra {\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n"))
 bad("regexp-extra-route", good.replace(site_import, site_import + "\t@wx path_regexp (?i)^/m/v1/watcher/extra$\n\thandle @wx {\n\t\trespond 204\n\t}\n"))
+# wac-092 (review wac-090 🟡-1..🟡-3: n07, n15b, n08, n19, n17b, n18)
+obs = 'Authorization "Bearer {env.SYSTEM_OBSERVER_TOKEN}"'
+bad("nonascii-dotted-i-inject", good.replace(site_import, site_import + f"\trequest_header /m/v1/watcher/tradİng/accounts {obs}\n"))
+bad("nonascii-kelvin-rewrite", good.replace(site_import, site_import + "\trewrite /m/v1/watcher/trading/risKs /index.html\n"))
+bad("double-slash-inject", good.replace(site_import, site_import + f"\trequest_header /m//v1/watcher/trading/accounts {obs}\n"))
+bad("double-slash-rewrite", good.replace(site_import, site_import + "\trewrite /m/v1//watcher/status /index.html\n"))
+bad("double-slash-forwarder", good.replace(site_import, site_import + "\thandle /m//v1/watcher/* {\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n"))
+bad("host-middle-wildcard-inject", good.replace(site_import, site_import + f"\t@h host jp-bot.*.wang\n\trequest_header @h {obs}\n"))
+bad("host-placeholder-inject", good.replace(site_import, site_import + f"\t@h host {{http.request.host}}\n\trequest_header @h {obs}\n"))
+bad("host-alias-redir-conservative", good.replace(site_import, site_import + "\t@alias host alias.balen.wang\n\tredir @alias https://jp-bot.balen.wang{uri}\n"))
 fine("glob-cannot-hit", good.replace(site_import, site_import + "\trewrite /static/?ld /static/old\n"))
 fine("mobile-handle-localhost", good.replace("\t\turi strip_prefix /m\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n\thandle /v1/*",
                                              "\t\turi strip_prefix /m\n\t\treverse_proxy localhost:8183\n\t}\n\thandle /v1/*"))
@@ -127,8 +146,9 @@ else bad "global order option not recorded"; fi
 if "${T[@]}" probe --caddy "$CADDY" --caddyfile "$WORK/Caddyfile" --paths "$PATHS" --snippet "$SNIP" > "$WORK/probe.txt" 2>&1; then
   ok "local probe: $(tail -1 "$WORK/probe.txt")"
 else bad "local probe"; grep -E '^FAIL|CADDY_PROBE' "$WORK/probe.txt" | head -12; fi
-grep -q '^+http://127.0.0.1:[0-9]* {$' "$WORK/probe.txt" && ! grep -q '\$2a\$' "$WORK/probe.txt" \
-  && ok "probe records the line diff (site address rewritten) and prints no bcrypt hash" || bad "probe diff record"
+grep -q '^+http://.* {$' "$WORK/probe.txt" && grep -q '^PROBE_LOCAL_ONLY listen=127.0.0.1:[0-9]* host=jp-bot.balen.wang ' "$WORK/probe.txt" \
+  && ! grep -q '\$2a\$' "$WORK/probe.txt" \
+  && ok "probe records the line diff (site address rewritten), keeps the production host name, prints no bcrypt hash" || bad "probe diff record"
 
 # 4. probe hygiene and local-only pinning (wac-090)
 WRAP="$WORK/caddy-wrap"
@@ -137,6 +157,18 @@ cat > "$WRAP" <<'WRAPEOF'
 # test wrapper around the real Caddy: logs the state-dir environment of every call; O0_WRAP_MODE edits
 # the pinned RUN config only (the probe's verify already passed on the unedited adapt output)
 printf '%s HOME=%s XDG_CONFIG_HOME=%s XDG_DATA_HOME=%s\n' "$1" "$HOME" "${XDG_CONFIG_HOME:-}" "${XDG_DATA_HOME:-}" >> "$O0_WRAP_LOG"
+# wac-092 R10: which proxy / OTEL_* variables reached this Caddy call (names only; values are test fakes anyway)
+[ -z "${O0_WRAP_ENVLOG:-}" ] || printf '%s proxy=[%s] otel=[%s]\n' "$1" "$(env | grep -iE '^(http|https|all|no|ftp)_proxy=' | cut -d= -f1 | sort | tr '\n' ',')" \
+  "$(env | grep -E '^OTEL_' | sort | tr '\n' ',')" >> "$O0_WRAP_ENVLOG"
+# wac-092 (review wac-090 🟡-4) signal timing: adapt-slow = `caddy adapt` hangs; run-wait = `caddy run` starts 1.5 s late;
+# slow-stop = on SIGTERM the wrapper takes 30 s to stop (the probe's cleanup is waiting when the test signals it)
+case "${O0_WRAP_SIG:-}:$1" in *adapt-slow*:adapt) echo "adapt $$" >> "$O0_WRAP_MARK"; sleep 30 ;; esac
+if [ "$1" = run ] && [ -n "${O0_WRAP_SIG:-}" ]; then
+  echo "run $$" >> "$O0_WRAP_MARK"
+  case "$O0_WRAP_SIG" in *slow-stop*) trap 'echo stopping >> "$O0_WRAP_MARK"; sleep 30; exit 0' TERM ;; esac
+  case "$O0_WRAP_SIG" in *run-wait*) sleep 1.5 ;; esac
+  case "$O0_WRAP_SIG" in *slow-stop*) "$O0_CADDY_BIN" "$@" & c=$!; echo "caddy $c" >> "$O0_WRAP_MARK"; wait "$c"; exit $? ;; esac
+fi
 if [ "$1" = run ] && [ -n "${O0_WRAP_MODE:-}" ]; then
   python3 - "$3" "$O0_WRAP_MODE" <<'PY'
 import json, sys
@@ -161,6 +193,15 @@ def edit(n):
             "^/m/v1/watcher/status$" == (m.get("path_regexp") or {}).get("pattern") for r in n["routes"] for m in r.get("match") or []):
         line = next(r for r in n["routes"] for m in r.get("match") or [] if (m.get("path_regexp") or {}).get("pattern") == "^/m/v1/watcher/status$")
         n["routes"].insert(0, {"match": [{"path": ["/m/v1/watcherx"]}], "handle": json.loads(json.dumps(line["handle"]))})
+    # wac-092: a header rewrite that only a '//' request (review n08) or only the production Host (n17b) triggers
+    # (inject-dslash: a doubled slash only the per-line '//' variants send; inject-dslash-noauth: only when the caller
+    # sends NO Authorization, so only the unauthenticated '//' request sees it)
+    if mode in ("inject-dslash", "inject-dslash-noauth", "inject-host") and isinstance(n.get("routes"), list) and any(
+            "^/m/v1/watcher/status$" == (m.get("path_regexp") or {}).get("pattern") for r in n["routes"] for m in r.get("match") or []):
+        match = {"inject-dslash": {"path": ["/m/v1//watcher/status"]},
+                 "inject-dslash-noauth": {"path": ["/m//v1/watcher/trading/accounts"], "not": [{"header": {"Authorization": ["*"]}}]},
+                 "inject-host": {"host": ["jp-bot.*.wang"]}}[mode]
+        n["routes"].insert(0, {"match": [match], "handle": [{"handler": "headers", "request": {"set": {"Authorization": ["Bearer injected"]}}}]})
 walk(cfg)
 json.dump(cfg, open(path, "w"))
 PY
@@ -188,8 +229,9 @@ else bad "a Caddy call ran with another HOME/XDG dir"; sed 's/^/    /' "$O0_WRAP
 if grep -qx $'\tadmin off' "$WORK/Caddyfile.o0probe" && grep -qx $'\tpersist_config off' "$WORK/Caddyfile.o0probe" \
    && grep -qx $'\tdefault_bind 127.0.0.1' "$WORK/Caddyfile.o0probe" && grep -qx $'\tauto_https off' "$WORK/Caddyfile.o0probe" \
    && [ "$(python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$WORK/Caddyfile.o0probe")" = 0o600 ] \
-   && grep -q '^PROBE_LOCAL_ONLY listen=127.0.0.1:[0-9]* admin=off persist=off servers=1 apps=http dials=stubs_only$' "$WORK/probe-iso.txt"; then
-  ok "the .o0probe copy (0600) says admin off, persist_config off, default_bind 127.0.0.1, auto_https off; pinned run is local-only (G25)"
+   && grep -Eq '^http://jp-bot\.balen\.wang:[0-9]+ \{$' "$WORK/Caddyfile.o0probe" \
+   && grep -q '^PROBE_LOCAL_ONLY listen=127.0.0.1:[0-9]* host=jp-bot.balen.wang admin=off persist=off servers=1 apps=http dials=stubs_only$' "$WORK/probe-iso.txt"; then
+  ok "the .o0probe copy (0600) says admin off, persist_config off, default_bind 127.0.0.1, auto_https off, site http://jp-bot.balen.wang:<port> (wac-092); pinned run is local-only (G25)"
 else bad "probe copy options / local-only line"; fi
 rm -f "$WORK/Caddyfile.o0probe"
 if grep -q "candidate_sha256=$(sha "$WORK/Caddyfile") snippet_sha256=$(sha "$WORK/caddy-watcher-gateway.caddy")\$" "$WORK/probe-iso.txt" \
@@ -242,23 +284,41 @@ if [ "$rc" = 0 ] && [ ! -s "$WORK/canary.log" ] && [ "${sink_hits:-0}" -gt 0 ] \
 else bad "canary: rc=$rc canary_requests=$(grep -c . "$WORK/canary.log" || true) sink=${sink_hits:-?}"; grep -E '^FAIL|^PROBE_PIN|CADDY_PROBE' "$WORK/probe-canary.txt" | head -12; fi
 
 # 4c. live checks alone (the wrapper edits only the RUN config; verify passed): G26 fallback body, Authorization rewrite
-for mode in fallback-body inject-auth strip-auth watcherx-to-oq; do
-  rc=0; O0_WRAP_MODE="$mode" probe --caddy "$WRAP" --caddyfile "$WORK/Caddyfile" > "$WORK/probe-$mode.txt" 2>&1 || rc=$?
+PT3="$WORK/ptmp3"; mkdir -p "$PT3"
+for mode in fallback-body inject-auth strip-auth watcherx-to-oq inject-dslash inject-dslash-noauth inject-host; do
+  rc=0; TMPDIR="$PT3" O0_WRAP_MODE="$mode" probe --caddy "$WRAP" --caddyfile "$WORK/Caddyfile" > "$WORK/probe-$mode.txt" 2>&1 || rc=$?
   case "$mode" in
     fallback-body) want='^FAIL fallback .* -> 404 body=1B' ;;
     inject-auth|strip-auth) want="^FAIL forward GET '/m/v1/watcher/trading/accounts'.*Authorization changed" ;;
     watcherx-to-oq) want="^FAIL GET '/m/v1/watcherx' -> 200 reached operator-query or the watcher" ;;
+    inject-dslash) want="^FAIL forward GET '/m/v1//watcher/status'.*Authorization changed" ;;   # wac-092 🟡-2
+    inject-dslash-noauth) want="^FAIL forward GET '/m//v1/watcher/trading/accounts': the caller's Authorization changed" ;;
+    inject-host) want="^FAIL forward GET '/m/v1/watcher/status'.*Authorization changed" ;;                  # wac-092 🟡-3 (Host kept)
   esac
-  if [ "$rc" != 0 ] && grep -q '^CADDY_PROBE_FAILED' "$WORK/probe-$mode.txt" && grep -Eq "$want" "$WORK/probe-$mode.txt" && ! grep -q '^FAIL verify:' "$WORK/probe-$mode.txt"; then
-    ok "live check alone catches $mode (verify passed, the running Caddy differs)"
-  else bad "live check missed $mode rc=$rc"; grep -E '^FAIL|CADDY_PROBE' "$WORK/probe-$mode.txt" | head -5; fi
+  # R06 (review wac-090 🟡-5): a probe whose checks FAIL also removes the .o0probe copy and its temporary dir
+  if [ "$rc" != 0 ] && grep -q '^CADDY_PROBE_FAILED' "$WORK/probe-$mode.txt" && grep -Eq "$want" "$WORK/probe-$mode.txt" && ! grep -q '^FAIL verify:' "$WORK/probe-$mode.txt" \
+     && [ ! -e "$WORK/Caddyfile.o0probe" ] && [ -z "$(find "$PT3" -mindepth 1 -print -quit)" ]; then
+    ok "live check alone catches $mode (verify passed, the running Caddy differs); .o0probe and temporary dir removed after the failure"
+  else bad "live check missed $mode rc=$rc (o0probe $([ -e "$WORK/Caddyfile.o0probe" ] && echo LEFT || echo gone))"; grep -E '^FAIL|CADDY_PROBE' "$WORK/probe-$mode.txt" | head -5; fi
 done
 
 # 4d. review wac-088 §2.3 as a probe copy: verify AND the live checks both refuse it
 rc=0; probe --caddy "$CADDY" --caddyfile "$WORK/bad-glob-request-header-inject.Caddyfile" > "$WORK/probe-inject.txt" 2>&1 || rc=$?
-if [ "$rc" != 0 ] && grep -q '^FAIL verify:' "$WORK/probe-inject.txt" && grep -q "^FAIL forward GET '/m/v1/watcher/trading/accounts'.*Authorization changed" "$WORK/probe-inject.txt"; then
-  ok "§2.3 request_header /m/v1/w?tcher/trading/accounts: verify fails and the live forward sees the rewritten Authorization"
+if [ "$rc" != 0 ] && grep -q '^FAIL verify:' "$WORK/probe-inject.txt" && grep -q "^FAIL forward GET '/m/v1/watcher/trading/accounts'.*Authorization changed" "$WORK/probe-inject.txt" \
+   && [ ! -e "$WORK/bad-glob-request-header-inject.Caddyfile.o0probe" ]; then
+  ok "§2.3 request_header /m/v1/w?tcher/trading/accounts: verify fails and the live forward sees the rewritten Authorization (.o0probe removed)"
 else bad "§2.3 copy rc=$rc"; grep -E '^FAIL|CADDY_PROBE' "$WORK/probe-inject.txt" | head -5; fi
+# 4d'. wac-092 (review wac-090 n07, n08, n17b): as probe copies, verify AND the live checks each refuse them
+for spec in "nonascii-dotted-i-inject|forward GET '/m/v1/watcher/trading/accounts'" \
+            "double-slash-inject|forward GET '/m//v1/watcher/trading/accounts'" \
+            "host-middle-wildcard-inject|forward GET '/m/v1/watcher/status'"; do
+  n="${spec%%|*}"; want="${spec#*|}"
+  rc=0; probe --caddy "$CADDY" --caddyfile "$WORK/bad-$n.Caddyfile" > "$WORK/probe-$n.txt" 2>&1 || rc=$?
+  if [ "$rc" != 0 ] && grep -q '^FAIL verify:' "$WORK/probe-$n.txt" && grep -q "^FAIL $want.*Authorization changed" "$WORK/probe-$n.txt" \
+     && [ ! -e "$WORK/bad-$n.Caddyfile.o0probe" ]; then
+    ok "probe copy $n: verify fails and the live checks see the injected Authorization ($want)"
+  else bad "probe copy $n rc=$rc"; grep -E '^FAIL|CADDY_PROBE' "$WORK/probe-$n.txt" | grep -v '^FAIL verify:' | head -5; fi
+done
 
 # 4e. adapt fails: no .o0probe (bcrypt hash) and no temporary dir left behind
 PT2="$WORK/ptmp2"; mkdir -p "$PT2"
@@ -268,6 +328,47 @@ if [ "$rc" != 0 ] && grep -q '^CADDY_PROBE_FAILED adapt rc=' "$WORK/probe-badada
    && [ -z "$(find "$PT2" -mindepth 1 -print -quit)" ]; then
   ok "adapt failure: .o0probe and the temporary dir removed (review wac-088 🟡-4)"
 else bad "adapt-failure cleanup rc=$rc"; ls -la "$WORK"/*.o0probe "$PT2" 2>/dev/null | head; fi
+# 4f. wac-092 (review wac-090 🟡-4): SIGINT/SIGTERM/SIGHUP at different moments with the real Caddy. Every run must
+# leave no .o0probe (bcrypt hash), an empty TMPDIR (temporary state dir with the pinned JSON), no wrapper or Caddy
+# process, and print no bcrypt hash.
+sig_case() {  # sig_case <name> <O0_WRAP_SIG> <want-rc> <want-line-ERE> <mark>:<SIG> [<mark>:<SIG>]
+  local name="$1" mode="$2" want_rc="$3" want="$4" pt="$WORK/ptsig-$1" mark="$WORK/mark-$1" pid rc=0 step w s p pids alive="" missed=""
+  shift 4
+  mkdir -p "$pt"; : > "$mark"
+  # a simple command, not the probe() function: $! must be the Python process itself
+  TMPDIR="$pt" O0_WRAP_SIG="$mode" O0_WRAP_MARK="$mark" "${T[@]}" probe --paths "$PATHS" --snippet "$SNIP" --caddy "$WRAP" \
+    --caddyfile "$WORK/Caddyfile" > "$WORK/probe-sig-$name.txt" 2>&1 &
+  pid=$!
+  for step in "$@"; do
+    w="${step%%:*}"; s="${step##*:}"
+    for _ in $(seq 400); do grep -q "^$w" "$mark" && break; kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
+    grep -q "^$w" "$mark" || missed="$missed $w"
+    kill -s "$s" "$pid" 2>/dev/null || true
+  done
+  wait "$pid" || rc=$?
+  pids="$(awk '$1=="adapt"||$1=="run"||$1=="caddy"{print $2}' "$mark")"
+  for _ in $(seq 40); do alive=""; for p in $pids; do kill -0 "$p" 2>/dev/null && alive="$alive $p"; done; [ -z "$alive" ] && break; sleep 0.05; done
+  if [ -z "$missed" ] && [ "$rc" = "$want_rc" ] && grep -Eq "$want" "$WORK/probe-sig-$name.txt" && [ ! -e "$WORK/Caddyfile.o0probe" ] \
+     && [ -z "$(find "$pt" -mindepth 1 -print -quit)" ] && [ -z "$alive" ] && [ -n "$pids" ] && ! grep -q '\$2a\$' "$WORK/probe-sig-$name.txt"; then
+    ok "signal $name: rc=$rc, .o0probe and the temporary dir removed, no wrapper/Caddy left ($(echo $pids | wc -w | tr -d ' ') pid(s) checked)"
+  else
+    bad "signal $name: rc=$rc (want $want_rc) missed=[$missed] o0probe=$([ -e "$WORK/Caddyfile.o0probe" ] && echo LEFT || echo gone) tmp=[$(ls -A "$pt" | tr '\n' ' ')] alive=[$alive]"
+    tail -3 "$WORK/probe-sig-$name.txt" | sed 's/^/    /'; rm -f "$WORK/Caddyfile.o0probe"
+  fi
+}
+sig_case adapt-sigterm adapt-slow 143 '^CADDY_PROBE_INTERRUPTED signal=SIGTERM:' adapt:TERM
+sig_case run-sigint run-wait 130 '^CADDY_PROBE_INTERRUPTED signal=SIGINT:' run:INT
+sig_case cleanup-sigterm slow-stop 143 '^CADDY_PROBE_INTERRUPTED signal=SIGTERM during cleanup' stopping:TERM
+sig_case sighup-then-sigint "run-wait slow-stop" 130 '^CADDY_PROBE_INTERRUPTED signal=SIGINT during cleanup' run:HUP stopping:INT
+
+# 4g. R10 (review wac-090 🟡-5): the caller's proxy and OTEL_* variables never reach the probe's Caddy
+EL="$WORK/wrap-env.log"; : > "$EL"
+rc=0; HTTP_PROXY=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 ALL_PROXY=socks5://127.0.0.1:9 NO_PROXY=x OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:9 \
+  O0_WRAP_ENVLOG="$EL" probe --caddy "$WRAP" --caddyfile "$WORK/Caddyfile" > "$WORK/probe-proxyenv.txt" 2>&1 || rc=$?
+if [ "$rc" = 0 ] && [ "$(grep -c . "$EL")" -ge 3 ] && ! grep -v '^[a-z]* proxy=\[\] otel=\[OTEL_SDK_DISABLED=true,\]$' "$EL" | grep -q .; then
+  ok "proxy and OTEL_* variables of the caller never reach Caddy ($(cut -d' ' -f1 "$EL" | tr '\n' ' ')); OTEL_SDK_DISABLED=true"
+else bad "proxy/OTEL environment reached Caddy rc=$rc"; sed 's/^/    /' "$EL"; fi
+
 if cat "$WORK"/probe-*.txt | grep -q '\$2a\$'; then bad "a probe output contains a bcrypt hash"; else ok "no probe output contains a bcrypt hash ($(ls "$WORK"/probe-*.txt | wc -l | tr -d ' ') runs)"; fi
 
 echo "CADDY_REAL_TEST $( [ "$fails" = 0 ] && echo OK || echo FAILED ) checks=$checks failures=$fails caddy=$("$CADDY" version | cut -d' ' -f1)"

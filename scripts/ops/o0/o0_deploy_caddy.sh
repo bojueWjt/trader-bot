@@ -119,7 +119,10 @@ phase_preflight() {
   o0_step "bundle list (format v2) and snippet (snippet.v1): snippet == list-derived §9.14.3 shape, byte for byte" \
     "$O0_PY" "$TOOLS/o0_caddy_watcher_routes.py" check-artifacts --paths "$PATHS_BUNDLE" --snippet "$SNIPPET_BUNDLE" --expect-phase-max P2
   o0_sh "live snippet file absent (first deploy) or byte-identical to the bundle's (never a different file)" \
-    "if [ -e '$SNIPPET_LIVE' ]; then cmp -s '$SNIPPET_LIVE' '$SNIPPET_BUNDLE' && echo LIVE_SNIPPET_EQUALS_BUNDLE; else echo LIVE_SNIPPET_ABSENT; fi"
+    "if [ -e '$SNIPPET_LIVE' ] || [ -L '$SNIPPET_LIVE' ]; then
+       if cmp -s '$SNIPPET_LIVE' '$SNIPPET_BUNDLE'; then echo LIVE_SNIPPET_EQUALS_BUNDLE
+       else echo 'LIVE_SNIPPET_DIFFERS: a different file already sits at the snippet path; stop, never overwrite it (report to the user)'; exit 1; fi
+     else echo LIVE_SNIPPET_ABSENT; fi"
   o0_sh "candidate and bundle snippet are exactly what the O0-A05P local probe passed (CADDY_PROBE_OK sha256)" \
     "c=\$(sha256sum '$CANDIDATE' | cut -d' ' -f1); n=\$(sha256sum '$SNIPPET_BUNDLE' | cut -d' ' -f1)
      [ \"\$c\" = '$PROBE_CAND_SHA' ] || { echo \"PROBE_BINDING_FAILED candidate sha256 \$c is not the probed one: re-run O0-A05P on this candidate\"; exit 1; }
@@ -171,7 +174,7 @@ phase_apply() {
     --expect-file-sha "probe_candidate_sha256=$CANDIDATE" --expect-file-sha "probe_snippet_sha256=$SNIPPET_BUNDLE"
   o0_bundle_recheck
   o0_sh "staged snippet is still the bundle's; the live snippet file is absent or identical" \
-    "cmp '$SNIPPET_STAGED' '$SNIPPET_BUNDLE' && { [ ! -e '$SNIPPET_LIVE' ] || cmp -s '$SNIPPET_LIVE' '$SNIPPET_BUNDLE'; } && echo SNIPPET_GATE_OK"
+    "cmp '$SNIPPET_STAGED' '$SNIPPET_BUNDLE' && { { [ ! -e '$SNIPPET_LIVE' ] && [ ! -L '$SNIPPET_LIVE' ]; } || cmp -s '$SNIPPET_LIVE' '$SNIPPET_BUNDLE'; } && echo SNIPPET_GATE_OK"
   o0_step "caddy validate candidate again (same file the gate hashed)" "${ENVX[@]}" caddy validate --adapter caddyfile --config "$CANDIDATE"
   o0_fleet_baseline before-caddy
   # ---- changes
