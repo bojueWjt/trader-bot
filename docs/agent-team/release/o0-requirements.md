@@ -523,3 +523,35 @@
 
 **与 WGW-1.0.3 草案的一处差异（交 Architect）**：复审 wac-098 建议 RS-6 期望"站点顶层**不带匹配器**的 `forward_auth 8183 { uri /v1/auth }` → PASS"。本工具的 F-13 遮蔽检查仍按契约白名单判它失败（`reverse_proxy` 不在白名单，F-13 原文把 `forward_auth` 列为失败类型）；带匹配器且匹配器打不中前缀的 `forward_auth /bar/* { uri /v1/auth }` 现在通过。两者如何统一由 wac-096 定。
 
+### 14.2 本机实跑（未连 jp-24；打包门禁 `--report-only`，未带 `--execute`）
+
+代码提交 `0cafdfc`（`auto/wac-097`，基于集成分支 `6e80efb`，含 wac-094 合并 `8ab8f43`）。Caddy 二进制同 §10.4（审查者构建的 v2.10.2，经 `O0_CADDY_BIN` 使用，不进仓库）。`run_all.sh` 用本机默认 `$TMPDIR`；变体、差分与变异各用 scratchpad 里单独的 `TMPDIR`。
+
+| 命令 | 结果 |
+|---|---|
+| `O0_CADDY_BIN=<v2.10.2> bash -o pipefail scripts/ops/o0/tests/run_all.sh` | 退出 0，末行 `ALL_O0_OFFLINE_CHECKS_OK real_caddy=ok`：`BASH_N_OK files=13`；Caddy 工具 `SELFTEST_OK good_passes=242 variants_caught=120/120 (raw and skeleton) benign_two_step=18 checks=279 … path_changes=ok re2_classes=ok rewrite_entries=ok`；`LEAK_TEST_OK leaks=0`；`AUTH_GATE_TEST_OK checks=24`；`APPLY_ROLLBACK_TEST_OK checks=152`；`CADDY_REAL_TEST OK checks=131 failures=0 caddy=v2.10.2`；`PLAN_MODE_OK scripts=5` |
+| 同上但不设 `O0_CADDY_BIN` | 退出 0，`CADDY_REAL_TEST_SKIPPED`，末行 `O0_OFFLINE_CHECKS_OK_WITHOUT_REAL_CADDY real_caddy=skipped` |
+| 13 个 shell 脚本逐个 `bash -n` | 13/13 |
+| 仿生产夹具的真实探针（`caddy_real_test` 第 3 段） | `CADDY_PROBE_OK caddy=v2.10.2 live_checks=860 verify_passes=242 …`（wac-094 的 840 加 10 个改写入口各发两次）；`PROBE_REWRITE_ENTRIES targets=10`，全部通过 |
+| `o0_package.sh --candidate 0cafdfc --out <scratchpad> --report-only --run-tests`（未带 `--execute`） | **G1–G12 全部 PASS**（13 行）：G2 `ROUTES_DIFF_EMPTY rows=63 … phase_max=P2`；G4 `CLOSURE_OK closure=16 whitelist=36`；G8 5 个文件；G9 pytest `35 passed`、watcher `155/155`；G10 17 个文件无生产动词；G12 `RUNTIME_MANIFEST_OK files=36`；`PACKAGE_OK`；`RELEASE.json` `deploy_candidate: true`、`failed_gates: 0` |
+| 审查 r095 的全部变体（r091 的 67 + r093 的 25 + r095 的 36，`cv/run.sh` 复制到 `w097/cv/`，只改工作目录与分支路径；每个都跑 verify 与完整探针） | 判定改变的恰好 9 个：g01c、g04c、g04d、g15、g16、g17、g18、`imp-at-end-after-catchall`（审查期望 FAIL，现在因为 import 之前的浏览器 `handle` 带 `strip_prefix /watcher` 而失败）由通过变为失败，p03 由失败变为通过；g16、g18 活体 12 处失败、g17 8 处（改写入口）；其余 118 个不变，g19（面板 `/v1/*`，wac-096 的范围）仍通过。所有 `v.out`、`p.out` 无 `$2a$`；无 `.o0probe`；122 次探针的扫描行都是 `cleaned=0 busy=0 foreign=0 orphans=0 unproven=0` |
+| 审查 wac-095 差分里的 216 个 `path_regexp` 漏判（`spacediff/out-*.txt`，本任务的 `w097/re54/check.py` 用旧工具 `8ab8f43` 与新工具对照） | 旧工具：函数层面 216/216 判"不命中"，整条 verify 放过 54 个（全是以 `]` 开头的字符类）；新工具：函数层面 0 个漏判，整条 verify 放过 0 个 |
+| 审查者自己的前缀空间差分 `sd.py`（种子 1、2、3、7、11，未改动，指向本分支） | 1,186,015 次请求，**危险分歧 0**（审查时同样的种子为 216 个 re 模式）；path 部分仍为 0 |
+| 本任务的改路径差分 `w097/pcdiff/pcdiff.py`（独立写的黑盒：每个 `(匹配器, 改写)` 在真实 Caddy 里先由对照路由确认请求原本在两个空间之外，再看改写后是否落进 `/m/v1/watcher` 或 `/v1/watcher`；工具判"证明在外"的，Caddy 一次命中即为危险） | 种子 1、2、3、5、7、11，各 400 条路由，共 421,979 次请求，**危险分歧 0**。第一版在种子 3、5 各发现 2 个危险（`uri /m/m/* strip_prefix /m/v1` 遇 `%2e%2e`），修复后为 0（见 14.1）。对照组：只剪整个 P、`strip_suffix` 一律在外、常量 `uri` 一律在外、去掉 `/v1/watcher` 空间，四个故意改坏的副本分别报出 3、399、2456、866 个危险 |
+| 本机 `~/Library/Application Support/Caddy/` | 开工前逐文件快照（修改时间、大小、权限、sha256，3 个文件）；全部运行之后逐文件相同（`USER_CADDY_DIR_UNCHANGED`）。`~/.config/caddy` 不存在。只做了检查，没有删除 |
+| 本机 `$TMPDIR` 与进程 | 开工前 `$TMPDIR` 下 8 个 `o0-*` 条目（7 个 `o0-caddy-probe-xdg-*`、1 个 `o0-tool-selftest-80jw8ghi`，都是早先留下的，见 U-12），之后仍是这 8 个，逐项相同，没有新增，也没有动它们；本任务用到的各个 scratchpad `TMPDIR` 最后都为空；没有遗留的 caddy、探针或差分进程 |
+
+证据文件（scratchpad `w097/`）：`runall-{caddy,nocaddy}-final.log`、`real5.txt`、`pkg.log`、`pkg/`、`cv/`（`run.sh`、`full-run-final.txt`、`work/case-*`）、`re54/`、`spacediff2/`、`pcdiff/`（`pcdiff.py`、`out4-*.txt`、`out3-broken*-3.txt`）、`mut/`（`muts.py`、`run.sh`、`out-final.txt`）、`caddyhome-{before,final}.txt`、`tmpdir-o0-{before,final}.txt`。
+
+### 14.3 变异（scratchpad `w097/mut/`，只针对本轮新增代码；每个变异一份副本、一个隔离的 `TMPDIR`，先跑 selftest，存活的再跑真实 Caddy 的 `caddy_real_test.sh`，结束后按路径杀掉命令行带该副本目录的进程）
+
+38 个变异 **38 个被杀**：扫描器 4 个（以 `]` 开头的类、`\Q…\E`、POSIX 类、`)` 多余时的顶层 `|`），遮蔽第 1 步 3 个（不看改路径、站点内不看、匹配器不收窄），`strip_prefix` 4 个（只剪整个 P、丢掉未剪的模式、放过以 `.` 开头的剩余、放过"头是 P 的前缀"），`strip_suffix` 2 个，常量 `uri` 3 个（一律在外、放过点段、路径部分为空当作不改），`uri_substring`/`path_regexp` 当作不改，转发检查 7 个（改路径规则整体关闭、忽略 `reverse_proxy` 自带 rewrite、收窄失效、不跟 `handle_response`、不跟 `invoke`、不查错误链、放过未知容器），`handle_response` 用改写后的副本推断路径 2 个，去掉 `/v1/watcher` 空间，watcher 覆盖只看主链，模拟器不做常量 `uri`，探针入口 7 个（不发入口、只带头发一次、不比较 `Authorization`、没有 `%2e%2e` 形式、不看 `uri_substring`、不看 `reverse_proxy` 自带 rewrite、没有 `/v1/watcher` 尾巴）。首轮有 3 个存活，都补了测试：N20（只带头发送）补"只在调用方不带 `Authorization` 时注入"的真实 Caddy 探针副本；N27（转发检查不跟 `invoke`）与 N33（放过未知容器）原来的用例同时被模拟器和移动端样本抓住，补了只有容器规则能抓的死路由用例（兜底之后的 `/m/v1/watcher/extra`）。
+
+### 14.4 剩余限制
+
+1. **更保守 = 可能误拦生产写法**：站点顶层的 `rewrite`、`uri`、`try_files`，只要工具证明不了改写结果在两个空间之外（占位符、`replace`、`path_regexp` 改写、剥前缀后可能是任意路径、只改查询串的 `uri`），C-1 都会失败；`handle_path … { reverse_proxy <8183> }` 一律失败；错误链、命名路由里转发到 watcher 的路由因为浏览器样本覆盖不到也会失败。这是有意的，与 §13.4 第 1 条同一取舍：改候选，不放宽检查。骨架（`caddy_skeleton`）会把含疑似令牌的 `uri` 值藏起来，站点核对阶段这类改写也按可能命中处理。
+2. **探针的改写入口是有限集合**：`path_regexp` 改写与占位符构造不出入口，只由 verify 把关；入口只用 GET。
+3. **错误链的活体检查是间接的**：探针没有专门制造错误，`handle_errors` 转发只在"浏览器路径不带凭据应 401 且不到任何桩"那一项里被看到（401 进入错误链）；`forward_auth` 失败进入错误链的情形，探针里的桩总是成功，看不到，只由 verify 把关。
+4. **F-13 与 WGW-1.0.3 草案的一处不一致**（见 14.1 末段）：站点顶层不带匹配器的 `forward_auth` 本工具判失败，草案 RS-6 期望通过；由 Architect 在 wac-096 定。Caddy 转发 8183 改为封闭白名单（Planner 裁定 R22）归后续 RS 任务，本轮没有实现。
+5. 审查 wac-095 的 💭-1、💭-2、💭-3、💭-5 本轮没有处理（不在任务书范围）；💭-4 已处理（p03）。
+
