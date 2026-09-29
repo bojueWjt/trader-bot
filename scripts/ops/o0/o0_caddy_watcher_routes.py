@@ -1351,7 +1351,7 @@ def dial_endpoint(dial: str) -> tuple[str, str]:
     if not m:
         raise Uncomparable(f"upstream dial {d!r} is not host:port")
     host, port = (m.group(1), m.group(2)) if m.group(1) is not None else (m.group(3), m.group(4))
-    if not re.fullmatch(r"[0-9]{1,5}", port or ""):
+    if not re.fullmatch(r"[0-9]{1,8}", port or "") or int(port) > 65535:   # leading zeros: same number (review wac-108 🟡-5)
         raise Uncomparable(f"upstream dial {d!r}: port {port!r} is not a single number")
     h = host.lower().rstrip(".")
     if h in ("", "localhost") or h.endswith(".localhost"):
@@ -1638,8 +1638,10 @@ class Report:
 # UPSTREAM_UNRESOLVED info lines. transport.network_proxy / forward_proxy_url: a request-scoped placeholder ANYWHERE in the
 # URL fails, any other placeholder is info. Values are never printed in full: only a short port-shaped excerpt, and nothing
 # at all under header / credential keys.
-STANDALONE_8186 = re.compile(r"(?<![0-9])" + GATEWAY_PORT + r"(?![0-9])")
-PORT_RANGE = re.compile(r"(?<![0-9])([0-9]{1,5})-([0-9]{1,5})(?![0-9])")
+# review wac-108 🟡-5: Go parses a port with leading zeros as the same number (127.0.0.1:08186 dials 8186; verified live),
+# so the standalone match allows them: (?<![0-9])0*8186(?![0-9])
+STANDALONE_8186 = re.compile(r"(?<![0-9])0*" + GATEWAY_PORT + r"(?![0-9])")
+PORT_RANGE = re.compile(r"(?<![0-9])([0-9]{1,8})-([0-9]{1,8})(?![0-9])")   # leading zeros allowed (review wac-108 🟡-5)
 PLACEHOLDER = re.compile(r"\{([^{}\s\"]+)\}")
 # Caddy global placeholders that do not depend on the request; everything else (http.request.*, http.vars.*, http.regexp.*,
 # http.matchers.*, http.reverse_proxy.*, http.auth.*, shorthands, unknown names) counts as request-scoped
@@ -1699,6 +1701,13 @@ def _split_host_port(dial: str) -> tuple[str, str | None]:
     return (dial, None) if cut < 0 else (dial[:cut], dial[cut + 1:])
 
 
+def proxy_url_hostport(url: str) -> str | None:
+    """host:port of a forward-proxy URL (scheme://[user@]host[:port]/...); None when it has no host part."""
+    rest = url.split("://", 1)[1] if "://" in url else url
+    rest = rest.split("/", 1)[0].rsplit("@", 1)[-1]
+    return rest or None
+
+
 def classify_dial(dial: str) -> tuple[str, str]:
     """('exposed' | 'unresolved' | 'ok', reason) for one upstream dial / health-check upstream (I-2 + review 🟡-A)."""
     d = str(dial).strip()
@@ -1724,7 +1733,7 @@ def classify_dial(dial: str) -> tuple[str, str]:
         return "exposed", "the port comes from a request-scoped placeholder (the client picks it)"
     if pnames:
         return "unresolved", "the port is a non-request placeholder"
-    m = re.fullmatch(r"([0-9]{1,5})(?:-([0-9]{1,5}))?", port)
+    m = re.fullmatch(r"([0-9]{1,8})(?:-([0-9]{1,8}))?", port)
     if not m:
         return "unresolved", "port is not a number"
     lo, hi = int(m.group(1)), int(m.group(2) or m.group(1))
@@ -1792,6 +1801,13 @@ def i2_check(rep: Report, config: dict, exclude: set[int], skeleton_note: bool =
                 expose(where, "<forward proxy URL built from a request-scoped placeholder>")
             elif names:
                 unres(where, "forward proxy URL with a non-request placeholder")
+            else:
+                # review wac-108 🟡-5: the proxy's host:port is judged like a dial (a numeric port equal to 8186 in any
+                # spelling); the literal forms are also caught by the string walk below
+                for u in ([url] if isinstance(url, str) else [v for v in (url.values() if isinstance(url, dict) else []) if isinstance(v, str)]):
+                    hp = proxy_url_hostport(u)
+                    if hp and classify_dial(hp)[0] == "exposed" and not _literal_8186(u):
+                        expose(where, "<forward proxy URL port resolves to 8186>")
 
     def dyn_rule(dyn: dict, path: str) -> None:
         source = str(dyn.get("source", ""))
@@ -3955,7 +3971,9 @@ def _cmd_selftest(args: argparse.Namespace, lines: list[Line], meta: dict[str, s
                        ("127.0.0.1:{http.vars.p}", "exposed"), ("{header.X}", "exposed"), ("127.0.0.1:{http.regexp.1}", "exposed"),
                        ("{env.OQ}", "unresolved"), ("127.0.0.1:{env.P}", "unresolved"), ("unix//run/a.sock", "unresolved"),
                        ("unix+h2c//run/a.sock", "unresolved"), ("udp/127.0.0.1:53", "unresolved"), ("tcp/127.0.0.1:18186", "ok"),
-                       ("127.0.0.1:81860", "ok"), ("10.0.0.8:1186", "ok")):
+                       ("127.0.0.1:81860", "ok"), ("10.0.0.8:1186", "ok"),
+                       # review wac-108 🟡-5: leading zeros are the same port for Go
+                       ("127.0.0.1:08186", "exposed"), ("[::1]:0008186", "exposed"), ("127.0.0.1:08183", "ok"), ("127.0.0.1:08180-08189", "exposed")):
         assert classify_dial(dial)[0] == want, ("classify_dial", dial, classify_dial(dial))
     checks += 5
     try:
@@ -4271,6 +4289,7 @@ def _cmd_selftest(args: argparse.Namespace, lines: list[Line], meta: dict[str, s
             "V-4 panel dials 8186": cf_good.replace("\thandle /v1/* {\n\t\treverse_proxy 127.0.0.1:8183", "\thandle /v1/* {\n\t\treverse_proxy 127.0.0.1:8186"),
             "V-4 network_proxy to 8186 in another site": cf_good + "other.example {\n\treverse_proxy 127.0.0.1:8183 {\n\t\ttransport http {\n\t\t\tnetwork_proxy url http://localhost:8186\n\t\t}\n\t}\n}\n",
             "V-4 port range 8180-8189": cf_good.replace("\thandle /v1/* {\n\t\treverse_proxy 127.0.0.1:8183", "\thandle /v1/* {\n\t\treverse_proxy 127.0.0.1:8180-8189"),
+            "V-4 network_proxy 08186 (leading zero)": cf_good + "other.example {\n\treverse_proxy 127.0.0.1:8183 {\n\t\ttransport http {\n\t\t\tnetwork_proxy url http://127.0.0.1:08186\n\t\t}\n\t}\n}\n",
             "V-4 upstream snippet defined twice": cf_good.replace("jp-bot.balen.wang {", "(watcher_gateway_upstream) {\n\treverse_proxy 127.0.0.1:8186\n}\njp-bot.balen.wang {"),
             "both snippets imported in the same site": cf_good.replace("\timport watcher_gateway_routes\n", "\timport watcher_gateway_routes\n\timport watcher_gateway_direct_guard\n"),
         }.items():
@@ -4730,6 +4749,12 @@ def _cmd_selftest(args: argparse.Namespace, lines: list[Line], meta: dict[str, s
         "I-2 port range 8180-8189 (adapt expands it)": at_tail({"match": [{"path": ["/g/*"]}], "handle": [{"handler": "reverse_proxy",
             "upstreams": [{"dial": f"127.0.0.1:{p_}"} for p_ in range(8180, 8190)]}]}),
         "I-2 unexpanded range string 127.0.0.1:8180-8189": at_tail({"match": [{"path": ["/g/*"]}], "handle": [rp("127.0.0.1:8180-8189")]}),
+        # review wac-108 🟡-5: leading zeros (Go dials 8186)
+        "I-2 dial 127.0.0.1:08186 (leading zero)": at_tail({"match": [{"path": ["/g/*"]}], "handle": [rp("127.0.0.1:08186")]}),
+        "I-2 panel 8183 through network_proxy http://127.0.0.1:08186 (leading zero)": lambda s: panel(s).update({"transport": {"protocol": "http",
+            "network_proxy": {"from": "url", "url": "http://127.0.0.1:08186"}}}),
+        "I-2 panel 8183 through forward_proxy_url http://localhost:008186 (leading zeros)": lambda s: panel(s).update({"transport": {"protocol": "http",
+            "forward_proxy_url": "http://localhost:008186"}}),
         "I-2 panel 8183 through network_proxy http://127.0.0.1:8186": lambda s: panel(s).update({"transport": {"protocol": "http",
             "network_proxy": {"from": "url", "url": "http://127.0.0.1:8186"}}}),
         "I-2 panel 8183 through forward_proxy_url http://127.0.0.1:8186": lambda s: panel(s).update({"transport": {"protocol": "http",

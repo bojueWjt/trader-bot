@@ -210,6 +210,9 @@ bad("i2-ipv6-loopback-8186", good.replace(site_import, site_import + "\thandle /
 bad("i2-port-range-8180-8189", good.replace(site_import, site_import + "\thandle /g/* {\n\t\treverse_proxy 127.0.0.1:8180-8189 {\n\t\t\tlb_policy round_robin\n\t\t}\n\t}\n"),
     trig=("GET /g/x",) * 12)
 bad("i2-network-proxy-8186", panel(panel_open + "\t\t\ttransport http {\n\t\t\t\tnetwork_proxy url http://127.0.0.1:8186\n\t\t\t}\n"), trig=("GET /v1/accounts",))
+# review wac-108 🟡-5: leading zeros are the same port for Go (the live runner shows the 8186 stub gets the request)
+bad("i2-network-proxy-leading-zero-08186", panel(panel_open + "\t\t\ttransport http {\n\t\t\t\tnetwork_proxy url http://127.0.0.1:08186\n\t\t\t}\n"), trig=("GET /v1/accounts",))
+bad("i2-dial-leading-zero-08186", good.replace(site_import, site_import + "\thandle /g/* {\n\t\treverse_proxy 127.0.0.1:08186\n\t}\n"), trig=("GET /g/x",))
 bad("i2-forward-proxy-url-8186", panel(panel_open + "\t\t\ttransport http {\n\t\t\t\tforward_proxy_url http://127.0.0.1:8186\n\t\t\t}\n"), trig=("GET /v1/accounts",))
 bad("i2-dynamic-a-8186", good.replace(site_import, site_import + "\thandle /d/* {\n\t\treverse_proxy {\n\t\t\tdynamic a {\n\t\t\t\tname localhost\n\t\t\t\tport 8186\n\t\t\t}\n\t\t}\n\t}\n"),
     trig=("GET /d/x",))
@@ -335,7 +338,8 @@ for n in handle-before-import route-wrapped handle-path-wrapped; do
   if "${T[@]}" caddyfile-check --caddyfile "$WORK/bad-$n.Caddyfile" >/dev/null 2>&1; then bad "caddyfile-check accepted $n"; else ok "caddyfile-check rejects $n (F-12 text rule)"; fi
 done
 # V-4 (RS-14): a standalone 8186 outside (watcher_gateway_upstream) fails the text check on its own
-for n in i2-panel-8186 i2-localhost-8186 i2-port-range-8180-8189 i2-network-proxy-8186 i2-health-upstream-8186 g18-handle-path-to-oq-injected-8186; do
+for n in i2-panel-8186 i2-localhost-8186 i2-port-range-8180-8189 i2-network-proxy-8186 i2-health-upstream-8186 g18-handle-path-to-oq-injected-8186 \
+         i2-network-proxy-leading-zero-08186 i2-dial-leading-zero-08186; do
   if "${T[@]}" caddyfile-check --caddyfile "$WORK/bad-$n.Caddyfile" > "$WORK/cf-$n.txt" 2>&1; then bad "caddyfile-check (V-4) accepted $n"
   elif grep -q '8186 outside (watcher_gateway_upstream)' "$WORK/cf-$n.txt"; then ok "caddyfile-check rejects $n (V-4: 8186 outside the upstream snippet)"
   else bad "caddyfile-check rejected $n for another reason: $(grep -m1 '^FAIL' "$WORK/cf-$n.txt")"; fi
@@ -679,7 +683,7 @@ try:
         print(f"LIVE_I2_ERROR adapt rc={a.returncode}"); sys.exit(2)
     cfg = json.loads(a.stdout)
     def sub(v):
-        v = re.sub(r"(?:127\.0\.0\.1|localhost|\[::1\]|\{env\.OQ_HOST\}):8186(?![0-9])", gw, v)
+        v = re.sub(r"(?:127\.0\.0\.1|localhost|\[::1\]|\{env\.OQ_HOST\}):0*8186(?![0-9])", gw, v)
         v = re.sub(r"(?:127\.0\.0\.1|localhost|\[::1\]|\{env\.OQ_HOST\}):8183(?![0-9])", oq, v)
         return re.sub(r"(?:127\.0\.0\.1|localhost|\[::1\]):9090(?![0-9])", wa, v)
     def walk(n):

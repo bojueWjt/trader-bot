@@ -370,8 +370,8 @@ run "S-00 fleet state before any O-0 action (docs/agent-operations.md §0); node
    i=0; while [ \$i -lt $HB_SAMPLES ]; do docker exec trader-v3-postgres psql -U postgres -d trader -Atc \"SELECT node_id||' '||coalesce(status::text,'NULL')||' '||coalesce(release_id::varchar(12),'NULL')||' hb_age='||coalesce(round(extract(epoch from now()-last_seen_at)::numeric,1)::text,'NULL') FROM node_heartbeats ORDER BY node_id\"; i=\$((i + 1)); [ \$i -ge $HB_SAMPLES ] || sleep $HB_SAMPLE_GAP; done \\
      | awk '{n[\$1]++; split(\$4, a, \"=\"); if (a[2] !~ /^-?[0-9]+([.][0-9]+)?\$/) {bad[\$1]++; why[\$1] = (a[2] ~ /^[A-Za-z]+\$/) ? a[2] : \"non-numeric\"; next} v = a[2] + 0; if (!(\$1 in m) || v > m[\$1]) m[\$1] = v} END {for (k in n) if (k in bad) printf \"observed_max_hb_age %s <uncomparable:%s> samples=%d non_numeric=%d\\n\", k, why[k], n[k], bad[k]; else printf \"observed_max_hb_age %s %.1f samples=%d\\n\", k, m[k], n[k]}' | sort"
 
-run "S-01 caddy version, unit, EnvironmentFile key names" \
-  "caddy version; systemctl show caddy -p ActiveState,SubState,ExecMainStartTimestamp,NRestarts,EnvironmentFiles; systemctl cat caddy | grep -E '^(ExecStart|ExecReload|EnvironmentFile)' | $REDACT; echo '--- keys in $CADDY_ENV'; $(keys_of "'$CADDY_ENV'"); stat -c '%a %U:%G %s %y %n' '$CADDY_ENV' '$CADDYFILE'"
+run "S-01 caddy version, unit, EnvironmentFile key names; systemd version (review wac-108 🟡-1: >= 255 marks every unit NeedDaemonReload=yes after an enable/disable; unknown = treat as >= 255)" \
+  "systemctl --version | head -n 1 | sed 's/^/SYSTEMD_VERSION_LINE /'; caddy version; systemctl show caddy -p ActiveState,SubState,ExecMainStartTimestamp,NRestarts,EnvironmentFiles; systemctl cat caddy | grep -E '^(ExecStart|ExecReload|EnvironmentFile)' | $REDACT; echo '--- keys in $CADDY_ENV'; $(keys_of "'$CADDY_ENV'"); stat -c '%a %U:%G %s %y %n' '$CADDY_ENV' '$CADDYFILE'"
 
 run "S-02 Caddyfile imports and directive outline (arguments classified; literals shown as <literal len=N>); global order options and pre-handle directives shown for the F-13 (2) record" \
   "sha256sum '$CADDYFILE' | cut -c1-16; ${PYRUN}caddyfile_outline(sys.argv[1])\" '$CADDYFILE'"
