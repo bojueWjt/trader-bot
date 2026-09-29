@@ -242,3 +242,21 @@ def test_one_bad_plan_is_excluded_and_the_run_continues(built, monkeypatch):
     assert report["replay_exclusions"]["reason_counts"] == {"PLAN_CONTRACT_INVALID:ContractError": 1}
     assert report["replay_exclusions"]["n_replayed"] == report["replay_exclusions"]["n_decision_episodes"] - 1
     assert pl.read_parquet(root / "flaky" / "trades.parquet").height == report["replay_exclusions"]["n_replayed"]
+
+
+def test_plan_without_stop_is_counted_as_no_stop(built, monkeypatch):
+    root, _ = built
+    real, state = l0.resolve_market_refs, {"n": 0}
+
+    def drop_first_stop(row, marks):
+        fixed, why = real(row, marks)
+        state["n"] += 1
+        if fixed is not None and state["n"] == 1:
+            fixed = dict(fixed, order_plan=dict(fixed["order_plan"], stop=None))
+        return fixed, why
+
+    monkeypatch.setattr(l0, "resolve_market_refs", drop_first_stop)
+    report = l0.replay(graph_version="l0-test", channel=CHANNEL, out=root / "nostop")
+    # Without a stop there is no R; it is its own reason, not a contract error.
+    assert report["replay_exclusions"]["reason_counts"] == {"PLAN_NO_STOP": 1}
+    assert report["replay_exclusions"]["n_replayed"] == report["replay_exclusions"]["n_decision_episodes"] - 1

@@ -128,6 +128,10 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
             continue
         if fixed is not row:
             market_ref_resolved.append(row["episode_id"])
+        if (fixed.get("order_plan") or {}).get("stop") is None:
+            # 按风险预算定仓要止损距离；原文没给止损的计划无法折成 R，单独计数，不混进契约错误。
+            replay_exclusions["PLAN_NO_STOP"] += 1
+            continue
         try:
             requests.append(build_request(fixed, policy_version=policy.version, policy_hash=policy.content_hash,
                                           risk_budget=risk_budget, market_manifest="l0-active-silver",
