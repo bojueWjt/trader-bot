@@ -733,6 +733,7 @@ class IntentExecutionStrategy(Strategy):
         *_args: Any,
         **_kwargs: Any,
     ) -> None:
+        self._recover_flat_watchdog_freezes()
         self._check_entry_expiry()
         self._cleanup_orphan_protections()
         for intent_key in tuple(self._entry_protection_stash):
@@ -756,11 +757,23 @@ class IntentExecutionStrategy(Strategy):
         for record in records:
             if record.account_id != str(self.config.account_id) or record.action not in {"open_position", "add_position"}:
                 continue
-            order_plan = record.intent_payload.get("order_plan") or {}
-            expiry = order_plan.get("entry_expires_at")
             stash = self._entry_protection_stash.get(record.intent_id)
             rejected = record.state is IntentExecutionState.REJECTED
             closing = bool(stash and stash.get("batch_closing"))
+            order_plan = record.intent_payload.get("order_plan") or {}
+            expiry = order_plan.get("entry_expires_at")
+            if not expiry and order_plan.get("type") != "entry_batch":
+                anchor = record.intent_payload.get("created_at") or record.intent_payload.get("approved_at")
+                hours = order_plan.get("expire_hours")
+                if anchor and hours is not None:
+                    try:
+                        anchor_at = datetime.fromisoformat(str(anchor))
+                        duration = Decimal(str(hours))
+                        if anchor_at.utcoffset() is None or not duration.is_finite() or duration <= 0:
+                            raise ValueError("invalid entry expiry anchor or duration")
+                        expiry = (anchor_at + timedelta(hours=float(duration))).isoformat()
+                    except (TypeError, ValueError, OverflowError, InvalidOperation):
+                        self._record_denial(OrderDenied("entry_expiry_invalid", record.intent_id))
             expired = False
             if expiry:
                 try:
@@ -1258,6 +1271,119 @@ class IntentExecutionStrategy(Strategy):
         self._entry_protection_stash.pop(intent_key, None)
         self._cancel_clock_timer(self._PROTECTION_TIMER_PREFIX + intent_key)
         return True
+
+    def _watchdog_recovery_denied(self, symbol: str, reason: str) -> None:
+        warnings = getattr(self, "_watchdog_recovery_warnings", None)
+        if warnings is None:
+            warnings = self._watchdog_recovery_warnings = {}
+        now = self._now()
+        previous = warnings.get(symbol)
+        if previous is not None and (now - previous).total_seconds() < 600:
+            return
+        warnings[symbol] = now
+        self.log.warning(f"Watchdog thaw denied for {symbol}: {reason}")
+
+    def _watchdog_recovery_orders(self, instrument_id: str) -> tuple[Any, ...]:
+        """Read complete history without the legacy open-only fallback."""
+        cache = getattr(self, "cache", None)
+        method = getattr(cache, "orders", None)
+        if not callable(method):
+            raise ValueError("order history unavailable")
+        for call in (
+            lambda: method(instrument_id=self._as_instrument_id(instrument_id)),
+            lambda: method(self._as_instrument_id(instrument_id)),
+            lambda: method(),
+        ):
+            try:
+                raw = call()
+                break
+            except TypeError:
+                continue
+        else:
+            raise ValueError("order history query failed")
+        if raw is None:
+            raise ValueError("order history missing")
+        orders = []
+        for order in raw:
+            order_instrument = getattr(order, "instrument_id", None)
+            if order_instrument is None:
+                raise ValueError("order history instrument missing")
+            if str(order_instrument) == instrument_id:
+                orders.append(order)
+        return tuple(orders)
+
+    def _recover_flat_watchdog_freezes(self) -> None:
+        """Release only the watchdog gate after two independent flat snapshots."""
+        reason = "protection order repair failed twice"
+        observations = getattr(self, "_watchdog_flat_observations", None)
+        if observations is None:
+            observations = self._watchdog_flat_observations = {}
+        for symbol in tuple(observations):
+            if self._symbol_open_freezes.get(symbol) != reason:
+                observations.pop(symbol, None)
+        for symbol, freeze_reason in tuple(self._symbol_open_freezes.items()):
+            if freeze_reason != reason:
+                continue
+            try:
+                stashes = [stash for stash in self._entry_protection_stash.values()
+                           if _canonical_symbol(str(stash.get("instrument_id") or "")) == symbol]
+                if not stashes or any(stash.get("entry_side") not in {"BUY", "SELL"} for stash in stashes):
+                    raise ValueError("missing protection book or direction")
+                if any(stash.get("protection_frozen") or self._has_pending_tp_market_fallback(stash)
+                       for stash in stashes):
+                    raise ValueError("independent protection freeze or pending TP fallback")
+                snapshot = self._cached_venue_evidence()
+                if snapshot is None:
+                    raise ValueError("venue evidence unavailable or stale")
+                snapshot_at = snapshot["positions_fetched_at"]
+                if not isinstance(snapshot_at, datetime) or snapshot_at.utcoffset() is None:
+                    raise ValueError("invalid position snapshot timestamp")
+                sides = {"LONG" if stash["entry_side"] == "BUY" else "SHORT" for stash in stashes}
+                if any(_canonical_symbol(row["symbol"]) == symbol
+                       and row["position_side"] in sides | {"BOTH"}
+                       and Decimal(str(row["quantity"])) != 0 for row in snapshot["positions"]):
+                    raise ValueError("relevant position is not flat")
+                first_at = observations.get(symbol)
+                if first_at is not None and snapshot_at < first_at:
+                    raise ValueError("position snapshot moved backwards")
+                boundary = first_at if first_at is not None else snapshot_at
+                for stash in stashes:
+                    if "last_entry_fill_at" not in stash:
+                        continue
+                    filled_at = datetime.fromisoformat(stash["last_entry_fill_at"])
+                    if filled_at.utcoffset() is None:
+                        raise ValueError("entry fill timestamp has no timezone")
+                    if filled_at > boundary or (first_at is not None and filled_at == boundary):
+                        raise ValueError("entry fill after flat observation")
+                for instrument_id in {str(stash["instrument_id"]) for stash in stashes}:
+                    for order in self._watchdog_recovery_orders(instrument_id):
+                        if not is_robot_client_order_id(object_client_order_id(order)):
+                            continue
+                        filled = self._order_status_name(order) in {"FILLED", "PARTIALLY_FILLED"}
+                        if not filled and Decimal(str(getattr(order, "filled_qty", 0))) <= 0:
+                            continue
+                        timestamp = getattr(order, "ts_last", None)
+                        if isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp <= 0:
+                            raise ValueError("robot fill timestamp missing or invalid")
+                        filled_at = datetime.fromtimestamp(timestamp / 1e9, tz=timezone.utc)
+                        if filled_at > boundary or (first_at is not None and filled_at == boundary):
+                            raise ValueError("robot fill after flat observation")
+                if first_at is None:
+                    observations[symbol] = snapshot_at
+                    self._watchdog_recovery_denied(symbol, "waiting for second flat snapshot")
+                    continue
+                if (snapshot_at - first_at).total_seconds() < 60:
+                    self._watchdog_recovery_denied(symbol, "flat observation window below 60 seconds")
+                    continue
+            except Exception as exc:
+                observations.pop(symbol, None)
+                self._watchdog_recovery_denied(symbol, str(exc))
+                continue
+            observations.pop(symbol, None)
+            self._symbol_open_freezes.pop(symbol, None)
+            for stash in stashes:
+                stash["watchdog_repair_failure_count"] = 0
+            self._queue_entry_protection_stash_persist()
 
     def _recover_protection_freeze(self, instrument_id: str, *, confirmed_intent: str = "") -> None:
         symbol = _canonical_symbol(instrument_id)
