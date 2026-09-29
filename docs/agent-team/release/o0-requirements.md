@@ -1,4 +1,4 @@
-# O-0 发行要求可追溯清单（wac-032 草案，wac-045 修订，wac-059 第 3 轮，wac-072 加固，wac-060 适配 WGW-1.0.2，wac-090、wac-092、wac-094 收紧 Caddy 核对）
+# O-0 发行要求可追溯清单（wac-032 草案，wac-045 修订，wac-059 第 3 轮，wac-072 加固，wac-060 适配 WGW-1.0.2，wac-090、wac-092、wac-094、wac-097 收紧 Caddy 核对）
 
 > 作者：watcher-app-crew-release-steward。状态：**草案，未执行任何生产动作，也没有做只读现场核对**。
 > wac-045 修订：处置审查报告 `reviews/wac-032.md`（5 🔴、18 🟡、4 💭），逐条见 §7；按用户 2026-09-26 裁决（W-0b 方案 A、Caddy `*` 严格单段锚定 `path_regexp`）与 Planner 对 D-05…D-08 的决定更新。事实基线：集成分支 `f7641cb`（含 wac-040 `a881802`、W-0b）。
@@ -504,3 +504,76 @@
 3. **自清理只在"再跑一次探针"时发生，而且只清理能证明的部分**：wac-094 之前的版本留下的目录、属主记录丢失的目录（例如在写入记录前被 SIGKILL 的极短窗口）、别的工具留下的进程，都只报告不动；探针从不删用户目录里不属于它的东西。runbook 的三项检查仍是必做项。`pgrep`/`ps` 不可用时扫描只处理能用 `kill -0` 证明已死的记录，其余报 `UNPROVEN`。
 4. **扫描在同一 `$TMPDIR` 里进行**：换了 shell、换了用户或 `TMPDIR` 不同，上一轮的残留就不在扫描范围内；runbook 要求三项检查在运行探针的同一个 shell 里做。
 5. 其余同 §12.4 第 2、4、5 条。§12.4 第 3 条（SIGKILL 只写了一半）已由本节第 2 项更正。
+
+## 14. wac-097：Caddy 核对第四轮（改路径的处理器、正则字符类；处置审查 wac-095（报告 `reviews/wac-094.md`）🟡-2、🟡-3 与 💭-4，以及 Planner 转达的复审 wac-098（报告 `reviews/wac-096.md`）🔴-1、🟡-1；未连 jp-24，未做只读生产核对）
+
+依据：`reviews/wac-094.md` §3、§3.3、§7 🟡-2、🟡-3、§8 💭-4、§9 U-6；`reviews/wac-096.md` 🔴-1、🟡-1；契约 §9.14.3 F-10、F-13（遮蔽第 1 步"无法评估的一律视为命中"）、§9.3 前缀中间件触发条件；Caddy v2.10.2 `modules/caddyhttp/rewrite/rewrite.go`（`Rewrite.Rewrite` 的 uri 拆分、`CleanPath` 之后 `trimPathPrefix`、`changePath`）、`caddyhttp.CleanPath`；Go `regexp/syntax` `parseClass`、`parseNamedClass` 与 `\Q…\E`。审查 wac-095 🟡-1（面板 `/v1/*` 注入 observer）属 wac-096（WGW-1.0.3），本任务不处理：仿生产夹具与 g19 仍判通过。
+
+### 14.1 处置
+
+| # | 项 | 处置 | 测试（selftest / 真实 Caddy） |
+|---|---|---|---|
+| 1 | 🟡-2 改路径的处理器 | **遮蔽第 1 步**（`path_change_into_space`）：路由里只要有改路径的处理器——`rewrite` handler 带 `uri`（路径部分）、`strip_path_prefix`、`strip_path_suffix`、`uri_substring`、`path_regexp`，或 `reverse_proxy` 自带的 `rewrite`——**不论匹配器是什么都算命中**，除非证明改写结果进不了 `/m/v1/watcher` 前缀空间与 operator-query 的 `/v1/watcher` 网关空间。可证明的只有三种：`uri` 的路径部分是不含占位符、`%`、glob 字符、`#`、`?`、`//`、点段、空白的常量绝对路径且不在两个空间内（p03 `rewrite /healthz /api/status` 放行）；`strip_prefix P` 的每一种剪法都在空间外；`strip_suffix` 作用在不可能以两个前缀开头的路径上。只改方法不算改路径；路径部分为空的 `uri`（`?a=1`、`#frag`）不改路径，但不当证明，按可能命中（见第 5 项）。可能的路径用"条目集合"表示（`path` 模式、`path_regexp`、"不可能以前缀开头"），匹配器把它替换成自己的条目（当前路径必须满足它，所以是交集的超集），`uri` 常量替换成该常量，`strip_prefix` 加上剪过的模式。**转发检查**（`_rewrite_forwarder_check`）：`reverse_proxy` 到 8183（按端口）之前、在它自己的链上改过路径（`handle_path`、`handle` 里先 `uri` 再转发、`reverse_proxy { rewrite }`、`forward_auth` 的 `uri`），改写结果同样要证明在两个空间外（g18）；9090/9100 不在此判（浏览器检查要求每条 watcher 路由有 basic auth 并被样本覆盖，watcher 不服务 `/m/…`、`/v1/…`）。**模拟器**支持常量 `uri`（💭-4 的 p03 不再 UNCOMPARABLE）。**探针**：从 adapt 后的配置构造"改写入口"（`strip_prefix P` → `P` + 6 个尾巴，多段 P 另加 `%2e%2e` 形式；`replace F R` → 把尾巴里的 R 换成 F；常量改写进任一空间 → 按匹配器填出的路径；`strip_suffix S` → 前缀 + S），带与不带假 `Authorization` 各发一次，到达 operator-query 的请求头必须与调用方发出的相同，到达 watcher 即失败。 | selftest：函数级 21 个"算命中"、13 个"证明在外"；verify 级新增变体 g15、g16、g17、g18、handle_path 不注入（只有转发规则能抓）、`reverse_proxy` 自带 rewrite、CONNECT 的 strip_prefix / path_regexp 改写 / 占位符 uri / `watcherx` 的 strip_suffix（只有第 1 步新规则能抓）、原 benign 的 `^/static/` + `strip_prefix` 改列变体；新 benign：p03、p05、p06、`/api/v2/*` 剥 `/api`、只改方法、`handle` 里剥 `/reports` 再转发。真实 Caddy：g15–g18、handle_path 不注入、`handle_path /reports/daily/*`（Caddy 剥掉整个 `/reports/daily`）、`reverse_proxy { rewrite /m/v1/watcher/status }`、`uri /m/v1/watcherx* strip_suffix x`、`uri /m/m/* strip_prefix /m/v1` verify 失败；p03、p05、p06、`uri /api/v2/* strip_prefix /api`、`handle /reports/daily/* { uri strip_prefix /reports … }` 通过；g16、g17、g18 与多段剥前缀作为探针副本，verify 与活体检查各自失败；夹具本身 10 个入口全部通过 |
+| 2 | 🟡-3 正则扫描器 | `_re_top_level_alternation` 与 `_re_class_end` 照搬 `_re2_compile` / Go `parseClass` 的规则：`[` 之后可选 `^`，紧跟的 `]` 是字面成员；类内 `\` 转义下一个字符；`[:` 到下一个 `:]` 是 POSIX 类；`\Q` 到 `\E`（或结尾）全是字面；类不闭合或 `)` 多余按命中。`_regexp_may_hit_space` 与新的 `_regexp_may_start_prefix` 共用 `_regexp_literal_head` | selftest：13 个必须看到顶层 `|` 的模式（g01c、g04c、g04d、`a\.bmp$` 形式、`\Q(\E|…`、`[[:alpha:](]|…`、`[\]]|…` 等）、8 个不得误判的（`\Q(|x` 未闭合、`[]|]x`、`[^]|]x`、`[[:alpha:]|]x`、`\|x` 等）；verify 级变体 g01c、g04c、g04d、`a\.bmp$`（探针参数值里没有 `.bmp`，只能靠 verify）、CONNECT 的 `[^](][^]]|/status$`。真实 Caddy：g01c、g04c、g04d、`a\.bmp$`、`\Q`、POSIX 六个 verify 失败 |
+| 3 | 复审 wac-098 🔴-1（Planner 追加） | `reverse_proxy` 的 `rewrite` 字段在第 1 步、转发检查、探针入口里都按改路径处理；改写结果也对 `/v1/watcher`（等于它，或以 `/v1/watcher/`、`/v1/watcher%` 开头，另加 `\n`，任意大小写）判定 | selftest 变体：`handle /foo/* { reverse_proxy <oq> { rewrite /v1/watcher/dialogs; header_up observer } }`、`rewrite /v1/watcher{path}`、`forward_auth /bar/* { uri /v1/watcher/status }`；benign：`forward_auth /bar/* { uri /v1/auth }`。真实 Caddy 同上四项，第一项作为探针副本活体也失败（`/foo/x` 以 `/v1/watcher/dialogs` 带注入头到达 oq 桩） |
+| 4 | 复审 wac-098 🟡-1（Planner 追加） | 路由枚举覆盖 `routes`、`subroute.routes`、`errors.routes`（run_verify 对错误链另跑转发检查与改路径转发检查）、`invoke` → `named_routes`（按调用处上下文，名字找不到或递归按 UNCOMPARABLE）、`reverse_proxy.handle_response[].routes`；其他带嵌套路由的 handler 在 wac-097 版本里只在特定条件下判 UNCOMPARABLE（复审 wac-099 🔴-2，已在返工中改为一律判失败，见 §14.5）；watcher 覆盖检查也枚举这些容器（错误链、命名路由里转发到 watcher 而没被浏览器样本覆盖的判失败）；模拟器遇到 `invoke` 判 UNCOMPARABLE | selftest 变体：`handle_errors` 转发 oq 带 observer、`handle_path /x/* { invoke obs }`、`/m/* { invoke obs }`、未知 `invoke` 名字、`handle_errors` 把 `/api/*` 转给 watcher、sink 的 `handle_response` 转发 oq、未知容器，以及两个只有容器规则能抓的（兜底之后的死路由 `/m/v1/watcher/extra` 上的 `invoke obs` 与未知容器，模拟器碰不到它们）；benign：`handle_errors { respond 502 }`、`/reports/*` invoke 到别的服务。真实 Caddy：`handle_errors`、`handle_path` + `invoke`、`/m/*` + `invoke`、死路由 `/m/v1/watcher/extra` + `invoke`、`handle_response` 五项 verify 失败，`handle_errors { respond }` 通过；`handle_errors` 作为探针副本，活体里"浏览器路径不带凭据应 401 且不到任何桩"一项失败（401 进入错误链后被转发） |
+| 5 | 复审 wac-098 第二轮 🔴-A、🔴-B（Planner 第二次追加；R22 封闭白名单属后续 RS 任务） | `uri` 的路径部分为空（`?a=1`、`#frag`）时 Caddy 不改路径、原路径照转：不再当作"不改"，按可能命中（改路径集合置为未知）；`reverse_proxy` 自带的 `rewrite` 只作用于发往上游的副本，`handle_response` 路由按原请求（外层改写之后、该 `rewrite` 之前）判定；同一个 `rewrite` 对象里 `uri` 之后的 `uri_substring` 等照 Caddy 顺序计算 | selftest：函数级 `?v=1`、`#frag`、`uri` 加 `uri_substring`、改到 `/V1/Watcher/…`、`handle_response` 里的剥前缀、`invoke` 的剥前缀、未知 `invoke`、未知容器都算命中；verify 级变体 q1、q2、q3、q4、`/foo/*` 上的 `rewrite ?a=1`（只有新规则能抓）、`handle_path` 加 `handle_response` 原请求、`uri` 加 `uri_substring`。真实 Caddy：q1–q4 与 `handle_path` 加 `handle_response` 五项 verify 失败；q1 作为探针副本活体失败；只在调用方**不带** `Authorization` 时注入的写法，由入口的第二次发送（不带头）在活体里抓到 |
+
+**本轮用真实 Caddy 找到并修掉的一处**：最初按"剥掉整个 P 或不剥"建模 `strip_prefix`。Caddy 先对**未解码**路径 clean，再在解码后的字符上剪 P，`%2e%2e` 因此能在剪完之后只弹掉 P 的一部分：`uri /m/m/* strip_prefix /m/v1` 下，`/m/v1/%2e%2e/m/v1/watcher/status` 被匹配成 `/m/m/v1/watcher/status`，剪完却是 `/m/v1/watcher/status`。现在对 P 的每一段前缀（`/m`、`/m/v1`）都加一份剪过的模式，剩余以 `.` 开头或 P 含点段时按未知处理；selftest 与真实 Caddy（含探针的 `%2e%2e` 入口）都有这个用例。
+
+**与 WGW-1.0.3 草案的一处差异（交 Architect）**：复审 wac-098 建议 RS-6 期望"站点顶层**不带匹配器**的 `forward_auth 8183 { uri /v1/auth }` → PASS"。本工具的 F-13 遮蔽检查仍按契约白名单判它失败（`reverse_proxy` 不在白名单，F-13 原文把 `forward_auth` 列为失败类型）；带匹配器且匹配器打不中前缀的 `forward_auth /bar/* { uri /v1/auth }` 现在通过。两者如何统一由 wac-096 定。
+
+### 14.2 本机实跑（未连 jp-24；打包门禁 `--report-only`，未带 `--execute`）
+
+代码提交 `0cafdfc`（`auto/wac-097`，基于集成分支 `6e80efb`，含 wac-094 合并 `8ab8f43`）。Caddy 二进制同 §10.4（审查者构建的 v2.10.2，经 `O0_CADDY_BIN` 使用，不进仓库）。`run_all.sh` 用本机默认 `$TMPDIR`；变体、差分与变异各用 scratchpad 里单独的 `TMPDIR`。
+
+| 命令 | 结果 |
+|---|---|
+| `O0_CADDY_BIN=<v2.10.2> bash -o pipefail scripts/ops/o0/tests/run_all.sh` | 退出 0，末行 `ALL_O0_OFFLINE_CHECKS_OK real_caddy=ok`：`BASH_N_OK files=13`；Caddy 工具 `SELFTEST_OK good_passes=242 variants_caught=120/120 (raw and skeleton) benign_two_step=18 checks=279 … path_changes=ok re2_classes=ok rewrite_entries=ok`；`LEAK_TEST_OK leaks=0`；`AUTH_GATE_TEST_OK checks=24`；`APPLY_ROLLBACK_TEST_OK checks=152`；`CADDY_REAL_TEST OK checks=131 failures=0 caddy=v2.10.2`；`PLAN_MODE_OK scripts=5` |
+| 同上但不设 `O0_CADDY_BIN` | 退出 0，`CADDY_REAL_TEST_SKIPPED`，末行 `O0_OFFLINE_CHECKS_OK_WITHOUT_REAL_CADDY real_caddy=skipped` |
+| 13 个 shell 脚本逐个 `bash -n` | 13/13 |
+| 仿生产夹具的真实探针（`caddy_real_test` 第 3 段） | `CADDY_PROBE_OK caddy=v2.10.2 live_checks=860 verify_passes=242 …`（wac-094 的 840 加 10 个改写入口各发两次）；`PROBE_REWRITE_ENTRIES targets=10`，全部通过 |
+| `o0_package.sh --candidate 0cafdfc --out <scratchpad> --report-only --run-tests`（未带 `--execute`） | **G1–G12 全部 PASS**（13 行）：G2 `ROUTES_DIFF_EMPTY rows=63 … phase_max=P2`；G4 `CLOSURE_OK closure=16 whitelist=36`；G8 5 个文件；G9 pytest `35 passed`、watcher `155/155`；G10 17 个文件无生产动词；G12 `RUNTIME_MANIFEST_OK files=36`；`PACKAGE_OK`；`RELEASE.json` `deploy_candidate: true`、`failed_gates: 0` |
+| 审查 r095 的全部变体（r091 的 67 + r093 的 25 + r095 的 36，`cv/run.sh` 复制到 `w097/cv/`，只改工作目录与分支路径；每个都跑 verify 与完整探针） | 判定改变的恰好 9 个：g01c、g04c、g04d、g15、g16、g17、g18、`imp-at-end-after-catchall`（审查期望 FAIL，现在因为 import 之前的浏览器 `handle` 带 `strip_prefix /watcher` 而失败）由通过变为失败，p03 由失败变为通过；g16、g18 活体 12 处失败、g17 8 处（改写入口）；其余 118 个不变，g19（面板 `/v1/*`，wac-096 的范围）仍通过。所有 `v.out`、`p.out` 无 `$2a$`；无 `.o0probe`；122 次探针的扫描行都是 `cleaned=0 busy=0 foreign=0 orphans=0 unproven=0` |
+| 审查 wac-095 差分里的 216 个 `path_regexp` 漏判（`spacediff/out-*.txt`，本任务的 `w097/re54/check.py` 用旧工具 `8ab8f43` 与新工具对照） | 旧工具：函数层面 216/216 判"不命中"，整条 verify 放过 54 个（全是以 `]` 开头的字符类）；新工具：函数层面 0 个漏判，整条 verify 放过 0 个 |
+| 审查者自己的前缀空间差分 `sd.py`（种子 1、2、3、7、11，未改动，指向本分支） | 1,186,015 次请求，**危险分歧 0**（审查时同样的种子为 216 个 re 模式）；path 部分仍为 0 |
+| 本任务的改路径差分 `w097/pcdiff/pcdiff.py`（独立写的黑盒：每个 `(匹配器, 改写)` 在真实 Caddy 里先由对照路由确认请求原本在两个空间之外，再看改写后是否落进 `/m/v1/watcher` 或 `/v1/watcher`；工具判"证明在外"的，Caddy 一次命中即为危险） | 种子 1、2、3、5、7、11，各 400 条路由，共 421,979 次请求，**危险分歧 0**。第一版在种子 3、5 各发现 2 个危险（`uri /m/m/* strip_prefix /m/v1` 遇 `%2e%2e`），修复后为 0（见 14.1）。对照组：只剪整个 P、`strip_suffix` 一律在外、常量 `uri` 一律在外、去掉 `/v1/watcher` 空间，四个故意改坏的副本分别报出 3、399、2456、866 个危险 |
+| 本机 `~/Library/Application Support/Caddy/` | 开工前逐文件快照（修改时间、大小、权限、sha256，3 个文件）；全部运行之后逐文件相同（`USER_CADDY_DIR_UNCHANGED`）。`~/.config/caddy` 不存在。只做了检查，没有删除 |
+| 本机 `$TMPDIR` 与进程 | 开工前 `$TMPDIR` 下 8 个 `o0-*` 条目（7 个 `o0-caddy-probe-xdg-*`、1 个 `o0-tool-selftest-80jw8ghi`，都是早先留下的，见 U-12），之后仍是这 8 个，逐项相同，没有新增，也没有动它们；本任务用到的各个 scratchpad `TMPDIR` 最后都为空；没有遗留的 caddy、探针或差分进程 |
+
+证据文件（scratchpad `w097/`）：`runall-{caddy,nocaddy}-final.log`、`real5.txt`、`pkg.log`、`pkg/`、`cv/`（`run.sh`、`full-run-final.txt`、`work/case-*`）、`re54/`、`spacediff2/`、`pcdiff/`（`pcdiff.py`、`out4-*.txt`、`out3-broken*-3.txt`）、`mut/`（`muts.py`、`run.sh`、`out-final.txt`）、`caddyhome-{before,final}.txt`、`tmpdir-o0-{before,final}.txt`。
+
+### 14.3 变异（scratchpad `w097/mut/`，只针对本轮新增代码；每个变异一份副本、一个隔离的 `TMPDIR`，先跑 selftest，存活的再跑真实 Caddy 的 `caddy_real_test.sh`，结束后按路径杀掉命令行带该副本目录的进程）
+
+38 个变异 **38 个被杀**：扫描器 4 个（以 `]` 开头的类、`\Q…\E`、POSIX 类、`)` 多余时的顶层 `|`），遮蔽第 1 步 3 个（不看改路径、站点内不看、匹配器不收窄），`strip_prefix` 4 个（只剪整个 P、丢掉未剪的模式、放过以 `.` 开头的剩余、放过"头是 P 的前缀"），`strip_suffix` 2 个，常量 `uri` 3 个（一律在外、放过点段、路径部分为空当作不改），`uri_substring`/`path_regexp` 当作不改，转发检查 7 个（改路径规则整体关闭、忽略 `reverse_proxy` 自带 rewrite、收窄失效、不跟 `handle_response`、不跟 `invoke`、不查错误链、放过未知容器），`handle_response` 用改写后的副本推断路径 2 个，去掉 `/v1/watcher` 空间，watcher 覆盖只看主链，模拟器不做常量 `uri`，探针入口 7 个（不发入口、只带头发一次、不比较 `Authorization`、没有 `%2e%2e` 形式、不看 `uri_substring`、不看 `reverse_proxy` 自带 rewrite、没有 `/v1/watcher` 尾巴）。首轮有 3 个存活，都补了测试：N20（只带头发送）补"只在调用方不带 `Authorization` 时注入"的真实 Caddy 探针副本；N27（转发检查不跟 `invoke`）与 N33（放过未知容器）原来的用例同时被模拟器和移动端样本抓住，补了只有容器规则能抓的死路由用例（兜底之后的 `/m/v1/watcher/extra`）。
+
+### 14.4 剩余限制
+
+1. **更保守 = 可能误拦生产写法**：站点顶层的 `rewrite`、`uri`、`try_files`，只要工具证明不了改写结果在两个空间之外（占位符、`replace`、`path_regexp` 改写、剥前缀后可能是任意路径、只改查询串的 `uri`），C-1 都会失败；`handle_path … { reverse_proxy <8183> }` 在 `reverse_proxy` 不带自己的匹配器时一律失败；带了匹配器（`reverse_proxy /v1/* …`、内层 `handle /v1/* { … }`）时，改路径之后的匹配器只收窄路径集合、不撤销"已改过路径"，收窄后的路径仍可能落进 `/m/v1/watcher` 或 `/v1/watcher` 就失败（复审 wac-099 A1、A6），能证明在两个空间之外（`reverse_proxy /reports/* …`）才放行；错误链、命名路由里转发到 watcher 的路由因为浏览器样本覆盖不到也会失败。这是有意的，与 §13.4 第 1 条同一取舍：改候选，不放宽检查。骨架（`caddy_skeleton`）会把含疑似令牌的 `uri` 值藏起来，站点核对阶段这类改写也按可能命中处理。
+2. **探针的改写入口是有限集合**：`path_regexp` 改写与占位符构造不出入口，只由 verify 把关（复审 wac-099 的 A7、A8 正是这两种写法，wac-097 版本的 verify 也放过了它们，返工后 verify 判失败，见 §14.5）；入口只用 GET。
+3. **错误链的活体检查是间接的**：探针没有专门制造错误，`handle_errors` 转发只在"浏览器路径不带凭据应 401 且不到任何桩"那一项里被看到（401 进入错误链）；`forward_auth` 失败进入错误链的情形，探针里的桩总是成功，看不到，只由 verify 把关。
+4. **F-13 与 WGW-1.0.3 草案的一处不一致**（见 14.1 末段）：站点顶层不带匹配器的 `forward_auth` 本工具判失败，草案 RS-6 期望通过；由 Architect 在 wac-096 定。Caddy 转发 8183 改为封闭白名单（Planner 裁定 R22）归后续 RS 任务，本轮没有实现。
+5. 审查 wac-095 的 💭-1、💭-2、💭-3、💭-5 本轮没有处理（不在任务书范围）；💭-4 已处理（p03）。
+
+### 14.5 返工：复审 wac-099（报告 `reviews/wac-097.md`）🔴-1、🔴-2（追加提交，不 amend；未连 jp-24）
+
+Planner 两次指示：只按最小改动修两条 blocker、补对应用例；🟡/🟢 建议可以跳过；不要新增会误拦正常生产写法的规则（用户已定入口隔离改为网关独立监听端口 WGW-1.0.4，对 8183 的判定之后降为纵深防御，verify 主判据由后续 RS 任务改写）。R22 白名单与 `contracts/` 都没有动。
+
+| # | 问题 | 修改（`scripts/ops/o0/o0_caddy_watcher_routes.py`） | 用例 |
+|---|---|---|---|
+| 1 | 🔴-1 改路径之后的匹配器把"已改过路径"清零（A1、A6、A7、A8 放过；A7、A8 探针也放过） | `_rewrite_forwarder_check` 改为同时带两组路径：未改过的 U 与改过的 C（`[]` = 没有，`None` = 任意）。匹配器分别收窄两组（`_narrow_keep`：匹配器自己的条目能证明在两个空间外时用它，否则当前集合能证明在外时保留当前集合，否则用匹配器条目；都是真实交集的超集），**不再清零**；改路径把 U∪C 移入 C；到 `reverse_proxy` 时只判 C。兄弟路由之间的传递只在该路由可能把请求交下去时发生（`_route_may_continue`：链上没有必然应答的 reverse_proxy、static_response、error、copy_response、不带 pass_thru 的 file_server，或以此结尾的无条件 subroute），而且不传给同一 `group` 的后续路由（Caddy 同组互斥）。`_forwarder_check`：外层匹配器打不中前缀、但路由会改路径进空间（`path_change_into_space`）时不再跳过，内层按全部前缀探针判定，只判 8183（watcher 端口仍归浏览器检查）；文档字符串里"改路径后由 `_forwarder_check` 判定"的错误说法已删 | selftest 变体 A1、A6、A7、A8（原始 JSON 与骨架）；良性：`handle_path /x/* { reverse_proxy /reports/* <oq> }`（匹配器证明在外）、"一条会应答的 handle_path 改路径后不影响另一组的 /v1/* 转发"。真实 Caddy：A1、A6、A7、A8 verify 失败，A1 作为探针副本活体也失败；`handle_path /x/* { reverse_proxy /reports/* 8183 }` 通过 |
+| 2 | 🔴-2 未知容器只在特定条件下判 UNCOMPARABLE（C1 verify 与探针都放过） | 新增 `_container_check`：对服务器里每一个 handler（主路由、subroute、reverse_proxy 与 intercept 的 handle_response、错误链、每一个命名路由），只要带有本工具不跟进的嵌套路由或处理器（`_nested_route_keys`：未知 handler 的 `routes`/`handle_response`/`errors` 键或任何带 `handler`/`routes` 的嵌套对象；已知 handler 在跟进范围之外的同类内容，例如 subroute 自带的 `errors`），**不论匹配器、不论是否改过路径**都判 UNCOMPARABLE 失败。`intercept` 的 `handle_response` 按原请求在 `_path_changes`、`_forwarder_check`、`_rewrite_forwarder_check`、`rewrite_entry_targets`、`_walk_all_routes` 五处跟进；原来带条件的 `and changed` 分支删掉 | selftest 变体 C1、C1b（handle_response 里转发带 `/v1/*` 匹配器，只有跟进 intercept 的改路径规则能抓）、`/zzz/*` 上的未知容器与 subroute 自带 `errors`（只有 `_container_check` 能抓）；函数层面 C1 与 subroute `errors`。真实 Caddy：C1 verify 失败、探针副本活体失败；站点顶层只应答的 `intercept`（C4）通过（原来因未知容器被误拦，现在按已知容器跟进） |
+| 3 | 🟡-1 三个存活变异的测试缺口（顺带补测，不新增规则） | 无代码改动 | E1、E1b（错误链里的 handle_path，后者只有错误链的改路径规则能抓）、E2（精确字面 `^/v1/watcherx$` 加 `strip_suffix x`，函数层面与 CONNECT 变体）、服务器顶层"另一主机 \| 本站 + /x/*"两个匹配器集合的路由（`_host_excludes_route` 的 all/any）。真实 Caddy：E1、E2 verify 失败 |
+
+文档更正：`o0-authorization-list.md` 第 11 行与本文 §14.4 第 1 条"`handle_path … { reverse_proxy <8183> }` 一律失败"改为按代码实际行为描述（不带自己的匹配器时一律失败；带匹配器时按收窄后的路径判定，能证明在外才放行）；§14.1 第 4 项"其他带嵌套路由的 handler 按 UNCOMPARABLE"与 §14.4 第 2 条注明返工前的缺口；runbook 同步加一段说明。
+
+**实跑**（scratchpad `w097/`）：
+- selftest `SELFTEST_OK good_passes=243 variants_caught=133/133 (raw and skeleton) benign_two_step=21 checks=286`；
+- `caddy_real_test.sh` `CADDY_REAL_TEST OK checks=142 failures=0 caddy=v2.10.2`，仿生产夹具探针 `CADDY_PROBE_OK … live_checks=860`；
+- `run_all.sh` 带 Caddy 退出 0（`ALL_O0_OFFLINE_CHECKS_OK real_caddy=ok`），不带退出 0（`real_caddy=skipped`）；`bash -n` 13/13（`runall-{caddy,nocaddy}-rework.log`）。
+- 审查者 r099 的全部用例（`gen.py`、`live.py`、`run.sh` 复制到 `w097/r099cv/`，只改目录）：审查期望 FAIL 的 A1–A9、B2、B5、C1、C2、C3、C5、C6、E1、E2 全部 verify 失败；活体里带着注入头到达 oq 的 16 个用例全部 verify 失败，verify 通过的用例没有一个在活体里被注入。判定改变的：C4 由失败变为通过（`intercept` 现在按已知容器跟进）；A5（`handle_path /x/* { reverse_proxy /m/* 8183 }`，oq 收到 `/m/…`，无害）由通过变为失败（合并规则：前缀不得由片段以外转发到 8183）。P1、P2、P10（`try_files`）、P4、P7、P11、B7 的保守判定与返工前相同。
+
+**变异**（只针对返工代码，`w097/mut/muts2.py`，17 个，加原 38 个在返工后的复跑）：R01（匹配器清零改过的集合，即 🔴-1 本身）、R02（关掉 `_container_check`）、R03（改路径转发规则不跟 intercept）、R05（传给同组）、R06（所有路由都可能交下去）、R07、R08（错误链不跑改路径转发规则，即审查 M09）、R09（all→any，即审查 M10）、R10、R11、R12、R13、R15 被杀；**R04、R14、R16、R17 存活，属冗余**：它们各自关掉两道转发检查之一的某一步，被关掉的那一类写法仍由另一道判失败（`_forwarder_check` 对改路径路由的新规则与 `_rewrite_forwarder_check` 在 8183 上重叠），合起来的 verify 结论不变。原 38 个里 N05、N25（step 1 的改路径规则）返工后因为面板 `/v1/*` 也能抓到而存活，补了去掉面板的 g16 变体后被杀；N06、N16、N17、N32、N33、N34、N37 的锚点随代码改变，已按新代码改写为 R13、R14、R01、R15、R02、R16、R17。其余 29 个仍被杀。
+
+**遗留（按 Planner 指示跳过）**：审查 🟢-1（`_re2_compile` 不认 POSIX 类，与扫描器不一致）、🟢-2（空 `\Q\E` 后跟量词的函数层漏判，整条 verify 能兜住）、🟢-3（oq 分隔符 `%` 冗余的注释）、🟡-2（站点顶层不带匹配器的 `forward_auth` 与 RS-6 的差异）、🟡-3（`try_files {path} /index.html` 的既有误拦写进 U-6）。这几项都没有改代码或文档，交给后续 RS 任务或 Planner。
+
