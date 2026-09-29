@@ -1033,18 +1033,25 @@ def _path_changes(handlers: list, paths: list | None, out: list, named: dict | N
         kind = h.get("handler")
         if kind == "subroute":
             paths = _route_list_changes(h.get("routes") or [], paths, out, named, stack)
+            if _nested_route_keys(h):        # e.g. a subroute's own 'errors' routes
+                out.append((str(kind), ["nested routes this tool does not enumerate"], None))
+                paths = None
         elif kind == "rewrite":
             new, fields = _paths_after_rewrite(h, paths)
             if fields:
                 out.append((kind, fields, new))
                 paths = new
-        elif kind == "reverse_proxy":
-            if isinstance(h.get("rewrite"), dict):
+        elif kind in ("reverse_proxy", "intercept"):
+            if kind == "reverse_proxy" and isinstance(h.get("rewrite"), dict):
                 new, fields = _paths_after_rewrite(h["rewrite"], paths)
                 if fields:
                     out.append(("reverse_proxy rewrite", fields, new))
+            # handle_response routes (reverse_proxy, and intercept - wac-099 🔴-2) run with the ORIGINAL request
             for hr in h.get("handle_response") or []:
                 paths = _route_list_changes(hr.get("routes") or [], paths, out, named, stack)
+            if _nested_route_keys(h):
+                out.append((str(kind), ["nested routes this tool does not enumerate"], None))
+                paths = None
         elif kind == "invoke":
             name = str(h.get("name", ""))
             route = (named or {}).get(name)
@@ -1053,7 +1060,7 @@ def _path_changes(handlers: list, paths: list | None, out: list, named: dict | N
                 paths = None
             else:
                 paths = _route_list_changes([route], paths, out, named, stack + (name,))
-        elif "routes" in h or "handle_response" in h:
+        elif _nested_route_keys(h):
             out.append((str(kind), ["nested routes this tool does not enumerate"], None))
             paths = None
     return paths
@@ -1347,7 +1354,7 @@ def _walk_all_routes(server: dict):
             for h in r.get("handle") or []:
                 if h.get("handler") == "subroute":
                     yield from rec(h.get("routes") or [], here)
-                elif h.get("handler") == "reverse_proxy":
+                elif h.get("handler") in ("reverse_proxy", "intercept"):
                     for j, hr in enumerate(h.get("handle_response") or []):
                         yield from rec(hr.get("routes") or [], here + (f"handle_response{j}",))
     yield from rec(server.get("routes") or [], ())
@@ -1612,7 +1619,8 @@ def _mset_written_for_prefix(mset: dict, host: str, host_exact: bool = True) -> 
 
 
 def _forwarder_check(rep: Report, routes: list, probes: list[str], host: str, upstream: str, skip: set[int], trail: tuple = (),
-                     inherited: bool = False, named: dict | None = None, stack: tuple = (), chain: str = "") -> None:
+                     inherited: bool = False, named: dict | None = None, stack: tuple = (), chain: str = "",
+                     oq_only: bool = False) -> None:
     """§9.14.3 merge rule + F-10: no route but the snippet may proxy the prefix to operator-query or the
     watcher. Operator-query is recognised by the PORT of ``upstream`` on any host, the watcher by
     9090/9100 (``localhost:8183``, ``[::1]:8183``, ``tcp/127.0.0.1:8183`` ... are all caught); a
@@ -1623,7 +1631,12 @@ def _forwarder_check(rep: Report, routes: list, probes: list[str], host: str, up
     container - subroute routes, a reverse_proxy's ``handle_response[].routes``, ``invoke`` -> the server's
     ``named_routes`` (in the caller's context; an unknown or recursive name fails as UNCOMPARABLE) - and any other
     handler that carries nested routes fails as UNCOMPARABLE; run_verify also runs this on the server's
-    ``errors.routes`` (handle_errors: a failing forward_auth or basic_auth sends the request there)."""
+    ``errors.routes`` (handle_errors: a failing forward_auth or basic_auth sends the request there).
+    wac-099 🔴-1: a route whose matcher misses the prefix but whose handlers CHANGE THE PATH into (possibly) the prefix
+    space or operator-query's /v1/watcher space (path_change_into_space) is not skipped: its nested routes are judged
+    with every prefix probe as if the prefix arrived (``oq_only``: there only operator-query forwarders fail - a
+    stripped browser path to the watcher behind basic auth is the browser checks' business). Unknown containers are
+    refused by _container_check whatever the matcher (wac-099 🔴-2)."""
     gw_port = dial_endpoint(upstream)[1]
     for index, route in enumerate(routes):
         if id(route) in skip:
@@ -1632,16 +1645,24 @@ def _forwarder_check(rep: Report, routes: list, probes: list[str], host: str, up
         exact = not trail   # host compared only for the server's own routes (site selection); wac-092
         hits = [p for p in probes if _may_hit(match, p, host, exact)]
         written = any(_mset_written_for_prefix(m, host, exact) for m in match or [])
+        route_oq_only = oq_only
+        moved = None
         if not (hits or written or (inherited and not match)):
-            continue
-        what = repr(hits[0]) if hits else "the /m/v1/watcher prefix (path pattern written for it)"
+            if exact and _host_excludes_route(route, host, True):
+                continue
+            moved = path_change_into_space(route, named)
+            if not moved:
+                continue
+            route_oq_only = True
+        what = repr(hits[0]) if hits else (repr(moved) if moved else "the /m/v1/watcher prefix (path pattern written for it)")
         here = trail + (index,)
         where = f"{chain}route {'.'.join(map(str, here))} ({_route_matcher_summary(match)})"
-        nested_inherited = bool(written or inherited) and not hits
+        nested_inherited = bool(written or inherited or moved) and not hits
+        nested_probes = list(PREFIX_PROBES) if moved else hits
 
         def nested(sub_routes: list, sub_trail: tuple, sub_stack: tuple) -> None:
-            _forwarder_check(rep, sub_routes or [], hits, host, upstream, skip, sub_trail, inherited=nested_inherited,
-                             named=named, stack=sub_stack, chain=chain)
+            _forwarder_check(rep, sub_routes or [], nested_probes, host, upstream, skip, sub_trail, inherited=nested_inherited,
+                             named=named, stack=sub_stack, chain=chain, oq_only=route_oq_only)
 
         for h in route.get("handle", []) or []:
             kind = h.get("handler")
@@ -1654,9 +1675,11 @@ def _forwarder_check(rep: Report, routes: list, probes: list[str], host: str, up
                     rep.fail(f"UNCOMPARABLE {where} may pass {what} to named route {name!r} (unknown or recursive invoke)")
                 else:
                     nested([target], here + (f"invoke:{name}",), stack + (name,))
-            elif kind == "reverse_proxy":
+            elif kind in ("reverse_proxy", "intercept"):
                 for i, hr in enumerate(h.get("handle_response") or []):
                     nested(hr.get("routes") or [], here + (f"handle_response{i}",), stack)
+                if kind == "intercept":
+                    continue
                 dials = _dials(h)
                 if "dynamic_upstreams" in h or not dials:
                     rep.fail(f"UNCOMPARABLE {where} may forward {what} with dynamic or no static upstreams")
@@ -1667,11 +1690,97 @@ def _forwarder_check(rep: Report, routes: list, probes: list[str], host: str, up
                     except Uncomparable as exc:
                         rep.fail(f"UNCOMPARABLE {where} may forward {what}: {exc}")
                         continue
-                    if port == gw_port or port in WATCHER_PORTS:
+                    if port == gw_port or (port in WATCHER_PORTS and not route_oq_only):
                         rep.fail(f"{where} may forward {what} to {d} (port {port}): only the snippet may route the "
                                  "/m/v1/watcher prefix to operator-query or the watcher (§9.14.3, F-10)")
-            elif "routes" in h or "handle_response" in h:
-                rep.fail(f"UNCOMPARABLE {where} may pass {what} to nested routes of handler {kind!r} that this tool does not enumerate")
+
+
+def _container_check(rep: Report, server: dict) -> int:
+    """wac-099 🔴-2: every handler anywhere in the server (routes, subroute routes, reverse_proxy / intercept
+    handle_response routes, errors.routes, every named route) that carries nested routes or handlers this tool does not
+    follow fails as UNCOMPARABLE, whatever its matcher and whether a path was changed before it. Returns the number of
+    handlers inspected."""
+    seen = 0
+
+    def rec(routes: list, trail: tuple) -> None:
+        nonlocal seen
+        for i, r in enumerate(routes or []):
+            here = trail + (i,)
+            for h in r.get("handle") or []:
+                seen += 1
+                bad = _nested_route_keys(h)
+                if bad:
+                    rep.fail(f"UNCOMPARABLE route {'.'.join(map(str, here))} ({_route_matcher_summary(r.get('match'))}): handler "
+                             f"{h.get('handler')!r} carries nested routes or handlers under {bad} that this tool does not follow "
+                             "(only subroute routes, reverse_proxy/intercept handle_response routes, invoke -> named routes and "
+                             "errors routes are followed)")
+                if h.get("handler") == "subroute":
+                    rec(h.get("routes") or [], here)
+                elif h.get("handler") in ("reverse_proxy", "intercept"):
+                    for j, hr in enumerate(h.get("handle_response") or []):
+                        rec(hr.get("routes") or [], here + (f"handle_response{j}",))
+
+    rec(server.get("routes") or [], ())
+    rec((server.get("errors") or {}).get("routes") or [], ("errors",))
+    for name, r in sorted((server.get("named_routes") or {}).items()):
+        rec([r] if isinstance(r, dict) else [], (f"named:{name}",))
+    return seen
+
+
+def _narrow_keep(paths: list | None, match: list | None) -> list | None:
+    """Paths after a matcher, for the two-set walk: [] stays [] (nothing arrives); otherwise the more informative of two
+    supersets of the true intersection: the matcher's own items (_paths_after_match) when they are proven outside both
+    spaces (they are path patterns, so a later strip can still be proven), else the current set when IT is proven
+    outside (a subset of it is too), else the matcher's items."""
+    if paths == []:
+        return []
+    items = _paths_after_match(paths, match)[0]
+    if not _paths_may_hit_space(items):
+        return items
+    if paths is not None and not _paths_may_hit_space(paths):
+        return paths
+    return items
+
+
+_KNOWN_NESTED = {"subroute": ("routes",), "reverse_proxy": ("handle_response",), "intercept": ("handle_response",)}
+
+
+def _nested_route_keys(h: dict) -> list[str]:
+    """Keys of a handler that hold nested routes or handlers this tool does NOT follow (wac-099 🔴-2): anything under an
+    unknown handler that contains a 'handler' or 'routes' key, and the same under a known handler outside the containers
+    followed (subroute.routes, reverse_proxy/intercept handle_response[].routes; e.g. a subroute's 'errors')."""
+    follow = _KNOWN_NESTED.get(str(h.get("handler")), ())
+    found: list[str] = []
+    for key, value in h.items():
+        if key == "handler" or key in follow:
+            continue
+        hit: list = []
+        _walk_json(value, lambda node: hit.append(1) if ("handler" in node or "routes" in node) else None)
+        if hit or key in ("routes", "handle_response", "errors"):
+            found.append(key)
+    return found
+
+
+_RESPONDERS_STOP = {"reverse_proxy", "static_response", "error", "copy_response"}
+
+
+def _handlers_stop(handlers: list) -> bool:
+    """Does this handler list never call the next route of its list? True only when a responder that never passes on
+    (reverse_proxy, static_response, error, copy_response, file_server without pass_thru) or a subroute whose routes
+    include an unconditional, ungrouped route that stops, is reached on every path. Anything else: may continue."""
+    for h in handlers or []:
+        kind = h.get("handler")
+        if kind in _RESPONDERS_STOP or (kind == "file_server" and not h.get("pass_thru")):
+            return True
+        if kind == "subroute":
+            if any(not r.get("match") and "group" not in r and _handlers_stop(r.get("handle") or []) for r in h.get("routes") or []):
+                return True
+    return False
+
+
+def _route_may_continue(route: dict) -> bool:
+    """Can a request that matched this route reach the routes after it (with this route's path change)?"""
+    return not _handlers_stop(route.get("handle") or [])
 
 
 def _rewrite_forwarder_check(rep: Report, routes: list, host: str, upstream: str, skip: set[int], named: dict | None = None,
@@ -1688,44 +1797,48 @@ def _rewrite_forwarder_check(rep: Report, routes: list, host: str, upstream: str
     passes (the cut patterns /v1/accounts, /v1/operator/orders/* are outside both). Containers followed: subroute
     routes, ``handle_response[].routes`` (original request), ``invoke`` -> ``named_routes`` in the caller's context;
     after a path change an unknown or recursive name, or another handler with nested routes, fails as UNCOMPARABLE.
-    Paths constrained again by a matcher AFTER the change are judged by _forwarder_check, which sees that matcher.
+    A matcher AFTER the change only narrows the possible paths to its own items (they are judged against both spaces;
+    wac-099 🔴-1: it no longer clears the change, so handle_path /x/* { reverse_proxy /v1/* <oq> } fails).
     The watcher ports (9090/9100) are not judged here: every route to the watcher must pass the browser checks (basic
     auth, cleared X-Watcher-* and Authorization, injected placeholder; an unexercised watcher route fails), and the
     watcher serves no /m/... or /v1/... path. Returns the number of forwarders judged."""
     gw_port = dial_endpoint(upstream)[1]
     judged = 0
+    # The walk carries TWO path sets (wac-099 🔴-1): U = paths that reached here unchanged, C = paths produced by a path
+    # change ([] = none, None = any). A matcher narrows each set separately (_narrow_keep); a change moves U | C into C;
+    # only C is judged at a reverse_proxy. So a matcher after a change never "clears" it, and a change proven outside
+    # (a pre-snippet strip_suffix) does not make a later panel /v1/* forwarder look changed.
 
-    def walk(handlers: list, paths, changed: bool, trail: tuple, match, stack: tuple) -> tuple[list | None, bool]:
+    def walk(handlers: list, U, C, trail: tuple, match, stack: tuple) -> tuple:
         nonlocal judged
         for h in handlers or []:
             kind = h.get("handler")
             if kind == "subroute":
-                paths, changed = walk_list(h.get("routes") or [], paths, changed, trail, match, stack)
+                U, C = walk_list(h.get("routes") or [], U, C, trail, match, stack)
             elif kind == "invoke":
                 name = str(h.get("name", ""))
                 target = (named or {}).get(name)
                 if not isinstance(target, dict) or name in stack:
-                    if changed:
-                        rep.fail(f"UNCOMPARABLE {chain}route {'.'.join(map(str, trail))} invokes {name!r} after a path change "
-                                 "(unknown or recursive named route)")
-                    paths = None
+                    U, C = [], None          # unknown: reported by _container_check / _forwarder_check
                 else:
-                    paths, changed = walk_list([target], paths, changed, trail + (f"invoke:{name}",), match, stack + (name,))
+                    U, C = walk_list([target], U, C, trail + (f"invoke:{name}",), match, stack + (name,))
             elif kind == "rewrite":
-                new, fields = _paths_after_rewrite(h, paths)
+                new, fields = _paths_after_rewrite(h, _paths_union(U, C))
                 if fields:
-                    paths, changed = new, True
-            elif kind == "reverse_proxy":
+                    U, C = [], new
+            elif kind in ("reverse_proxy", "intercept"):
+                # handle_response routes run with the ORIGINAL request (the proxy's own rewrite only touches its copy)
                 for i, hr in enumerate(h.get("handle_response") or []):
-                    after, after_changed = walk_list(hr.get("routes") or [], paths, changed, trail + (f"handle_response{i}",),
-                                                     match, stack)
-                    paths, changed = _paths_union(paths, after), changed or after_changed
-                sent, sent_changed = paths, changed
+                    aU, aC = walk_list(hr.get("routes") or [], U, C, trail + (f"handle_response{i}",), match, stack)
+                    U, C = _paths_union(U, aU), _paths_union(C, aC)
+                if kind == "intercept":
+                    continue
+                sent = C
                 if isinstance(h.get("rewrite"), dict):
-                    new, fields = _paths_after_rewrite(h["rewrite"], sent)
+                    new, fields = _paths_after_rewrite(h["rewrite"], _paths_union(U, C))
                     if fields:
-                        sent, sent_changed = new, True
-                if not sent_changed:
+                        sent = new
+                if sent == []:
                     continue
                 judged += 1
                 if not _paths_may_hit_space(sent):
@@ -1739,31 +1852,38 @@ def _rewrite_forwarder_check(rep: Report, routes: list, host: str, upstream: str
                         continue
                     if port == gw_port:
                         rep.fail(f"{where} may forward a path changed into the /m/v1/watcher prefix space or operator-query's "
-                                 f"/v1/watcher space to {d} (port {port}) (a strip/replace/rewrite between the matcher and "
-                                 "reverse_proxy - handle_path, uri, the proxy's own rewrite; not proven to stay outside): only the "
-                                 "snippet may route the prefix to operator-query (§9.14.3, wac-097)")
-            elif ("routes" in h or "handle_response" in h) and changed:
-                rep.fail(f"UNCOMPARABLE {chain}route {'.'.join(map(str, trail))}: handler {kind!r} carries nested routes this tool "
-                         "does not enumerate, after a path change")
-                paths = None
-        return paths, changed
+                                 f"/v1/watcher space to {d} (port {port}) (a strip/replace/rewrite before reverse_proxy - handle_path, "
+                                 "uri, the proxy's own rewrite; a matcher after the change only narrows it; not proven to stay "
+                                 "outside): only the snippet may route the prefix to operator-query (§9.14.3, wac-097)")
+            elif _nested_route_keys(h):
+                U, C = [], None              # unknown container: reported by _container_check
+        return U, C
 
-    def walk_list(sub: list, paths, changed: bool, trail: tuple, match, stack: tuple) -> tuple[list | None, bool]:
-        cur, cur_changed = paths, changed
+    def walk_list(sub: list, U, C, trail: tuple, match, stack: tuple) -> tuple:
+        # A route's change reaches its later siblings only when the route can hand the request on (_route_may_continue),
+        # and never a later route of the SAME group (Caddy skips the rest of a group once one of its routes matched).
+        contribs: list = []
         for i, r in enumerate(sub or []):
             if id(r) in skip:
                 continue
-            inner, constrained = _paths_after_match(cur, r.get("match"))
-            after, after_changed = walk(r.get("handle") or [], inner, False if constrained else cur_changed,
-                                        trail + (i,), r.get("match") or match, stack)
-            cur, cur_changed = _paths_union(cur, after), cur_changed or after_changed
-        return cur, cur_changed
+            g = r.get("group")
+            iU, iC = U, C
+            for cg, aU, aC in contribs:
+                if g is None or cg != g:
+                    iU, iC = _paths_union(iU, aU), _paths_union(iC, aC)
+            m = r.get("match")
+            aU, aC = walk(r.get("handle") or [], _narrow_keep(iU, m), _narrow_keep(iC, m), trail + (i,), m or match, stack)
+            if _route_may_continue(r):
+                contribs.append((g, aU, aC))
+        for _g, aU, aC in contribs:
+            U, C = _paths_union(U, aU), _paths_union(C, aC)
+        return U, C
 
     for index, route in enumerate(routes):
         if id(route) in skip or _host_excludes_route(route, host, True):
             continue
-        start, _c = _paths_after_match(None, route.get("match"))
-        walk(route.get("handle") or [], start, False, (index,), route.get("match"), ())
+        m = route.get("match")
+        walk(route.get("handle") or [], _narrow_keep(None, m), [], (index,), m, ())
     return judged
 
 
@@ -1949,6 +2069,10 @@ def run_verify(config: dict, lines: list[Line], *, host: str, listen_port: str, 
                     _check_gateway_outcome(rep, f"{method} {line.sample()}", out, line, upstream)
     named = server.get("named_routes") or {}
     errors = (server.get("errors") or {}).get("routes") or []
+    before_c = len(rep.failures)
+    inspected = _container_check(rep, server)
+    if len(rep.failures) == before_c:
+        rep.ok(f"every nested route container is one this tool follows ({inspected} handler(s) in routes, errors, named routes)")
     _forwarder_check(rep, server.get("routes", []), list(PREFIX_PROBES), host, upstream, skip, named=named)
     # wac-097 (review wac-096 🟡-1): the error chain (handle_errors) is a second entry; nothing in it may forward the prefix
     _forwarder_check(rep, errors, list(PREFIX_PROBES), host, upstream, set(), named=named, chain="errors ")
@@ -2519,8 +2643,8 @@ def rewrite_entry_targets(config: dict, listen_port: str) -> list[str]:
                 kind = h.get("handler")
                 if kind == "rewrite":
                     from_spec(h, here)
-                elif kind == "reverse_proxy":
-                    if isinstance(h.get("rewrite"), dict):
+                elif kind in ("reverse_proxy", "intercept"):
+                    if kind == "reverse_proxy" and isinstance(h.get("rewrite"), dict):
                         from_spec(h["rewrite"], here)
                     for hr in h.get("handle_response") or []:
                         visit(hr.get("routes") or [], here, stack)
@@ -3288,6 +3412,17 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             "invoke of a named route that strips (named routes passed)": {"match": [{"path": ["/x/*"]}], "handle": [{"handler": "invoke", "name": "strip"}]},
             "invoke of an unknown named route": {"match": [{"path": ["/x/*"]}], "handle": [{"handler": "invoke", "name": "nope"}]},
             "unknown handler with nested routes": {"match": [{"path": ["/x/*"]}], "handle": [{"handler": "o0_plugin", "routes": []}]},
+            # wac-099 🔴-2 C1: intercept's handle_response routes run with the original request and are followed
+            "C1 intercept handle_response rewrite into /v1/watcher": {"match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [
+                {"handle": [{"handler": "intercept", "handle_response": [{"routes": [{"group": "g", "handle": [{"handler": "rewrite",
+                    "uri": "/v1/watcher/dialogs"}]}, {"handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]},
+                            {"handler": "static_response", "status_code": 404}]}]}]},
+            "subroute with its own errors routes": {"match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [],
+                                                                                           "errors": {"routes": []}}]},
+            # wac-099 🟡-1 (M12): an exact-literal path_regexp that starts with a prefix, then strip_suffix x
+            "E2 CONNECT ^/m/v1/watcherx$ + strip_suffix x": rw([{"method": ["CONNECT"], "path_regexp": {"pattern": "^/m/v1/watcherx$"}}], strip_path_suffix="x"),
+            "CONNECT ^/v1/watcherx$ + strip_suffix x (operator-query space)": rw([{"method": ["CONNECT"], "path_regexp": {"pattern": "^/v1/watcherx$"}}],
+                                                                                   strip_path_suffix="x"),
     }.items():
         assert path_change_into_space(route, {"strip": {"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]}}), \
             ("path change must count as entering the prefix space", name)
@@ -3507,6 +3642,10 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         wrap_in_route(site)
 
     browser = lambda s: s[-2]["handle"][0]["routes"][0]["handle"]  # noqa: E731
+
+    def inject_rp() -> dict:
+        return {"handler": "reverse_proxy", "headers": {"request": {"set": {"Authorization": ["Bearer {env.SYSTEM_OBSERVER_TOKEN}"]}}},
+                "upstreams": [{"dial": "127.0.0.1:8183"}]}
     variants = {
         # route set (a)
         "missing list line": lambda s: s.pop(gw_index(s, "trading/briefings")),
@@ -3672,6 +3811,12 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         "g18 handle_path /x/* to operator-query with the observer token": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/x/*"]}],
             "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}, {"handler": "reverse_proxy",
                 "upstreams": [{"dial": "127.0.0.1:8183"}], "headers": {"request": {"set": {"Authorization": ["Bearer {env.SYSTEM_OBSERVER_TOKEN}"]}}}}]}]}]}),
+        # isolated (wac-099 rework): without the panel /v1/* forwarder, a pre-snippet path change can only feed the snippet, so only
+        # step 1's path-change rule (not the two-set forwarder walk) sees it
+        "g16 without the panel: CONNECT strip_prefix /x + request_header on /x/*": lambda s: (
+            s.pop(next(i for i, r in enumerate(s) if (r.get("match") or [{}])[0].get("path") == ["/v1/*"])),
+            s.insert(0, {"match": [{"method": ["CONNECT"], "path": ["/x/*"]}], "handle": [{"handler": "rewrite", "strip_path_prefix": "/x"},
+                                                                                        inject_observer()]})),
         # isolated: behind the fallback, nothing injected, no probe or sample reaches /x/*: only the path-change forwarder rule
         "handle_path /x/* to operator-query, nothing injected": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/x/*"]}],
             "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"},
@@ -3740,6 +3885,42 @@ def cmd_selftest(args: argparse.Namespace) -> int:
                 {"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]},
                 {"handle": [{"handler": "reverse_proxy", "rewrite": {"uri": "/ping"}, "upstreams": [{"dial": "127.0.0.1:7001"}],
                              "handle_response": [{"routes": [{"handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}]}]}]}),
+        # wac-099 🔴-1 (review wac-099 A1, A6, A7, A8): a matcher AFTER the path change (reverse_proxy /v1/*, handle /v1/*)
+        "A1 handle_path /x/* { reverse_proxy /v1/* <oq> +observer }": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/x/*"]}],
+            "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]},
+                                                         {"match": [{"path": ["/v1/*"]}], "handle": [inject_rp()]}]}]}),
+        "A6 handle_path /x/* { handle /v1/* { reverse_proxy <oq> +observer } }": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+            "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]},
+                {"group": "group1", "match": [{"path": ["/v1/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [inject_rp()]}]}]}]}]}),
+        "A7 handle /x/* { uri path_regexp ^/x/ /; reverse_proxy /v1/* <oq> +observer }": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+            "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "path_regexp": [
+                {"find": "^/x/", "replace": "/"}]}]}, {"match": [{"path": ["/v1/*"]}], "handle": [inject_rp()]}]}]}),
+        "A8 handle /x/* { rewrite * /v1{query.p}; reverse_proxy /v1/* <oq> +observer }": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+            "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [{"group": "group17", "handle": [{"handler": "rewrite",
+                "uri": "/v1{http.request.uri.query.p}"}]}, {"match": [{"path": ["/v1/*"]}], "handle": [inject_rp()]}]}]}),
+        # wac-099 🔴-2 (review wac-099 C1): intercept's handle_response rewrites and forwards
+        "C1 handle /x/* { intercept { handle_response { rewrite * /v1/watcher/dialogs; reverse_proxy <oq> +observer } } respond 404 }":
+            lambda s: s.insert(fb(s) + 1, {"group": "group22", "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [
+                {"handler": "intercept", "handle_response": [{"routes": [{"group": "group17", "handle": [{"handler": "rewrite", "uri": "/v1/watcher/dialogs"}]},
+                                                                         {"handle": [inject_rp()]}]}]},
+                {"handler": "static_response", "status_code": 404}]}]}]}),
+        # isolated: the forwarder inside intercept's handle_response has its own /v1/* matcher, so only the path-change
+        # forwarder rule, following intercept, sees it
+        "C1b intercept handle_response { rewrite * /v1/watcher/dialogs; reverse_proxy /v1/* <oq> +observer }": lambda s: s.insert(fb(s) + 1, {
+            "group": "group22", "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [
+                {"handler": "intercept", "handle_response": [{"routes": [{"group": "group17", "handle": [{"handler": "rewrite", "uri": "/v1/watcher/dialogs"}]},
+                                                                         {"match": [{"path": ["/v1/*"]}], "handle": [inject_rp()]}]}]},
+                {"handler": "static_response", "status_code": 404}]}]}]}),
+        # isolated: matcher cannot hit, no path change: only _container_check refuses what it cannot follow
+        "unknown container on /zzz/* (no path change, matcher misses the prefix)": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+            "match": [{"path": ["/zzz/*"]}], "handle": [{"handler": "o0_plugin", "routes": [{"handle": [{"handler": "reverse_proxy",
+                "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
+        "subroute with its own errors routes on /zzz/*": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/zzz/*"]}],
+            "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "static_response", "status_code": 204}]}],
+                        "errors": {"routes": [{"handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}}]}),
+        # review wac-099 E2 / M12: exact-literal path_regexp, CONNECT-only
+        "E2 CONNECT ^/v1/watcherx$ + uri strip_suffix x": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"], "path_regexp": {"name": "e2",
+            "pattern": "^/v1/watcherx$"}}], "handle": [{"handler": "rewrite", "strip_path_suffix": "x"}]}),
         "reverse_proxy <oq> { rewrite {uri /v1/auth, uri_substring auth -> watcher/dialogs} } on /foo/*": lambda s: s.insert(fb(s) + 1, {
             "group": "group21", "match": [{"path": ["/foo/*"]}], "handle": [{"handler": "reverse_proxy", "rewrite": {"uri": "/v1/auth", "uri_substring": [
                 {"find": "auth", "replace": "watcher/dialogs"}]}, "upstreams": [{"dial": "127.0.0.1:8183"}]}]}),
@@ -3775,6 +3956,20 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             "match": [{"path": ["/m/*"]}], "handle": [{"handler": "invoke", "name": "nope"}]}),
         "handle_errors forwards /api/* to the watcher (basic auth bypass by the error chain)": lambda c: with_errors(c, [{"handler": "reverse_proxy",
             "upstreams": [{"dial": "127.0.0.1:9090"}]}], [{"path": ["/api/*"]}]),
+        # review wac-099 E1 (M09): handle_path inside handle_errors
+        "E1 handle_errors { handle_path /x/* { reverse_proxy <oq> +observer } respond 404 }": lambda c: with_errors(c, [{"handler": "subroute",
+            "routes": [{"match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [
+                {"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]}, {"handle": [copy.deepcopy(oq_obs)]}]}]},
+                {"handle": [{"handler": "static_response", "status_code": 404}]}]}]),
+        # isolated (review M09): the error-chain forwarder has its own /v1/* matcher: only the error chain's path-change rule
+        "E1b handle_errors { handle_path /x/* { reverse_proxy /v1/* <oq> +observer } }": lambda c: with_errors(c, [{"handler": "subroute",
+            "routes": [{"match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [
+                {"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]}, {"match": [{"path": ["/v1/*"]}], "handle": [copy.deepcopy(oq_obs)]}]}]}]}]),
+        # review wac-099 M10: a server-level route with two matcher sets, one for another host and one for the site host
+        "server route [host other | host site + /x/*] { strip /x; reverse_proxy <oq> }": lambda c: srv(c)["routes"].append({
+            "match": [{"host": ["other.example"]}, {"host": ["jp-bot.balen.wang"], "path": ["/x/*"]}], "terminal": True,
+            "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"},
+                                                                      {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
         "q2 handle_errors { reverse_proxy <oq> { rewrite ?a=1 } }": lambda c: with_errors(c, [{"handler": "reverse_proxy", "rewrite": {"uri": "?a=1"},
                                                                                           "upstreams": [{"dial": "127.0.0.1:8183"}]}]),
         "q3 handle_errors { reverse_proxy sink { rewrite /ping; handle_response { reverse_proxy <oq> } } }": lambda c: with_errors(c, [{
@@ -3835,6 +4030,17 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             {"handler": "rewrite", "strip_path_prefix": "/api"}]}),
         # (a query-only uri counts as "may hit" since review wac-096 second round 🔴-A: see 1b')
         "method-only rewrite": lambda s: s.insert(0, {"match": [{"path": ["/old/*"]}], "handle": [{"handler": "rewrite", "method": "GET"}]}),
+        # wac-099: a matcher after the change that proves the forwarded path outside both spaces; an intercept that only answers
+        "handle_path /x/* { reverse_proxy /reports/* <oq> }": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/x/*"]}],
+            "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]},
+                {"match": [{"path": ["/reports/*"]}], "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
+        # a route that stops (it proxies elsewhere) hands no changed path to later routes of another group
+        "stopping handle_path /x/* to another service, then a route-group /v1/* forwarder to <oq>": lambda s: (
+            s.insert(fb(s) + 1, {"group": "group99", "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [
+                {"handler": "rewrite", "strip_path_prefix": "/x"}, {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:7000"}]}]}]}]}),
+            s.insert(fb(s) + 2, {"match": [{"path": ["/v1/*"]}], "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]})),
+        "intercept /x/* { handle_response { respond 204 } } before the snippet": lambda s: s.insert(0, {"match": [{"path": ["/x/*"]}],
+            "handle": [{"handler": "intercept", "handle_response": [{"routes": [{"handle": [{"handler": "static_response", "status_code": 204}]}]}]}]}),
         # wac-097 (review wac-096 🔴-1): forward_auth's own rewrite to a constant outside both spaces, on a matcher that cannot hit
         "forward_auth /bar/* <oq> { uri /v1/auth } before the snippet": lambda s: s.insert(0, {"match": [{"path": ["/bar/*"]}], "handle": [
             {"handler": "reverse_proxy", "rewrite": {"method": "GET", "uri": "/v1/auth"}, "upstreams": [{"dial": "127.0.0.1:8183"}],

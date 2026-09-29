@@ -59,6 +59,10 @@
 #      strip (q1, q4), handle_errors { reverse_proxy <oq> { rewrite ?a=1 } } (q2), and handle_response routes behind a proxy
 #      that rewrites its copy to /ping, in the error chain (q3) and after handle_path: verify FAILS; q1 as a probe copy also
 #      fails live; an injection made only when the caller sends NO Authorization is caught by the entries' second send.
+#      Review wac-099 (wac-099 rework): A1 handle_path /x/* { reverse_proxy /v1/* <oq> }, A6 handle_path + handle /v1/*, A7
+#      uri path_regexp then reverse_proxy /v1/*, A8 placeholder rewrite then reverse_proxy /v1/*, C1 intercept handle_response
+#      rewrite + forward, E1 handle_path inside handle_errors, E2 CONNECT ^/v1/watcherx$ + strip_suffix x: verify FAILS
+#      (A1 and C1 also live); handle_path /x/* { reverse_proxy /reports/* <oq> } and a top-level intercept that only answers pass.
 # Local only: 127.0.0.1 ports, a temporary directory, a random one-off basic-auth password.
 set -eo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -208,6 +212,18 @@ bad("q3-handle-errors-handle-response-original-request", good.replace(site_impor
 bad("q4-handle-path-proxy-rewrite-fragment", good.replace(site_import, site_import + f"\thandle_path /x/* {{\n\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\trewrite \"#frag\"\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n"))
 bad("handle-path-handle-response-original-request", good.replace(site_import, site_import + "\thandle_path /x/* {\n\t\treverse_proxy 127.0.0.1:7001 {\n\t\t\trewrite /ping\n\t\t\t@any status 2xx 3xx 4xx 5xx\n\t\t\thandle_response @any {\n\t\t\t\treverse_proxy 127.0.0.1:8183\n\t\t\t}\n\t\t}\n\t}\n"))
 # a "default token" shape: injected only when the caller sends NO Authorization (the probe sends each entry both ways)
+# wac-099 (review wac-099 🔴-1, 🔴-2, 🟡-1): a matcher AFTER the path change only narrows it (A1, A6, A7, A8: only verify can
+# see A7 and A8, the probe builds no entry for a path_regexp or placeholder rewrite); intercept's handle_response (C1);
+# handle_path inside handle_errors (E1); an exact-literal regexp + strip_suffix x (E2)
+bad("A1-handle-path-proxy-v1-matcher-obs", good.replace(site_import, site_import + f"\thandle_path /x/* {{\n\t\treverse_proxy /v1/* 127.0.0.1:8183 {{\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n"))
+bad("A6-handle-path-nested-handle-v1-obs", good.replace(site_import, site_import + f"\thandle_path /x/* {{\n\t\thandle /v1/* {{\n\t\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\t\theader_up {obs}\n\t\t\t}}\n\t\t}}\n\t}}\n"))
+bad("A7-uri-path-regexp-proxy-v1-matcher-obs", good.replace(site_import, site_import + f"\thandle /x/* {{\n\t\turi path_regexp ^/x/ /\n\t\treverse_proxy /v1/* 127.0.0.1:8183 {{\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n"))
+bad("A8-rewrite-placeholder-proxy-v1-matcher-obs", good.replace(site_import, site_import + f"\thandle /x/* {{\n\t\trewrite * /v1{{query.p}}\n\t\treverse_proxy /v1/* 127.0.0.1:8183 {{\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n"))
+bad("C1-intercept-handle-response-rewrite-oq-obs", good.replace(site_import, site_import + f"\thandle /x/* {{\n\t\tintercept {{\n\t\t\thandle_response {{\n\t\t\t\trewrite * /v1/watcher/dialogs\n\t\t\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\t\t\theader_up {obs}\n\t\t\t\t}}\n\t\t\t}}\n\t\t}}\n\t\trespond 404\n\t}}\n"))
+bad("E1-handle-errors-handle-path-oq-obs", good.replace(site_import, site_import + f"\thandle_errors {{\n\t\thandle_path /x/* {{\n\t\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\t\theader_up {obs}\n\t\t\t}}\n\t\t}}\n\t\trespond 404\n\t}}\n"))
+bad("E2-connect-exact-regexp-strip-suffix", good.replace(site_import, site_import + "\t@s {\n\t\tmethod CONNECT\n\t\tpath_regexp ^/v1/watcherx$\n\t}\n\turi @s strip_suffix x\n"))
+fine("handle-path-proxy-reports-matcher", good.replace(site_import, site_import + "\thandle_path /x/* {\n\t\treverse_proxy /reports/* 127.0.0.1:8183\n\t}\n"))
+fine("C4-intercept-toplevel-respond", good.replace(site_import, site_import + "\tintercept /x/* {\n\t\thandle_response {\n\t\t\trespond 204\n\t\t}\n\t}\n"))
 bad("g16-inject-only-without-auth", good.replace(site_import, site_import + f"\t@s {{\n\t\tpath /x/*\n\t\tnot header Authorization *\n\t}}\n\trequest_header @s {obs}\n\turi @s strip_prefix /x\n"))
 PY
 for f in "$WORK"/bad-*.Caddyfile; do
@@ -426,7 +442,9 @@ for spec in "g16-uri-strip-prefix-into-prefix|rewrite entry GET '/x/m/v1/watcher
             "proxy-rewrite-v1-watcher-injected|rewrite entry GET '/foo/x'" \
             "handle-errors-to-oq-injected|browser /watcher/ without credentials -> 200, stub hits 1" \
             "q1-handle-path-proxy-rewrite-query|rewrite entry GET '/x/m/v1/watcher/" \
-            "g16-inject-only-without-auth|rewrite entry GET '/x/m/v1/watcher/status' (without Authorization)"; do
+            "g16-inject-only-without-auth|rewrite entry GET '/x/m/v1/watcher/status' (without Authorization)" \
+            "A1-handle-path-proxy-v1-matcher-obs|rewrite entry GET '/x/v1/watcher/" \
+            "C1-intercept-handle-response-rewrite-oq-obs|rewrite entry GET '/x/x'"; do
   n="${spec%%|*}"; want="${spec#*|}"
   rc=0; probe --caddy "$CADDY" --caddyfile "$WORK/bad-$n.Caddyfile" > "$WORK/probe-$n.txt" 2>&1 || rc=$?
   if [ "$rc" != 0 ] && grep -q '^FAIL verify:' "$WORK/probe-$n.txt" && grep -q "^FAIL $want" "$WORK/probe-$n.txt" \
