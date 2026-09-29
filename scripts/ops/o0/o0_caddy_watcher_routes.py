@@ -1766,11 +1766,15 @@ _RESPONDERS_STOP = {"reverse_proxy", "static_response", "error", "copy_response"
 
 def _handlers_stop(handlers: list) -> bool:
     """Does this handler list never call the next route of its list? True only when a responder that never passes on
-    (reverse_proxy, static_response, error, copy_response, file_server without pass_thru) or a subroute whose routes
+    (reverse_proxy without handle_response, static_response, error, copy_response, file_server without pass_thru) or a subroute whose routes
     include an unconditional, ungrouped route that stops, is reached on every path. Anything else: may continue."""
     for h in handlers or []:
         kind = h.get("handler")
-        if kind in _RESPONDERS_STOP or (kind == "file_server" and not h.get("pass_thru")):
+        # forward_auth is a reverse_proxy with handle_response: on auth success it falls through to the next
+        # handler, so it does not stop (review wac-099 r2, D2/D5).
+        if (kind in _RESPONDERS_STOP and not (kind == "reverse_proxy" and h.get("handle_response"))) or (
+            kind == "file_server" and not h.get("pass_thru")
+        ):
             return True
         if kind == "subroute":
             if any(not r.get("match") and "group" not in r and _handlers_stop(r.get("handle") or []) for r in h.get("routes") or []):
