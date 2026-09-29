@@ -850,20 +850,20 @@ CREATE TABLE IF NOT EXISTS config_audit (
   - `(watcher_gateway_upstream)`（O-0 手写，§9.14.3）：恰好一次 `uri strip_prefix /m`，然后 `reverse_proxy 127.0.0.1:8186`。它的 `reverse_proxy` 不带 `rewrite` 对象，也不带 `transport` 覆盖。
   - 片段 `(watcher_gateway_routes)` 的格式 v2 不变：生成物里不含上游地址，所以改端口不需要重新生成。
   - 直连守卫 `@wgw_direct` 保留，作为纵深防御。`(watcher_gateway_direct_guard)` 对其他站点**可选**。
-  - 对 operator-query（8183）或任何其他端口的转发，**本契约不作形状判定**：8183 上本来就没有网关。面板 `handle /v1/*`、`@mobile`、`forward_auth`、`handle_errors`、`invoke`、`handle_response`、`handle_path`、unix socket 上游、占位符主机名、`dynamic` 上游等现有或常见写法，只要不触发下面的 I-2，都不会因本契约失败。V-1 (c) 对其中与 `/m/v1/watcher` 前缀或片段顺序有关的形状，最多给出 `HINT DEFENSE_IN_DEPTH` 提示，不阻断（G-44）。唯一的例外是请求头操作：带 `copy_headers` 的 `forward_auth` 排在片段之前时，按 V-1 (a) 判失败。
+  - 对 operator-query（8183）或任何其他端口的转发，**本契约不作形状判定**：8183 上本来就没有网关。面板 `handle /v1/*`、`@mobile`、`forward_auth`、`handle_errors`、`invoke`、`handle_response`、`handle_path`、unix socket 上游、占位符主机名、`dynamic` 上游等现有或常见写法，只要不触发下面的 I-2，都不会因本契约失败。V-1 (c) 对其中与 `/m/v1/watcher` 前缀或片段顺序有关的形状，最多给出 `HINT DEFENSE_IN_DEPTH` 提示，不阻断（G-44）。仍然判失败的形状，以 V-1 (c) 的"仍判失败"清单为准：片段之前的请求头操作（含带 `copy_headers` 的 `forward_auth`）、改路径进 `/m/v1/watcher` 空间、`/m/v1/watcher` 前缀空间内的白名单外 handler、把前缀转发到 9090/9100/8186，以及一切与 8186 有关的形状（G-53）。
 - **入口不变式 I-2（取代 I-1；第四轮按用户"别卡太死"收敛）**：
   - **范围**：`caddy adapt` 之后的**整份** JSON（全部 app、全部 server、任意深度），但排除 V-1 (a) 认定的**每一个**片段逐路径组中，由 `(watcher_gateway_upstream)` 产生的 `reverse_proxy` 对象（仿生产片段约有 20 个；G-51）。
   - **判失败的情形**，出现任一即判 `GATEWAY_PORT_EXPOSED`：
     - (1) 任何字符串值含有独立的 `8186`，允许带前导零（G-50；正则 `(?<![0-9])0*8186(?![0-9])`。Go 把 `:08186` 当作端口 8186，审查 wac-108 已活体证实，网关桩收到了带注入凭据的请求）。这一条覆盖 dial、`upstreams`、`transport.network_proxy.url`、`forward_proxy_url`、健康检查的 `upstream`、非 http 的 app 等全部写法；
     - (2) 任何数值恰为 8186；
     - (3) 任何形如 `<数字>-<数字>` 的端口范围包含 8186（adapt 通常会把范围展开，展开后由 (1) 命中）；
-    - (4) （G-46，收录 wac-096 第五轮 🟡-A）**端口可能由请求决定**：dial 的端口部分，或整个 dial，含有 `{env.*}`、`{system.*}` 以外的任何占位符。这包括请求作用域的 `{http.request.*}`、`{http.regexp.*}`、`{http.matchers.*}`、`{http.vars.*}`，它们的简写 `{header.*}`、`{query.*}`、`{path.*}`、`{re.*}`、`{vars.*}`、`{cookie.*}` 等，也包括 `map` 定义的自定义输出。理由是客户端可以借此把上游端口指到 8186，审查 wac-096 第五轮已活体证实。`dynamic` 上游的 `port` 字段按同一规则判定。
+    - (4) （G-46，收录 wac-096 第五轮 🟡-A）**端口可能由请求决定**：dial 的端口部分，或整个 dial，含有与请求无关的全局占位符（`{env.*}`、`{system.*}`、`{file.*}`、`{time.*}`；G-52 按实现补入后两类）以外的任何占位符。这包括请求作用域的 `{http.request.*}`、`{http.regexp.*}`、`{http.matchers.*}`、`{http.vars.*}`，它们的简写 `{header.*}`、`{query.*}`、`{path.*}`、`{re.*}`、`{vars.*}`、`{cookie.*}` 等，也包括 `map` 定义的自定义输出。理由是客户端可以借此把上游端口指到 8186，审查 wac-096 第五轮已活体证实。四类全局占位符都不受客户端控制；其中 `{file.*}` 可以被本机进程改写，这与本机转发同属 PC-6 (iii) 的威胁面，所以交给 PC-6 (i) 人工确认。`dynamic` 上游的 `port` 字段按同一规则判定。
     - (5) （G-50）**代理 URL 按 dial 规则判定**：`transport.network_proxy.url`、`forward_proxy_url` 这类代理 URL，先用标准 URL 解析取出 host:port（缺省端口按 scheme 补齐），再按上面的 dial 规则判定：端口整数值为 8186 就失败，端口或整个 URL 含请求作用域占位符也失败。
   - **不因 I-2 失败**的写法：
     - unix socket 上游：到 8186 需要本机进程转发，这由 PC-6 (iii) 覆盖；
     - 主机名是占位符、端口是字面值且不是 8186；
     - `dynamic a`/`aaaa` 的 `port` 是字面值且不是 8186；
-    - 其他解析不出、字符串中又不含 8186 的上游，且只含 `{env.*}` 或 `{system.*}` 占位符，例如 `{env.OQ}`；代理 URL 中同样只含这两类占位符的也算。这类对象由 V-1 输出为 `UPSTREAM_UNRESOLVED` 信息行，交 PC-6 (i) 人工确认它不会解析到 8186。（G-46：端口含请求作用域占位符的不在此列，由 (4) 判失败。）
+    - 其他解析不出、字符串中又不含 8186 的上游，且只含 `{env.*}`、`{system.*}`、`{file.*}`、`{time.*}` 占位符，例如 `{env.OQ}`、`127.0.0.1:{file.port.txt}`；代理 URL 中同样只含这四类占位符的也算。这类对象由 V-1 输出为 `UPSTREAM_UNRESOLVED` 信息行，交 PC-6 (i) 人工确认它不会解析到 8186。（G-46：端口含请求作用域占位符的不在此列，由 (4) 判失败。）
   - **为什么这样就够**：
     - 网关只存在于 8186，而 8186 只监听回环；
     - 能把公网请求送到回环 8186 的，只有 Caddy 中写有 8186 的对象（dial、代理 URL 等，由 (1)–(3) 覆盖），以及 Caddy 以外的本机转发（由 PC-6 (iii) 覆盖）；
@@ -888,7 +888,7 @@ CREATE TABLE IF NOT EXISTS config_audit (
       - **降为 `HINT DEFENSE_IN_DEPTH`**（不阻断；写进结果行；由 PC-6 (i) 逐条人工确认它不会指向 8186）：
         - (i) 片段之前的**普通** `forward_auth`：adapt 后是一个 `reverse_proxy`，不命中 I-2，不带 `dynamic_upstreams`，`handle_response` 路由里只有 `vars` 或不带 `request` 的 `headers`。它在 2xx 时原样放行原请求，碰不到 8186，也不改调用方的 `Authorization`；
         - (ii) 片段之前、只可能把路径改进 `/v1/watcher` 空间（而不是 `/m/v1/watcher` 空间）的规则，因为 8183 上没有网关；
-        - (iii) 位于兜底与守卫之后、工具无法求值的匹配器或处理器，例如 SPA 的 `try_files`，因为这些路由已被兜底与守卫的 404 截断；
+        - (iii) 位于兜底与守卫之后、工具无法求值的匹配器或处理器，例如 SPA 的 `try_files`。提示标签是 `HINT UNCOMPARABLE_AFTER_SNIPPET`，其余三类是 `HINT DEFENSE_IN_DEPTH`；PC-6 (i) 逐条复核**每一个** HINT 行，不分标签（G-53）。它不阻断的理由是：这些路由对 `/m/v1/watcher` 与 `/v1/watcher` 前缀已被兜底与守卫的 404 截断，其中与 8186 有关的内容又由 I-2 独立判失败。这是一处有明确理由的"无法比较但不阻断"，**不得**当作"无法比较即通过"的先例；
         - (iv) 指向 8183 或其他既不是 8186、也不是 9090/9100 的端口的旧形状：把前缀转发给 8183、改路径后转发给 8183、上游动态或解析不出（其中 8186 的部分由 I-2 判定）、未知或递归的 `invoke`、只是提到 `watcher` 的 `path_regexp`。
       
       以上提示形状一旦改拨 8186，或者其中出现 8186，都由 I-2 判失败。本条只规定结果口径；工具已有的精确判定（例如具体的 handler 白名单）照旧。
@@ -929,25 +929,21 @@ CREATE TABLE IF NOT EXISTS config_audit (
   - **部署前只读核对（证据）**：
     - 共享目录中每个受版本控制的文件，逐个核对 sha256 与 `67b401a` 基线一致，一致则输出 `MANIFEST_OK cp-shared-vs-67b401a`。（G-47，收录 wac-096 第五轮 🟢-3 与 wac-108 🟡-6，修订 G-32 的"不一致即停工"）不一致时：
       - 输出 `MANIFEST_DRIFT cp-shared-vs-67b401a` 并停工，不修复、不覆盖、不还原任何文件；
-      - 漂移清单每行为 `MODIFIED <相对路径> <当前 sha256>` 或 `MISSING <相对路径>`，按路径排序；`drift_sha256` 是整份清单文本的 sha256，因此**同时绑定了路径与内容**；
+      - 漂移清单每行为 `MODIFIED <相对路径> sha256=<当前 sha256 十六进制>` 或 `MISSING <相对路径> sha256=-`，整份清单按整行排序，所以 `MISSING` 行排在 `MODIFIED` 行之前（G-53：按实现 `o0_tool.py:979-996` 写定；改工具会让已有的 `drift_sha256` 失效）；`drift_sha256` 是整份清单文本的 sha256，因此**同时绑定了路径与内容**；
       - 由用户按 O0-A08D 决定：(A) 接受恰好这份差异，preflight 加 `--accept-shared-drift <drift_sha256>` 重跑；差异的路径或任一文件内容有任何变化，都会得到另一个 `drift_sha256`，仍然停工；(B) 先另立授权任务，把共享目录对齐。
       
       无论选哪条路，preflight 之后对共享目录的全量快照（每个文件的 sha256、mode、uid、gid）在 apply 前、apply 后、回滚后都必须逐项相同，这是硬门禁。本阶段本来就不读写共享目录，真正的不变式正是"前后逐字相同"；
     - 全部单元的 `NeedDaemonReload`，范围至少包括 `trader-v3-*`、`caddy` 与交易节点相关单元，最好直接用 `systemctl list-units --all` 取全量。任一为 `yes` 就停工，不执行 daemon-reload，输出 `DAEMON_RELOAD_PENDING units=<单元列表>`，由用户按 O0-A08R 决定是否单独授权一次 reload（wac-096 第五轮 🟢-4）。这维持 wac-060 已定的规则：`daemon-reload` 作用于整台主机，会把别处待加载的改动一并加载；
     - 记录另三个控制面单元的 MainPID 与启动时间；
     - 8186 未被监听；
-    - 共享 venv 中新代码所需的依赖齐全。（G-48，收录 wac-096 第五轮 🟡-C）这一项**就是**下面这次 import 冒烟，不另跑 `pip check`、`pip install --dry-run`，也不以 root 身份不带 `-B` 做 import，因为这些做法可能写入 pip 缓存或 `.pyc`：
-      - 以新单元的 OS 用户身份运行 `.venv-cp/bin/python -B`，`env -i` 只放白名单 env 与 `CONTROL_PLANE_APP_ROLE=watcher-gateway`，工作目录是 staging 中展开的新目录下的 `services/control-plane/api`；
-      - 执行 `import read_api` 与 `create_app("watcher-gateway")`，要求网关路由数大于 0；
-      - `ImportError`/`ModuleNotFoundError` 输出 `DEPENDENCY_MISSING <模块名>` 并停工，其他非零退出同样停工；
-      - 事后断言共享 venv 与新目录的文件清单、元数据都没有变化（没有生成 `__pycache__`）。
-      
-      这次冒烟同时承担新单元步骤第 4 步的审计钩子检查。
+    - 共享 venv 中新代码所需的依赖齐全。（G-48，收录 wac-096 第五轮 🟡-C；G-52 按实现改为分两次运行）这一项**就是** import 冒烟，不另跑 `pip check`、`pip install --dry-run`，也不以 root 身份**不带** `-B` 做 import，因为这些做法可能写入 pip 缓存或 `.pyc`。冒烟分两次：
+      - **preflight（只读）**：这时新单元的 OS 用户还不存在，preflight 又是只读的，不能为冒烟提前建用户，所以**以 root** 运行 `.venv-cp/bin/python -B`。`env -i` 只放白名单 env 与 `CONTROL_PLANE_APP_ROLE=watcher-gateway`，工作目录是 staging 中展开的新目录下的 `services/control-plane/api`，并带审计钩子。执行 `import read_api` 与 `create_app("watcher-gateway")`，要求网关路由数大于 0。`ImportError`/`ModuleNotFoundError` 输出 `DEPENDENCY_MISSING <模块名>` 并停工，其他非零退出同样停工。事后断言共享 venv 与新目录的文件清单、元数据都没有变化：没有生成 `__pycache__`，这就证明了零写入。
+      - **apply 新单元步骤第 4 步**：在新目录安装之后、写 env 与单元文件之前，**以新单元的 OS 用户**（`setpriv`）对**已安装的**新目录再跑一次同样的冒烟，证明这个用户以实际权限能够加载。失败即自动回滚。
   - **新单元步骤**：
     1. 上面的只读核对全部通过；
     2. 创建 OS 用户；
     3. 用 `git archive` 展开新目录，按清单做 sha 校验，权限设为 root 0755；
-    4. 用新目录与白名单 env 做 import 冒烟，并用审计钩子证明没有从新目录与 venv 以外加载模块或文件；
+    4. 以新单元的 OS 用户（`setpriv`）对已安装的新目录做 import 冒烟：`python -B`、白名单 env、审计钩子，证明没有从新目录与 venv 以外加载模块或文件，且网关路由数大于 0；失败即自动回滚（G-52）；
     5. 按白名单生成 env 文件（只打印变量名）；
     6. 安装单元文件；
     7. 再核对一次 `NeedDaemonReload`：除第 6 步装的新单元外全为 `no`；
@@ -1369,10 +1365,10 @@ CREATE TABLE IF NOT EXISTS config_audit (
    - 独立的 `8186` 字符串，允许前导零；
    - 数值 8186；
    - 端口范围含 8186；
-   - 端口或整个 dial 含 `{env.*}`、`{system.*}` 以外的占位符；
+   - 端口或整个 dial 含 `{env.*}`、`{system.*}`、`{file.*}`、`{time.*}` 以外的占位符（与实现 `STATIC_PLACEHOLDER_PREFIXES` 一致，G-52）；
    - 代理 URL 解析出 host:port 后按 dial 规则判定。
    
-   排除的片段上游是**每一个**片段逐路径组中的 `reverse_proxy`。解析不出、又只含 `{env.*}`、`{system.*}` 的，只输出 `UPSTREAM_UNRESOLVED` 信息行。对 8183 的转发**不作任何导致失败的形状判定**，按 §9.14.6 V-1 (c) 最多给 `HINT DEFENSE_IN_DEPTH`（G-44、G-46、G-50）。V-4 的文本规则同步允许前导零。
+   排除的片段上游是**每一个**片段逐路径组中的 `reverse_proxy`。解析不出、又只含上述四类全局占位符的，只输出 `UPSTREAM_UNRESOLVED` 信息行。对 8183 的转发**不作任何导致失败的形状判定**，按 §9.14.6 V-1 (c) 最多给 `HINT`（`DEFENSE_IN_DEPTH` 或 `UNCOMPARABLE_AFTER_SNIPPET`）（G-44、G-46、G-50、G-53）。V-4 的文本规则同步允许前导零。
 4. **RS-13 V-2、V-3**：
    - 在 app 站点模拟四个 `/v1/watcher` 请求，期望守卫返回 404。
    - 探针用 8183 与 8186 两个独立的桩：表内路径只命中 8186 桩，`Authorization` 保持原值；其余所有探针都不命中 8186 桩。
@@ -1417,16 +1413,15 @@ CREATE TABLE IF NOT EXISTS config_audit (
      - 全部单元的 `NeedDaemonReload` 都必须为 `no`，否则输出 `DAEMON_RELOAD_PENDING units=<列表>` 并停工，交 O0-A08R；
      - 8186 没有监听，新单元、系统用户与新目录都不存在（或与 bundle 一致）；
      - 记录另三个单元的 MainPID 与启动时间；
-     - 依赖检查：就是 §9.14.6 G-48 规定的 `python -B` import 冒烟（新单元的 OS 用户、`env -i` 白名单、staging 中的新目录），缺模块时输出 `DEPENDENCY_MISSING <模块名>`；事后共享 venv 与新目录的元数据不变；
      - 在 staging 中展开 `git archive <release-sha>`，按清单核对 sha；
-     - 做 import 冒烟：新目录、白名单 env、审计钩子，断言没有从新目录与 venv 以外加载任何东西；网关路由数大于 0；
+     - 依赖检查与 import 冒烟是同一件事（§9.14.6 G-48、G-52）：以 root 运行 `python -B`，`env -i` 白名单，staging 中的新目录，带审计钩子；网关路由数大于 0；缺模块时输出 `DEPENDENCY_MISSING <模块名>`；事后共享 venv 与新目录的元数据不变；
      - 按白名单拼出变量名清单（只打印名字），并做 reader token 互异检查；
      - 写门禁。
    - **apply**：
      1. 核对门禁；
      2. 再核对一次 `NeedDaemonReload`；
      3. 创建系统用户；
-     4. 把新目录从 staging 以 root 0755 安装到 `$TRADER_ROOT/releases/watcher-gateway/<release-sha>/`，并做 sha 校验；
+     4. 把新目录从 staging 以 root 0755 安装到 `$TRADER_ROOT/releases/watcher-gateway/<release-sha>/`，并做 sha 校验；随后以新单元用户（`setpriv`）对已安装目录再跑一次冒烟，失败即自动回滚（G-52）；
      5. 生成 0600 的 env；
      6. 安装单元；
      7. `NeedDaemonReload` 核对（排除新单元）；
@@ -1503,13 +1498,26 @@ CREATE TABLE IF NOT EXISTS config_audit (
 
 | # | 来源 | 改动 | 位置 |
 |---|---|---|---|
-| G-44 | wac-108 §4 (1)；用户要求"不要限制得那么死" | 消除 V-1 (c)"遮蔽检查不变"与 Caddy 条款"对 8183 不作形状判定"之间的矛盾。<br>仍判失败：片段之前的请求头操作（含带 `copy_headers` 的 `forward_auth`）、改路径进 `/m/v1/watcher` 空间、把前缀转发到 9090/9100/8186，以及一切与 8186 有关的形状。<br>降为 `HINT DEFENSE_IN_DEPTH`：片段之前的普通 `forward_auth`、只可能改进 `/v1/watcher` 空间的规则、兜底与守卫之后无法求值的形状（SPA `try_files` 等）、指向 8183 的旧形状。<br>V-1 (d) 改为"不作导致失败的形状判定，最多给提示"。 | §9.14.6 Caddy 条款、V-1 (c)(d)；RS-12、RS-15 |
+| G-44 | wac-108 §4 (1)；用户要求"不要限制得那么死" | 消除 V-1 (c)"遮蔽检查不变"与 Caddy 条款"对 8183 不作形状判定"之间的矛盾。<br>仍判失败：片段之前的请求头操作（含带 `copy_headers` 的 `forward_auth`）、改路径进 `/m/v1/watcher` 空间、把前缀转发到 9090/9100/8186，以及一切与 8186 有关的形状。<br>降为 `HINT DEFENSE_IN_DEPTH`：片段之前的普通 `forward_auth`、只可能改进 `/v1/watcher` 空间的规则、兜底与守卫之后无法求值的形状（SPA `try_files` 等）、指向 8183 的旧形状。<br>V-1 (d) 改为"不作导致失败的形状判定，最多给提示"。 | （(iii) 的标签与 Caddy 条款措辞以 G-53 为准）§9.14.6 Caddy 条款、V-1 (c)(d)；RS-12、RS-15 |
 | G-45 | wac-108 §4 (2) | 凭据文件名澄清：线上文件仍是 `$TRADER_ROOT/secrets/control-plane/watcher-gateway.env`，没有改名；凭据集内部的持有方文件 `controlplane-watcher-gateway.env` 只是为了和 watcher 容器的 `/srv/trader-secrets/watcher-gateway.env` 区分，不属于契约的规定范围 | §9.14.6 凭据"值的来源" |
-| G-46 | wac-096 第五轮 🟡-A（E-2） | I-2 新增 (4)：dial 的端口部分或整个 dial 含 `{env.*}`、`{system.*}` 以外的占位符（请求作用域、`map` 输出等）即判失败，`dynamic` 的 `port` 同样处理；`UPSTREAM_UNRESOLVED` 只留给 `{env.*}`、`{system.*}` | §9.14.6 I-2；RS-12、RS-15 |
-| G-47 | wac-096 第五轮 🟢-3；wac-108 🟡-6（E-2） | 共享目录漂移：输出 `MANIFEST_DRIFT` 并停工，不修复任何文件；清单带每个文件的当前 sha256，`drift_sha256` 同时绑定路径与内容；由用户按 O0-A08D 决定用 `--accept-shared-drift <drift_sha256>` 重跑，还是先对齐；前后全量快照逐项相同仍是硬门禁。修订 G-32 的"不一致即停工" | §9.14.6 部署前只读核对、PC-6 (vi)；RS-16 |
-| G-48 | wac-096 第五轮 🟡-C（E-2） | 依赖检查就是 `python -B` import 冒烟：以新单元用户身份，`env -i` 白名单，staging 新目录，`create_app("watcher-gateway")` 的网关路由数大于 0；缺模块输出 `DEPENDENCY_MISSING`；事后共享 venv 不变；不得用 `pip check` 之类的做法 | §9.14.6 部署前只读核对；RS-16 |
+| G-46 | wac-096 第五轮 🟡-A（E-2） | I-2 新增 (4)：dial 的端口部分或整个 dial 含 `{env.*}`、`{system.*}` 以外的占位符（请求作用域、`map` 输出等）即判失败，`dynamic` 的 `port` 同样处理；`UPSTREAM_UNRESOLVED` 只留给 `{env.*}`、`{system.*}` | （G-52 已补入 `{file.*}`、`{time.*}`）§9.14.6 I-2；RS-12、RS-15 |
+| G-47 | wac-096 第五轮 🟢-3；wac-108 🟡-6（E-2） | 共享目录漂移：输出 `MANIFEST_DRIFT` 并停工，不修复任何文件；清单带每个文件的当前 sha256，`drift_sha256` 同时绑定路径与内容；由用户按 O0-A08D 决定用 `--accept-shared-drift <drift_sha256>` 重跑，还是先对齐；前后全量快照逐项相同仍是硬门禁。修订 G-32 的"不一致即停工" | （行格式以 G-53 为准）§9.14.6 部署前只读核对、PC-6 (vi)；RS-16 |
+| G-48 | wac-096 第五轮 🟡-C（E-2） | 依赖检查就是 `python -B` import 冒烟：以新单元用户身份，`env -i` 白名单，staging 新目录，`create_app("watcher-gateway")` 的网关路由数大于 0；缺模块输出 `DEPENDENCY_MISSING`；事后共享 venv 不变；不得用 `pip check` 之类的做法 | （运行身份与目录以 G-52 为准：preflight 以 root，apply 以单元用户）§9.14.6 部署前只读核对；RS-16 |
 | G-49 | wac-108 🟡-1（E-3）；wac-096 第五轮 🟡-B、🟢-4 | 适配 systemd ≥ 255 的 `unit_file_state_outdated` 语义：<br>apply 顺序改为：核对（排除新单元）→ `enable --no-reload` → 紧接着唯一一次 `daemon-reload` → 再核对全部为 `no` → 另三个单元 PID 不变 → `start`，全程不用 `--now`。<br>回滚改为：记录快照（不作门槛）→ 无条件 stop、`disable --no-reload`、删 env 与目录，先撤暴露 → reload 门看 disable 之前的快照。<br>`DAEMON_RELOAD_PENDING` 列出单元交给 O0-A08R；PC-6 (vii) 记录 `systemctl --version`；RS-16 的测试桩模拟 manager 过期标志 | §9.14.6 新单元步骤、回滚、PC-6；RS-16 |
 | G-50 | wac-108 🟡-5（E-4） | I-2 (1) 的正则允许前导零：`(?<![0-9])0*8186(?![0-9])`；新增 (5)：代理 URL 先解析出 host:port，再按 dial 规则判定；V-4 同步修改 | §9.14.6 I-2；RS-12、RS-15 |
 | G-51 | wac-096 第五轮 🟢-1、🟢-2 | 独立目录内容的措辞改为"在 p1 子集基础上取整个 `packages`"；I-2 排除的对象改为"每一个片段逐路径组中的 `reverse_proxy`"（复数） | §9.14.6 独立代码目录、I-2；RS-12 |
 
 没有收录的提示：wac-108 的 💭-4（新单元加 systemd 加固项）留给下一版契约考虑，本次不改单元 lint 的固定项；其余 💭 属于执行侧，由 wac-109 处理。
+
+**WGW-1.0.4 合并后勘误一 · 复审修订（2026-09-30；版本号不变）**
+
+来源：合审报告 `docs/agent-team/reviews/wac-109-110.md`（wac-113）。结论为 wac-110 FAIL，原因是 🔴-2：勘误一有两条写得与已实现、已验证的行为相反；另有 🟡-A/B/C 与 💭-1。
+
+Planner 裁定：以实现为准，修改契约。只改 §9 文字：§1–§8、YAML、四份生成物不变，`ROUTES_DIFF_EMPTY` 不变。
+
+| # | 来源 | 改动 | 位置 |
+|---|---|---|---|
+| G-52 | 🔴-2 (a)(b) | (a) I-2 (4) 中"与请求无关、客户端不可控"的全局占位符集合，补入 `{file.*}`、`{time.*}`，与实现 `STATIC_PLACEHOLDER_PREFIXES = ("env.", "system.", "file.", "time.")` 一致：它们只输出 `UPSTREAM_UNRESOLVED`，其余占位符（请求作用域、`map` 输出等）仍判失败。(b) G-48 的冒烟改为分两次：preflight 以 root 运行 `python -B`，`env -i` 白名单，staging 目录，事后元数据不变；apply 第 4 步在安装之后、写 env 与单元之前，以新单元用户（`setpriv`）对已安装目录再跑一次。原文"preflight 以单元用户在 staging 跑"已删除：那时用户还不存在，且会破坏 preflight 的只读性。RS-16 preflight 把"依赖检查"与"import 冒烟"合并为一条 | §9.14.6 I-2 (4)、不因 I-2 失败、部署前只读核对、新单元步骤第 4 步；RS-12、RS-16 |
+| G-53 | 🟡-A、🟡-B、🟡-C、💭-1 | Caddy 条款"唯一的例外是请求头操作"改为以 V-1 (c)"仍判失败"清单为准的完整表述。G-47 的漂移行格式按实现写定为 `MODIFIED <rel> sha256=<hex>` 与 `MISSING <rel> sha256=-`，整行排序。G-44 (iii) 的提示标签按实现写定为 `HINT UNCOMPARABLE_AFTER_SNIPPET`，PC-6 (i) 复核每一个 HINT 行；(iii) 旁补写"不阻断"的理由，并注明它不是"无法比较即通过"的先例 | §9.14.6 Caddy 条款、V-1 (c)、部署前只读核对；RS-12 |
+
+没有处理的 💭-2..💭-4：它们属于执行侧，其中 💭-2 是 V-4 文本规则的范围端点位数，由 Release 自行决定。
