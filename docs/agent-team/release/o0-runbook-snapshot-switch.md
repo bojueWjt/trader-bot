@@ -1,5 +1,7 @@
 # O-0 快照切换 runbook：数据基线、影子三路对照、切换、副本移除与回滚（wac-032 草案，wac-045 修订）
 
+> **WGW-1.0.4 之后的前提变化（wac-109，审查 wac-108 🟡-2；以此段为准）**：阶段 O 现在只新增 watcher-gateway 单元，**不升级 operator-query 的代码（C-0 快照 reader、`snapshot_warmup` 日志），也不往 `operator-query.env` 写 `WATCHER_SNAPSHOT_TOKEN`**（契约 §9.14.6）。生产 operator-query 仍是 `67b401a`，没有快照 reader。因此本 runbook（O0-A13 … O0-A17）**要等以后单独的控制面整体升级**：那次升级把 C-0 代码装进 operator-query 实际加载的目录、写入 snapshot token、重启 operator-query，有自己的契约、门禁、窗口与用户授权。WGW-1.0.4 的 O0-A08 不提供这些，**完成 O0-A08 不等于可以开始本 runbook**。下文凡写"随阶段 O 上线""阶段 O 写入"的，一律改读为"随那次控制面整体升级上线"。在此之前本 runbook 的门禁（每个 worker 一行预热成功日志、`$OQ` 中的 snapshot token）会 fail-closed 地挡住，不会误开开关。
+
 > 草案，未执行。对应计划 §4.1 第 2–4 步与回滚条款；契约 §9.10、§9.11（E-01、E-14）；审查 wac-001 🟡-9/💭-2/💭-3、wac-011 第 6 点、wac-011-r2 第 6 点、wac-013 💭-3、wac-022.md（wac-023）结论、wac-032 🟡-6/🟡-7/🟡-8。
 > 本 runbook 只在 `o0-runbook-deploy.md` 三个阶段全部完成并稳定之后才开始。全程不写控制面库、不碰记账五表、不新增控制面迁移、不发 RESUME、不下单。
 > 记号：`$S` = `/srv/trader-staging/o0-<UTC>`，`$T` = `$S/bundle/tools`，`$DB` = `/var/lib/docker/volumes/trader_signal-data/_data/watcher-trading.db`（真库），`$REP` = `/srv/trader-v3/state/operator-query-risk/trading-risk.db`（副本），`$OQ` = `/srv/trader-v3/secrets/control-plane/operator-query.env`。
@@ -9,9 +11,9 @@
 
 | 前置 | 状态 | 说明 |
 |---|---|---|
-| 部署 runbook 阶段 C、W、O 完成，快照开关为 0 | 未开始 | — |
+| 部署 runbook 阶段 C、W、O 完成，快照开关为 0；**另立的控制面整体升级已上线**（operator-query 加载 C-0 代码、`$OQ` 含 `WATCHER_SNAPSHOT_TOKEN`；WGW-1.0.4 的阶段 O 不做这两件事） | 未开始 | wac-109：审查 wac-108 🟡-2 |
 | P-02：W-0 集成（含 `db_manager.py` 直写停用）已上线 | pending（wac-015） | 绕过 revision 的写入者会造成"同 revision 异摘要"，C-0 锁存 `invalid` 后全部开仓被拒 |
-| P-10：C-0 每个进程启动时写一行 `snapshot_warmup result=… revision=… content_sha256=<前 12 位> pid=… role=operator-query`，状态迁移写 `snapshot_state_transition` | wac-041（`c9b1e3f`）审查中，**须合入并随阶段 O 上线** | 切换门禁 3.2.3 以"每个 worker 一行预热成功日志"为证据（Planner 决定）；没有它不能打开开关 |
+| P-10：C-0 每个进程启动时写一行 `snapshot_warmup result=… revision=… content_sha256=<前 12 位> pid=… role=operator-query`，状态迁移写 `snapshot_state_transition` | wac-041（`c9b1e3f`）审查中，**须合入并随以后的控制面整体升级上线**（WGW-1.0.4 的阶段 O 不上线它） | 切换门禁 3.2.3 以"每个 worker 一行预热成功日志"为证据（Planner 决定）；没有它不能打开开关 |
 | P-11：T0-6 三路对照工具与报告，B/C 等价 | 未派 | 计划 §4.2 对照条款 |
 | 数据基线无阻断项，或每一项都有用户裁决 | 未做 | §2.1 |
 | 失败恢复演练通过（计划第 4 步前置之一） | 未做 | 推荐隔离环境；生产演练是 O0-A16 |

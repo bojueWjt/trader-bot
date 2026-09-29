@@ -971,12 +971,16 @@ def shared_tree_check(root: Path, manifest_text: str, subdirs: tuple[str, ...], 
     if not entries:
         return 2, ["MANIFEST_UNCOMPARABLE cp-shared-vs-67b401a compared=0"], ""
     drift = []
+    # review wac-108 🟡-6: each drift line carries the file's CURRENT content sha256, so drift_sha256 (what the user accepts)
+    # binds the contents, not only the paths: a drifted file that changes again after the review needs a new acceptance
     for sha, rel in entries:
         f = root / rel
         if f.is_symlink() or not f.is_file():
-            drift.append(f"MISSING {rel}")
-        elif sha256_file(f) != sha:
-            drift.append(f"MODIFIED {rel}")
+            drift.append(f"MISSING {rel} sha256=-")
+        else:
+            now = sha256_file(f)
+            if now != sha:
+                drift.append(f"MODIFIED {rel} sha256={now}")
     known = {rel for _sha, rel in entries}
     extra = []
     for sub in subdirs:
@@ -1666,6 +1670,11 @@ def _selftest_wgw(base: Path, cp: Path, good_shows: dict, show, U_OQ: str, U_NC:
         and "INFO EXTRA services/control-plane/api/extra_hotmount.py" in text and hot.read_bytes() == before_bytes, text
     rc, text = run(["shared-tree", "--root", str(root), "--manifest", str(man), "--accept-drift-sha256", drift_sha])
     assert rc == 0 and "MANIFEST_DRIFT_ACCEPTED" in text, text
+    # review wac-108 🟡-6: the acceptance binds the drifted files' CONTENTS: the same path with other bytes needs a new decision
+    hot.write_text("print('hotfix v2')\n")
+    rc, text = run(["shared-tree", "--root", str(root), "--manifest", str(man), "--accept-drift-sha256", drift_sha])
+    assert rc == 1 and "MANIFEST_DRIFT " in text and drift_sha not in text.split("MANIFEST_DRIFT ", 1)[1].split("\n")[0], text
+    hot.write_text("print('hotfix')\n")
     assert run(["shared-tree", "--root", str(root), "--manifest", str(man), "--accept-drift-sha256", "0" * 64])[0] == 1, "acceptance is bound to the list"
     rc, text = run(["shared-tree", "--root", str(root), "--compare", str(snap)])
     assert rc == 1 and "SHARED_CHANGED changed=1 added=1" in text, text

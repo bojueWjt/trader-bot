@@ -157,22 +157,28 @@ i_dir = idx(ev, lambda e: e[1].startswith("install the release tree"), "wgw inst
 i_smoke = idx(ev, lambda e: e[1].startswith("dependency check AS THE UNIT USER"), "wgw user smoke")
 i_env = idx(ev, lambda e: e[1].startswith("install the watcher-gateway env"), "wgw env")
 i_unit = idx(ev, lambda e: e[1].startswith("install the unit file"), "wgw unit")
-i_rc = idx(ev, lambda e: e[1].startswith("NeedDaemonReload=no on EVERY unit (apply-before-daemon-reload"), "wgw reload check")
+i_rc = idx(ev, lambda e: e[1].startswith("NeedDaemonReload=no on EVERY unit (apply-before-enable"), "wgw reload check")
 i_dr = idx(ev, lambda e: e[1].startswith("daemon-reload (the only one"), "wgw daemon-reload")
 i_en = idx(ev, lambda e: e[1].startswith("enable watcher-gateway WITHOUT a reload"), "wgw enable")
+i_ra = idx(ev, lambda e: e[1].startswith("NeedDaemonReload=no on EVERY unit (apply-after-daemon-reload"), "wgw reload check after")
 i_st = idx(ev, lambda e: e[1] == "start watcher-gateway", "wgw start")
-check(i_dir < i_smoke < i_env < i_unit < i_rc < i_dr < i_en < i_st, f"wgw apply order ({i_dir},{i_smoke},{i_env},{i_unit},{i_rc},{i_dr},{i_en},{i_st})")
-check("--as-user trader-v3-cp-watcher-gateway" in ev[i_smoke][2] and "--exclude trader-v3-controlplane-watcher-gateway.service" in ev[i_rc][2],
-      "wgw: smoke as the unit user; the pre-reload check excludes only the new unit")
+# review wac-108 🟡-1: enable --no-reload, then AT ONCE the one daemon-reload (it clears systemd >= 255's host-wide mark), a
+# check that every unit is back to no, then start
+check(i_dir < i_smoke < i_env < i_unit < i_rc < i_en and i_dr == i_en + 1 and i_dr < i_ra < i_st,
+      f"wgw apply order ({i_dir},{i_smoke},{i_env},{i_unit},{i_rc},{i_en},{i_dr},{i_ra},{i_st})")
+check("--as-user trader-v3-cp-watcher-gateway" in ev[i_smoke][2] and "--exclude trader-v3-controlplane-watcher-gateway.service" in ev[i_rc][2]
+      and "--exclude" not in ev[i_ra][2], "wgw: smoke as the unit user; the pre-enable check excludes only the new unit, the post-reload check nothing")
 check(sum(1 for e in ev if "systemctl daemon-reload" in e[2] or e[2].strip().endswith("systemctl daemon-reload")) == 1, "wgw apply: exactly one daemon-reload")
 check("enable --now" not in text and "systemctl restart" not in text and "pip " not in text and "jp24-p1-control-plane" not in text,
       "wgw apply: no enable --now, no restart of anything, no pip, no whole-plane script")
 check(not re.search(r"systemctl (stop|restart|reload|kill|start) [^\n]*(node-control|event-ingest|operator-query)", text), "wgw apply never acts on the three units")
 rb = [e for e in events("plan-o0_deploy_watcher_gateway-rollback.txt") if e[0] == "PLAN"]
+i_r = idx(rb, lambda e: e[1].startswith("record host-wide NeedDaemonReload BEFORE the disable"), "wgw rollback pre-disable listing")
 i_w = idx(rb, lambda e: e[1].startswith("withdraw the exposure FIRST"), "wgw rollback withdraw")
-i_n = idx(rb, lambda e: e[1].startswith("NeedDaemonReload=no on every other unit, then remove the unit file"), "wgw rollback reload gate")
-check(i_w < i_n and "disable --no-reload" in rb[i_w][2] and "daemon-reload-check" not in rb[i_w][2] and "daemon-reload-check" in rb[i_n][2],
-      "wgw rollback: stop + disable --no-reload first, the NeedDaemonReload gate only before removing the unit file")
+i_n = idx(rb, lambda e: e[1].startswith("judge the listing taken BEFORE the disable"), "wgw rollback reload gate")
+check(i_r < i_w < i_n and "disable --no-reload" in rb[i_w][2] and "daemon-reload-check" not in rb[i_w][2] + rb[i_r][2]
+      and "reload-rollback-before-disable.txt" in rb[i_n][2] and "reload-rollback-after.txt" in rb[i_n][2],
+      "wgw rollback: record the host-wide listing, then stop + disable --no-reload, then gate on the PRE-disable listing (and prove all no after)")
 
 # restore-db (review wac-032-r2 🟡-5): owner/mode/sha recorded before the stop; recovery armed
 # and the runtime marked before the stop; the install uses the RECORDED owner and mode
@@ -217,6 +223,8 @@ STUB
 cat > "$BIN/ss" <<'STUB'
 #!/usr/bin/env bash
 echo 'LISTEN 0 4096 127.0.0.1:8183 0.0.0.0:* users:(("uvicorn",pid=11,fd=3))'
+last="$(grep -E '^systemctl (start|stop) trader-v3-controlplane-watcher-gateway' "$CALLS" 2>/dev/null | tail -1)"
+case "$last" in *" start "*) echo 'LISTEN 0 4096 127.0.0.1:8186 0.0.0.0:* users:(("uvicorn",pid=12,fd=3))' ;; esac
 STUB
 cat > "$BIN/docker" <<'STUB'
 #!/usr/bin/env bash
@@ -243,10 +251,19 @@ cat > "$BIN/systemctl" <<'STUB'
 echo "systemctl $*" >> "$CALLS"
 W=trader-v3-controlplane-watcher-gateway.service
 WF="$O0_SANDBOX/etc/systemd/system/$W"
+# review wac-108 🟡-1: systemd >= 255 (unit.c:3915, dbus-manager.c:2524) - an enable/disable that changes unit files sets the
+# manager-level unit_file_state_outdated: EVERY unit reports NeedDaemonReload=yes until the next daemon-reload. SYSTEMD_VERSION
+# (default 255) switches to the v254 behaviour (per-unit only).
+OUTDATED="$CALLS.outdated"
+case "$1 $2" in
+  "enable --no-reload"|"disable --no-reload") [ "${SYSTEMD_VERSION:-255}" -lt 255 ] || : > "$OUTDATED" ;;
+  "daemon-reload "*) rm -f "$OUTDATED" ;;
+esac
 case "$1" in list-units) printf 'caddy.service loaded active running Caddy\ntrader-v3-controlplane-operator-query.service loaded active running oq\nx.timer loaded active waiting x\n'; exit 0 ;; esac
 if [ "$1" = show ] && [[ " $* " == *" -p Id -p NeedDaemonReload "* ]]; then
   for u in "$@"; do case "$u" in show|-p|Id|NeedDaemonReload) continue ;; esac
     v=no
+    [ ! -e "$OUTDATED" ] || v=yes
     if [ "$u" = x.timer ] && { [ "${RELOAD_PENDING:-}" = always ] || { [ "${RELOAD_PENDING:-}" = after-start ] && grep -q "^systemctl start $W" "$CALLS"; }; }; then v=yes; fi
     printf 'Id=%s\nNeedDaemonReload=%s\n\n' "$u" "$v"; done
   exit 0
@@ -258,7 +275,17 @@ fi
 if [ "$1" = show ] && [[ "$*" == *"-p ActiveState --value $W"* ]]; then
   last="$(grep -E "^systemctl (start|stop) $W" "$CALLS" | tail -1)"; case "$last" in *" start "*) echo active ;; *) echo inactive ;; esac; exit 0
 fi
-if [ "$1" = show ] && [ "$2" = "$W" ]; then printf 'LoadState=not-found\nNeedDaemonReload=no\n'; exit 0; fi
+if [ "$1" = show ] && [ "$2" = "$W" ]; then
+  if [ -e "$WF" ] && grep -q '^systemctl daemon-reload' "$CALLS"; then
+    nd=no; [ ! -e "$OUTDATED" ] || nd=yes
+    printf 'LoadState=loaded\nNeedDaemonReload=%s\nFragmentPath=%s\n' "$nd" "$WF"
+    sed -n 's/^User=/User=/p; s/^WorkingDirectory=/WorkingDirectory=/p' "$WF"
+    printf 'EnvironmentFiles=%s (ignore_errors=no)\n' "$(sed -n 's/^EnvironmentFile=//p' "$WF")"
+    printf 'Environment=%s\n' "$(sed -n 's/^Environment=//p' "$WF" | tr '\n' ' ')"
+    printf 'ExecStart={ path=x ; argv[]=%s ; }\n' "$(sed -n 's/^ExecStart=//p' "$WF")"
+  else printf 'LoadState=not-found\nNeedDaemonReload=no\n'; fi
+  exit 0
+fi
 if [ "$1" = start ] && [ -n "${START_FAIL:-}" ]; then exit 1; fi
 # unit properties for the stage O isolation gate (o0_tool.py cp-isolation); ISOLATION_FAIL
 # injects the two S-10 violations (env file / Environment= name) with a sentinel VALUE
@@ -266,7 +293,7 @@ if [ "$1" = "show" ] && [[ " $* " == *" -p LoadState "* ]]; then
   echo LoadState=loaded; echo "WorkingDirectory=$O0_SANDBOX/srv/trader-v3/services/control-plane/api"
   # wac-060 (review wac-072 🟡-3): reload = node-control drop-in changed on disk but not loaded;
   # unparsed = an EnvironmentFiles= value the gate cannot read
-  if [ "${ISOLATION_FAIL:-}" = reload ] && [[ "$2" == *node-control ]]; then echo NeedDaemonReload=yes; else echo NeedDaemonReload=no; fi
+  if { [ "${ISOLATION_FAIL:-}" = reload ] && [[ "$2" == *node-control ]]; } || [ -e "$OUTDATED" ]; then echo NeedDaemonReload=yes; else echo NeedDaemonReload=no; fi
   if [ "${ISOLATION_FAIL:-}" = unparsed ] && [[ "$2" == *event-ingest ]]; then echo 'EnvironmentFiles=etc/relative.env (ignore_errors=no)'; fi
   oqe="$O0_SANDBOX/srv/trader-v3/secrets/control-plane/operator-query.env"
   case "$2" in
@@ -325,6 +352,8 @@ src, dst = files
 if mk:
     os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
 shutil.copyfile(src, dst)
+if "-m" in args:
+    os.chmod(dst, int(args[args.index("-m") + 1], 8))
 STUB
 # chown/stat: ownership is kept per INODE in $CALLS.owners (mv keeps it, cp makes a new file
 # owned by root), so a restore that forgets to re-apply the recorded owner is visible.
@@ -730,28 +759,106 @@ wgw_setup WA; run_wgw preflight; : > "$CALLS"
 : > "$BIN/SMOKE_AS_USER_MISSING"; run_wgw apply; rm -f "$BIN/SMOKE_AS_USER_MISSING"
 assert_rollback "wgw WA (unit-user smoke: DEPENDENCY_MISSING)" no '^systemctl (start|enable)' 0 "dependency check AS THE UNIT USER"
 wgw_nothing_new "wgw WA"
+# WB/WC run under both systemd behaviours (review wac-108 🟡-1): v254 (NeedDaemonReload per unit) and v255+ (an enable/disable
+# marks EVERY unit yes until the next daemon-reload). The rollback gate judges the listing taken BEFORE its own disable.
+for SV in 254 255; do
+export SYSTEMD_VERSION=$SV
 # WB: health fails after the start -> exposure withdrawn (stop, disable --no-reload), env and dir removed, unit file removed after a
 # clean NeedDaemonReload check and ONE more daemon-reload, user removed
-wgw_setup WB; run_wgw preflight; : > "$CALLS"
+wgw_setup "WB$SV"; run_wgw preflight; : > "$CALLS"
 run_wgw apply
-assert_rollback "wgw WB (health fails after start)" yes '^systemctl start trader-v3-controlplane-watcher-gateway' 1 "watcher-gateway /health/role"
+assert_rollback "wgw WB v$SV (health fails after start)" yes '^systemctl start trader-v3-controlplane-watcher-gateway' 1 "watcher-gateway /health/role"
 if grep -q '^systemctl enable --no-reload trader-v3-controlplane-watcher-gateway' "$CALLS" && grep -q '^systemctl stop trader-v3-controlplane-watcher-gateway' "$CALLS" \
    && grep -q '^systemctl disable --no-reload trader-v3-controlplane-watcher-gateway' "$CALLS" && [ "$(grep -c '^systemctl daemon-reload' "$CALLS")" = 2 ] \
    && ! grep -q 'enable --now\|disable --now' "$CALLS" && [ "$(grep -n '^systemctl stop trader-v3' "$CALLS" | cut -d: -f1)" -lt "$(grep -n '^systemctl daemon-reload' "$CALLS" | tail -1 | cut -d: -f1)" ]; then
-  ok "wgw WB: enable --no-reload + start; rollback stops and disables (--no-reload) BEFORE its single daemon-reload"
-else bad "wgw WB: systemctl sequence"; grep '^systemctl \(start\|stop\|enable\|disable\|daemon\)' "$CALLS" | sed 's/^/    /'; fi
-wgw_nothing_new "wgw WB (after rollback)" objects-only
-grep -q 'setpriv --reuid=trader-v3-cp-watcher-gateway' "$BIN/setpriv.log" && ok "wgw WB: the apply smoke ran as trader-v3-cp-watcher-gateway (setpriv)" || bad "wgw WB: no setpriv run"
+  ok "wgw WB v$SV: enable --no-reload + start; rollback stops and disables (--no-reload) BEFORE its single daemon-reload"
+else bad "wgw WB v$SV: systemctl sequence"; grep '^systemctl \(start\|stop\|enable\|disable\|daemon\)' "$CALLS" | sed 's/^/    /'; fi
+wgw_nothing_new "wgw WB v$SV (after rollback)" objects-only
+grep -q 'setpriv --reuid=trader-v3-cp-watcher-gateway' "$BIN/setpriv.log" && ok "wgw WB v$SV: the apply smoke ran as trader-v3-cp-watcher-gateway (setpriv)" || bad "wgw WB v$SV: no setpriv run"
 # WC (review wac-096 r5 🟡-B): another unit gets NeedDaemonReload=yes after the start: the exposure is withdrawn anyway; the stopped,
 # disabled unit file stays, no second daemon-reload, DAEMON_RELOAD_PENDING reported
-wgw_setup WC; run_wgw preflight; : > "$CALLS"
+wgw_setup "WC$SV"; run_wgw preflight; : > "$CALLS"
 RELOAD_PENDING=after-start run_wgw apply
 if [ "$RC" != 0 ] && grep -q '^systemctl stop trader-v3-controlplane-watcher-gateway' "$CALLS" && grep -q '^systemctl disable --no-reload trader-v3-controlplane-watcher-gateway' "$CALLS" \
    && [ "$(grep -c '^systemctl daemon-reload' "$CALLS")" = 1 ] && [ -e "$SB/etc/systemd/system/trader-v3-controlplane-watcher-gateway.service" ] \
    && [ ! -e "$TR/secrets/control-plane/watcher-gateway.env" ] && [ ! -e "$TR/releases/watcher-gateway/$RSHA" ] && printf '%s' "$OUT" | grep -q 'DAEMON_RELOAD_PENDING' \
    && grep -qE 'rollback_rc=[1-9]' "$S/evidence/auto-rollback.log"; then
-  ok "wgw WC: NeedDaemonReload pending in the rollback: stopped + disabled + env/dir removed anyway; unit file kept, no second reload, DAEMON_RELOAD_PENDING"
-else bad "wgw WC rc=$RC"; grep '^systemctl \(start\|stop\|enable\|disable\|daemon\)' "$CALLS" | sed 's/^/    /'; cat "$S/evidence/auto-rollback.log" 2>/dev/null; fi
+  ok "wgw WC v$SV: NeedDaemonReload pending in the rollback: stopped + disabled + env/dir removed anyway; unit file kept, no second reload, DAEMON_RELOAD_PENDING"
+else bad "wgw WC v$SV rc=$RC"; grep '^systemctl \(start\|stop\|enable\|disable\|daemon\)' "$CALLS" | sed 's/^/    /'; cat "$S/evidence/auto-rollback.log" 2>/dev/null; fi
+done
+unset SYSTEMD_VERSION
+# WS (review wac-108 🟡-1): the SUCCESS path against fake services - apply (enable --no-reload, then at once the one
+# daemon-reload, then start), verify (four-unit isolation must PASS: the host-wide mark is cleared), then a manual rollback
+# (its gate uses the listing taken before its own disable) - under v254 and v255
+python3 - "$WORK/fake-ports" <<'PY' > /dev/null 2>&1 &
+import http.server, json, sys, threading
+def srv(handler):
+    s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=s.serve_forever, daemon=True).start()
+    return s.server_address[1]
+def mk(route):
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            code, body = route(self.path, self.headers)
+            data = json.dumps(body).encode()
+            self.send_response(code); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(data)))
+            self.end_headers(); self.wfile.write(data)
+        def log_message(self, *a):
+            pass
+    return H
+def wgw(path, h):
+    if path == "/health/role":
+        return 200, {"status": "healthy", "app_role": "watcher-gateway", "database": "none", "gateway": "enabled"}
+    if path == "/v1/watcher/status":
+        return (200, {"ok": True}) if h.get("Authorization") else (401, {"code": "unauthenticated"})
+    return 404, {"detail": "Not Found"}
+def oq(path, h):
+    return 404, {"detail": "Not Found"}
+def v5(path, h):
+    return (401, {}) if path in ("/m/v1/watcher/status", "/m/v1/accounts") else (404, {})
+ports = [srv(mk(f)) for f in (wgw, oq, v5)]
+open(sys.argv[1], "w").write(" ".join(map(str, ports)) + "\n")
+threading.Event().wait()
+PY
+FAKE_PID=$!
+for _ in $(seq 50); do [ -s "$WORK/fake-ports" ] && break; sleep 0.1; done
+read -r P_WGW P_OQ P_V5 < "$WORK/fake-ports" || true
+for SV in 254 255; do
+  export SYSTEMD_VERSION=$SV O0_WGW_TEST_URL="http://127.0.0.1:$P_WGW" O0_OQ_TEST_URL="http://127.0.0.1:$P_OQ" O0_V5_TEST_PORT="$P_V5"
+  wgw_setup "WS$SV"; run_wgw preflight; : > "$CALLS"
+  run_wgw apply
+  seq_ok=no
+  en=$(grep -n '^systemctl enable --no-reload trader-v3-controlplane-watcher-gateway' "$CALLS" | cut -d: -f1); dr=$(grep -n '^systemctl daemon-reload' "$CALLS" | head -1 | cut -d: -f1)
+  st=$(grep -n '^systemctl start trader-v3-controlplane-watcher-gateway' "$CALLS" | cut -d: -f1)
+  [ -n "$en" ] && [ -n "$dr" ] && [ -n "$st" ] && [ "$en" -lt "$dr" ] && [ "$dr" -lt "$st" ] && [ "$(grep -c '^systemctl daemon-reload' "$CALLS")" = 1 ] && seq_ok=yes
+  if [ "$RC" = 0 ] && [ "$seq_ok" = yes ] && printf '%s' "$OUT" | grep -q 'WGW_APPLY_DONE' && printf '%s' "$OUT" | grep -q 'PORT_LOOPBACK_ONLY 8186' \
+     && grep -q 'NeedDaemonReload=no' "$S/evidence/reload-apply-after-daemon-reload.txt" && ! grep -q 'NeedDaemonReload=yes' "$S/evidence/reload-apply-after-daemon-reload.txt" \
+     && [ "$(stat -f %Lp "$TR/secrets/control-plane/watcher-gateway.env" 2>/dev/null || stat -c %a "$TR/secrets/control-plane/watcher-gateway.env")" = 600 ]; then
+    ok "wgw WS v$SV: apply succeeds - enable --no-reload, then the ONE daemon-reload, then start; every unit NeedDaemonReload=no after it"
+  else bad "wgw WS v$SV apply rc=$RC seq=$seq_ok"; printf '%s\n' "$OUT" | grep -E 'STEP|FAIL|PENDING|ABORT' | tail -6 | sed 's/^/    /'; fi
+  python3 -c 'import sys,time; print("\n".join("V5 GET %s status=%s content_type=- size=0 want=%s ok" % (p, c, c) for p, c in (("/v1/watcher/status",404),("/v1/watcher/dialogs",404),("/V1/WATCHER/status",404),("/m/v1/watcher/status",401),("/m/v1/accounts",401)))); print("V5_PUBLIC_CHECK_OK mode=external phase=unit-running host=jp-bot.balen.wang at=x epoch=%d checks=5" % (int(time.time()) + 1))' > "$S/evidence/v5-unit-running.txt"
+  run_wgw verify --v5-evidence "$S/evidence/v5-unit-running.txt"
+  if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q 'CP_ISOLATION_OK units=4 watcher_gateway=present' && printf '%s' "$OUT" | grep -q '^WGW_VERIFY_OK$' \
+     && printf '%s' "$OUT" | grep -q '^V5_EVIDENCE_OK'; then ok "wgw WS v$SV: verify passes (four-unit isolation, no NeedDaemonReload left, V-5 evidence)"
+  else bad "wgw WS v$SV verify rc=$RC"; printf '%s\n' "$OUT" | grep -E 'STEP|FAIL|UNCOMPARABLE|INCOMPLETE|ABORT' | tail -6 | sed 's/^/    /'; fi
+  run_wgw verify
+  [ "$RC" != 0 ] && printf '%s' "$OUT" | grep -q '^WGW_VERIFY_INCOMPLETE DIRECT_GUARD_UNVERIFIED' && ! printf '%s' "$OUT" | grep -q '^WGW_VERIFY_OK$' \
+    && ok "wgw WS v$SV: verify without external evidence is INCOMPLETE (DIRECT_GUARD_UNVERIFIED), never OK" || bad "wgw WS v$SV: verify without evidence rc=$RC"
+  : > "$CALLS.mark"; echo "---- manual rollback" >> "$CALLS"
+  run_wgw rollback
+  if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q 'WGW_UNIT_REMOVED' && [ ! -e "$SB/etc/systemd/system/trader-v3-controlplane-watcher-gateway.service" ] \
+     && ! grep -q 'NeedDaemonReload=yes' "$S/evidence/reload-rollback-before-disable.txt" && ! grep -q 'NeedDaemonReload=yes' "$S/evidence/reload-rollback-after.txt" \
+     && [ "$(sed -n '/^---- manual rollback/,$p' "$CALLS" | grep -c '^systemctl daemon-reload')" = 1 ]; then
+    ok "wgw WS v$SV: manual rollback removes everything (gate on the pre-disable listing; one reload; all units back to no)"
+  else bad "wgw WS v$SV rollback rc=$RC"; printf '%s\n' "$OUT" | grep -E 'STEP|PENDING|FAIL|ABORT' | tail -6 | sed 's/^/    /'; fi
+  wgw_nothing_new "wgw WS v$SV (after rollback)" objects-only
+done
+unset SYSTEMD_VERSION O0_WGW_TEST_URL O0_OQ_TEST_URL O0_V5_TEST_PORT
+kill "$FAKE_PID" 2>/dev/null || true; wait "$FAKE_PID" 2>/dev/null || true
+# the pre-fix order would have failed exactly here on v255: enable AFTER the reload leaves the host-wide mark set
+SYSTEMD_VERSION=255 CALLS="$WORK/calls-v255-demo.log" bash -c ': > "$CALLS"; "$0/systemctl" daemon-reload; "$0/systemctl" enable --no-reload x.service; "$0/systemctl" show -p Id -p NeedDaemonReload caddy.service' "$BIN" \
+  | grep -q 'NeedDaemonReload=yes' && ok "stub: on v255 an enable --no-reload after the reload leaves every unit NeedDaemonReload=yes (the bug the new order avoids)" \
+  || bad "stub: v255 host-wide mark not modelled"
 # WD: NeedDaemonReload pending before apply -> refused before any write
 wgw_setup WD; run_wgw preflight; : > "$CALLS"
 RELOAD_PENDING=always run_wgw apply

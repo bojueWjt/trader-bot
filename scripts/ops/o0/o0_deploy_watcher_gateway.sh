@@ -12,15 +12,19 @@
 #              the dependency check = python -B import smoke with the audit hook (as root: the unit user does not exist
 #              yet; the venv and the tree are proven unchanged), unit file lint; writes the wgw-preflight gate
 #   apply      gate first; then user, release dir (root 0755), import smoke AS THE UNIT USER, env (0600), unit file,
-#              NeedDaemonReload re-check (new unit excluded) + ONE daemon-reload, the three units unchanged,
-#              enable --no-reload + start, health, loopback probes, shared dir unchanged, fleet guard.
+#              NeedDaemonReload re-check (new unit excluded), enable --no-reload, then at once the ONE daemon-reload
+#              (review wac-108 🟡-1: on systemd >= 255 an enable/disable marks EVERY unit NeedDaemonReload=yes until the
+#              next reload - unit.c unit_need_daemon_reload / unit_file_state_outdated), NeedDaemonReload=no everywhere
+#              again, the three units unchanged, start, health, loopback probes, shared dir unchanged, fleet guard.
 #              Any failure: automatic rollback of the NEW objects only.
 #   verify     O-3: health, loopback probes, 8186 loopback only, four-unit isolation, env names, the three units and the
 #              shared dir unchanged, fleet guard; the EXTERNAL V-5 evidence (--v5-evidence) is required: without it
 #              DIRECT_GUARD_UNVERIFIED and the verify is NOT complete (exit 1, never a "done" line)
-#   rollback   withdraw the exposure FIRST (stop + disable --no-reload, never blocked by NeedDaemonReload), remove env and
-#              release dir; then, only if every other unit has NeedDaemonReload=no, remove the unit file, daemon-reload,
-#              remove the user; else DAEMON_RELOAD_PENDING (the stopped, disabled unit file stays; report to the user)
+#   rollback   record a host-wide NeedDaemonReload snapshot (record only), then withdraw the exposure (stop + disable
+#              --no-reload, never blocked by anything), remove env and release dir; then, only if the snapshot taken BEFORE
+#              the disable shows no other pending unit (a disable itself sets every unit to yes on systemd >= 255), remove
+#              the unit file, daemon-reload once, prove every unit is back to no, remove the user; else
+#              DAEMON_RELOAD_PENDING (the stopped, disabled unit file stays; report to the user)
 #
 # NEVER here: write the shared code dir or the shared venv, pip anything, restart/stop/reload node-control, event-ingest
 # or operator-query, run jp24-p1-control-plane.sh, daemon-reload while any unit has NeedDaemonReload=yes, RESUME.
@@ -59,6 +63,12 @@ WGW_URL="http://127.0.0.1:8186"
 HEALTH_TRIES=15                                     # 15 x 2 s = the contract's 30 s
 if [ -n "${O0_SANDBOX:-}" ] && [ -n "${O0_WGW_HEALTH_TRIES:-}" ]; then HEALTH_TRIES="$O0_WGW_HEALTH_TRIES"; fi   # local tests only
 OQ_URL="http://127.0.0.1:8183"
+V5_LOOPBACK=(--loopback)
+if [ -n "${O0_SANDBOX:-}" ]; then   # local tests only (O0_SANDBOX is refused on any host with /srv/trader-v3): fake services
+  [ -z "${O0_WGW_TEST_URL:-}" ] || WGW_URL="$O0_WGW_TEST_URL"
+  [ -z "${O0_OQ_TEST_URL:-}" ] || OQ_URL="$O0_OQ_TEST_URL"
+  [ -z "${O0_V5_TEST_PORT:-}" ] || V5_LOOPBACK=(--loopback --scheme http --port "$O0_V5_TEST_PORT")
+fi
 O0_STAGE_DIR="${O0_STAGE_DIR:-/srv/trader-staging/o0-YYYYMMDDTHHMMSSZ}"
 CRED_SET="${CRED_SET:-$O0_STAGE_DIR/creds/set-initial}"
 BUNDLE="$O0_STAGE_DIR/bundle"
@@ -98,6 +108,9 @@ units_unchanged() {  # units_unchanged <before> <after>
   o0_sh "the three running control-plane units are untouched (same MainPID and start time as $1)" \
     "for u in $OTHER_UNITS; do printf '%s ' \$u; systemctl show \$u -p MainPID,ExecMainStartTimestamp --value | tr '\\n' ' '; echo; done > '$EV/$2'
      diff '$EV/$1' '$EV/$2' && echo OTHER_UNITS_UNCHANGED"
+}
+reload_snapshot_text() {  # the host-wide NeedDaemonReload listing (read-only)
+  printf '%s' "systemctl list-units --all --plain --no-legend --no-pager | awk '{print \$1}' | grep -E '\\.[a-z]+\$' | xargs -r systemctl show -p Id -p NeedDaemonReload"
 }
 reload_check() {  # reload_check <label> [unit to exclude]
   o0_sh "NeedDaemonReload=no on EVERY unit ($1; else DAEMON_RELOAD_PENDING: stop, never daemon-reload here)" \
@@ -141,11 +154,17 @@ loopback_probes() {  # the tokens are read in-process from the installed env fil
   o0_sh "8186 listens on 127.0.0.1 only (S-06 re-check)" \
     "ss -H -ltnp > '$EV/ss-$1.txt'; $(o0_quote "${TOOL[@]}") port-check --ss-file '$EV/ss-$1.txt' --port 8186 --expect loopback-only --record-range 8184-8189"
   o0_step "V-5 loopback supplementary check through Caddy (127.0.0.1 with the public name; NOT the external evidence)" \
-    "${TOOL[@]}" public-direct-check --host "$HOST" --phase unit-running --loopback
+    "${TOOL[@]}" public-direct-check --host "$HOST" --phase unit-running "${V5_LOOPBACK[@]}"
 }
 
 # ---------------------------------------------------------------- rollback of the NEW objects only (review wac-096 r5 🟡-B)
 withdraw_exposure() {
+  # review wac-108 🟡-1: the ONLY valid "was something else pending?" evidence is a listing taken before our own disable
+  # (on systemd >= 255 the disable marks every unit NeedDaemonReload=yes); recorded, never a gate here
+  o0_sh "record host-wide NeedDaemonReload BEFORE the disable (record only; the reload gate below judges this listing)" \
+    "rm -f '$EV/reload-rollback-before-disable.txt'
+     $(reload_snapshot_text) > '$EV/reload-rollback-before-disable.txt' || { rm -f '$EV/reload-rollback-before-disable.txt'; echo 'RECORD_FAILED (the reload gate will stop at DAEMON_RELOAD_PENDING)'; }
+     echo \"recorded \$(grep -c '^Id=' '$EV/reload-rollback-before-disable.txt' 2>/dev/null || true) unit(s)\""
   o0_sh "withdraw the exposure FIRST: stop the new unit and disable it WITHOUT a reload (never blocked by NeedDaemonReload)" \
     "if [ \"\$(systemctl show -p LoadState --value $UNIT.service)\" = loaded ]; then systemctl stop $UNIT.service || true; fi
      if [ -e '$UNIT_FILE' ]; then systemctl disable --no-reload $UNIT.service || true; fi
@@ -154,10 +173,11 @@ withdraw_exposure() {
     "rm -f -- '$ENV_FILE'; rm -rf -- '$REL_DIR' '$REL_DIR.staging'; [ ! -e '$ENV_FILE' ] && [ ! -e '$REL_DIR' ] && echo NEW_FILES_REMOVED"
 }
 remove_unit_file() {
-  o0_sh "NeedDaemonReload=no on every other unit, then remove the unit file, daemon-reload once, remove the user; else DAEMON_RELOAD_PENDING (the stopped, disabled unit file stays: report to the user)" \
-    "systemctl list-units --all --plain --no-legend --no-pager | awk '{print \$1}' | grep -E '\\.[a-z]+\$' | xargs -r systemctl show -p Id -p NeedDaemonReload > '$EV/reload-rollback.txt'
-     if $(o0_quote "${TOOL[@]}") daemon-reload-check --show '$EV/reload-rollback.txt' --require caddy.service --exclude $UNIT.service; then
+  o0_sh "judge the listing taken BEFORE the disable: no other unit pending -> remove the unit file, daemon-reload once, prove every unit is back to no, remove the user; else DAEMON_RELOAD_PENDING (the stopped, disabled unit file stays: report to the user)" \
+    "if [ -s '$EV/reload-rollback-before-disable.txt' ] && $(o0_quote "${TOOL[@]}") daemon-reload-check --show '$EV/reload-rollback-before-disable.txt' --require caddy.service --exclude $UNIT.service; then
        if [ -e '$UNIT_FILE' ]; then rm -f -- '$UNIT_FILE'; systemctl daemon-reload; fi
+       $(reload_snapshot_text) > '$EV/reload-rollback-after.txt'
+       $(o0_quote "${TOOL[@]}") daemon-reload-check --show '$EV/reload-rollback-after.txt' --require caddy.service
        if getent passwd $WUSER >/dev/null; then userdel $WUSER; fi
        if getent group $WUSER >/dev/null; then groupdel $WUSER; fi
        echo WGW_UNIT_REMOVED
@@ -238,12 +258,15 @@ phase_apply() {
     "install -m 0600 -o root -g root '$STAGED_ENV' '$ENV_FILE'; cmp -s '$STAGED_ENV' '$ENV_FILE' && echo ENV_INSTALLED names_only"
   o0_sh "install the unit file (0644 root; the bundle's file, byte for byte)" \
     "install -m 0644 -o root -g root '$WB/$UNIT.service' '$UNIT_FILE'; cmp -s '$WB/$UNIT.service' '$UNIT_FILE' && echo UNIT_INSTALLED"
-  reload_check apply-before-daemon-reload "$UNIT.service"
-  o0_step "daemon-reload (the only one; every other unit had NeedDaemonReload=no)" systemctl daemon-reload
+  reload_check apply-before-enable "$UNIT.service"
+  o0_mark_runtime_replaced
+  # review wac-108 🟡-1: enable (systemd >= 255 then marks EVERY unit NeedDaemonReload=yes) and at once the one reload that
+  # loads the new unit, its wants link, and clears that host-wide mark; nothing else happens in between
+  o0_step "enable watcher-gateway WITHOUT a reload" systemctl enable --no-reload "$UNIT.service"
+  o0_step "daemon-reload (the only one; right after the enable; every other unit had NeedDaemonReload=no)" systemctl daemon-reload
+  reload_check apply-after-daemon-reload
   units_unchanged cp-units-preflight.txt cp-units-after-daemon-reload.txt
   o0_sh "record the unit start time (V-5 evidence must be newer)" "date +%s | tee '$EV/wgw-start.epoch'"
-  o0_mark_runtime_replaced
-  o0_step "enable watcher-gateway WITHOUT a reload" systemctl enable --no-reload "$UNIT.service"
   o0_step "start watcher-gateway" systemctl start "$UNIT.service"
   health
   loopback_probes apply
@@ -270,6 +293,8 @@ phase_verify() {
 
 phase_rollback() {
   o0_fleet_record before-wgw-rollback
+  o0_sh "release directories present (a changed candidate may have left another one; listed, never removed here)" \
+    "ls -1 '$REL_BASE' 2>/dev/null | sed 's/^/RELEASE_DIR /' || true; echo \"current release: $REL_SHA\""
   withdraw_exposure
   remove_unit_file
   units_unchanged cp-units-preflight.txt cp-units-after-rollback.txt
