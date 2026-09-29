@@ -578,3 +578,31 @@ Planner 两次指示：只按最小改动修两条 blocker、补对应用例；�
 
 **遗留（按 Planner 指示跳过）**：审查 🟢-1（`_re2_compile` 不认 POSIX 类，与扫描器不一致）、🟢-2（空 `\Q\E` 后跟量词的函数层漏判，整条 verify 能兜住）、🟢-3（oq 分隔符 `%` 冗余的注释）、🟡-2（站点顶层不带匹配器的 `forward_auth` 与 RS-6 的差异）、🟡-3（`try_files {path} /index.html` 的既有误拦写进 U-6）。这几项都没有改代码或文档，交给后续 RS 任务或 Planner。
 
+
+## 15. wac-105：WGW-1.0.4 Release Steward 清单（RS-1、RS-11..RS-20；未连 jp-24，未访问生产域名，未做任何生产动作）
+
+| RS / 要求 | 落实位置 |
+|---|---|
+| RS-1 片段 v2 | `o0_caddy_watcher_routes.py`：`expected_snippet`（兜底后接守卫组，另一个 snippet 只含守卫）、`_find_wgw`/`_check_wgw_structure`（守卫逐字、404、块尾"兜底→守卫"；其他站点/server 的可选守卫也须逐字 404）；`check-artifacts` 与 wac-104 `fe84fdd` 的片段、契约原文拼出的片段三方逐字节相同（sha256 `c06a95bc…6979`） |
+| RS-11 上游 | 默认 `--upstream 127.0.0.1:8186`、新增 `--oq-upstream 127.0.0.1:8183`；`_check_snippet_upstreams`（每条逐路径路由恰为 strip `/m` + 只拨 8186 的 reverse_proxy，无 rewrite/transport/头操作）；`_check_gateway_outcome` 链上任何请求头操作即失败 |
+| RS-12 I-2 | `i2_check`、`classify_dial`；复审 wac-096 第五轮 🟡-A：端口或整个 dial、`network_proxy` URL 含请求作用域占位符即 `GATEWAY_PORT_EXPOSED`，`{env.*}` 等只出 `UPSTREAM_UNRESOLVED` |
+| RS-13 V-2/V-3 | V-2 在 app 站点模拟四个 `/v1/watcher` 请求（模拟器对 `path_regexp` 按 Caddy `cleanPath` 匹配）；探针 8186 与 8183 分桩（`pin_probe_config` 的 `gw` 桩），只有表内路径可打到 8186，逐转发器入口探针改为 `PROBE_HINT` |
+| RS-14 V-4 | `caddyfile_check`：独立 `8186` 只能在 `(watcher_gateway_upstream)` 内；该块恰好一个；同站点不得同时 import 两个 snippet |
+| RS-15 测试 | selftest：124 个违规变体、43 个纵深防御形状（各带自动生成的 8186 孪生，39 个可翻转的全部判 `GATEWAY_PORT_EXPOSED`）、7 个 RS-15 PASS 形状、D2/D5 钉住提示文字；`caddy_real_test.sh`：真实 Caddy v2.10.2 的 bad/ok/did 三类与活体执行器（I-2 各例与孪生都证明 8186 桩收到非表内请求；请求头端口的 `network_proxy` 被 Caddy 在加载时拒绝） |
+| 用户"别卡太死" | 8183 形状（前缀转发、改路径后转发、未知容器、站点顶层普通 forward_auth、改路径到 `/v1/watcher`、兜底后无法求值的匹配器如 SPA `try_files`、A5）只输出 `HINT`；同形状拨 8186 仍失败 |
+| RS-16 阶段 O | `o0_deploy_watcher_gateway.sh`（旧 `o0_deploy_operator_query.sh` 删除）；`o0_tool.py` 的 `shared-tree`（漂移清单+建议+绑定清单的用户接受）、`daemon-reload-check`、`port-check`、`wgw-env`、`wgw-smoke`（`python -B`、审计钩子、`DEPENDENCY_MISSING`）、`wgw-unit`；回滚先 `stop`+`disable --no-reload` |
+| RS-17 | `cp-isolation` 四单元（`--wgw-unit/--wgw-env/--wgw-root/--wgw-may-be-absent/--allow-auth-secret-key`） |
+| RS-18 | `scripts/jp24-p1-control-plane.sh`：数组、无库模板、8186 健康期望、头注释（阶段 O 禁用） |
+| RS-19 | `o0_tool.py public-direct-check`（封闭状态集合、只看状态码、`--loopback` 不算外部证据）、`v5-evidence-check`（`DIRECT_GUARD_UNVERIFIED`）；接入 `o0_deploy_caddy.sh` verify 与 `o0_deploy_watcher_gateway.sh` verify |
+| RS-20 | 本文件 R28；部署 runbook §3.1 第 8 条（PC-6）、C-3、§5 重写；授权清单 O0-A08 重写，新增 O0-A05X、O0-A08X、O0-A08D、O0-A08R、U-13、PC-6；凭据 runbook（持有方 `controlplane-watcher-gateway.env`）；现场清单 S-06；打包 G3 v2、G8、G12 |
+
+本地实跑（`HOME`/`XDG_*`/`TMPDIR` 重定向到 scratchpad；在"本提交 + wac-104 片段"的临时副本上跑，因为本分支单独提交时已提交的片段仍是 v1）：
+
+| 命令 | 结果 |
+|---|---|
+| `O0_CADDY_BIN=<v2.10.2> run_all.sh` | `ALL_O0_OFFLINE_CHECKS_OK real_caddy=ok`；`SELFTEST_OK … variants_caught=124/124 … defense_in_depth_hints=43 (8186 twins caught=39) …`；`APPLY_ROLLBACK_TEST_OK checks=161`；`CADDY_REAL_TEST OK checks=293 failures=0` |
+| 不设 `O0_CADDY_BIN` | `O0_OFFLINE_CHECKS_OK_WITHOUT_REAL_CADDY real_caddy=skipped` |
+| 本分支单独 `run_all.sh` | 只在 `check-artifacts` 失败：`snippet _format 'watcher-gateway-caddy-snippet.v1' != …v2`（等 wac-104 合入） |
+| `o0_package.sh --report-only`（本提交单独） | 仅 G3 失败（同上原因），其余 PASS |
+| `o0_package.sh --report-only --run-tests`（本提交与 wac-104 `fe84fdd` 的临时合并） | G1–G12 全部 PASS、`PACKAGE_OK`、`deploy_candidate: true`；G9 pytest 65 passed，watcher 155/155；G12 `wgw_release_files=197 unit_lint=ok env_whitelist=ok cp_shared_baseline=152` |
+| `wgw-smoke` 对 wac-104 真实代码树 + 本机 `.venv-arch` | `SMOKE gateway_routes=20 ready=True`，`SMOKE_OK … venv_unchanged=yes code_dir_unchanged=yes`，无 `__pycache__` |
