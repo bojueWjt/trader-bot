@@ -129,7 +129,7 @@ o0_expected_auth() {
     o0_deploy_watcher.sh:preflight|o0_deploy_watcher.sh:build) echo "O0-A04" ;;
     o0_deploy_watcher.sh:apply-preflight|o0_deploy_watcher.sh:apply|o0_deploy_watcher.sh:verify|o0_deploy_watcher.sh:rollback) echo "O0-A07" ;;
     o0_deploy_watcher.sh:restore-db) echo "O0-A07R" ;;
-    o0_deploy_operator_query.sh:preflight|o0_deploy_operator_query.sh:apply|o0_deploy_operator_query.sh:verify|o0_deploy_operator_query.sh:rollback) echo "O0-A08" ;;
+    o0_deploy_watcher_gateway.sh:preflight|o0_deploy_watcher_gateway.sh:apply|o0_deploy_watcher_gateway.sh:verify|o0_deploy_watcher_gateway.sh:rollback) echo "O0-A08" ;;
     # standalone fleet guard: the phase is the runbook step it guards
     o0_fleet_guard.sh:R-1) echo "O0-A20" ;;
     o0_fleet_guard.sh:R-2) echo "O0-A21" ;;
@@ -294,7 +294,7 @@ o0_fleet_settle_compare() {
 
 # ---------------------------------------------------------------- automatic rollback
 # Review wac-032-r2 🟡-1. An apply first changes FILES, then replaces the RUNNING service
-# (Caddy restart, watcher recreate, operator-query restart). If it fails before the
+# (Caddy restart, watcher recreate, watcher-gateway start). If it fails before the
 # replacement, the running service never changed: restoring the files is enough, and a
 # restart would only add risk (D-02: a Caddy restart has HALTed the whole fleet before).
 # O0_RUNTIME_REPLACED is set immediately BEFORE the replacing step (a failed restart may

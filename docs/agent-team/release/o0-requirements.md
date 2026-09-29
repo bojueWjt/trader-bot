@@ -50,11 +50,11 @@
 | R01 | "三路对照工具与报告" | 计划 §9 O-0；§4.3 T0-6 | P-11 | 报告 B/C 等价；切换 runbook §2 |
 | R02 | "服务端凭据生成、两两互异校验与 env 下发（不经 app）" | 计划 §9 O-0；§2.1 | — | `o0_watcher_credentials.py generate/check`；凭据 runbook §1–§2 |
 | R03 | "每个进程只持自己需要的那一个，watcher 环境里不放任何控制面 reader token" | 计划 §2.1 | P-04 | `check` 拒绝 watcher env 出现控制面密钥名；S-05；阶段 W verify |
-| R04 | "operator-query 缺 `gateway` 时只禁用网关路由并告警，不得让交易端点启动失败（上线前配置校验锁定）" | 计划 §2.1、§4.2 | C-1 R11 已实现 | 阶段 O preflight import 冒烟断言 `_LOAD_ERROR is None`；生产不做缺 token 负例 |
+| R04 | "operator-query 缺 `gateway` 时只禁用网关路由并告警，不得让交易端点启动失败（上线前配置校验锁定）" | 计划 §2.1、§4.2 | C-1 R11 已实现 | WGW-1.0.4：网关在独立角色 watcher-gateway（operator-query 本来就不挂网关，交易端点不受影响）；阶段 O 的依赖检查（`python -B` import 冒烟）断言网关路由数 > 0 且 `readiness()` 为真；`/health/role` 停用态 503 只影响 8186；生产不做缺 token 负例 |
 | R05 | "轮换用 `*_TOKEN` + `*_TOKEN_PREVIOUS` 双值，顺序为：watcher 先接受新旧两值，网关切到新值，确认请求与审计正常，再撤旧值" | 计划 §2.1；契约 §9.2 | P-02 | 凭据 runbook §3 |
 | R06 | "确认 import 与 handler 顺序" | 计划 §9 O-0；契约 F-12、F-13 | — | S-02（含全局 `order` 与前置指令）、S-03/S-04 + `verify --before-deploy`（前瞻遮蔽检查）；阶段 C：`caddyfile-check`（片段文件全局 import、站点顶层 import 在所有 handle 之前）、F-13 (2) 人工记录、`verify` 的两步遮蔽检查（第一条 wgw 路由之前与外层每一条路由）、本机 Caddy 探针（O0-A05P） |
 | R07 | "`/m` 只 strip 一次" | 计划 §9 O-0 | — | verify：每条样本恰好一次 `strip_path_prefix /m`；L-probe |
-| R08 | "上游仍是 8183" | 计划 §9 O-0 | — | verify：dial 恰为 `127.0.0.1:8183`；S-06 |
+| R08 | "上游仍是 8183" | 计划 §9 O-0；**用户裁决 2026-09-29 选项 (e)**（契约 §9.14.6） | — | 计划原文按裁决改读：片段上游 `(watcher_gateway_upstream)` 恰为 `127.0.0.1:8186`（RS-11：一次 strip、无 rewrite、无 transport、无头操作）；其他 `/m/v1/*` 移动样本仍到 8183（verify `--oq-upstream`）；计划 v0.6 §2.1 由 Planner 修订 |
 | R09 | "移动端 `Authorization` 保留且不被面板注入的 `system_observer` 覆盖" | 计划 §9 O-0 | — | verify：移动样本链路上无 Authorization 头操作；探针 `/m/v1/accounts` 无 token 必须 401（若被注入会变 200） |
 | R10 | "浏览器 basicauth 后先清头再注入" | 计划 §9 O-0；§2.1 | — | verify：浏览器样本经 authentication，先删 `X-Watcher-Actor`/`X-Watcher-Token-Fingerprint`，再 set `X-Watcher-Proxy-Auth={env.WATCHER_BROWSER_PROXY_TOKEN}` |
 | R11 | "`/media` 与其他公网入口没有绕过" | 计划 §9 O-0 | — | verify：任何代理到 9090/9100 的路由必须被浏览器样本覆盖且带认证，否则失败；S-06 只允许 127.0.0.1:9090；探针 `/media/<name>` 不得无认证返回图片 |
@@ -71,9 +71,10 @@
 | R22 | "浏览器 basicauth 路径回归不变" | 计划 §4.2 | — | 阶段 C/W 探针 + 用户浏览器核对 |
 | R23 | "不自动 RESUME；破坏性实验只在隔离环境" | 计划 §8 | — | 全部阶段；无 RESUME 命令 |
 | R24 | "生产只做只读/dry_run 冒烟，不做破坏性 CRUD" | 计划 §6.2 | — | 所有 verify 只读；切换冒烟只用 dry_run |
-| R25 | "开关默认关，旧 reader 保留"（`WATCHER_CONFIG_SNAPSHOT_ENABLED` 缺省 0） | 计划 §2.2、§4.1；契约 §9.11 | — | 阶段 O preflight 断言未设或为 0 |
+| R25 | "开关默认关，旧 reader 保留"（`WATCHER_CONFIG_SNAPSHOT_ENABLED` 缺省 0） | 计划 §2.2、§4.1；契约 §9.11 | — | WGW-1.0.4：阶段 O 不改 operator-query.env、不重启 operator-query，开关保持现值；快照切换 runbook 另行断言 |
 | R26 | 副本"无同步单元，已漂移……切换前必须逐行比对" | 计划 §1.2 | P-17 | S-09 `sync_operator_risk_db.py --check`；基线工具 |
 | R27 | "`db_manager.py` 写命令停用或改走服务；feeder 只读" | 计划 D1、§8；契约 §9.12 | P-02/P-03 | G7 + S-15 |
+| R28 | "网关独立端口、独立目录与 I-2"（契约 §9.14.6，RS-1、RS-11..RS-20；wac-105） | 契约 WGW-1.0.4；裁定 R23 | wac-104 | I-2 主判据（`i2_check`：整份 adapt JSON 中片段上游之外不得出现独立 8186、数值 8186、含 8186 的端口范围；上游端口或整个 dial 取自请求作用域占位符即 `GATEWAY_PORT_EXPOSED`；解析不出的上游只输出 `UPSTREAM_UNRESOLVED`）；V-2 app 站点 `/v1/watcher/*` 由守卫 404；V-3 探针 8186 与 8183 分桩，只有表内路径打到 8186；V-4 文本中独立 8186 只在 `(watcher_gateway_upstream)` 内；V-5 外部只看状态码（O0-A05X、O0-A08X）；对 8183 的旧检查降为 `HINT`（纵深防御），同形状拨 8186 仍失败；阶段 O `o0_deploy_watcher_gateway.sh`：独立单元、`releases/watcher-gateway/<sha>` 目录、白名单 env、共享目录逐文件对 `67b401a`（漂移即停、交用户）、`NeedDaemonReload` 门、`python -B` 依赖检查、回滚先撤暴露；`cp-isolation` 四单元（RS-17）；打包 G12 含 release 清单、单元 lint、env 白名单 |
 
 ## 3. B 类：契约 §9
 
@@ -577,3 +578,31 @@ Planner 两次指示：只按最小改动修两条 blocker、补对应用例；�
 
 **遗留（按 Planner 指示跳过）**：审查 🟢-1（`_re2_compile` 不认 POSIX 类，与扫描器不一致）、🟢-2（空 `\Q\E` 后跟量词的函数层漏判，整条 verify 能兜住）、🟢-3（oq 分隔符 `%` 冗余的注释）、🟡-2（站点顶层不带匹配器的 `forward_auth` 与 RS-6 的差异）、🟡-3（`try_files {path} /index.html` 的既有误拦写进 U-6）。这几项都没有改代码或文档，交给后续 RS 任务或 Planner。
 
+
+## 15. wac-105：WGW-1.0.4 Release Steward 清单（RS-1、RS-11..RS-20；未连 jp-24，未访问生产域名，未做任何生产动作）
+
+| RS / 要求 | 落实位置 |
+|---|---|
+| RS-1 片段 v2 | `o0_caddy_watcher_routes.py`：`expected_snippet`（兜底后接守卫组，另一个 snippet 只含守卫）、`_find_wgw`/`_check_wgw_structure`（守卫逐字、404、块尾"兜底→守卫"；其他站点/server 的可选守卫也须逐字 404）；`check-artifacts` 与 wac-104 `fe84fdd` 的片段、契约原文拼出的片段三方逐字节相同（sha256 `c06a95bc…6979`） |
+| RS-11 上游 | 默认 `--upstream 127.0.0.1:8186`、新增 `--oq-upstream 127.0.0.1:8183`；`_check_snippet_upstreams`（每条逐路径路由恰为 strip `/m` + 只拨 8186 的 reverse_proxy，无 rewrite/transport/头操作）；`_check_gateway_outcome` 链上任何请求头操作即失败 |
+| RS-12 I-2 | `i2_check`、`classify_dial`；复审 wac-096 第五轮 🟡-A：端口或整个 dial、`network_proxy` URL 含请求作用域占位符即 `GATEWAY_PORT_EXPOSED`，`{env.*}` 等只出 `UPSTREAM_UNRESOLVED` |
+| RS-13 V-2/V-3 | V-2 在 app 站点模拟四个 `/v1/watcher` 请求（模拟器对 `path_regexp` 按 Caddy `cleanPath` 匹配）；探针 8186 与 8183 分桩（`pin_probe_config` 的 `gw` 桩），只有表内路径可打到 8186，逐转发器入口探针改为 `PROBE_HINT` |
+| RS-14 V-4 | `caddyfile_check`：独立 `8186` 只能在 `(watcher_gateway_upstream)` 内；该块恰好一个；同站点不得同时 import 两个 snippet |
+| RS-15 测试 | selftest：124 个违规变体、43 个纵深防御形状（各带自动生成的 8186 孪生，39 个可翻转的全部判 `GATEWAY_PORT_EXPOSED`）、7 个 RS-15 PASS 形状、D2/D5 钉住提示文字；`caddy_real_test.sh`：真实 Caddy v2.10.2 的 bad/ok/did 三类与活体执行器（I-2 各例与孪生都证明 8186 桩收到非表内请求；请求头端口的 `network_proxy` 被 Caddy 在加载时拒绝） |
+| 用户"别卡太死" | 8183 形状（前缀转发、改路径后转发、未知容器、站点顶层普通 forward_auth、改路径到 `/v1/watcher`、兜底后无法求值的匹配器如 SPA `try_files`、A5）只输出 `HINT`；同形状拨 8186 仍失败 |
+| RS-16 阶段 O | `o0_deploy_watcher_gateway.sh`（旧 `o0_deploy_operator_query.sh` 删除）；`o0_tool.py` 的 `shared-tree`（漂移清单+建议+绑定清单的用户接受）、`daemon-reload-check`、`port-check`、`wgw-env`、`wgw-smoke`（`python -B`、审计钩子、`DEPENDENCY_MISSING`）、`wgw-unit`；回滚先 `stop`+`disable --no-reload` |
+| RS-17 | `cp-isolation` 四单元（`--wgw-unit/--wgw-env/--wgw-root/--wgw-may-be-absent/--allow-auth-secret-key`） |
+| RS-18 | `scripts/jp24-p1-control-plane.sh`：数组、无库模板、8186 健康期望、头注释（阶段 O 禁用） |
+| RS-19 | `o0_tool.py public-direct-check`（封闭状态集合、只看状态码、`--loopback` 不算外部证据）、`v5-evidence-check`（`DIRECT_GUARD_UNVERIFIED`）；接入 `o0_deploy_caddy.sh` verify 与 `o0_deploy_watcher_gateway.sh` verify |
+| RS-20 | 本文件 R28；部署 runbook §3.1 第 8 条（PC-6）、C-3、§5 重写；授权清单 O0-A08 重写，新增 O0-A05X、O0-A08X、O0-A08D、O0-A08R、U-13、PC-6；凭据 runbook（持有方 `controlplane-watcher-gateway.env`）；现场清单 S-06；打包 G3 v2、G8、G12 |
+
+本地实跑（`HOME`/`XDG_*`/`TMPDIR` 重定向到 scratchpad；在"本提交 + wac-104 片段"的临时副本上跑，因为本分支单独提交时已提交的片段仍是 v1）：
+
+| 命令 | 结果 |
+|---|---|
+| `O0_CADDY_BIN=<v2.10.2> run_all.sh` | `ALL_O0_OFFLINE_CHECKS_OK real_caddy=ok`；`SELFTEST_OK … variants_caught=124/124 … defense_in_depth_hints=43 (8186 twins caught=39) …`；`APPLY_ROLLBACK_TEST_OK checks=161`；`CADDY_REAL_TEST OK checks=293 failures=0` |
+| 不设 `O0_CADDY_BIN` | `O0_OFFLINE_CHECKS_OK_WITHOUT_REAL_CADDY real_caddy=skipped` |
+| 本分支单独 `run_all.sh` | 只在 `check-artifacts` 失败：`snippet _format 'watcher-gateway-caddy-snippet.v1' != …v2`（等 wac-104 合入） |
+| `o0_package.sh --report-only`（本提交单独） | 仅 G3 失败（同上原因），其余 PASS |
+| `o0_package.sh --report-only --run-tests`（本提交与 wac-104 `fe84fdd` 的临时合并） | G1–G12 全部 PASS、`PACKAGE_OK`、`deploy_candidate: true`；G9 pytest 65 passed，watcher 155/155；G12 `wgw_release_files=197 unit_lint=ok env_whitelist=ok cp_shared_baseline=152` |
+| `wgw-smoke` 对 wac-104 真实代码树 + 本机 `.venv-arch` | `SMOKE gateway_routes=20 ready=True`，`SMOKE_OK … venv_unchanged=yes code_dir_unchanged=yes`，无 `__pycache__` |

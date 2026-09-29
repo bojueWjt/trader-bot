@@ -6,8 +6,8 @@
 #   G1 candidate descends from the production baseline (67b401a)
 #   G2 contract generator check: ROUTES_DIFF_EMPTY and phase_max=P2   (§9.14.4, wac-016-r2 §7-1, wac-026)
 #   G3 the four generated artifacts carry the same yaml_sha256/phase_max; the Caddy list is format v2
-#      and the snippet format snippet.v1, the snippet equals the list-derived §9.14.3 shape byte for
-#      byte (candidate's o0_caddy_watcher_routes.py check-artifacts; wac-060)          (§9.14.3)
+#      and the snippet format snippet.v2 (WGW-1.0.3/1.0.4: fallback then the direct guard; RS-1), the snippet
+#      equals the list-derived §9.14.3 shape byte for byte (candidate's check-artifacts; wac-060)   (§9.14.3)
 #   G4 watcher require() closure is inside WATCHER_RUNTIME_RELATIVE_PATHS (wac-007 🟡-4)
 #   G5 compose passes the six WATCHER_* values to the watcher, healthcheck not interpolated (wac-009 🟡-5, E-16)
 #   G6 W-0b merged (lib/config-store.js wired)                                            (wac-009 🟡-7)
@@ -19,7 +19,11 @@
 #   G11 the candidate commit carries scripts/ops/o0 (the bundle's tools come from the CANDIDATE,
 #       never from the packaging worktree) plus the offline image builder
 #   G12 the offline builder accepts the bundle's watcher runtime manifest (exact whitelist set,
-#       hashes, sizes) - the same validation it runs on jp-24 before building
+#       hashes, sizes) - the same validation it runs on jp-24 before building; WGW-1.0.4 (RS-20, R23): plus the
+#       watcher-gateway release (git archive of the candidate's services/control-plane, services/nautilus-node/
+#       observability, packages, db/migrations; its per-file manifest equals the archive), the rendered unit file
+#       (lint: own user/dir/env, 127.0.0.1:8186, no database), the env whitelist, and the 67b401a manifest of the
+#       SHARED code dir (the p1 script's subset) that stage O compares production with
 #
 # Usage:
 #   o0_package.sh --candidate <commit> [--baseline 67b401a] --out <new dir> [--run-tests] [--report-only] [--plan]
@@ -52,7 +56,11 @@ REPO="$(git -C "$O0_SCRIPT_DIR" rev-parse --show-toplevel)"
 # .venv-arch and node_modules live in the main checkout, not in task worktrees
 MAIN_CHECKOUT="$(dirname "$(git -C "$O0_SCRIPT_DIR" rev-parse --path-format=absolute --git-common-dir)")"
 
+# reviewed control-plane change set (G8); WGW-1.0.4 (wac-104) adds app_roles.py and db/pools.py. None of these is
+# installed into the shared directory any more: stage O deploys the whole candidate subset to its own dir (R23)
 CP_FILES=(
+  services/control-plane/api/app_roles.py
+  services/control-plane/db/pools.py
   services/control-plane/api/read_api.py
   services/control-plane/api/watcher_gateway.py
   services/control-plane/api/watcher_config_snapshot.py
@@ -106,7 +114,7 @@ exec((root / "services/control-plane/api/generated/watcher_gateway_routes.py").r
 meta = ns["PAYLOAD"]["_meta"]
 js = (root / "bridge/services/telegram-watcher/lib/generated/gateway-routes.js").read_text()
 formats = {"contracts/generated/caddy-watcher-gateway-paths.txt": "watcher-gateway-caddy-paths.v2",
-           "contracts/generated/caddy-watcher-gateway.caddy": "watcher-gateway-caddy-snippet.v1"}
+           "contracts/generated/caddy-watcher-gateway.caddy": "watcher-gateway-caddy-snippet.v2"}
 for rel, fmt in formats.items():
     rows = (root / rel).read_text(encoding="ascii").splitlines()
     head = dict(l[2:].split(" ", 1) for l in rows[:4] if l.startswith("# _"))
@@ -175,6 +183,7 @@ if [ "${#CHANGED[@]}" -gt 0 ] && [ "${#EXTRA[@]}" -eq 0 ]; then gate_pass "G8 co
 # G9
 if [ "$RUN_TESTS" = "1" ]; then
   PYTESTS=(tests/control-plane/test_caddy_watcher_gateway_paths.py tests/control-plane/api/test_watcher_gateway.py)
+  [ -f "$OUT/src/tests/control-plane/api/test_watcher_gateway_role.py" ] && PYTESTS+=(tests/control-plane/api/test_watcher_gateway_role.py)
   [ -f "$OUT/src/tests/deployment/test_watcher_package_contract.py" ] && PYTESTS+=(tests/deployment/test_watcher_package_contract.py)
   if (cd "$OUT/src" && LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 PYTHONUTF8=1 "$MAIN_CHECKOUT/.venv-arch/bin/python" -m pytest -q -p no:cacheprovider \
         "${PYTESTS[@]}") >"$OUT/logs/g9-pytest.log" 2>&1; then
@@ -217,15 +226,22 @@ fi
 
 # ---- bundle + manifests
 B="$OUT/bundle"
-mkdir -p "$B/controlplane" "$B/watcher" "$B/compose" "$B/caddy" "$B/tools"
-printf '%s\n' "${CP_FILES[@]#services/control-plane/}" > "$OUT/manifests/controlplane.paths"
-( cd "$OUT/src/services/control-plane" && find api security -maxdepth 2 -name '*.py' -type f | sort ) > "$OUT/manifests/controlplane-context.paths"
-( cd "$OUT/base/services/control-plane" && find api security -maxdepth 2 -name '*.py' -type f | sort ) >> "$OUT/manifests/controlplane-context.paths"
-sort -u -o "$OUT/manifests/controlplane-context.paths" "$OUT/manifests/controlplane-context.paths"
-while IFS= read -r rel; do put "$OUT/src/services/control-plane/$rel" "$B/controlplane/$rel"; done < "$OUT/manifests/controlplane.paths"
-"$O0_PY" "$O0_TOOL" manifest-build --root "$B/controlplane" --paths-file "$OUT/manifests/controlplane.paths" --out "$OUT/manifests/controlplane.candidate.sha256"
-"$O0_PY" "$O0_TOOL" manifest-build --root "$OUT/base/services/control-plane" --paths-file "$OUT/manifests/controlplane.paths" --out "$OUT/manifests/controlplane.baseline.sha256"
-"$O0_PY" "$O0_TOOL" manifest-build --root "$OUT/base/services/control-plane" --paths-file "$OUT/manifests/controlplane-context.paths" --out "$OUT/manifests/controlplane-context.baseline.sha256"
+mkdir -p "$B/watcher-gateway" "$B/watcher" "$B/compose" "$B/caddy" "$B/tools"
+# WGW-1.0.4 (R23): the watcher-gateway release = the candidate's own tree for the p1 paths (whole packages), as a tar and
+# a per-file manifest; the shared code dir baseline = 67b401a's files for the paths the p1 script installs
+WGW_PATHS=(services/control-plane services/nautilus-node/observability packages db/migrations)
+git -C "$REPO" archive --format=tar "$CAND_SHA" -- "${WGW_PATHS[@]}" > "$B/watcher-gateway/release.tar"
+mkdir -p "$OUT/wgw-release" "$OUT/cp-shared-base"
+tar -x -C "$OUT/wgw-release" -f "$B/watcher-gateway/release.tar"
+( cd "$OUT/wgw-release" && find . -type f | sed 's|^\./||' | sort ) > "$OUT/manifests/wgw-release.paths"
+"$O0_PY" "$O0_TOOL" manifest-build --root "$OUT/wgw-release" --paths-file "$OUT/manifests/wgw-release.paths" --out "$B/watcher-gateway/release.sha256"
+git -C "$REPO" archive --format=tar "$BASE_SHA" -- services/control-plane services/nautilus-node/observability packages/execution-domain db/migrations \
+  | tar -x -C "$OUT/cp-shared-base"
+( cd "$OUT/cp-shared-base" && find . -type f | sed 's|^\./||' | sort ) > "$OUT/manifests/cp-shared.paths"
+"$O0_PY" "$O0_TOOL" manifest-build --root "$OUT/cp-shared-base" --paths-file "$OUT/manifests/cp-shared.paths" --out "$OUT/manifests/cp-shared.baseline.sha256"
+"$O0_PY" "$O0_TOOL" wgw-unit --render --trader-root /srv/trader-v3 --release-sha "$CAND_SHA" \
+  --resource-conf "$OUT/src/infra/systemd/account-stall-control-plane-reader.conf" --out "$B/watcher-gateway/trader-v3-controlplane-watcher-gateway.service"
+"$O0_PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); import o0_tool as t; print("\n".join(t.wgw_whitelist(False)))' "$O0_SCRIPT_DIR" > "$B/watcher-gateway/env.whitelist"
 
 python3 - "$OUT/src/scripts/build_immutable_watcher_image.py" > "$OUT/manifests/watcher.paths" <<'PY'
 import ast, sys
@@ -275,7 +291,18 @@ builder._require_release_source_contract(mpath.resolve())
 builder.validate_watcher_runtime_manifest(mpath)
 print(f"RUNTIME_MANIFEST_OK files={len(files)} payload_subject_sha256={manifest['payload_subject_sha256'][:16]}")
 PY
-then gate_pass "G12 $(tail -n 1 "$OUT/logs/g12.log")"; else gate_fail "G12 offline builder rejects the runtime manifest: $(tail -n 1 "$OUT/logs/g12.log")"; fi
+then
+  # RS-20: the watcher-gateway release, unit file and env whitelist (the candidate's own tool lints the unit)
+  if { "$O0_PY" "$O0_TOOL" manifest-verify --root "$OUT/wgw-release" --manifest "$B/watcher-gateway/release.sha256" --label wgw-release \
+       && [ "$(grep -c . "$B/watcher-gateway/release.sha256")" = "$(tar -tf "$B/watcher-gateway/release.tar" | grep -vc '/$')" ] \
+       && [ -f "$OUT/wgw-release/services/control-plane/api/read_api.py" ] && [ -f "$OUT/wgw-release/packages/execution-domain/execution_domain/__init__.py" ] \
+       && (cd "$OUT/src" && "$O0_PY" scripts/ops/o0/o0_tool.py wgw-unit --lint "$B/watcher-gateway/trader-v3-controlplane-watcher-gateway.service" \
+             --trader-root /srv/trader-v3 --release-sha "$CAND_SHA") \
+       && [ "$(sort "$B/watcher-gateway/env.whitelist" | tr '\n' ' ')" = "REVIEWER_TOKEN RISK_ADMIN_TOKEN SYSTEM_OBSERVER_TOKEN VIEWER_TOKEN WATCHER_GATEWAY_CONFIG_SLOTS WATCHER_GATEWAY_MEDIA_SLOTS WATCHER_GATEWAY_TOKEN WATCHER_GATEWAY_URL " ] \
+       && [ "$(grep -c . "$OUT/manifests/cp-shared.baseline.sha256")" -gt 0 ]; } >>"$OUT/logs/g12.log" 2>&1; then
+    gate_pass "G12 $(grep '^RUNTIME_MANIFEST_OK' "$OUT/logs/g12.log") wgw_release_files=$(grep -c . "$B/watcher-gateway/release.sha256") unit_lint=ok env_whitelist=ok cp_shared_baseline=$(grep -c . "$OUT/manifests/cp-shared.baseline.sha256")"
+  else gate_fail "G12 watcher-gateway release / unit / whitelist (see $OUT/logs/g12.log)"; fi
+else gate_fail "G12 offline builder rejects the runtime manifest: $(tail -n 1 "$OUT/logs/g12.log")"; fi
 cp "$OUT"/manifests/*.sha256 "$B/"
 python3 - "$OUT" "$CAND_SHA" "$BASE_SHA" "${#FAILED_GATES[@]}" "$B/tools" > "$B/RELEASE.json" <<'PY'
 import hashlib, json, sys

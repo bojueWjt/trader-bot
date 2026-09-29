@@ -23,7 +23,7 @@ bad() { checks=$((checks + 1)); fails=$((fails + 1)); echo "FAIL $*"; }
   for pair in o0_deploy_caddy.sh:preflight o0_deploy_caddy.sh:apply o0_deploy_caddy.sh:verify o0_deploy_caddy.sh:rollback \
               o0_deploy_watcher.sh:preflight o0_deploy_watcher.sh:build o0_deploy_watcher.sh:apply-preflight o0_deploy_watcher.sh:apply \
               o0_deploy_watcher.sh:verify o0_deploy_watcher.sh:rollback o0_deploy_watcher.sh:restore-db \
-              o0_deploy_operator_query.sh:preflight o0_deploy_operator_query.sh:apply o0_deploy_operator_query.sh:verify o0_deploy_operator_query.sh:rollback \
+              o0_deploy_watcher_gateway.sh:preflight o0_deploy_watcher_gateway.sh:apply o0_deploy_watcher_gateway.sh:verify o0_deploy_watcher_gateway.sh:rollback \
               o0_fleet_guard.sh:R-2 o0_fleet_guard.sh:R-3 o0_fleet_guard.sh:SW-3 o0_fleet_guard.sh:SW-4; do
     script="${pair%%:*}"; phase="${pair#*:}"; want="$(o0_expected_auth "$script" "$phase")"
     [ -n "$want" ] || { echo "FAIL no id for $pair"; f=$((f + 1)); continue; }
@@ -108,8 +108,8 @@ before="$(snapshot)"
 run "needs --auth-id O0-A05" o0_deploy_caddy.sh --execute --phase apply --auth-id O0-A01
 run "needs --auth-id O0-A07R" o0_deploy_watcher.sh --execute --phase restore-db --auth-id O0-A07 --i-understand-data-loss
 run "--i-understand-data-loss" o0_deploy_watcher.sh --execute --phase restore-db --auth-id O0-A07R
-run "needs --auth-id O0-A08" o0_deploy_operator_query.sh --execute --phase apply --auth-id O0-A07
-run "--phase is required" o0_deploy_operator_query.sh --execute --auth-id O0-A08
+run "needs --auth-id O0-A08" o0_deploy_watcher_gateway.sh --execute --phase apply --auth-id O0-A07
+run "--phase is required" o0_deploy_watcher_gateway.sh --execute --auth-id O0-A08
 STUB_UID=1000 run "must run as root" o0_deploy_caddy.sh --execute --phase apply --auth-id O0-A05
 # wac-090 (review wac-088 🟡-6, 🟡-4): candidate outside the stage dir, probe binding missing
 run "must be inside the stage dir" o0_deploy_caddy.sh --execute --phase preflight --auth-id O0-A05 --candidate "$SB/etc/caddy/Caddyfile.candidate" \
@@ -120,7 +120,7 @@ run "must not contain '..'" o0_deploy_caddy.sh --execute --phase preflight --aut
 run "--probe-candidate-sha256 and --probe-snippet-sha256" o0_deploy_caddy.sh --execute --phase preflight --auth-id O0-A05
 run "--probe-candidate-sha256 and --probe-snippet-sha256" o0_deploy_caddy.sh --execute --phase preflight --auth-id O0-A05 --probe-candidate-sha256 abc --probe-snippet-sha256 "$(printf '%064d' 0)"
 run "gate file missing" o0_deploy_caddy.sh --execute --phase apply --auth-id O0-A05
-run "gate file missing" o0_deploy_operator_query.sh --execute --phase apply --auth-id O0-A08 --operator-query-env "$WORK/wroot/docker-compose.yml"
+run "gate file missing" o0_deploy_watcher_gateway.sh --execute --phase apply --auth-id O0-A08
 run "gate file missing" o0_deploy_watcher.sh --execute --phase apply --auth-id O0-A07 --watcher-root "$WORK/wroot"
 # a passed preflight gate for the watcher, but the build never ran: the image check must refuse
 python3 "$O0/o0_tool.py" gate-write --out "$S/evidence/watcher-preflight.gate.json" --stage watcher-preflight --bundle "$S/bundle" \

@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# WGW-1.0.4 (contracts/backend-api.md §9.14.6, RS-18): O-0 STAGE O MUST NOT USE THIS SCRIPT.
+#   `apply` overwrites the SHARED control-plane code directory and restarts EVERY role (node-control restarts HALT the
+#   fleet; operator-query carries the signal path). Stage O deploys the watcher-gateway role alone, from its own code
+#   directory, with scripts/ops/o0/o0_deploy_watcher_gateway.sh. The watcher-gateway entries below exist only for a
+#   LATER whole-control-plane upgrade, which needs its own contract, gates, window and user authorization; that upgrade
+#   must also decide where watcher-gateway's code lives (shared dir or releases/watcher-gateway/<sha>) and provide
+#   secrets/control-plane/watcher-gateway.env (bootstrap_roles does not write it).
 set -Eeuo pipefail
 
 MODE="${1:-apply}"
@@ -9,26 +16,31 @@ RUNTIME_ENV_FILE="$TRADER_ROOT/.env.v3"
 ROLE_SECRET_ROOT="$TRADER_ROOT/secrets/control-plane"
 SYSTEMD_ROOT="/etc/systemd/system"
 
-ROLE_NAMES=(node-control event-ingest operator-query)
-ROLE_PORTS=(8181 8182 8183)
+ROLE_NAMES=(node-control event-ingest operator-query watcher-gateway)
+ROLE_PORTS=(8181 8182 8183 8186)
 ROLE_USERS=(
   trader-v3-cp-node-control
   trader-v3-cp-event-ingest
   trader-v3-cp-operator-query
+  trader-v3-cp-watcher-gateway
 )
+# watcher-gateway: no database role (WGW-1.0.4: no DATABASE_URL, no CONTROL_PLANE_EXPECT_DATABASE_ROLE, no pg_isready)
 ROLE_DATABASES=(
   trader_v3_node_control
   trader_v3_event_ingest
   trader_v3_operator_query
+  ""
 )
 ROLE_ENV_FILES=(
   "$ROLE_SECRET_ROOT/node-control.env"
   "$ROLE_SECRET_ROOT/event-ingest.env"
   "$ROLE_SECRET_ROOT/operator-query.env"
+  "$ROLE_SECRET_ROOT/watcher-gateway.env"
 )
 ROLE_RESOURCE_FILES=(
   "$TRADER_ROOT/infra/systemd/account-stall-control-plane-writer.conf"
   "$TRADER_ROOT/infra/systemd/account-stall-control-plane-writer.conf"
+  "$TRADER_ROOT/infra/systemd/account-stall-control-plane-reader.conf"
   "$TRADER_ROOT/infra/systemd/account-stall-control-plane-reader.conf"
 )
 
@@ -287,6 +299,25 @@ write_role_unit() {
   local unit="$SYSTEMD_ROOT/trader-v3-controlplane-$role.service"
   local temporary
   temporary="$(mktemp "$SYSTEMD_ROOT/.trader-v3-controlplane-$role.XXXXXX")"
+  if [ -z "$database_role" ]; then
+    # database-less template (watcher-gateway, WGW-1.0.4 §9.14.6 单元)
+    cat > "$temporary" <<EOF
+[Unit]
+Description=Trader v3 control-plane role $role (no database)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=$user
+Group=$user
+WorkingDirectory=$TRADER_ROOT/services/control-plane/api
+EnvironmentFile=$env_file
+Environment=CONTROL_PLANE_APP_ROLE=$role
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=$VENV_ROOT/bin/uvicorn read_api:app --host 127.0.0.1 --port $port
+TimeoutStopSec=15
+EOF
+  else
   cat > "$temporary" <<EOF
 [Unit]
 Description=Trader v3 control-plane role $role
@@ -304,6 +335,7 @@ ExecStartPre=+/usr/bin/docker exec trader-v3-postgres pg_isready -U postgres -d 
 ExecStart=$VENV_ROOT/bin/uvicorn read_api:app --host 127.0.0.1 --port $port
 TimeoutStopSec=15
 EOF
+  fi
   sed '1d' "$resource_file" >> "$temporary"
   cat >> "$temporary" <<'EOF'
 
@@ -341,6 +373,7 @@ expected = {
     8181: ("node-control", "trader_v3_node_control"),
     8182: ("event-ingest", "trader_v3_event_ingest"),
     8183: ("operator-query", "trader_v3_operator_query"),
+    8186: ("watcher-gateway", None),
 }
 deadline = time.monotonic() + 45
 for port, (app_role, database_role) in expected.items():
@@ -354,14 +387,18 @@ for port, (app_role, database_role) in expected.items():
             if time.monotonic() >= deadline:
                 raise
             time.sleep(1)
-    required = {
-        "status": "healthy",
-        "app_role": app_role,
-        "expected_database_role": database_role,
-        "session_user": database_role,
-        "current_user": database_role,
-        "rollback_only_permission_probe": "pass",
-    }
+    if database_role is None:
+        # WGW-1.0.4 §9.14.6 健康检查: no database; 200 only while the gateway is enabled
+        required = {"status": "healthy", "app_role": app_role, "database": "none", "gateway": "enabled"}
+    else:
+        required = {
+            "status": "healthy",
+            "app_role": app_role,
+            "expected_database_role": database_role,
+            "session_user": database_role,
+            "current_user": database_role,
+            "rollback_only_permission_probe": "pass",
+        }
     if payload != required:
         raise SystemExit(f"role health mismatch on port {port}: {payload}")
     print(json.dumps(payload, sort_keys=True))

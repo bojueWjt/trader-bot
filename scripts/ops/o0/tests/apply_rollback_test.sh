@@ -47,7 +47,8 @@ bad() { checks=$((checks + 1)); fails=$((fails + 1)); echo "FAIL $*"; }
 # ---------------------------------------------------------------- 1. plan structure
 plan() { env -u O0_FLEET_SETTLE_S -u O0_FLEET_SAMPLES -u O0_FLEET_INTERVAL_S bash "$O0/$1" --phase "$2" > "$WORK/plan-${1%.sh}-$2.txt"; }
 for pair in o0_deploy_caddy.sh:preflight o0_deploy_caddy.sh:apply o0_deploy_watcher.sh:preflight o0_deploy_watcher.sh:build \
-            o0_deploy_watcher.sh:apply o0_deploy_watcher.sh:restore-db o0_deploy_operator_query.sh:preflight o0_deploy_operator_query.sh:apply; do
+            o0_deploy_watcher.sh:apply o0_deploy_watcher.sh:restore-db o0_deploy_watcher_gateway.sh:preflight o0_deploy_watcher_gateway.sh:apply \
+            o0_deploy_watcher_gateway.sh:rollback; do
   plan "${pair%%:*}" "${pair#*:}"
 done
 if python3 - "$WORK" > "$WORK/structure.txt" 2>&1 <<'PY'; then ok "plan structure: $(tail -1 "$WORK/structure.txt")"; else bad "plan structure"; cat "$WORK/structure.txt"; fi
@@ -80,7 +81,7 @@ def check(cond, msg):
         problems.append(msg)
 
 for name, stage in (("plan-o0_deploy_caddy-preflight.txt", "caddy-preflight"), ("plan-o0_deploy_watcher-preflight.txt", "watcher-preflight"),
-                    ("plan-o0_deploy_watcher-build.txt", "watcher-build"), ("plan-o0_deploy_operator_query-preflight.txt", "oq-preflight")):
+                    ("plan-o0_deploy_watcher-build.txt", "watcher-build"), ("plan-o0_deploy_watcher_gateway-preflight.txt", "wgw-preflight")):
     ev = [e for e in events(name) if e[0] == "PLAN"]
     check(ev and ev[0][1].startswith(f"clear any earlier {stage} gate") and f"{stage}.gate.json" in ev[0][2],
           f"{name}: first step must clear the old {stage} gate (got {ev[0][1][:50] if ev else None!r})")
@@ -91,21 +92,23 @@ apply_cases = {
               "restart caddy", "after-caddy"),
     "watcher": ("plan-o0_deploy_watcher-apply.txt", "watcher-preflight", "before-watcher", "backups:", "install the watcher env_file",
                 "recreate watcher with the tested image", "after-watcher"),
-    "oq": ("plan-o0_deploy_operator_query-apply.txt", "oq-preflight", "before-oq", "backup overwritten files", "add WATCHER_GATEWAY_TOKEN",
-           "restart operator-query ONLY", "after-oq"),
+    # WGW-1.0.4 stage O: nothing existing is overwritten (no backup step); the first write creates the new user; the runtime
+    # replacement is "enable --no-reload" (then start)
+    "wgw": ("plan-o0_deploy_watcher_gateway-apply.txt", "wgw-preflight", "before-wgw", None, "create the system user",
+            "enable watcher-gateway WITHOUT a reload", "after-wgw"),
 }
 for key, (name, gate, base, backup, first_write, restart, after) in apply_cases.items():
     ev = events(name)
     plans = [e for e in ev if e[0] == "PLAN"]
     check(plans[0][1].startswith(f"REQUIRE passed {gate} gate"), f"{key}: apply must start with REQUIRE {gate}")
     i_base = idx(ev, lambda e: e[1].startswith(f"fleet baseline ({base})"), f"{key} fleet baseline")
-    i_backup = idx(ev, lambda e: e[1].startswith(backup), f"{key} backup")
+    i_backup = idx(ev, lambda e: e[1].startswith(backup), f"{key} backup") if backup else i_base + 1
     i_armed = idx(ev, lambda e: e[0] == "NOTE" and e[1].startswith(f"AUTO_ROLLBACK_ARMED"), f"{key} rollback armed")
     i_write = idx(ev, lambda e: e[1].startswith(first_write), f"{key} first live write")
     i_mark = idx(ev, lambda e: e[0] == "NOTE" and e[1].startswith("RUNTIME_REPLACEMENT_BEGINS"), f"{key} runtime mark")
     i_restart = idx(ev, lambda e: e[0] == "PLAN" and e[1].startswith(restart), f"{key} restart")
     i_after = idx(ev, lambda e: e[1].startswith(f"fleet after {after}:"), f"{key} fleet after")
-    check(i_base < i_backup < i_armed < i_write, f"{key}: order must be fleet baseline < backup < rollback armed < first live write "
+    check(i_base < i_backup <= i_armed < i_write, f"{key}: order must be fleet baseline < backup < rollback armed < first live write "
           f"(got {i_base},{i_backup},{i_armed},{i_write})")
     check(all(e[0] == "PLAN" and not e[1].startswith("fleet") for e in ev[1:i_base] if e[0] == "PLAN") and i_base < i_write,
           f"{key}: nothing but gates before the fleet baseline")
@@ -138,14 +141,38 @@ check(not re.search(r"\bcp\b[^\n]*dryrun\.post\.db", post[2]), "build: dryrun.po
 
 # stage O isolation gate (review wac-032-r2 🟡-6): in preflight before the gate is written, in
 # apply before the fleet baseline and the first backup; both other units named
-for name, before_what in (("plan-o0_deploy_operator_query-preflight.txt", "record the passed oq-preflight gate"),
-                          ("plan-o0_deploy_operator_query-apply.txt", "fleet baseline (before-oq)")):
+for name, before_what in (("plan-o0_deploy_watcher_gateway-preflight.txt", "record the passed wgw-preflight gate"),
+                          ("plan-o0_deploy_watcher_gateway-apply.txt", "fleet baseline (before-wgw)")):
     ev = events(name)
     i_iso = idx(ev, lambda e: e[1].startswith("control-plane unit isolation (S-10)"), f"{name} isolation gate")
     i_next = idx(ev, lambda e: e[1].startswith(before_what), f"{name} {before_what}")
     check(i_iso < i_next, f"{name}: the isolation gate must come before '{before_what}'")
     check("cp-isolation" in ev[i_iso][2] and "--other-unit trader-v3-controlplane-node-control" in ev[i_iso][2]
-          and "--other-unit trader-v3-controlplane-event-ingest" in ev[i_iso][2], f"{name}: isolation gate must check both other units")
+          and "--other-unit trader-v3-controlplane-event-ingest" in ev[i_iso][2] and "--wgw-unit trader-v3-controlplane-watcher-gateway.service" in ev[i_iso][2],
+          f"{name}: isolation gate must check all four units")
+# WGW-1.0.4 RS-16 order and red lines (review wac-096 r5 🟡-B, 🟡-C)
+ev = [e for e in events("plan-o0_deploy_watcher_gateway-apply.txt") if e[0] == "PLAN"]
+text = "".join(e[1] + "\n" + e[2] for e in ev)
+i_dir = idx(ev, lambda e: e[1].startswith("install the release tree"), "wgw install dir")
+i_smoke = idx(ev, lambda e: e[1].startswith("dependency check AS THE UNIT USER"), "wgw user smoke")
+i_env = idx(ev, lambda e: e[1].startswith("install the watcher-gateway env"), "wgw env")
+i_unit = idx(ev, lambda e: e[1].startswith("install the unit file"), "wgw unit")
+i_rc = idx(ev, lambda e: e[1].startswith("NeedDaemonReload=no on EVERY unit (apply-before-daemon-reload"), "wgw reload check")
+i_dr = idx(ev, lambda e: e[1].startswith("daemon-reload (the only one"), "wgw daemon-reload")
+i_en = idx(ev, lambda e: e[1].startswith("enable watcher-gateway WITHOUT a reload"), "wgw enable")
+i_st = idx(ev, lambda e: e[1] == "start watcher-gateway", "wgw start")
+check(i_dir < i_smoke < i_env < i_unit < i_rc < i_dr < i_en < i_st, f"wgw apply order ({i_dir},{i_smoke},{i_env},{i_unit},{i_rc},{i_dr},{i_en},{i_st})")
+check("--as-user trader-v3-cp-watcher-gateway" in ev[i_smoke][2] and "--exclude trader-v3-controlplane-watcher-gateway.service" in ev[i_rc][2],
+      "wgw: smoke as the unit user; the pre-reload check excludes only the new unit")
+check(sum(1 for e in ev if "systemctl daemon-reload" in e[2] or e[2].strip().endswith("systemctl daemon-reload")) == 1, "wgw apply: exactly one daemon-reload")
+check("enable --now" not in text and "systemctl restart" not in text and "pip " not in text and "jp24-p1-control-plane" not in text,
+      "wgw apply: no enable --now, no restart of anything, no pip, no whole-plane script")
+check(not re.search(r"systemctl (stop|restart|reload|kill|start) [^\n]*(node-control|event-ingest|operator-query)", text), "wgw apply never acts on the three units")
+rb = [e for e in events("plan-o0_deploy_watcher_gateway-rollback.txt") if e[0] == "PLAN"]
+i_w = idx(rb, lambda e: e[1].startswith("withdraw the exposure FIRST"), "wgw rollback withdraw")
+i_n = idx(rb, lambda e: e[1].startswith("NeedDaemonReload=no on every other unit, then remove the unit file"), "wgw rollback reload gate")
+check(i_w < i_n and "disable --no-reload" in rb[i_w][2] and "daemon-reload-check" not in rb[i_w][2] and "daemon-reload-check" in rb[i_n][2],
+      "wgw rollback: stop + disable --no-reload first, the NeedDaemonReload gate only before removing the unit file")
 
 # restore-db (review wac-032-r2 🟡-5): owner/mode/sha recorded before the stop; recovery armed
 # and the runtime marked before the stop; the install uses the RECORDED owner and mode
@@ -162,14 +189,35 @@ check('chown "$own"' in ev[i_inst][2] and 'chmod "$mode"' in ev[i_inst][2] and "
 if problems:
     print("\n".join(problems))
     sys.exit(1)
-print("STRUCTURE_OK preflight_gate_clear=4 caddy_probe_binding=ok apply_order=3 restore_db_order=ok oq_isolation_gate=2 build_graceful_stop=ok build_backup_api=ok")
+print("STRUCTURE_OK preflight_gate_clear=4 caddy_probe_binding=ok apply_order=3 restore_db_order=ok wgw_isolation_gate=2 wgw_order=ok wgw_rollback_order=ok build_graceful_stop=ok build_backup_api=ok")
 PY
 
 # ---------------------------------------------------------------- 2. automatic rollback (sandbox)
 if [ "$STRUCTURE_ONLY" = 1 ]; then :
 elif [ -e /srv/trader-v3 ]; then echo "SKIP sandbox part: this host has /srv/trader-v3"; else
 BIN="$WORK/bin"; mkdir -p "$BIN"
-printf '#!/usr/bin/env bash\n[ "$1" = "-u" ] && echo 0 || /usr/bin/id "$@"\n' > "$BIN/id"
+printf '#!/usr/bin/env bash\n[ "$1" = "-u" ] && { echo 0; exit 0; }\ngrep -qx "$1" "$CALLS.users" 2>/dev/null && { echo "uid=999($1) gid=999($1)"; exit 0; }\n/usr/bin/id "$@"\n' > "$BIN/id"
+# stage O (WGW-1.0.4): system users/groups in a stub db; setpriv runs the command (the unit-user smoke; SMOKE_AS_USER_MISSING
+# injects the DEPENDENCY_MISSING the shared venv would give); ss lists 8186 only while the new unit runs
+cat > "$BIN/getent" <<'STUB'
+#!/usr/bin/env bash
+grep -qx "$2" "$CALLS.users" 2>/dev/null && { echo "$2:x:999:999::/nonexistent:/usr/sbin/nologin"; exit 0; }
+exit 2
+STUB
+for v in useradd groupadd; do printf '#!/usr/bin/env bash\necho "%s $*" >> "$CALLS"\nn="${*: -1}"; grep -qx "$n" "$CALLS.users" 2>/dev/null || echo "$n" >> "$CALLS.users"\n' "$v" > "$BIN/$v"; done
+for v in userdel groupdel; do printf '#!/usr/bin/env bash\necho "%s $*" >> "$CALLS"\nn="${*: -1}"; [ -f "$CALLS.users" ] && grep -vx "$n" "$CALLS.users" > "$CALLS.users.t"; mv -f "$CALLS.users.t" "$CALLS.users" 2>/dev/null || true\n' "$v" > "$BIN/$v"; done
+cat > "$BIN/setpriv" <<'STUB'
+#!/usr/bin/env bash
+# the smoke runs its child with a minimal environment: this stub signals through files next to itself
+here="$(dirname "$0")"; echo "setpriv $1" >> "$here/setpriv.log"
+while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done; shift
+if [ -e "$here/SMOKE_AS_USER_MISSING" ]; then echo "DEPENDENCY_MISSING httpx"; exit 3; fi
+exec "$@"
+STUB
+cat > "$BIN/ss" <<'STUB'
+#!/usr/bin/env bash
+echo 'LISTEN 0 4096 127.0.0.1:8183 0.0.0.0:* users:(("uvicorn",pid=11,fd=3))'
+STUB
 cat > "$BIN/docker" <<'STUB'
 #!/usr/bin/env bash
 echo "docker $*" >> "$CALLS"
@@ -193,6 +241,25 @@ STUB
 cat > "$BIN/systemctl" <<'STUB'
 #!/usr/bin/env bash
 echo "systemctl $*" >> "$CALLS"
+W=trader-v3-controlplane-watcher-gateway.service
+WF="$O0_SANDBOX/etc/systemd/system/$W"
+case "$1" in list-units) printf 'caddy.service loaded active running Caddy\ntrader-v3-controlplane-operator-query.service loaded active running oq\nx.timer loaded active waiting x\n'; exit 0 ;; esac
+if [ "$1" = show ] && [[ " $* " == *" -p Id -p NeedDaemonReload "* ]]; then
+  for u in "$@"; do case "$u" in show|-p|Id|NeedDaemonReload) continue ;; esac
+    v=no
+    if [ "$u" = x.timer ] && { [ "${RELOAD_PENDING:-}" = always ] || { [ "${RELOAD_PENDING:-}" = after-start ] && grep -q "^systemctl start $W" "$CALLS"; }; }; then v=yes; fi
+    printf 'Id=%s\nNeedDaemonReload=%s\n\n' "$u" "$v"; done
+  exit 0
+fi
+if [ "$1" = show ] && [[ "$*" == *"MainPID,ExecMainStartTimestamp"* ]]; then printf '4242\nTue 2026-09-29 00:00:00 UTC\n'; exit 0; fi
+if [ "$1" = show ] && [[ "$*" == *"-p LoadState --value $W"* ]]; then
+  if [ -e "$WF" ] && grep -q '^systemctl daemon-reload' "$CALLS"; then echo loaded; else echo not-found; fi; exit 0
+fi
+if [ "$1" = show ] && [[ "$*" == *"-p ActiveState --value $W"* ]]; then
+  last="$(grep -E "^systemctl (start|stop) $W" "$CALLS" | tail -1)"; case "$last" in *" start "*) echo active ;; *) echo inactive ;; esac; exit 0
+fi
+if [ "$1" = show ] && [ "$2" = "$W" ]; then printf 'LoadState=not-found\nNeedDaemonReload=no\n'; exit 0; fi
+if [ "$1" = start ] && [ -n "${START_FAIL:-}" ]; then exit 1; fi
 # unit properties for the stage O isolation gate (o0_tool.py cp-isolation); ISOLATION_FAIL
 # injects the two S-10 violations (env file / Environment= name) with a sentinel VALUE
 if [ "$1" = "show" ] && [[ " $* " == *" -p LoadState "* ]]; then
@@ -203,9 +270,10 @@ if [ "$1" = "show" ] && [[ " $* " == *" -p LoadState "* ]]; then
   if [ "${ISOLATION_FAIL:-}" = unparsed ] && [[ "$2" == *event-ingest ]]; then echo 'EnvironmentFiles=etc/relative.env (ignore_errors=no)'; fi
   oqe="$O0_SANDBOX/srv/trader-v3/secrets/control-plane/operator-query.env"
   case "$2" in
-    *operator-query) echo "EnvironmentFiles=$oqe (ignore_errors=no)"; echo 'Environment=PYTHONPATH=/x' ;;
-    *node-control) [ "${ISOLATION_FAIL:-}" != envfile ] || echo "EnvironmentFiles=$oqe (ignore_errors=no)"; echo 'Environment=' ;;
-    *event-ingest) if [ "${ISOLATION_FAIL:-}" = envname ]; then echo 'Environment=WATCHER_SNAPSHOT_TOKEN=SENTINELisoleak0123456789'; else echo 'Environment='; fi ;;
+    *operator-query) echo "EnvironmentFiles=$oqe (ignore_errors=no)"; echo 'Environment=PYTHONPATH=/x CONTROL_PLANE_APP_ROLE=operator-query' ;;
+    *node-control) [ "${ISOLATION_FAIL:-}" != envfile ] || echo "EnvironmentFiles=$oqe (ignore_errors=no)"; echo 'Environment=CONTROL_PLANE_APP_ROLE=node-control' ;;
+    *event-ingest) if [ "${ISOLATION_FAIL:-}" = envname ]; then echo 'Environment=WATCHER_SNAPSHOT_TOKEN=SENTINELisoleak0123456789 CONTROL_PLANE_APP_ROLE=event-ingest'
+                   else echo 'Environment=CONTROL_PLANE_APP_ROLE=event-ingest'; fi ;;
   esac
   exit 0
 fi
@@ -240,6 +308,11 @@ import os, shutil, sys
 if os.environ.get("INSTALL_FAIL"):
     sys.exit(1)
 args, files, mk, i = sys.argv[1:], [], False, 0
+if "-d" in args:
+    for a in args[args.index("-d") + 1:]:
+        if not a.startswith("-") and a not in (args[args.index(x) + 1] for x in ("-m", "-o", "-g") if x in args):
+            os.makedirs(a, exist_ok=True)
+    sys.exit(0)
 while i < len(args):
     if args[i] == "-D":
         mk = True
@@ -262,8 +335,9 @@ if os.environ.get("CHOWN_FAIL"):
     sys.exit(1)
 db = os.environ["CALLS"] + ".owners"
 owners = json.load(open(db)) if os.path.exists(db) else {}
-owner = sys.argv[1].replace("root", "0")
-for f in sys.argv[2:]:
+argv = [a for a in sys.argv[1:] if a != "-R"]
+owner = argv[0].replace("root", "0")
+for f in argv[1:]:
     owners[str(os.stat(f).st_ino)] = owner
 json.dump(owners, open(db, "w"))
 STUB
@@ -356,7 +430,7 @@ caddy_setup() {
   mkdir -p "$SB/etc/caddy" "$S/caddy"
   printf 'old.example {\n\trespond 200\n}\n' > "$SB/etc/caddy/Caddyfile"
   printf 'CADDY_DOMAIN=jp-bot.balen.wang\n' > "$SB/etc/caddy/v3.env"
-  printf 'import caddy-watcher-gateway.caddy\njp-bot.balen.wang {\n\timport watcher_gateway_routes\n\trespond 204\n}\n' > "$S/caddy/Caddyfile.candidate"
+  printf 'import caddy-watcher-gateway.caddy\n(watcher_gateway_upstream) {\n\turi strip_prefix /m\n\treverse_proxy 127.0.0.1:8186\n}\njp-bot.balen.wang {\n\timport watcher_gateway_routes\n\trespond 204\n}\n' > "$S/caddy/Caddyfile.candidate"
   cp "$S/bundle/caddy/caddy-watcher-gateway.caddy" "$S/caddy/caddy-watcher-gateway.caddy"   # preflight stages it (relative import)
   (cd "$SB/etc/caddy" && sha256sum "$SB/etc/caddy/Caddyfile" "$SB/etc/caddy/v3.env") > "$S/evidence/caddy-live.sha256"
   seal_bundle
@@ -445,7 +519,7 @@ pf_setup() {  # pf_setup <name>: live files, a candidate in $S/caddy, a fake con
   mkdir -p "$SB/etc/caddy" "$S/caddy"
   printf 'old.example {\n\trespond 200\n}\n' > "$SB/etc/caddy/Caddyfile"
   printf 'CADDY_DOMAIN=jp-bot.balen.wang\n' > "$SB/etc/caddy/v3.env"
-  printf 'import caddy-watcher-gateway.caddy\njp-bot.balen.wang {\n\timport watcher_gateway_routes\n\trespond 204\n}\n' > "$S/caddy/Caddyfile.candidate"
+  printf 'import caddy-watcher-gateway.caddy\n(watcher_gateway_upstream) {\n\turi strip_prefix /m\n\treverse_proxy 127.0.0.1:8186\n}\njp-bot.balen.wang {\n\timport watcher_gateway_routes\n\trespond 204\n}\n' > "$S/caddy/Caddyfile.candidate"
   PF_CAT="$WORK/catalog-pf-$1.env"; fake_catalog "$PF_CAT"
   seal_bundle
   PF_CAND="$(sha256sum "$S/caddy/Caddyfile.candidate" | cut -d' ' -f1)"; PF_SNIP="$(sha256sum "$S/bundle/caddy/caddy-watcher-gateway.caddy" | cut -d' ' -f1)"
@@ -581,38 +655,122 @@ WATCHER_LOG_DBFAIL=1 run_apply o0_deploy_watcher.sh O0-A07 "${watcher_args[@]//s
 assert_rollback "watcher B (startup check fails after recreate)" yes 'docker compose .* up ' 2 "startup:"
 watcher_restored "watcher B"
 
-# ---- operator-query
-oq_setup() {
-  new_sandbox "oq-$1"
-  CP="$SB/srv/trader-v3/services/control-plane"; OQE="$SB/srv/trader-v3/secrets/control-plane/operator-query.env"
-  mkdir -p "$CP/api" "$S/bundle/controlplane/api/generated" "$(dirname "$OQE")" "$SB/srv/trader-v3/.venv-cp/bin"
-  printf '#!/usr/bin/env bash\necho "python 3.12 httpx stub"\n' > "$SB/srv/trader-v3/.venv-cp/bin/python"; chmod +x "$SB/srv/trader-v3/.venv-cp/bin/python"
-  echo 'old = 1' > "$CP/api/read_api.py"
-  echo 'new = 1' > "$S/bundle/controlplane/api/read_api.py"; echo 'PAYLOAD = {}' > "$S/bundle/controlplane/api/generated/watcher_gateway_routes.py"
-  fake_catalog "$OQE"
-  printf 'api/read_api.py\napi/generated/watcher_gateway_routes.py\n' > "$WORK/opaths"
-  python3 "$O0/o0_tool.py" manifest-build --root "$CP" --paths-file "$WORK/opaths" --out "$S/bundle/controlplane.baseline.sha256" >/dev/null
-  cp "$S/bundle/controlplane.baseline.sha256" "$S/bundle/controlplane-context.baseline.sha256"
-  python3 "$O0/o0_tool.py" manifest-build --root "$S/bundle/controlplane" --paths-file "$WORK/opaths" --out "$S/bundle/controlplane.candidate.sha256" >/dev/null
-  sha256sum "$OQE" > "$WORK/oq-env-$1.sha256"
+# ---- stage O (WGW-1.0.4 §9.14.6, RS-16; task wac-105): watcher-gateway, own unit / dir / env; the three running units never touched
+wgw_setup() {  # wgw_setup <name> [missing]  -> a sandbox with a fake shared tree, a fake release tree, the bundle and a cred set
+  new_sandbox "wgw-$1"
+  TR="$SB/srv/trader-v3"; RSHA="$(printf '%040d' 7)"
+  mkdir -p "$TR/services/control-plane/api" "$TR/packages/execution-domain" "$TR/secrets/control-plane" "$TR/.venv-cp/bin" "$SB/etc/systemd/system" \
+           "$S/bundle/watcher-gateway" "$WORK/rel-$1/services/control-plane/api"
+  ln -s "$(command -v python3)" "$TR/.venv-cp/bin/python"
+  echo 'shared = 1' > "$TR/services/control-plane/api/read_api.py"; echo 'x = 1' > "$TR/packages/execution-domain/a.py"
+  printf 'services/control-plane/api/read_api.py\npackages/execution-domain/a.py\n' > "$WORK/shared-$1.paths"
+  python3 "$O0/o0_tool.py" manifest-build --root "$TR" --paths-file "$WORK/shared-$1.paths" --out "$S/bundle/cp-shared.baseline.sha256" >/dev/null
+  python3 -c 'import secrets,sys; open(sys.argv[1],"w").write("".join("%s=%s\n" % (n, secrets.token_urlsafe(32)) for n in ("RISK_ADMIN_TOKEN","VIEWER_TOKEN","REVIEWER_TOKEN","SYSTEM_OBSERVER_TOKEN")))' \
+    "$TR/secrets/control-plane/operator-query.env"
+  R="$WORK/rel-$1/services/control-plane/api"
+  { [ "${2:-}" = missing ] && echo 'import o0_no_such_module_stand_in'
+    printf 'class _R:\n    def __init__(s, n, p): s.name, s.path = n, p\nclass _A:\n    routes = [_R("watcher_gateway__status", "/v1/watcher/status"), _R("role_database_health", "/health/role")]\n'
+    printf 'def create_app(role=None):\n    return _A()\napp = create_app()\n'; } > "$R/read_api.py"
+  printf 'import os\ndef readiness():\n    return (bool(os.environ.get("WATCHER_GATEWAY_TOKEN")), "ok")\n' > "$R/watcher_gateway.py"
+  (cd "$WORK/rel-$1" && tar -cf "$S/bundle/watcher-gateway/release.tar" services && find services -type f | sort > "$WORK/rel-$1.paths")
+  python3 "$O0/o0_tool.py" manifest-build --root "$WORK/rel-$1" --paths-file "$WORK/rel-$1.paths" --out "$S/bundle/watcher-gateway/release.sha256" >/dev/null
+  python3 "$O0/o0_tool.py" wgw-unit --render --trader-root "$TR" --release-sha "$RSHA" --resource-conf "$REPO/infra/systemd/account-stall-control-plane-reader.conf" \
+    --out "$S/bundle/watcher-gateway/trader-v3-controlplane-watcher-gateway.service" >/dev/null
+  printf 'WATCHER_GATEWAY_TOKEN\nRISK_ADMIN_TOKEN\nVIEWER_TOKEN\nREVIEWER_TOKEN\nSYSTEM_OBSERVER_TOKEN\n' > "$S/bundle/watcher-gateway/env.whitelist"
   seal_bundle
-  python3 "$O0/o0_tool.py" gate-write --out "$S/evidence/oq-preflight.gate.json" --stage oq-preflight --bundle "$S/bundle" \
-    --file-sha "cred_oq_env=$S/creds/set-initial/operator-query.env" --file-sha "live_oq_env=$OQE" >/dev/null
 }
-oq_restored() {
-  if python3 "$O0/o0_tool.py" manifest-verify --root "$CP" --manifest "$S/bundle/controlplane.baseline.sha256" >/dev/null \
-     && sha256sum -c --quiet "$WORK/oq-env-$2.sha256" >/dev/null 2>&1; then ok "$1: control-plane code and operator-query.env restored"; else bad "$1: operator-query files not restored"; fi
+run_wgw() {  # run_wgw <phase> args...  -> RC, OUT
+  local phase="$1"; shift
+  RC=0
+  OUT="$(PATH="$BIN:$PATH" O0_SANDBOX="$SB" O0_FLEET_PARAMS_SANDBOX_SKIP=1 CALLS="$CALLS" O0_FLEET_NODES=account-a O0_FLEET_READY_PORTS=8081 O0_FLEET_SETTLE_S=0 \
+         O0_FLEET_SAMPLES=1 O0_FLEET_INTERVAL_S=0 O0_WGW_HEALTH_TRIES=1 bash "$O0/o0_deploy_watcher_gateway.sh" --execute --phase "$phase" --auth-id O0-A08 \
+         --stage-dir "$S" "$@" 2>&1)" || RC=$?
 }
-oq_setup A
-INSTALL_FAIL=1 run_apply o0_deploy_operator_query.sh O0-A08 --cp-root "$WORK/sb-oq-A/srv/trader-v3/services/control-plane" \
-  --operator-query-env "$WORK/sb-oq-A/srv/trader-v3/secrets/control-plane/operator-query.env"
-assert_rollback "operator-query A (install fails before restart)" no 'systemctl restart' 0 "install the five reviewed files"
-oq_restored "operator-query A" A
-oq_setup B
-OQ_JOURNAL_FAIL=1 run_apply o0_deploy_operator_query.sh O0-A08 --cp-root "$WORK/sb-oq-B/srv/trader-v3/services/control-plane" \
-  --operator-query-env "$WORK/sb-oq-B/srv/trader-v3/secrets/control-plane/operator-query.env"
-assert_rollback "operator-query B (startup journal fails after restart)" yes 'systemctl restart trader-v3-controlplane-operator-query' 2 "startup journal since the restart"
-oq_restored "operator-query B" B
+wgw_nothing_new() {  # wgw_nothing_new <label> [objects-only]: no user, dir, env, unit file; (unless objects-only) no start/enable/daemon-reload
+  local acts='^systemctl (start|enable|daemon-reload)'; [ "${2:-}" = objects-only ] && acts='^o0-never-matches$'
+  if [ ! -e "$TR/releases/watcher-gateway/$RSHA" ] && [ ! -e "$TR/secrets/control-plane/watcher-gateway.env" ] && [ ! -e "$SB/etc/systemd/system/trader-v3-controlplane-watcher-gateway.service" ] \
+     && ! grep -qx trader-v3-cp-watcher-gateway "$CALLS.users" 2>/dev/null && ! grep -qE "$acts" "$CALLS" \
+     && cmp -s "$TR/services/control-plane/api/read_api.py" <(echo 'shared = 1'); then ok "$1: no new object left, nothing started or reloaded, shared dir intact"
+  else bad "$1: leftovers or actions"; grep -E '^systemctl (start|enable|daemon-reload|stop|disable)|useradd|userdel' "$CALLS" | sed 's/^/    /'; fi
+}
+# PF-OK: the whole preflight runs in the sandbox and writes the gate (every other apply case starts from such a gate)
+wgw_setup PFOK
+run_wgw preflight
+if [ "$RC" = 0 ] && [ -f "$S/evidence/wgw-preflight.gate.json" ] && printf '%s' "$OUT" | grep -q 'MANIFEST_OK cp-shared-vs-67b401a' \
+   && printf '%s' "$OUT" | grep -q 'DAEMON_RELOAD_CLEAN' && printf '%s' "$OUT" | grep -q 'SMOKE_OK as=current user' && printf '%s' "$OUT" | grep -q 'WGW_UNIT_LINT_OK' \
+   && printf '%s' "$OUT" | grep -q 'WGW_ENV_WRITTEN names=WATCHER_GATEWAY_TOKEN,RISK_ADMIN_TOKEN,VIEWER_TOKEN,REVIEWER_TOKEN,SYSTEM_OBSERVER_TOKEN' \
+   && printf '%s' "$OUT" | grep -q 'CP_ISOLATION_OK units=3 watcher_gateway=absent' && printf '%s' "$OUT" | grep -q 'PORT_FREE 8186' \
+   && [ ! -e "$TR/releases" ] && ! grep -qE '^systemctl (start|enable|daemon-reload|stop|restart)' "$CALLS" && [ ! -e "$TR/services/control-plane/api/__pycache__" ]; then
+  ok "wgw PF-OK: preflight passes in the sandbox (manifest, NeedDaemonReload, 8186 free, isolation, env names, python -B smoke, unit lint) and writes only the stage dir"
+else bad "wgw PF-OK rc=$RC"; printf '%s\n' "$OUT" | grep -E 'STEP|FAIL|ABORT|SMOKE|DRIFT' | tail -8 | sed 's/^/    /'; fi
+printf '%s' "$OUT" | grep -qE 'o0fake|SENTINEL|[A-Za-z0-9_-]{43}' && bad "wgw PF-OK: an env value may have been printed" || ok "wgw PF-OK: no token value in the output (names only)"
+# PF-DRIFT (task wac-105): the shared dir differs from 67b401a -> stop with the file list and the options, nothing changed; the
+# user's acceptance is bound to exactly that list
+wgw_setup PFDRIFT
+echo 'hotfix = 1' > "$TR/services/control-plane/api/read_api.py"
+run_wgw preflight
+dsha="$(printf '%s' "$OUT" | sed -n 's/.*MANIFEST_DRIFT cp-shared-vs-67b401a .*drift_sha256=\([0-9a-f]\{64\}\).*/\1/p' | head -1)"
+if [ "$RC" != 0 ] && [ -n "$dsha" ] && printf '%s' "$OUT" | grep -q 'DRIFT MODIFIED services/control-plane/api/read_api.py' && printf '%s' "$OUT" | grep -q 'SUGGESTION option A' \
+   && printf '%s' "$OUT" | grep -q 'NEVER here: fix, restore, overwrite' && [ "$(cat "$TR/services/control-plane/api/read_api.py")" = 'hotfix = 1' ] && [ ! -f "$S/evidence/wgw-preflight.gate.json" ]; then
+  ok "wgw PF-DRIFT: preflight stops with the drift list, the user's options and drift_sha256; the drifted file is untouched, no gate"
+else bad "wgw PF-DRIFT rc=$RC"; printf '%s\n' "$OUT" | grep -E 'DRIFT|SUGGESTION|STEP' | tail -6 | sed 's/^/    /'; fi
+run_wgw preflight --accept-shared-drift "$(printf '%064d' 1)"
+[ "$RC" != 0 ] && [ ! -f "$S/evidence/wgw-preflight.gate.json" ] && ok "wgw PF-DRIFT: an acceptance for another list is refused" || bad "wgw PF-DRIFT: foreign acceptance passed"
+run_wgw preflight --accept-shared-drift "$dsha"
+[ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q MANIFEST_DRIFT_ACCEPTED && [ -f "$S/evidence/wgw-preflight.gate.json" ] \
+  && ok "wgw PF-DRIFT: with the user's acceptance of exactly that list the preflight passes (before/after identity stays a gate)" || bad "wgw PF-DRIFT accepted rc=$RC"
+# PF-MISSING (review wac-096 r5 🟡-C): the shared venv lacks a module -> DEPENDENCY_MISSING, stop, no gate, nothing pip-installed
+wgw_setup PFMISS missing
+run_wgw preflight
+if [ "$RC" != 0 ] && printf '%s' "$OUT" | grep -q 'DEPENDENCY_MISSING o0_no_such_module_stand_in' && [ ! -f "$S/evidence/wgw-preflight.gate.json" ] \
+   && ! grep -q pip "$CALLS"; then ok "wgw PF-MISSING: DEPENDENCY_MISSING stops the preflight (no gate, no pip)"
+else bad "wgw PF-MISSING rc=$RC"; printf '%s\n' "$OUT" | grep -E 'SMOKE|DEPENDENCY|STEP' | tail -4 | sed 's/^/    /'; fi
+# WA: the smoke AS THE UNIT USER fails (after the dir install) -> automatic rollback of the new objects, nothing started or reloaded
+wgw_setup WA; run_wgw preflight; : > "$CALLS"
+: > "$BIN/SMOKE_AS_USER_MISSING"; run_wgw apply; rm -f "$BIN/SMOKE_AS_USER_MISSING"
+assert_rollback "wgw WA (unit-user smoke: DEPENDENCY_MISSING)" no '^systemctl (start|enable)' 0 "dependency check AS THE UNIT USER"
+wgw_nothing_new "wgw WA"
+# WB: health fails after the start -> exposure withdrawn (stop, disable --no-reload), env and dir removed, unit file removed after a
+# clean NeedDaemonReload check and ONE more daemon-reload, user removed
+wgw_setup WB; run_wgw preflight; : > "$CALLS"
+run_wgw apply
+assert_rollback "wgw WB (health fails after start)" yes '^systemctl start trader-v3-controlplane-watcher-gateway' 1 "watcher-gateway /health/role"
+if grep -q '^systemctl enable --no-reload trader-v3-controlplane-watcher-gateway' "$CALLS" && grep -q '^systemctl stop trader-v3-controlplane-watcher-gateway' "$CALLS" \
+   && grep -q '^systemctl disable --no-reload trader-v3-controlplane-watcher-gateway' "$CALLS" && [ "$(grep -c '^systemctl daemon-reload' "$CALLS")" = 2 ] \
+   && ! grep -q 'enable --now\|disable --now' "$CALLS" && [ "$(grep -n '^systemctl stop trader-v3' "$CALLS" | cut -d: -f1)" -lt "$(grep -n '^systemctl daemon-reload' "$CALLS" | tail -1 | cut -d: -f1)" ]; then
+  ok "wgw WB: enable --no-reload + start; rollback stops and disables (--no-reload) BEFORE its single daemon-reload"
+else bad "wgw WB: systemctl sequence"; grep '^systemctl \(start\|stop\|enable\|disable\|daemon\)' "$CALLS" | sed 's/^/    /'; fi
+wgw_nothing_new "wgw WB (after rollback)" objects-only
+grep -q 'setpriv --reuid=trader-v3-cp-watcher-gateway' "$BIN/setpriv.log" && ok "wgw WB: the apply smoke ran as trader-v3-cp-watcher-gateway (setpriv)" || bad "wgw WB: no setpriv run"
+# WC (review wac-096 r5 🟡-B): another unit gets NeedDaemonReload=yes after the start: the exposure is withdrawn anyway; the stopped,
+# disabled unit file stays, no second daemon-reload, DAEMON_RELOAD_PENDING reported
+wgw_setup WC; run_wgw preflight; : > "$CALLS"
+RELOAD_PENDING=after-start run_wgw apply
+if [ "$RC" != 0 ] && grep -q '^systemctl stop trader-v3-controlplane-watcher-gateway' "$CALLS" && grep -q '^systemctl disable --no-reload trader-v3-controlplane-watcher-gateway' "$CALLS" \
+   && [ "$(grep -c '^systemctl daemon-reload' "$CALLS")" = 1 ] && [ -e "$SB/etc/systemd/system/trader-v3-controlplane-watcher-gateway.service" ] \
+   && [ ! -e "$TR/secrets/control-plane/watcher-gateway.env" ] && [ ! -e "$TR/releases/watcher-gateway/$RSHA" ] && printf '%s' "$OUT" | grep -q 'DAEMON_RELOAD_PENDING' \
+   && grep -qE 'rollback_rc=[1-9]' "$S/evidence/auto-rollback.log"; then
+  ok "wgw WC: NeedDaemonReload pending in the rollback: stopped + disabled + env/dir removed anyway; unit file kept, no second reload, DAEMON_RELOAD_PENDING"
+else bad "wgw WC rc=$RC"; grep '^systemctl \(start\|stop\|enable\|disable\|daemon\)' "$CALLS" | sed 's/^/    /'; cat "$S/evidence/auto-rollback.log" 2>/dev/null; fi
+# WD: NeedDaemonReload pending before apply -> refused before any write
+wgw_setup WD; run_wgw preflight; : > "$CALLS"
+RELOAD_PENDING=always run_wgw apply
+if [ "$RC" != 0 ] && printf '%s' "$OUT" | grep -q 'DAEMON_RELOAD_PENDING units=x.timer' && ! printf '%s' "$OUT" | grep -q AUTO_ROLLBACK; then ok "wgw WD: NeedDaemonReload=yes anywhere refuses apply before any write"
+else bad "wgw WD rc=$RC"; fi
+wgw_nothing_new "wgw WD"
+# WE: the shared dir changed between preflight and apply -> refused before any write (never repaired)
+wgw_setup WE; run_wgw preflight; : > "$CALLS"
+echo 'late = 1' > "$TR/packages/execution-domain/a.py"
+run_wgw apply
+if [ "$RC" != 0 ] && printf '%s' "$OUT" | grep -q 'SHARED_CHANGED changed=1' && [ "$(cat "$TR/packages/execution-domain/a.py")" = 'late = 1' ]; then
+  ok "wgw WE: a shared-dir change after preflight refuses apply (reported, not repaired)"
+else bad "wgw WE rc=$RC"; fi
+echo 'x = 1' > "$TR/packages/execution-domain/a.py"; wgw_nothing_new "wgw WE"
+# WR: the manual rollback phase on a clean host is a no-op that still checks the three units and the shared dir
+wgw_setup WR; run_wgw preflight; : > "$CALLS"
+run_wgw rollback
+[ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q WGW_UNIT_REMOVED && printf '%s' "$OUT" | grep -q OTHER_UNITS_UNCHANGED && printf '%s' "$OUT" | grep -q SHARED_UNCHANGED \
+  && ok "wgw WR: rollback phase (nothing installed) passes and re-checks the three units and the shared dir" || { bad "wgw WR rc=$RC"; printf '%s\n' "$OUT" | tail -5; }
 # ---- review wac-032-r3 §3.2/§3.3 (🟡-3): D = the restart/recreate command itself fails; E = the fleet guard after
 # the restart sees a change (stop and report, no automatic rollback); F = candidate manifest WITH an ABSENT line
 # restart command ITSELF fails (marker set before it): rollback restarts once more
@@ -650,12 +808,6 @@ assert_rollback "watcher F (ABSENT line, fails at compose config)" no 'docker co
 printf '%s' "$OUT" | grep -q 'watcher-live-vs-candidate' && ok "watcher F: candidate manifest verified (old.js was removed)" || bad "watcher F: no candidate verify"
 [ "$(cat "$SRC/lib/old.js" 2>/dev/null)" = legacy ] && ok "watcher F: rollback restored lib/old.js" || bad "watcher F: lib/old.js not restored"
 watcher_restored "watcher F"
-# operator-query: restart command itself fails
-oq_setup D
-RESTART_FAIL_FIRST=1 run_apply o0_deploy_operator_query.sh O0-A08 --cp-root "$WORK/sb-oq-D/srv/trader-v3/services/control-plane" \
-  --operator-query-env "$WORK/sb-oq-D/srv/trader-v3/secrets/control-plane/operator-query.env"
-assert_rollback "operator-query D (restart itself fails)" yes 'systemctl restart trader-v3-controlplane-operator-query' 2 "restart operator-query ONLY"
-oq_restored "operator-query D" D
 # ---- restore-db (review wac-032-r2 🟡-5): the restored file keeps the ORIGINAL owner and mode;
 # a failure after the stop puts the original DB files back (owner/mode/sha proven), starts the
 # watcher again and records the fleet verdict; a second run over set-aside files is refused.
@@ -762,17 +914,15 @@ else bad "R073 RECSHA: rc=$RC starts=$n_start"; cat "$S/evidence/auto-rollback.l
 # wac-060: so does an UNCOMPARABLE unit (NeedDaemonReload=yes, unparseable EnvironmentFiles=)
 for kind in envfile envname reload unparsed; do
   case "$kind" in reload|unparsed) want_iso='CP_ISOLATION_UNCOMPARABLE' ;; *) want_iso='CP_ISOLATION_FAILED' ;; esac
-  oq_setup "ISO-$kind"
-  ISOLATION_FAIL=$kind run_apply o0_deploy_operator_query.sh O0-A08 --cp-root "$WORK/sb-oq-ISO-$kind/srv/trader-v3/services/control-plane" \
-    --operator-query-env "$WORK/sb-oq-ISO-$kind/srv/trader-v3/secrets/control-plane/operator-query.env"
+  wgw_setup "ISO-$kind"; run_wgw preflight; : > "$CALLS"
+  ISOLATION_FAIL=$kind run_wgw apply
   failed_at="$(printf '%s\n' "$OUT" | awk '/\[o0\] STEP [0-9]+: /{s=$0} END{print s}' | sed -E 's/.*STEP [0-9]+: //')"
   if [ "$RC" -ne 0 ] && { [ "$want_iso" != CP_ISOLATION_FAILED ] || printf '%s' "$OUT" | grep -q 'ENVFILE_ISOLATION VIOLATION'; } && printf '%s' "$OUT" | grep -q "$want_iso" \
-     && [ "${failed_at#control-plane unit isolation}" != "$failed_at" ] && [ ! -e "$S/backup-operator-query" ] && [ ! -e "$S/evidence/auto-rollback.log" ] \
-     && ! grep -q 'systemctl restart' "$CALLS"; then
-    ok "operator-query ISO-$kind: apply refused at the isolation gate, before backup/env/install/restart"
-  else bad "operator-query ISO-$kind: rc=$RC failed_at='$failed_at'"; printf '%s\n' "$OUT" | grep -E 'STEP|ISOLATION|ABORT' | tail -5 | sed 's/^/    /'; fi
-  oq_restored "operator-query ISO-$kind" "ISO-$kind"
-  printf '%s' "$OUT" | grep -q SENTINELisoleak && bad "operator-query ISO-$kind: an Environment= VALUE was printed" || ok "operator-query ISO-$kind: no env value printed (names only)"
+     && [ "${failed_at#control-plane unit isolation}" != "$failed_at" ] && [ ! -e "$S/evidence/auto-rollback.log" ]; then
+    ok "wgw ISO-$kind: apply refused at the isolation gate, before any write"
+  else bad "wgw ISO-$kind: rc=$RC failed_at='$failed_at'"; printf '%s\n' "$OUT" | grep -E 'STEP|ISOLATION|ABORT' | tail -5 | sed 's/^/    /'; fi
+  wgw_nothing_new "wgw ISO-$kind"
+  printf '%s' "$OUT" | grep -q SENTINELisoleak && bad "wgw ISO-$kind: an Environment= VALUE was printed" || ok "wgw ISO-$kind: no env value printed (names only)"
 done
 # ---- fleet guard parameters vs node heartbeat parameters (review wac-032-r2 🟡-7), checked in
 # every execute run BEFORE any step (here: the standalone guard, runbook step R-2)
@@ -805,7 +955,8 @@ if ( unset O0_SANDBOX; source "$O0/o0_common.sh"; O0_FLEET_PARAMS_SANDBOX_SKIP=1
   bad "fleet params: O0_FLEET_PARAMS_SANDBOX_SKIP skipped the check without O0_SANDBOX"
 else ok "fleet params: the skip seam is ignored without O0_SANDBOX"; fi
 # the other control-plane units are never touched, in any case
-if grep -hE 'systemctl (restart|stop|start|kill|reload|try-restart|reload-or-restart) .*(node-control|event-ingest)' "$WORK"/calls-*.log >/dev/null; then bad "a rollback touched node-control/event-ingest"; else ok "node-control/event-ingest never touched (read-only 'systemctl show' only)"; fi
+if grep -hE 'systemctl (restart|stop|start|kill|reload|try-restart|reload-or-restart|enable|disable) .*(node-control|event-ingest|operator-query)' "$WORK"/calls-*.log >/dev/null; then
+  bad "a run touched node-control/event-ingest/operator-query"; else ok "node-control, event-ingest and operator-query never touched (read-only 'systemctl show' only)"; fi
 fi
 
 if [ "$fails" -gt 0 ]; then echo "APPLY_ROLLBACK_TEST_FAILED failures=$fails checks=$checks"; exit 1; fi

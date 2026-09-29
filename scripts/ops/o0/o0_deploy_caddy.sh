@@ -37,7 +37,7 @@ set -eo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/o0_common.sh"
 o0_parse_common "$@"
 set -- "${O0_REST[@]}"
-CANDIDATE="" CRED_SET="" HOST="jp-bot.balen.wang" NODE_CHANNEL="172.30.1.1:8080" PROBE_CAND_SHA="" PROBE_SNIP_SHA=""
+CANDIDATE="" CRED_SET="" HOST="jp-bot.balen.wang" NODE_CHANNEL="172.30.1.1:8080" PROBE_CAND_SHA="" PROBE_SNIP_SHA="" V5_EVIDENCE=""
 CADDYFILE="/etc/caddy/Caddyfile" CADDY_ENV="/etc/caddy/v3.env" SNIPPET_LIVE="/etc/caddy/caddy-watcher-gateway.caddy"
 CATALOG_ENVS=()
 while [ "$#" -gt 0 ]; do
@@ -49,6 +49,7 @@ while [ "$#" -gt 0 ]; do
     --catalog-env) CATALOG_ENVS+=("$2"); shift ;;  # repeat: every control-plane env file from S-10/S-11
     --probe-candidate-sha256) PROBE_CAND_SHA="$2"; shift ;;   # from the O0-A05P CADDY_PROBE_OK line
     --probe-snippet-sha256) PROBE_SNIP_SHA="$2"; shift ;;
+    --v5-evidence) V5_EVIDENCE="$2"; shift ;;       # verify: output of the EXTERNAL public-direct-check --phase before-unit
     *) o0_die "unknown argument: $1" ;;
   esac
   shift
@@ -95,7 +96,7 @@ probe_public() {
      c() { curl -s -o /dev/null -w '%{http_code}' -m 10 --resolve $HOST:443:127.0.0.1 \"\$@\" </dev/null || true; }
      r1=\$(c https://$HOST/m/v1/accounts); echo \"GET /m/v1/accounts (no token) -> \$r1 (expect 401: Authorization not injected)\"; [ \"\$r1\" = 401 ]
      r2=\$(c -H 'Authorization: Bearer o0-probe-not-a-token-000000000000000000000000' https://$HOST/m/v1/accounts); echo \"GET /m/v1/accounts (bogus) -> \$r2 (expect 403)\"; [ \"\$r2\" = 403 ]
-     r3=\$(c https://$HOST/m/v1/watcher/status); echo \"GET /m/v1/watcher/status (no token) -> \$r3 (expect 404 before stage O, 401 after)\"; case \"\$r3\" in 401|404) ;; *) exit 1;; esac
+     r3=\$(c https://$HOST/m/v1/watcher/status); echo \"GET /m/v1/watcher/status (no token) -> \$r3 (WGW-1.0.4: 502 while watcher-gateway 8186 is not running yet, 401/403 after stage O; 404 without the snippet)\"; case \"\$r3\" in 401|403|404|502) ;; *) exit 1;; esac
      r3b=\$(c https://$HOST/m/v1/watcher/trading/risks/A/B); echo \"GET /m/v1/watcher/trading/risks/A/B (two segments) -> \$r3b (must not be a gateway 401: never reaches the gateway)\"; [ \"\$r3b\" != 401 ]
      r4=\$(c https://$HOST/watcher/); echo \"GET /watcher/ -> \$r4 (expect 401 basic auth)\"; [ \"\$r4\" = 401 ]
      r5=\$(c https://$HOST/api/status); echo \"GET /api/status -> \$r5 (expect 401 basic auth)\"; [ \"\$r5\" = 401 ]
@@ -211,7 +212,15 @@ phase_verify() {
   o0_step "verify running config" "${VERIFY[@]}" --adapted "$O0_STAGE_DIR/caddy/running.json"
   o0_step "live snippet file is still the bundle's" cmp "$SNIPPET_LIVE" "$SNIPPET_BUNDLE"
   probe_public after-caddy
+  # V-5 (WGW-1.0.4 §9.14.6, RS-19) at O0-A05 verify: before stage O the gateway unit does not run, so /m/v1/watcher/status
+  # must be 502; the panel /v1/watcher paths 404 (guard); /m/v1/accounts 401
+  o0_step "V-5 loopback supplementary check through Caddy (127.0.0.1 with the public name; not the external evidence)" \
+    "$O0_PY" "$TOOLS/o0_tool.py" public-direct-check --host "$HOST" --phase before-unit --loopback
   o0_fleet_settle_compare before-caddy verify-caddy
+  o0_sh "V-5 EXTERNAL evidence (run outside jp-24: real DNS, no proxy, no credentials, phase before-unit): else DIRECT_GUARD_UNVERIFIED, verify NOT complete" \
+    "$(o0_quote "$O0_PY" "$TOOLS/o0_tool.py") v5-evidence-check ${V5_EVIDENCE:+--evidence '$V5_EVIDENCE'} --host $HOST --phase before-unit \
+       || { echo 'CADDY_VERIFY_INCOMPLETE DIRECT_GUARD_UNVERIFIED'; exit 1; }
+     echo CADDY_VERIFY_V5_OK"
 }
 
 phase_rollback() {

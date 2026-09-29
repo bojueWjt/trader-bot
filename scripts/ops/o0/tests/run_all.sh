@@ -22,7 +22,7 @@ bash "$HERE/auth_gate_test.sh" | tail -n 1
 bash "$HERE/apply_rollback_test.sh" | tail -n 1
 REAL="$(bash "$HERE/caddy_real_test.sh" | tail -n 1)" || true; echo "$REAL"
 case "$REAL" in CADDY_REAL_TEST\ OK*) REAL_CADDY=ok ;; CADDY_REAL_TEST_SKIPPED*) REAL_CADDY=skipped ;; *) exit 1 ;; esac
-for s in o0_deploy_caddy.sh o0_deploy_watcher.sh o0_deploy_operator_query.sh o0_fleet_guard.sh o0_site_check.sh; do
+for s in o0_deploy_caddy.sh o0_deploy_watcher.sh o0_deploy_watcher_gateway.sh o0_fleet_guard.sh o0_site_check.sh; do
   bash "$O0/$s" >/dev/null
 done
 echo "PLAN_MODE_OK scripts=5 (no execution)"

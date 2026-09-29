@@ -31,7 +31,7 @@
 | S-03 | 磁盘上 Caddyfile 的 adapt 结果（带 env、无 shell 展开）的**白名单骨架**（R06–R12） | 内嵌 python 读 `v3.env` 后 `caddy adapt`，只输出骨架 | 夹在 `-----BEGIN O0 ADAPTED FILE SKELETON JSON-----` 与 END 之间；`X-Watcher-*` 注入值只能是 `{env.…}` 占位符 | `ADAPT_FAILED`：阻断（任何 Caddy 变更都不能做）。字面 `Authorization`（显示为 `<literal len=N>`）：记录，报用户 |
 | S-04 | 运行中配置（admin API）与 S-03 在**主机上**比较（R06） | 内嵌 python：adapt 文件 + 读 `:2019/config/`，比较完整 JSON | `RUNNING_EQUALS_FILE=yes`；随后是运行配置的骨架 | `no`：列出不同处的 JSON 路径（不带值）。说明有人改了文件未重启，或反之：**阻断**，先查清谁改的（不采信转述） |
 | S-05 | watcher 容器：镜像、运行用户（`.Config.User`，W-6 恢复库的属主依据）、标签、端口映射、重启次数、健康、env 变量名、DB 路径值、挂载（R03、R13） | `docker inspect`（env 只取名字，路径类变量取值） | `user=` 记下（空即镜像默认 root；与 S-08 `ls -l` 的库文件属主对照）；`PortBindings` = `{"9100/tcp":[{"HostIp":"127.0.0.1","HostPort":"9090"}]}`；三个 DB 路径变量都等于 `/data/watcher-trading.db`；env 名中没有任何控制面 token 名；`config_image` 记下（阶段 W 的 `--compose-image`） | 端口映射不是宿主 127.0.0.1:9090 → 容器 9100：阻断（计划 §9 O-0 要记录的事实不成立，网关上游默认值要改）。三个 DB 变量不一致：阻断（W-0b 的路径解析会直接抛错退出） |
-| S-06 | 监听端口（R08、R11、R13）；**节点通道地址**（阶段 C 探针 r7 用） | `ss -ltnp`；`:8080` 的全部监听地址 | 9090 只在 127.0.0.1；8181/8182/8183 在 127.0.0.1；2019 只在 127.0.0.1；9100 不在宿主上监听；`:8080` 预期在 `172.30.1.1`（记下实际地址作 `--node-channel`） | 9090 或 9100 暴露在非回环地址：**阻断**（可绕过 Caddy 直连 watcher），报用户 |
+| S-06 | 监听端口（R08、R11、R13）；**节点通道地址**（阶段 C 探针 r7 用） | `ss -ltnp`；`:8080` 的全部监听地址；**WGW-1.0.4 PC-6 (ii)：记录 8184–8189 的全部监听者，8186 必须空闲**（上线后 O-3 复核 8186 只监听 127.0.0.1） | 9090 只在 127.0.0.1；8181/8182/8183 在 127.0.0.1；2019 只在 127.0.0.1；9100 不在宿主上监听；`:8080` 预期在 `172.30.1.1`（记下实际地址作 `--node-channel`） | 9090 或 9100 暴露在非回环地址：**阻断**（可绕过 Caddy 直连 watcher），报用户 |
 | S-07 | watcher 源码树与 compose 的 sha（R84 同类，P-15）；构建上下文里有没有 `config.json`（R60） | 源码逐文件 `sha256sum`；compose sha 与 watcher 服务块（脱敏） | L-A4 比对全部等于 `67b401a`；`config.json absent from build context` | 源码漂移：阻断，先把线上文件取回本地做差异审阅，不覆盖未知代码。`config.json` 存在：阻断（镜像会烤进 Telegram 会话，任何演练容器都有双活风险） |
 | S-08 | watcher 真库（只读打开）：表清单、三表行数、`config_revision` 是否存在、account_configs 列与 CHECK（R26、R57） | python `mode=ro` | 此时应无 `config_revision`/`config_audit`（W-0b 未上线）；三表行数记下 | 已有 `config_revision`：说明有人提前上线过 W-0b 代码，阻断并查审计 |
 | S-09 | 副本与同步工具（R26、P-17） | stat 副本；timer；主机脚本的 sha256；**只有 sha 等于 `--expect-sync-sha256`（bundle 里已审版本）才**以 `--check` 运行（只读，退出 3 = 有差异） | 副本 `root:trader-v3-cp-operator-query 0640`；timer 未安装或未启用；`sync --check exit=0/3` | `SYNC_CHECK_SKIPPED`/`PENDING`：不执行未知代码，记为待核，切换时用 bundle 的副本。timer 已启用：记录并报 Planner。`SYNC_SCRIPT_ABSENT`：用 bundle 的副本（P-17） |
@@ -72,7 +72,7 @@
 |---|---|---|
 | 确认 import 与 handler 顺序 | S-02、S-03、L-A1（按 adapt 结果模拟生效顺序；前瞻遮蔽检查） | 阶段 C preflight：`caddyfile-check`（片段文件全局 import 一次、站点顶层 `import watcher_gateway_routes` 在所有 handle 之前，F-12）+ F-13 (2) 人工记录 + verify 的两步遮蔽检查；本机 Caddy 探针（O0-A05P）；verify 对运行中配置再做一次 |
 | `/m` 只 strip 一次 | L-A1 移动端样本 | verify：每条 `/m/v1/watcher/*` 样本恰好一次；四条带参数路径为锚定、区分大小写的单段 `path_regexp`（用户裁决，WGW-1.0.2） |
-| 上游仍是 8183 | L-A1、S-06 | verify：dial 恰为 `127.0.0.1:8183` |
+| 上游仍是 8183（用户裁决 (e) 后改读：网关上游为 8186，其他移动端路径仍到 8183） | L-A1、S-06（记录 8184–8189 的占用，8186 必须空闲） | verify：片段上游 dial 恰为 `127.0.0.1:8186`（RS-11），移动样本到 `127.0.0.1:8183`；I-2 主判据；阶段 O O-2/O-3 复核 8186 只监听回环 |
 | 移动端 `Authorization` 保留且不被面板注入的 `system_observer` 覆盖 | L-A1、L-P1、L-P2 | 阶段 C 探针 r1/r2；阶段 O 公网探针 |
 | 浏览器 basicauth 后先清头再注入 | L-A1（部署前只查 basic auth） | verify 浏览器样本；阶段 W 用注入凭据 200 |
 | `/media` 与其他公网入口没有绕过 | S-06、L-A1、L-P6 | verify 覆盖检查；阶段 C 探针 r6 |
