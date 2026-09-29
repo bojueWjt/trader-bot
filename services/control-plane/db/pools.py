@@ -445,7 +445,16 @@ def checkout_role_connection(
     return pool.checkout()
 
 
+# contracts/backend-api.md §9.14.6: the watcher-gateway role holds no
+# database credentials. Checkout keeps failing closed through _role_name;
+# closing its (never created) pools is a no-op.
+_NO_DATABASE_ROLES = frozenset({"watcher-gateway"})
+
+
 def close_role_pools(role: Any) -> None:
+    value = getattr(role, "value", role)
+    if str(value or "").strip().lower().replace("_", "-") in _NO_DATABASE_ROLES:
+        return
     role_name = _role_name(role)
     prefix = role_name + "|"
     with _POOL_REGISTRY_LOCK:

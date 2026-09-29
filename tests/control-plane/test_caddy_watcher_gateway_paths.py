@@ -45,6 +45,37 @@ P3_PATHS = (
     "/m/v1/watcher/price-monitor/status",
 )
 
+# Snippet format v2 (backend-api.md §9.14.3, WGW-1.0.3): written out here by
+# hand, independent of scripts/contracts/watcher_gateway_routes_lib.py.
+FALLBACK_REGEX = r"^(?i:/m/v1/watcher)(?:[/\n]|$)"
+DIRECT_REGEX = r"^(?i:/v1/watcher)(?:[/\n%]|$)"
+FALLBACK_GROUP = (
+    "\t@wgw_fallback {\n"
+    "\t\tpath_regexp ^(?i:/m/v1/watcher)(?:[/\\n]|$)\n"
+    "\t}\n"
+    "\thandle @wgw_fallback {\n"
+    "\t\trespond 404\n"
+    "\t}\n"
+)
+DIRECT_GROUP = (
+    "\t@wgw_direct {\n"
+    "\t\tpath_regexp ^(?i:/v1/watcher)(?:[/\\n%]|$)\n"
+    "\t}\n"
+    "\thandle @wgw_direct {\n"
+    "\t\trespond 404\n"
+    "\t}\n"
+)
+V2_TAIL = FALLBACK_GROUP + DIRECT_GROUP + "}\n(watcher_gateway_direct_guard) {\n" + DIRECT_GROUP + "}\n"
+DIRECT_MATCH = (
+    "/v1/watcher", "/v1/watcher/", "/V1/WATCHER/status", "/v1/watcher/status",
+    "/v1/watcher\n", "/V1/WATCHER\n", "/v1/watcher/status\n", "/v1/watcher%",
+    "/v1/watcher%x", "/v1/watcher/media/1700000000000-1.png", "/v1/watcher/status#x",
+)
+DIRECT_NO_MATCH = (
+    "/v1/watcherx", "/v1/watcherx\n", "/v1/watcher\r", "/v1/watcher#x", "/v1/other",
+    "/v1/accounts", "/xv1/watcher", "/m/v1/watcher/status", "//v1/watcher/status",
+)
+
 
 @pytest.fixture
 def isolated_root(tmp_path):
@@ -116,10 +147,91 @@ def test_independent_path_method_expectations():
         assert methods == sorted(set(methods))
         assert regex.startswith("^") and regex.endswith("$")
     snippet = SNIPPET.read_text(encoding="ascii")
-    assert "# _format watcher-gateway-caddy-snippet.v1\n" in snippet
+    assert snippet.split("\n")[3] == "# _format watcher-gateway-caddy-snippet.v2"
     assert snippet.count("\t\tmethod ") == len(paths)
-    assert "path_regexp ^(?i:/m/v1/watcher)(?:[/\\n]|$)" in snippet
-    assert snippet.endswith("\t\trespond 404\n\t}\n}\n")
+    assert "*" not in snippet
+    assert snippet.endswith(V2_TAIL)
+
+
+def test_snippet_v2_defines_routes_then_direct_guard():
+    snippet = SNIPPET.read_text(encoding="ascii")
+    top_level = [line for line in snippet.split("\n") if line.startswith("(")]
+    assert top_level == ["(watcher_gateway_routes) {", "(watcher_gateway_direct_guard) {"]
+    routes = snippet[snippet.index("(watcher_gateway_routes) {\n"):snippet.index("(watcher_gateway_direct_guard) {\n")]
+    guard = snippet[snippet.index("(watcher_gateway_direct_guard) {\n"):]
+    assert guard == "(watcher_gateway_direct_guard) {\n" + DIRECT_GROUP + "}\n"
+    assert routes.endswith(FALLBACK_GROUP + DIRECT_GROUP + "}\n")
+    assert routes.count("\n\t@wgw_direct {\n") == 1 and routes.count("\n\t@wgw_fallback {\n") == 1
+    assert routes.index("\n\t@wgw_fallback {\n") < routes.index("\n\t@wgw_direct {\n")
+    assert routes.rindex("import watcher_gateway_upstream") < routes.index("\n\t@wgw_fallback {\n")
+    for forbidden in ("reverse_proxy", "8183", "8186", "Authorization", "header_up", "{env."):
+        assert forbidden not in snippet
+
+
+def test_direct_guard_regex_probes_are_independent():
+    import re
+
+    for probe in DIRECT_MATCH:
+        assert re.search(DIRECT_REGEX, probe) is not None, repr(probe)
+        assert re.search(FALLBACK_REGEX, probe) is None, repr(probe)
+    for probe in DIRECT_NO_MATCH:
+        assert re.search(DIRECT_REGEX, probe) is None, repr(probe)
+    for probe in ("/m/v1/watcher", "/m/v1/watcher/status"):
+        assert re.search(DIRECT_REGEX, probe) is None
+    # G1 => D: every committed P2 row with values that pass the gateway
+    # parameter patterns is inside the direct guard once /m is stripped.
+    values = {
+        "filename": ("1700000000000-1.png", "1-1.jpg"),
+        "account_id": ("account-a", "A.b@c-1"),
+        "channel_id": ("-1001234567890", "1"),
+        "symbol": ("BTCUSDT",),
+    }
+    compared = 0
+    for line in EXPECTED_P2_LINES:
+        template = line.split(" ")[0]
+        candidates = [template]
+        for name in re.findall(r"\{([^{}]+)\}", template):
+            candidates = [c.replace("{" + name + "}", v) for c in candidates for v in ("x", *values[name])]
+        for candidate in candidates:
+            assert candidate.startswith("/m/v1/watcher/")
+            assert re.search(DIRECT_REGEX, candidate[len("/m"):]) is not None, candidate
+            compared += 1
+    assert compared > len(EXPECTED_P2_LINES)
+
+
+@pytest.mark.parametrize(
+    ("label", "old", "new"),
+    [
+        ("guard group removed from routes", "\t@wgw_direct {\n\t\tpath_regexp ^(?i:/v1/watcher)(?:[/\\n%]|$)\n\t}\n\thandle @wgw_direct {\n\t\trespond 404\n\t}\n}\n(watcher_gateway_direct_guard)", "}\n(watcher_gateway_direct_guard)"),
+        ("guard regex without %", "(?:[/\\n%]|$)\n\t}\n\thandle @wgw_direct {\n\t\trespond 404\n\t}\n}\n(watcher_gateway_direct_guard)", "(?:[/\\n]|$)\n\t}\n\thandle @wgw_direct {\n\t\trespond 404\n\t}\n}\n(watcher_gateway_direct_guard)"),
+        ("guard regex case sensitive", "}\n(watcher_gateway_direct_guard) {\n\t@wgw_direct {\n\t\tpath_regexp ^(?i:/v1/watcher)", "}\n(watcher_gateway_direct_guard) {\n\t@wgw_direct {\n\t\tpath_regexp ^(/v1/watcher)"),
+        ("second snippet renamed", "(watcher_gateway_direct_guard) {", "(watcher_gateway_guard) {"),
+        ("format v1", "# _format watcher-gateway-caddy-snippet.v2", "# _format watcher-gateway-caddy-snippet.v1"),
+    ],
+    ids=["guard-removed", "guard-without-percent", "guard-case-sensitive", "guard-snippet-renamed", "format-v1"],
+)
+def test_check_fails_on_tampered_snippet_v2(isolated_root, label, old, new):
+    snippet = isolated_root / SNIPPET.relative_to(ROOT)
+    text = snippet.read_text(encoding="ascii")
+    assert text.count(old) == 1, label
+    snippet.write_text(text.replace(old, new), encoding="ascii")
+    result = _run_check(isolated_root)
+    assert result.returncode == 1, label
+    assert "DIFF" in result.stdout, label
+    assert "ROUTES_DIFF_EMPTY" not in result.stdout, label
+
+
+def test_check_fails_when_snippets_are_swapped(isolated_root):
+    snippet = isolated_root / SNIPPET.relative_to(ROOT)
+    text = snippet.read_text(encoding="ascii")
+    cut = text.index("(watcher_gateway_routes) {\n")
+    guard_at = text.index("(watcher_gateway_direct_guard) {\n")
+    swapped = text[:cut] + text[guard_at:] + text[cut:guard_at]
+    assert swapped != text and len(swapped) == len(text)
+    snippet.write_text(swapped, encoding="ascii")
+    result = _run_check(isolated_root)
+    assert result.returncode == 1
+    assert "DIFF" in result.stdout
 
 
 def test_p3_paths_excluded():

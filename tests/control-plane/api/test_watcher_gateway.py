@@ -73,9 +73,10 @@ def setup(monkeypatch):
     upstream = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://watcher")
     sems = {"config": asyncio.Semaphore(4), "media": asyncio.Semaphore(4)}
     monkeypatch.setattr(wg.gateway, "_resources", lambda budget: (sems[budget], upstream))
-    app = FastAPI()
-    wg.register_routes(app)
-    wg.install_middleware(app)
+    import read_api
+    # WGW-1.0.4: exercise the gateway on the real watcher-gateway role app
+    # (health + gateway routes, prefix middleware, request-role binding).
+    app = read_api.create_app("watcher-gateway")
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://local")
     return client, calls, responses, sems, app
 
@@ -258,16 +259,22 @@ async def test_three_budgets_are_independent():
 
 @run_async
 async def test_role_app_prefix_isolation_and_existing_redirect(setup):
+    # WGW-1.0.4 (§9.14.4 item 2, §9.14.6): the gateway lives only on the
+    # watcher-gateway role app; operator-query keeps its /v1 behaviour.
     import read_api
+    gateway_app = read_api.create_app("watcher-gateway")
     operator = read_api.create_app("operator-query")
     node = read_api.create_app("node-control")
     ingest = read_api.create_app("event-ingest")
-    assert_route_surface(operator)
-    for app in (node, ingest):
+    assert_route_surface(gateway_app)
+    for app in (operator, node, ingest):
         assert not [r for r in app.routes if isinstance(r, APIRoute) and r.path.startswith("/v1/watcher/")]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway_app), base_url="http://local") as client:
+        watcher = await client.get("/v1/watcher/status/", follow_redirects=False)
+        assert watcher.status_code == 404 and watcher.json()["code"] == "route_not_found" and "location" not in watcher.headers
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=operator), base_url="http://local") as client:
         watcher = await client.get("/v1/watcher/status/", follow_redirects=False)
-        assert watcher.status_code == 404 and "location" not in watcher.headers
+        assert watcher.status_code == 404 and watcher.content == b'{"detail":"Not Found"}' and "location" not in watcher.headers
         accounts = await client.get("/v1/accounts/", follow_redirects=False)
         assert accounts.status_code == 307 and accounts.headers["location"] == "http://local/v1/accounts" and accounts.content == b""
 
@@ -279,14 +286,19 @@ def test_repeated_all_role_app_middleware_is_idempotent():
     shared = read_api.all_role_app
     first = read_api.create_app(AppRole.ALL)
     assert first is shared
+    gateway_app = read_api.create_app(AppRole.WATCHER_GATEWAY)
     async def serve_request():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=shared), base_url="http://local") as client:
+            response = await client.get("/v1/watcher/status")
+            assert response.status_code == 404 and response.content == b'{"detail":"Not Found"}'
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway_app), base_url="http://local") as client:
             response = await client.get("/v1/watcher/status")
             assert response.status_code == 401
     asyncio.run(serve_request())
     assert read_api.create_app(AppRole.ALL) is shared
-    wg.install_middleware(shared)
-    assert sum(item.cls is wg.GatewayPathMiddleware for item in shared.user_middleware) == 1
+    assert not any(item.cls is wg.GatewayPathMiddleware for item in shared.user_middleware)
+    wg.install_middleware(gateway_app)
+    assert sum(item.cls is wg.GatewayPathMiddleware for item in gateway_app.user_middleware) == 1
     assert shared.router.on_startup.count(read_api.watcher_config_snapshot.start_if_enabled) == 1
     assert shared.router.on_shutdown.count(read_api.watcher_config_snapshot.stop_if_started) == 1
 
@@ -480,7 +492,8 @@ async def test_artifact_disable_four_sources_preserves_existing_routes(caplog, m
             for headers in ({}, {"Authorization": "Bearer " + FAKE["risk_admin"]}):
                 responses.append(await client.post("/v1/watcher/config", headers=headers))
             return old, responses
-    baseline, _ = await probe(read_api.create_app("operator-query"))
+    baseline, _ = await probe(read_api.create_app("watcher-gateway"))
+    operator_baseline, _ = await probe(read_api.create_app("operator-query"))
     variants = []
     collision = copy.deepcopy(original)
     collision["routes"].append({**copy.deepcopy(next(row for row in original["routes"] if row["identity"] == "gateway")), "id": "gw.injected.get", "outer_path": "/v1/watcher/login/x", "inner_path": "/api/login/x"})
@@ -494,7 +507,9 @@ async def test_artifact_disable_four_sources_preserves_existing_routes(caplog, m
     try:
         for variant in variants:
             assert wg.load_route_artifact(variant) is False
-            old, responses = await probe(read_api.create_app("operator-query"))
+            operator_old, _ = await probe(read_api.create_app("operator-query"))
+            assert (operator_old.status_code, operator_old.content) == (operator_baseline.status_code, operator_baseline.content)
+            old, responses = await probe(read_api.create_app("watcher-gateway"))
             assert (old.status_code, old.content) == (baseline.status_code, baseline.content)
             for response in responses:
                 assert response.status_code == 503
@@ -503,7 +518,9 @@ async def test_artifact_disable_four_sources_preserves_existing_routes(caplog, m
             assert upstream_calls == []
             assert all(token not in caplog.text for token in FAKE.values())
         assert wg.load_route_artifact(loader=lambda _: (_ for _ in ()).throw(ImportError("fixture"))) is False
-        old, responses = await probe(read_api.create_app("operator-query"))
+        operator_old, _ = await probe(read_api.create_app("operator-query"))
+        assert (operator_old.status_code, operator_old.content) == (operator_baseline.status_code, operator_baseline.content)
+        old, responses = await probe(read_api.create_app("watcher-gateway"))
         assert (old.status_code, old.content) == (baseline.status_code, baseline.content)
         for response in responses:
             assert response.status_code == 503

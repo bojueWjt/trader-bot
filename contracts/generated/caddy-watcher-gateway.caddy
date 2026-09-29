@@ -1,7 +1,7 @@
 # _generated_from contracts/watcher-gateway-routes.yaml
 # _yaml_sha256 85eb4c88a629acd2555b51dff9306581dc2f25b224ba9ef4992035cf242f6082
 # _phase_max P2
-# _format watcher-gateway-caddy-snippet.v1
+# _format watcher-gateway-caddy-snippet.v2
 (watcher_gateway_routes) {
 	@wgw_r_dialogs {
 		path_regexp ^/m/v1/watcher/dialogs$
@@ -119,6 +119,20 @@
 		path_regexp ^(?i:/m/v1/watcher)(?:[/\n]|$)
 	}
 	handle @wgw_fallback {
+		respond 404
+	}
+	@wgw_direct {
+		path_regexp ^(?i:/v1/watcher)(?:[/\n%]|$)
+	}
+	handle @wgw_direct {
+		respond 404
+	}
+}
+(watcher_gateway_direct_guard) {
+	@wgw_direct {
+		path_regexp ^(?i:/v1/watcher)(?:[/\n%]|$)
+	}
+	handle @wgw_direct {
 		respond 404
 	}
 }
