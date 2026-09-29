@@ -40,7 +40,7 @@ O0="$(cd "$HERE/.." && pwd)"
 REPO="$(cd "$O0/../../.." && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/o0-rollback.XXXXXX")"
 FAKE_PID=""
-trap '[ -z "$FAKE_PID" ] || kill "$FAKE_PID" 2>/dev/null; rm -rf "$WORK"' EXIT   # wac-109: the WS fake services die with the test
+trap '[ -z "$FAKE_PID" ] || kill "$FAKE_PID" 2>/dev/null || true; rm -rf "$WORK"' EXIT   # wac-109: the WS fake services die with the test
 fails=0; checks=0
 ok() { checks=$((checks + 1)); echo "PASS $*"; }
 bad() { checks=$((checks + 1)); fails=$((fails + 1)); echo "FAIL $*"; }
@@ -855,7 +855,7 @@ for SV in 254 255; do
   wgw_nothing_new "wgw WS v$SV (after rollback)" objects-only
 done
 unset SYSTEMD_VERSION O0_WGW_TEST_URL O0_OQ_TEST_URL O0_V5_TEST_PORT
-kill "$FAKE_PID" 2>/dev/null || true; wait "$FAKE_PID" 2>/dev/null || true
+kill "$FAKE_PID" 2>/dev/null || true; wait "$FAKE_PID" 2>/dev/null || true; FAKE_PID=""
 # the pre-fix order would have failed exactly here on v255: enable AFTER the reload leaves the host-wide mark set
 SYSTEMD_VERSION=255 CALLS="$WORK/calls-v255-demo.log" bash -c ': > "$CALLS"; "$0/systemctl" daemon-reload; "$0/systemctl" enable --no-reload x.service; "$0/systemctl" show -p Id -p NeedDaemonReload caddy.service' "$BIN" \
   | grep -q 'NeedDaemonReload=yes' && ok "stub: on v255 an enable --no-reload after the reload leaves every unit NeedDaemonReload=yes (the bug the new order avoids)" \
