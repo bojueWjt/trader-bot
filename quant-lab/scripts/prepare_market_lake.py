@@ -35,10 +35,12 @@ def load_exchange_info(path: Path | None, save_to: Path) -> tuple[dict, str]:
     return resp.json(), out.name
 
 
-def filters_for(info: dict, symbol: str) -> dict[str, str | None]:
-    s = next((x for x in info.get("symbols", []) if x.get("symbol") == symbol and x.get("contractType") == "PERPETUAL"), None)
+def filters_for(info: dict, symbol: str) -> dict[str, str | None] | None:
+    # TradFi 永续（CLUSDT、XAUUSDT、MUUSDT 等）的 contractType 是 TRADIFI_PERPETUAL，同样是 U 本位永续。
+    s = next((x for x in info.get("symbols", []) if x.get("symbol") == symbol
+              and x.get("contractType") in ("PERPETUAL", "TRADIFI_PERPETUAL")), None)
     if s is None:
-        raise SystemExit(f"exchangeInfo 快照里没有永续合约 {symbol}")
+        return None
     f = {x["filterType"]: x for x in s.get("filters", [])}
     return {"tick_size": f.get("PRICE_FILTER", {}).get("tickSize"), "step_size": f.get("LOT_SIZE", {}).get("stepSize"),
             "min_notional": f.get("MIN_NOTIONAL", {}).get("notional")}
@@ -56,6 +58,9 @@ def main(argv=None) -> int:
     for sym in symbols:
         inst = instrument_id(sym)
         fl = filters_for(info, sym)
+        if fl is None:
+            # 已下市品种（如 RNDR→RENDER）不在当前快照里：不猜规则，交给体检报 RULE_HISTORY_MISSING。
+            print(f"{sym}: exchangeInfo 快照里没有该永续合约，跳过规则（重放会按缺规则删失）"); continue
         rules = rules_from_manifests(lake, inst, **fl)
         if rules.height == 0:
             print(f"{sym}: 湖里没有该品种的分区，跳过"); continue
