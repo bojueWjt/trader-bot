@@ -39,7 +39,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 O0="$(cd "$HERE/.." && pwd)"
 REPO="$(cd "$O0/../../.." && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/o0-rollback.XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
+FAKE_PID=""
+trap '[ -z "$FAKE_PID" ] || kill "$FAKE_PID" 2>/dev/null; rm -rf "$WORK"' EXIT   # wac-109: the WS fake services die with the test
 fails=0; checks=0
 ok() { checks=$((checks + 1)); echo "PASS $*"; }
 bad() { checks=$((checks + 1)); fails=$((fails + 1)); echo "FAIL $*"; }
