@@ -212,7 +212,8 @@ def compare_field(field, gold, actions):
         want = signature(field, expected)
         got = [signature(field, a.get(key), predicted=True) for a in actions]
         return all(v == want for v in got), None
-    except (ValueError, TypeError, KeyError):
+    except (ValueError, TypeError, KeyError, ArithmeticError):
+        # A gold value that is not a plain number (e.g. "0.26美元") needs review; it never passes.
         return False, 'semantic_comparison_requires_independent_review'
 
 
@@ -246,6 +247,7 @@ def summarize(rows):
     gates = [m['passes'] for m in metrics.values() if m['passes'] is not None]
     return dict(metrics=metrics, field_evidence_failed=sum(r['field_evidence_failed'] for r in rows),
                 pending_fields=sum(bool(v['pending']) for r in rows for v in r['fields'].values()),
+                messages_with_extra_open_actions=sum(bool(r['extra_open_actions']) for r in opens),
                 entry_market_leg_unevaluated=sum(not r['fields']['entry'].get('market_leg_evaluated', True) for r in opens if 'entry' in r['fields']),
                 passes=all(gates) and all(metrics[k]['passes'] is True for k in ('open_false_discovery', 'open_miss', *FIELDS, 'evidence_discarded')))
 
@@ -289,6 +291,13 @@ def check(truth_path, prompts_path, responses_path, *, adjudications=None):
         truth_open = gold['truth_op'] == 'open' and op_eval
         now_opens = [a for a in actions if a['op'] == 'open' and a['time_ref'] == 'now']
         predicted_open = bool(now_opens)
+        # A single-trade gold label (one symbol, one side) cannot hold a post's second scenario ("多空两个方案").
+        # Score the gold trade against the parsed open that is that trade; count the rest, never hide them.
+        aligned = now_opens
+        if isinstance(gold.get('side'), str):
+            aligned = [a for a in aligned if a.get('side') == gold['side']] or aligned
+        if isinstance(gold.get('symbol'), str):
+            aligned = [a for a in aligned if symbol(a.get('symbol_raw')) == symbol(gold['symbol'])] or aligned
         discarded = not response or 'abstain' in response or invalid or bool(stats.get('whole_message_discarded'))
         model_uncertain = bool(stats.get('model_uncertain')) or note == 'model_undecidable'
         op = 'open' if predicted_open else (actions[0]['op'] if len(actions) == 1 else 'chatter' if payload and not actions else None)
@@ -303,7 +312,7 @@ def check(truth_path, prompts_path, responses_path, *, adjudications=None):
                     continue
                 # Gold fields describe the new trade; a sibling analysis/close action must not dilute them.
                 probe = dict(gold)
-                correct, pending = compare_field(field, probe, now_opens or actions)
+                correct, pending = compare_field(field, probe, aligned or actions)
                 override = overrides.get(identity, {}).get(field)
                 if override is not None:
                     if type(override.get('correct')) is not bool or not override.get('reason'):
@@ -322,7 +331,8 @@ def check(truth_path, prompts_path, responses_path, *, adjudications=None):
                          whole_message_discarded=discarded, model_uncertain=model_uncertain,
                          evidence_discarded=discarded and note.startswith('evidence_rejected'),
                          field_evidence_failed=stats.get('field_evidence_failed', 0),
-                         field_evidence_failed_messages=bool(stats.get('field_evidence_failed'))))
+                         field_evidence_failed_messages=bool(stats.get('field_evidence_failed')),
+                         extra_open_actions=len(now_opens) - len(aligned) if truth_open else 0))
     channels = defaultdict(list)
     for row in rows:
         channels[row['channel']].append(row)

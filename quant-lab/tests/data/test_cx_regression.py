@@ -160,3 +160,21 @@ def test_zone_and_two_level_ladder_with_same_endpoints_compare_equal():
     gold = dict(entry=dict(kind='zone', lo='84000', hi='85500'), entry_market_leg=True)
     assert regression.compare_field('entry', dict(gold), [ladder]) == (True, None)
     assert regression.compare_field('entry', dict(gold, entry=dict(kind='zone', lo='84000', hi='86000')), [ladder]) == (False, None)
+
+
+def test_non_numeric_gold_value_is_pending_not_a_crash():
+    assert regression.compare_field('stop', dict(stop='0.26美元'), [action()]) == (False, 'semantic_comparison_requires_independent_review')
+
+
+def test_second_scenario_scored_apart_and_counted(tmp_path):
+    truth, prompts, rows = corpus(tmp_path)
+    responses = tmp_path / 'responses'
+    other = action(side='short', stop=None, tps=[])
+    responses.write_text(cx.dumps(dict(key=rows[0]['key'], response=envelope(action(), other))) + '\n')
+    report = regression.check(truth, prompts, responses)
+    item = report['items'][0]
+    assert all(item['fields'][f]['correct'] for f in ('side', 'stop', 'tps')) and item['extra_open_actions'] == 1
+    assert report['overall']['messages_with_extra_open_actions'] == 1
+    # Without an open on the gold side, nothing is aligned and the fields fail.
+    responses.write_text(cx.dumps(dict(key=rows[0]['key'], response=envelope(other))) + '\n')
+    assert not regression.check(truth, prompts, responses)['items'][0]['fields']['side']['correct']
