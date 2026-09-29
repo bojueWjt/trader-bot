@@ -5,7 +5,7 @@ performance, media memory). It starts:
 
 - the watcher (`bridge/services/telegram-watcher/server.js`) on `127.0.0.1:9100`, and
 - the control-plane app that hosts the watcher gateway (`read_api:app`, role
-  `operator-query` today) on `127.0.0.1:<port>` (default `18731`).
+  `watcher-gateway` since WGW-1.0.4) on `127.0.0.1:<port>` (default `18731`).
 
 All data is synthetic, all tokens are fresh random test values, and both servers bind
 loopback only. The app reaches the gateway through `adb reverse`.
@@ -14,7 +14,7 @@ loopback only. The app reaches the gateway through `adb reverse`.
 
 ```bash
 W=scripts/dev/wac_local_backend/wac_local_backend.sh
-$W up     [--port 18731] [--role operator-query] [--python PY] [--node NODE] [--node-modules DIR]
+$W up     [--port 18731] [--role watcher-gateway] [--python PY] [--node NODE] [--node-modules DIR]
 $W status [--port 18731]
 $W verify [--port 18731]      # smoke checks through the gateway, exits non-zero on any failure
 $W token  [--port 18731] [--role viewer|risk_admin|reviewer|system_observer] [--reveal]

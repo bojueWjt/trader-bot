@@ -52,7 +52,7 @@ LAUNCHER = HERE / "gateway_launcher.py"
 HOST = "127.0.0.1"
 WATCHER_PORT = 9100  # hard-coded in bridge/services/telegram-watcher/server.js
 DEFAULT_PORT = 18731
-DEFAULT_ROLE = "operator-query"
+DEFAULT_ROLE = "watcher-gateway"
 MARKER = ".wac-local-backend"
 ENV_NAME = "test.env"
 TELEGRAM_BLACKHOLE_PORT = 9  # discard port, nothing listens: any accidental MTProto dial fails locally
@@ -736,7 +736,7 @@ def build_parser() -> argparse.ArgumentParser:
         return p
 
     up = common(sub.add_parser("up", help="seed data and start watcher + gateway"))
-    up.add_argument("--role", default=DEFAULT_ROLE, help="control-plane app role hosting the gateway (operator-query today; watcher-gateway later)")
+    up.add_argument("--role", default=DEFAULT_ROLE, help="control-plane app role hosting the gateway (watcher-gateway since WGW-1.0.4)")
     up.add_argument("--app", default="read_api:app", help="ASGI app to serve from services/control-plane/api")
     up.add_argument("--python", help="python with uvicorn/fastapi/httpx/psycopg2 (default: autodetect repo venvs)")
     up.add_argument("--node", help="node binary (default: node on PATH)")
