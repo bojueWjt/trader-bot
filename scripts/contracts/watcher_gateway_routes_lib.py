@@ -271,7 +271,7 @@ def validate(data):
     _check(by_identity == {"gateway", "snapshot", "browser"}, 4, "missing identity")
     _check(len(snapshots) == 1 and snapshots[0]["method"] == "GET" and snapshots[0]["inner_path"] == "/api/trading/config-snapshot", 17, "snapshot count/path")
     _check(snapshots[0]["response"]["fields"] == SNAPSHOT_FIELDS, 17, "snapshot fields")
-    _check(len(matcher_names) == len({r["outer_path"] for r in rows if r["identity"] == "gateway"}) and "wgw_fallback" not in matcher_names, 22, "matcher names")
+    _check(len(matcher_names) == len({r["outer_path"] for r in rows if r["identity"] == "gateway"}) and not ({"wgw_fallback", "wgw_direct"} & matcher_names), 22, "matcher names")
     for excluded in denied:
         _check(any(_na_intersects(row["inner_path"], excluded) for row in rows if row["identity"] == "browser"), 21, "never_allowed must intersect browser")
     for row in rows:
@@ -314,7 +314,7 @@ def _render_caddy(value, yaml_sha256, phase_max):
         f"# _phase_max {phase_max}",
     ]
     lines = common + ["# _format watcher-gateway-caddy-paths.v2"]
-    snippet = common + ["# _format watcher-gateway-caddy-snippet.v1", "(watcher_gateway_routes) {"]
+    snippet = common + ["# _format watcher-gateway-caddy-snippet.v2", "(watcher_gateway_routes) {"]
     for path in sorted(grouped):
         regex = _caddy_regex(path)
         methods = " ".join(sorted(grouped[path]))
@@ -322,7 +322,16 @@ def _render_caddy(value, yaml_sha256, phase_max):
         name = _matcher_name(path[len(prefix):], value["paths"]["app_outer_prefix"])
         snippet.extend((f"\t@{name} {{", f"\t\tpath_regexp {regex}", f"\t\tmethod {methods}", "\t}", f"\thandle @{name} {{", "\t\timport watcher_gateway_upstream", "\t}"))
     fallback = "^(?i:" + prefix + value["paths"]["app_outer_prefix"] + r")(?:[/\n]|$)"
-    snippet.extend(("\t@wgw_fallback {", f"\t\tpath_regexp {fallback}", "\t}", "\thandle @wgw_fallback {", "\t\trespond 404", "\t}", "}"))
+    snippet.extend(("\t@wgw_fallback {", f"\t\tpath_regexp {fallback}", "\t}", "\thandle @wgw_fallback {", "\t\trespond 404", "\t}"))
+    # Format v2 (§9.14.3, WGW-1.0.3): direct guard after the fallback, and a
+    # second snippet holding only the same guard group.
+    direct = "^(?i:" + value["paths"]["app_outer_prefix"] + r")(?:[/\n%]|$)"
+    guard = ("\t@wgw_direct {", f"\t\tpath_regexp {direct}", "\t}", "\thandle @wgw_direct {", "\t\trespond 404", "\t}")
+    snippet.extend(guard)
+    snippet.append("}")
+    snippet.append("(watcher_gateway_direct_guard) {")
+    snippet.extend(guard)
+    snippet.append("}")
     return ("\n".join(lines) + "\n").encode("ascii"), ("\n".join(snippet) + "\n").encode("ascii")
 
 

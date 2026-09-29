@@ -1,4 +1,9 @@
-"""Async, contract generated watcher gateway for operator-query."""
+"""Async, contract generated watcher gateway for the watcher-gateway role.
+
+WGW-1.0.4 (contracts/backend-api.md §9.14.6): these routes and the prefix
+middleware are registered only on ``create_app("watcher-gateway")``. The
+module never touches PostgreSQL; authentication uses the environment only.
+"""
 
 from __future__ import annotations
 
@@ -168,6 +173,47 @@ def load_route_artifact(source=None, loader=None):
 
 
 load_route_artifact()
+
+
+def gateway_route_names(source=None):
+    """Route names of the registered gateway rows, taken from the payload.
+
+    §9.14.6 / §9.16 B-8: ``identity == gateway`` and ``phase <= phase_max``,
+    named ``watcher_gateway__<id with . replaced by _>``. Empty when the
+    artifact is disabled.
+    """
+    source = PAYLOAD if source is None else source
+    if source is None:
+        return frozenset()
+    phases = ("P0", "P1", "P2", "P3")
+    phase_max = phases.index(source["_meta"]["phase_max"])
+    return frozenset(
+        "watcher_gateway__" + row["id"].replace(".", "_")
+        for row in source["routes"]
+        if row["identity"] == "gateway" and phases.index(row["phase"]) <= phase_max
+    )
+
+
+def readiness():
+    """(ready, reason) for G5 and the role health check (§9.3, §9.14.6).
+
+    Not ready when the artifact is disabled (R11), when
+    ``WATCHER_GATEWAY_TOKEN`` is missing, or when it collides with a token
+    visible in this process (or the token catalog is unusable). ``reason``
+    names variables only and never contains a value.
+    """
+    if _LOAD_ERROR is not None or PAYLOAD is None:
+        return False, "watcher gateway artifact disabled"
+    token = os.getenv("WATCHER_GATEWAY_TOKEN", "")
+    if not token:
+        return False, "WATCHER_GATEWAY_TOKEN missing"
+    try:
+        collision = token in configured_token_values()
+    except TokenCatalogError:
+        collision = True
+    if collision:
+        return False, "WATCHER_GATEWAY_TOKEN collision or token catalog unavailable"
+    return True, None
 
 
 class GatewayPathMiddleware:
@@ -401,15 +447,11 @@ class Gateway:
         content, error = await _body(request, row, request_id)
         if error:
             return error
-        token = os.getenv("WATCHER_GATEWAY_TOKEN", "")
-        try:
-            collision = token and token in configured_token_values()
-        except TokenCatalogError:
-            collision = True
-        if not token or collision:
-            reason = "WATCHER_GATEWAY_TOKEN missing" if not token else "WATCHER_GATEWAY_TOKEN collision or token catalog unavailable"
+        ready, reason = readiness()
+        if not ready:
             LOG.warning("watcher gateway disabled: %s", reason)
             return _error(503, "gateway_disabled", request_id)
+        token = os.getenv("WATCHER_GATEWAY_TOKEN", "")
         budget = row["budget"]
         try:
             sem, client = self._resources(budget)

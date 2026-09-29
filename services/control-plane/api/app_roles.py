@@ -14,6 +14,7 @@ class AppRole(str, Enum):
     NODE_CONTROL = "node-control"
     EVENT_INGEST = "event-ingest"
     OPERATOR_QUERY = "operator-query"
+    WATCHER_GATEWAY = "watcher-gateway"
 
 
 _ACTIVE_APP_ROLE: ContextVar[AppRole | None] = ContextVar(
@@ -42,6 +43,9 @@ _EVENT_INGEST_ROUTES = frozenset(
     }
 )
 _SHARED_ROUTES = frozenset({"role_database_health"})
+# contracts/backend-api.md §9.4 / §9.14.6: gateway route names are
+# "watcher_gateway__<id>" and exist only on the watcher-gateway role app.
+WATCHER_GATEWAY_ROUTE_PREFIX = "watcher_gateway__"
 _DATABASE_ROLE_NAMES = {
     AppRole.NODE_CONTROL: "trader_v3_node_control",
     AppRole.EVENT_INGEST: "trader_v3_event_ingest",
@@ -136,9 +140,21 @@ def route_names_for_role(
         return _NODE_CONTROL_ROUTES | _SHARED_ROUTES
     if resolved is AppRole.EVENT_INGEST:
         return _EVENT_INGEST_ROUTES | _SHARED_ROUTES
+    if resolved is AppRole.WATCHER_GATEWAY:
+        # The shared app carries no gateway routes (§9.14.6); the gateway
+        # names come from the generated payload, never from ``routes``.
+        import watcher_gateway
+
+        return frozenset(watcher_gateway.gateway_route_names()) | _SHARED_ROUTES
     owned_elsewhere = _NODE_CONTROL_ROUTES | _EVENT_INGEST_ROUTES
+    # Belt and braces (§9.16 B-8): operator-query never serves the gateway.
+    gateway_names = {
+        name
+        for name in application_names
+        if name.startswith(WATCHER_GATEWAY_ROUTE_PREFIX)
+    }
     return frozenset(
-        (application_names - owned_elsewhere) | _SHARED_ROUTES
+        (application_names - owned_elsewhere - gateway_names) | _SHARED_ROUTES
     )
 
 
@@ -176,4 +192,52 @@ def build_role_app(
         finally:
             reset_app_role(token)
 
+    return role_app
+
+
+class BindRequestRoleMiddleware:
+    """Pure ASGI twin of ``build_role_app``'s ``bind_request_role``.
+
+    Binds ``current_app_role()`` to a fixed role for the whole request so
+    that ``/health/role`` answers for the watcher-gateway role even when
+    ``CONTROL_PLANE_APP_ROLE`` is unset (§9.14.6, §9.16 B-9/B-10 (b)).
+    It is a plain ASGI middleware so that streamed media responses are not
+    re-wrapped by ``BaseHTTPMiddleware``.
+    """
+
+    def __init__(self, app, role: AppRole | str) -> None:
+        self.app = app
+        self.role = resolve_app_role(role)
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        token = bind_app_role(self.role)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            reset_app_role(token)
+
+
+def build_watcher_gateway_app(source_app: FastAPI) -> FastAPI:
+    """Fresh app for the watcher-gateway role (§9.14.6, §9.16 B-9).
+
+    It carries only the shared health route taken from ``source_app``;
+    the caller registers the generated gateway routes, the prefix
+    middleware and nothing else (no DB startup check, no snapshot hooks,
+    no DB retry handler). docs, redoc and openapi are disabled.
+    """
+    role_app = FastAPI(
+        title=source_app.title,
+        description=source_app.description,
+        version=source_app.version,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
+    for route in source_app.routes:
+        if isinstance(route, APIRoute) and str(route.name) in _SHARED_ROUTES:
+            role_app.router.routes.append(route)
+    role_app.state.control_plane_role = AppRole.WATCHER_GATEWAY.value
     return role_app

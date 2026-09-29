@@ -58,7 +58,9 @@ from execution_domain.ownership_ledger import (  # noqa: E402
 
 from app_roles import (  # noqa: E402
     AppRole,
+    BindRequestRoleMiddleware,
     build_role_app,
+    build_watcher_gateway_app,
     current_app_role,
     expected_database_role_name,
     resolve_app_role,
@@ -10630,9 +10632,27 @@ def operator_order_status(intent_id: str, authorization: str | None = Header(def
         conn.close()
 
 
+def _watcher_gateway_health() -> JSONResponse:
+    """§9.14.6: no database; 200 enabled / 503 disabled, reason only logged."""
+    import watcher_gateway
+
+    ready, reason = watcher_gateway.readiness()
+    body = {
+        "status": "healthy" if ready else "unhealthy",
+        "app_role": AppRole.WATCHER_GATEWAY.value,
+        "database": "none",
+        "gateway": "enabled" if ready else "disabled",
+    }
+    if not ready:
+        watcher_gateway.LOG.warning("watcher gateway health: disabled (%s)", reason)
+    return JSONResponse(body, status_code=200 if ready else 503)
+
+
 @app.get("/health/role", name="role_database_health")
 def role_database_health():
     role = current_app_role()
+    if role is AppRole.WATCHER_GATEWAY:
+        return _watcher_gateway_health()
     if role is AppRole.ALL:
         raise HTTPException(
             status_code=503,
@@ -10666,19 +10686,38 @@ def role_database_health():
 
 from v1_mirror import router as v1_mirror_router  # noqa: E402
 from operator_queries import router as operator_queries_router  # noqa: E402
-import watcher_gateway  # noqa: E402
 
 app.router.routes.extend(v1_mirror_router.routes)
 app.router.routes.extend(operator_queries_router.routes)
-watcher_gateway.register_routes(app)
-watcher_gateway.install_middleware(app)
+# WGW-1.0.4 (§9.14.6): no gateway routes or prefix middleware on the shared
+# app; only create_app("watcher-gateway") carries them.
 
 _install_retryable_db_error_handler(app)
 all_role_app = app
 
 
+def _create_watcher_gateway_app() -> FastAPI:
+    """§9.16 B-9: health + generated gateway routes, prefix middleware only.
+
+    No database startup check, no snapshot hooks, no DB retry handler and
+    no pool shutdown hook: this role holds no database credentials.
+    """
+    import watcher_gateway
+
+    role_app = build_watcher_gateway_app(all_role_app)
+    watcher_gateway.register_routes(role_app)
+    watcher_gateway.install_middleware(role_app)
+    role_app.add_middleware(
+        BindRequestRoleMiddleware,
+        role=AppRole.WATCHER_GATEWAY,
+    )
+    return role_app
+
+
 def create_app(role: AppRole | str | None = None) -> FastAPI:
     resolved = resolve_app_role(role)
+    if resolved is AppRole.WATCHER_GATEWAY:
+        return _create_watcher_gateway_app()
     role_app = build_role_app(all_role_app, resolved)
     if resolved in (AppRole.ALL, AppRole.OPERATOR_QUERY):
         if watcher_config_snapshot.start_if_enabled not in role_app.router.on_startup:
@@ -10687,8 +10726,6 @@ def create_app(role: AppRole | str | None = None) -> FastAPI:
             role_app.router.on_shutdown.append(watcher_config_snapshot.stop_if_started)
     if role_app is not all_role_app:
         _install_retryable_db_error_handler(role_app)
-    if role_app is not all_role_app and resolved is AppRole.OPERATOR_QUERY:
-        watcher_gateway.install_middleware(role_app)
     if resolved is not AppRole.ALL:
         role_app.router.on_startup.append(
             lambda: _verify_role_database_on_startup(role_app, resolved)
