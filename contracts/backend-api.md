@@ -128,7 +128,7 @@
 > 状态：**frozen（WGW-1.0.2，2026-09-26）**——WGW-1.0（同日冻结、审查 wac-001 PASS、合入 `90e96d0`）的第二次勘误版（含合并前追补 F-09..F-12，仍为 WGW-1.0.2）。WGW-1.0.1 写入 Planner 裁定 R1–R9 与审查 wac-001 的 🟡-1..🟡-11；WGW-1.0.2 写入 `never_allowed` 进生成物、R10–R14、Caddy 单段语义（用户裁决 2026-09-26）与 A-6 价格提醒身份作用域（P3 只定契约、不启用），逐条见 §9.16。§9 的接口都还没有部署，两次勘误都不构成对已发布接口的破坏性变更。设计真相：`docs/plans/2026-09-11-watcher-to-app-migration.md` v0.6 §2.1–§2.3、§3、§4.2/§4.3（含附录 E 吸收的 v0.3 review P1-12..P1-19、P2-03）。
 > **路由字段以 `contracts/watcher-gateway-routes.yaml` 为准**（method、outer/inner path、identity、roles、query、body allow/deny/required、response omit/mask/headers、phase、budget、write 元数据）；本节规定语义（鉴权顺序、错误码、事务顺序、状态机、媒体规则）。两者冲突时路由字段听 YAML、语义听本节；任一与计划冲突，停工并由 Planner 召回 Architect。
 > 本节只新增 `/v1/watcher/*` 与 watcher 内部契约；§1–§8 既有端点的字段、状态码、错误体一律不变（见 §9.13）。
-> **WGW-1.0.4（2026-09-29，勘误 H-01..H-14，第四轮修订 G-30..G-43，见 §9.16）——当前有效版本**：用户于 2026-09-29 裁决采纳选项 (e)"网关独立监听端口"。`/v1/watcher/*` 只由新控制面角色 `watcher-gateway` 提供，它监听 `127.0.0.1:8186`，运行在独立的 systemd 单元中，并且按 Planner 裁定 R23 使用**独立的代码目录**；它不持有数据库凭据。operator-query（8183）及其他所有角色在路由层面都没有网关。Caddy 中只有契约片段的 `/m/v1/watcher/*` 逐路径组能拨到 8186；直连守卫 `@wgw_direct` 保留，作为纵深防御。§9.14.6 全文重写。WGW-1.0.3 草案（下一段）中的 T/D/I-1/L-1、N-1..N-5、R22 封闭白名单，以及旧版的 V-1..V-5、PC-6、U-13 全部作废，历史见 §9.16 与提交 `db79023`；它的片段格式 v2（直连守卫）与 B-1..B-5 保留。本次只改 §9 的文字：YAML 与四份生成物不变（片段 v2 的重新生成沿用 WGW-1.0.3 的 B-3）。**本阶段不动 node-control、event-ingest、operator-query 三个单元的代码目录、单元文件与 env，也不重启它们**；交易节点不动。
+> **WGW-1.0.4（2026-09-29，勘误 H-01..H-14，第四轮修订 G-30..G-43；2026-09-30 合并后勘误一 G-44..G-51，见 §9.16）——当前有效版本**：用户于 2026-09-29 裁决采纳选项 (e)"网关独立监听端口"。`/v1/watcher/*` 只由新控制面角色 `watcher-gateway` 提供，它监听 `127.0.0.1:8186`，运行在独立的 systemd 单元中，并且按 Planner 裁定 R23 使用**独立的代码目录**；它不持有数据库凭据。operator-query（8183）及其他所有角色在路由层面都没有网关。Caddy 中只有契约片段的 `/m/v1/watcher/*` 逐路径组能拨到 8186；直连守卫 `@wgw_direct` 保留，作为纵深防御。§9.14.6 全文重写。WGW-1.0.3 草案（下一段）中的 T/D/I-1/L-1、N-1..N-5、R22 封闭白名单，以及旧版的 V-1..V-5、PC-6、U-13 全部作废，历史见 §9.16 与提交 `db79023`；它的片段格式 v2（直连守卫）与 B-1..B-5 保留。本次只改 §9 的文字：YAML 与四份生成物不变（片段 v2 的重新生成沿用 WGW-1.0.3 的 B-3）。**本阶段不动 node-control、event-ingest、operator-query 三个单元的代码目录、单元文件与 env，也不重启它们**；交易节点不动。
 > **WGW-1.0.3（2026-09-28，勘误 G-01..G-10，第二轮 G-11..G-19，第三轮 G-20..G-29，见 §9.16；草案，从未合入，已被 WGW-1.0.4 取代，只有片段格式 v2 与 B-1..B-5 仍然有效）**：operator-query 的非移动入口（面板 `/v1/*` 等）不得把请求交给网关，新增 §9.14.6。本次只改 §9 的文字与 Caddy 片段的生成规则：路由真源 YAML **零改动**（其 `contract_version` 字段仍为 `WGW-1.0.2`，`yaml_sha256` 不变），两份代码生成物与 Caddy 清单逐字节不变，只有 Caddy 片段改为格式 v2（`watcher-gateway-caddy-snippet.v2`）。网关代码、角色 scope（§9.3 四角色读）、既有 `/v1` 端点都不变。
 
 ### 9.1 现状事实（worktree `auto/wac-001`，基线 `integ/watcher-app-crew`；app 基线 `0f7d26d`）
@@ -797,7 +797,7 @@ CREATE TABLE IF NOT EXISTS config_audit (
   - **角色与 app**：新增 `AppRole.WATCHER_GATEWAY = "watcher-gateway"`，与另三个角色使用同一个 `read_api:app` 模块，由单元中的 `Environment=CONTROL_PLANE_APP_ROLE=watcher-gateway` 选择角色。
   - **独立代码目录（R23，规范性）**：新角色的代码目录与现有三个单元共用的 `$TRADER_ROOT/services/control-plane` **互相独立**。
     - **位置**：`$TRADER_ROOT/releases/watcher-gateway/<release-sha>/`，单元的 `WorkingDirectory` 是其中的 `services/control-plane/api`。
-    - **内容**：用 `git archive <release-sha>` 取出与 `scripts/jp24-p1-control-plane.sh:85-95` 相同的路径子集：`services/control-plane`、`services/nautilus-node/observability`、`packages`（整个目录）、`db/migrations`。保持仓库相对布局，原因是 `read_api.py:32-43`、`:2536-2542` 以及 `snapshot.py`、`order_management/*` 都按 `__file__` 的上级目录定位兄弟包。
+    - **内容**：用 `git archive <release-sha>` 取出以下路径（在 `scripts/jp24-p1-control-plane.sh:85-95` 的子集基础上，把 `packages/execution-domain` 放宽为整个 `packages`；G-51）：`services/control-plane`、`services/nautilus-node/observability`、`packages`（整个目录）、`db/migrations`。保持仓库相对布局，原因是 `read_api.py:32-43`、`:2536-2542` 以及 `snapshot.py`、`order_management/*` 都按 `__file__` 的上级目录定位兄弟包。
     - **权限**：整个目录属 root，权限 0755，对单元用户只读。
     - **路径约束**：模块与数据文件都不得从该目录之外加载，只有 venv 与标准库例外。这一条由 B-11 与 RS-16 的审计钩子证明。
   - **共享代码目录的约束**：本阶段对共享目录 `$TRADER_ROOT/services/control-plane`（以及 `services/nautilus-node/observability`、`packages`、`db/migrations`）**一个字节都不动**：不安装、不备份覆盖、不还原。node-control、event-ingest、operator-query 三个单元的磁盘代码与内存代码，都保持现在的样子。
@@ -833,7 +833,7 @@ CREATE TABLE IF NOT EXISTS config_audit (
     - `RISK_ADMIN_TOKEN`、`VIEWER_TOKEN`、`REVIEWER_TOKEN`、`SYSTEM_OBSERVER_TOKEN`：§9.3 的四角色 scope 需要它们。
   - **值的来源**：
     - 四个 reader token 取自现行 `operator-query.env` 中的同名变量。它们由 `scripts/bootstrap_control_plane_roles.py:505-509` 从 `.env.v3` 拷入，这样网关与 8183 接受同一组静态 token；
-    - `WATCHER_GATEWAY_TOKEN` 取自 O-0 凭据阶段；
+    - `WATCHER_GATEWAY_TOKEN` 取自 O-0 凭据阶段。（G-45 澄清）它在 O-0 凭据集中的持有方文件叫 `controlplane-watcher-gateway.env`，这只是凭据集内部的文件名，用来和 watcher 容器自己的 `/srv/trader-secrets/watcher-gateway.env` 区分。部署到线上时，文件名仍是本节规定的 `$TRADER_ROOT/secrets/control-plane/watcher-gateway.env`，没有改名；凭据集内部的文件名不属于本契约的规定范围；
     - 读取与写入都只在 jp-24 上、由部署脚本以 root 完成，只打印变量名。
   - **默认不写入**：
     - `SIGNAL_TOKEN_ACCOUNT_*`：它们能在 operator-query 上下单，不为一个错误码放进网关进程；
@@ -850,18 +850,20 @@ CREATE TABLE IF NOT EXISTS config_audit (
   - `(watcher_gateway_upstream)`（O-0 手写，§9.14.3）：恰好一次 `uri strip_prefix /m`，然后 `reverse_proxy 127.0.0.1:8186`。它的 `reverse_proxy` 不带 `rewrite` 对象，也不带 `transport` 覆盖。
   - 片段 `(watcher_gateway_routes)` 的格式 v2 不变：生成物里不含上游地址，所以改端口不需要重新生成。
   - 直连守卫 `@wgw_direct` 保留，作为纵深防御。`(watcher_gateway_direct_guard)` 对其他站点**可选**。
-  - 对 operator-query（8183）或任何其他端口的转发，**本契约不作形状判定**：8183 上本来就没有网关。面板 `handle /v1/*`、`@mobile`、`forward_auth`、`handle_errors`、`invoke`、`handle_response`、`handle_path`、unix socket 上游、占位符主机名、`dynamic` 上游等现有或常见写法，只要不触发下面的 I-2，都不会因本契约失败。
+  - 对 operator-query（8183）或任何其他端口的转发，**本契约不作形状判定**：8183 上本来就没有网关。面板 `handle /v1/*`、`@mobile`、`forward_auth`、`handle_errors`、`invoke`、`handle_response`、`handle_path`、unix socket 上游、占位符主机名、`dynamic` 上游等现有或常见写法，只要不触发下面的 I-2，都不会因本契约失败。V-1 (c) 对其中与 `/m/v1/watcher` 前缀或片段顺序有关的形状，最多给出 `HINT DEFENSE_IN_DEPTH` 提示，不阻断（G-44）。唯一的例外是请求头操作：带 `copy_headers` 的 `forward_auth` 排在片段之前时，按 V-1 (a) 判失败。
 - **入口不变式 I-2（取代 I-1；第四轮按用户"别卡太死"收敛）**：
-  - **范围**：`caddy adapt` 之后的**整份** JSON（全部 app、全部 server、任意深度），但排除 (a) 认定的 `(watcher_gateway_upstream)` 那个 `reverse_proxy` 对象本身。
+  - **范围**：`caddy adapt` 之后的**整份** JSON（全部 app、全部 server、任意深度），但排除 V-1 (a) 认定的**每一个**片段逐路径组中，由 `(watcher_gateway_upstream)` 产生的 `reverse_proxy` 对象（仿生产片段约有 20 个；G-51）。
   - **判失败的情形**，出现任一即判 `GATEWAY_PORT_EXPOSED`：
-    - (1) 任何字符串值含有独立的 `8186`（正则 `(?<![0-9])8186(?![0-9])`）。这一条覆盖 dial、`upstreams`、`transport.network_proxy.url`、`forward_proxy_url`、健康检查的 `upstream`、非 http 的 app 等全部写法；
+    - (1) 任何字符串值含有独立的 `8186`，允许带前导零（G-50；正则 `(?<![0-9])0*8186(?![0-9])`。Go 把 `:08186` 当作端口 8186，审查 wac-108 已活体证实，网关桩收到了带注入凭据的请求）。这一条覆盖 dial、`upstreams`、`transport.network_proxy.url`、`forward_proxy_url`、健康检查的 `upstream`、非 http 的 app 等全部写法；
     - (2) 任何数值恰为 8186；
-    - (3) 任何形如 `<数字>-<数字>` 的端口范围包含 8186（adapt 通常会把范围展开，展开后由 (1) 命中）。
+    - (3) 任何形如 `<数字>-<数字>` 的端口范围包含 8186（adapt 通常会把范围展开，展开后由 (1) 命中）；
+    - (4) （G-46，收录 wac-096 第五轮 🟡-A）**端口可能由请求决定**：dial 的端口部分，或整个 dial，含有 `{env.*}`、`{system.*}` 以外的任何占位符。这包括请求作用域的 `{http.request.*}`、`{http.regexp.*}`、`{http.matchers.*}`、`{http.vars.*}`，它们的简写 `{header.*}`、`{query.*}`、`{path.*}`、`{re.*}`、`{vars.*}`、`{cookie.*}` 等，也包括 `map` 定义的自定义输出。理由是客户端可以借此把上游端口指到 8186，审查 wac-096 第五轮已活体证实。`dynamic` 上游的 `port` 字段按同一规则判定。
+    - (5) （G-50）**代理 URL 按 dial 规则判定**：`transport.network_proxy.url`、`forward_proxy_url` 这类代理 URL，先用标准 URL 解析取出 host:port（缺省端口按 scheme 补齐），再按上面的 dial 规则判定：端口整数值为 8186 就失败，端口或整个 URL 含请求作用域占位符也失败。
   - **不因 I-2 失败**的写法：
     - unix socket 上游：到 8186 需要本机进程转发，这由 PC-6 (iii) 覆盖；
     - 主机名是占位符、端口是字面值且不是 8186；
     - `dynamic a`/`aaaa` 的 `port` 是字面值且不是 8186；
-    - 其他解析不出、字符串中又不含 8186 的上游，例如端口本身是占位符。这类对象由 V-1 输出为 `UPSTREAM_UNRESOLVED` 信息行，交 PC-6 (i) 人工确认它不会解析到 8186。
+    - 其他解析不出、字符串中又不含 8186 的上游，且只含 `{env.*}` 或 `{system.*}` 占位符，例如 `{env.OQ}`；代理 URL 中同样只含这两类占位符的也算。这类对象由 V-1 输出为 `UPSTREAM_UNRESOLVED` 信息行，交 PC-6 (i) 人工确认它不会解析到 8186。（G-46：端口含请求作用域占位符的不在此列，由 (4) 判失败。）
   - **为什么这样就够**：
     - 网关只存在于 8186，而 8186 只监听回环；
     - 能把公网请求送到回环 8186 的，只有 Caddy 中写有 8186 的对象（dial、代理 URL 等，由 (1)–(3) 覆盖），以及 Caddy 以外的本机转发（由 PC-6 (iii) 覆盖）；
@@ -876,8 +878,21 @@ CREATE TABLE IF NOT EXISTS config_audit (
       - 从 server 根到片段 `reverse_proxy` 的整条处理链上（含站点顶层的 `request_header`），没有任何请求头操作。这与现有 verify 的"top-level request_header"变异及"不带 `Authorization`"探针（`o0_caddy_watcher_routes.py:2815`、`:2016-2019`）一致；
       - 守卫组存在，且逐字一致。
     - (b) **主判据 I-2**：命中即输出 `GATEWAY_PORT_EXPOSED <JSON 路径> <命中的值>`（值只截取端口附近，不输出头值），verify 失败。解析不出的上游输出 `UPSTREAM_UNRESOLVED <JSON 路径>`，这只是信息行，不判失败。
-    - (c) 现有的 `/m/v1/watcher` 前缀遮蔽检查（F-12、F-13、wac-094）与 9090/9100 检查（R11）不变。
-    - (d) **不对**指向 8183 或其他端口的路由做任何形状判定。WGW-1.0.3 草案 RS-2 的白名单**不得实现**。
+    - (c) 现有的 `/m/v1/watcher` 前缀遮蔽检查（F-12、F-13、wac-094）与 9090/9100 检查（R11）仍然阻断。（G-44 修订：消除与上面 Caddy 条款"对 8183 不作形状判定"的矛盾，按用户"不要限制得那么死"的要求降级）判定口径如下：
+      - **仍判失败（阻断）**：
+        - 片段之前的请求头操作，包括带 `copy_headers` 的 `forward_auth`，它 adapt 后在 2xx 分支中生成 `headers.request`，属于 V-1 (a) 所说的请求头操作；
+        - 片段之前、可能把路径改进 `/m/v1/watcher` 空间的规则；
+        - 片段之前、命中 `/m/v1/watcher` 前缀空间，并且含有白名单外 handler（`static_response`、`redir`、`basic_auth`、`subroute` 等）的路由，但下面列出的提示形状除外；
+        - 把 `/m/v1/watcher` 前缀转发到 9090、9100 或 8186 的非片段路由；
+        - 与 8186 有关的一切（I-2）。
+      - **降为 `HINT DEFENSE_IN_DEPTH`**（不阻断；写进结果行；由 PC-6 (i) 逐条人工确认它不会指向 8186）：
+        - (i) 片段之前的**普通** `forward_auth`：adapt 后是一个 `reverse_proxy`，不命中 I-2，不带 `dynamic_upstreams`，`handle_response` 路由里只有 `vars` 或不带 `request` 的 `headers`。它在 2xx 时原样放行原请求，碰不到 8186，也不改调用方的 `Authorization`；
+        - (ii) 片段之前、只可能把路径改进 `/v1/watcher` 空间（而不是 `/m/v1/watcher` 空间）的规则，因为 8183 上没有网关；
+        - (iii) 位于兜底与守卫之后、工具无法求值的匹配器或处理器，例如 SPA 的 `try_files`，因为这些路由已被兜底与守卫的 404 截断；
+        - (iv) 指向 8183 或其他既不是 8186、也不是 9090/9100 的端口的旧形状：把前缀转发给 8183、改路径后转发给 8183、上游动态或解析不出（其中 8186 的部分由 I-2 判定）、未知或递归的 `invoke`、只是提到 `watcher` 的 `path_regexp`。
+      
+      以上提示形状一旦改拨 8186，或者其中出现 8186，都由 I-2 判失败。本条只规定结果口径；工具已有的精确判定（例如具体的 handler 白名单）照旧。
+    - (d) 对指向 8183 或其他端口的路由，**不作任何导致失败的形状判定**，最多按 (c) 给出不阻断的提示（G-44）。WGW-1.0.3 草案 RS-2 的白名单**不得实现**。
   - **V-2 verify 模拟**：沿用现有模拟：表内路径经片段到达上游 8186，路径去掉 `/m`。另在 app 站点模拟 `GET /v1/watcher/status`、`/V1/WATCHER/status`、`//v1/watcher/status`、`/v1/watcher/dialogs`，期望由守卫回 404。
   - **V-3 探针活体检查**：8183 与 8186 各用独立的桩，断言两点：
     - (1) 清单每行、每种方法都经片段到达 **8186 桩**，路径去掉 `/m`，`Authorization` 保持请求方原值；
@@ -912,11 +927,22 @@ CREATE TABLE IF NOT EXISTS config_audit (
     
     这些都属于**以后单独的一次控制面升级**，届时要有自己的门禁、窗口与授权，不在本阶段。另外，三个单元都带 `Restart=on-failure`，所以共享目录中的代码一旦被替换，任何一次崩溃或 OOM 都会让新代码在无人值守时生效（`infra/systemd/account-stall-control-plane-{reader,writer}.conf`）。这就是本阶段不碰共享目录的原因。
   - **部署前只读核对（证据）**：
-    - 共享目录中每个受版本控制的文件，逐个核对 sha256 与 `67b401a` 基线一致，输出 `MANIFEST_OK cp-shared-vs-67b401a`；不一致即停工报告，不做任何修改；
-    - 全部单元的 `NeedDaemonReload`，范围至少包括 `trader-v3-*`、`caddy` 与交易节点相关单元，最好直接用 `systemctl list-units --all` 取全量。任一为 `yes` 就停工，不执行 daemon-reload，输出 `DAEMON_RELOAD_PENDING`。这维持 wac-060 已定的规则：`daemon-reload` 作用于整台主机，会把别处待加载的改动一并加载；
+    - 共享目录中每个受版本控制的文件，逐个核对 sha256 与 `67b401a` 基线一致，一致则输出 `MANIFEST_OK cp-shared-vs-67b401a`。（G-47，收录 wac-096 第五轮 🟢-3 与 wac-108 🟡-6，修订 G-32 的"不一致即停工"）不一致时：
+      - 输出 `MANIFEST_DRIFT cp-shared-vs-67b401a` 并停工，不修复、不覆盖、不还原任何文件；
+      - 漂移清单每行为 `MODIFIED <相对路径> <当前 sha256>` 或 `MISSING <相对路径>`，按路径排序；`drift_sha256` 是整份清单文本的 sha256，因此**同时绑定了路径与内容**；
+      - 由用户按 O0-A08D 决定：(A) 接受恰好这份差异，preflight 加 `--accept-shared-drift <drift_sha256>` 重跑；差异的路径或任一文件内容有任何变化，都会得到另一个 `drift_sha256`，仍然停工；(B) 先另立授权任务，把共享目录对齐。
+      
+      无论选哪条路，preflight 之后对共享目录的全量快照（每个文件的 sha256、mode、uid、gid）在 apply 前、apply 后、回滚后都必须逐项相同，这是硬门禁。本阶段本来就不读写共享目录，真正的不变式正是"前后逐字相同"；
+    - 全部单元的 `NeedDaemonReload`，范围至少包括 `trader-v3-*`、`caddy` 与交易节点相关单元，最好直接用 `systemctl list-units --all` 取全量。任一为 `yes` 就停工，不执行 daemon-reload，输出 `DAEMON_RELOAD_PENDING units=<单元列表>`，由用户按 O0-A08R 决定是否单独授权一次 reload（wac-096 第五轮 🟢-4）。这维持 wac-060 已定的规则：`daemon-reload` 作用于整台主机，会把别处待加载的改动一并加载；
     - 记录另三个控制面单元的 MainPID 与启动时间；
     - 8186 未被监听；
-    - 共享 venv 中新代码所需的依赖齐全（只读 import 检查）。
+    - 共享 venv 中新代码所需的依赖齐全。（G-48，收录 wac-096 第五轮 🟡-C）这一项**就是**下面这次 import 冒烟，不另跑 `pip check`、`pip install --dry-run`，也不以 root 身份不带 `-B` 做 import，因为这些做法可能写入 pip 缓存或 `.pyc`：
+      - 以新单元的 OS 用户身份运行 `.venv-cp/bin/python -B`，`env -i` 只放白名单 env 与 `CONTROL_PLANE_APP_ROLE=watcher-gateway`，工作目录是 staging 中展开的新目录下的 `services/control-plane/api`；
+      - 执行 `import read_api` 与 `create_app("watcher-gateway")`，要求网关路由数大于 0；
+      - `ImportError`/`ModuleNotFoundError` 输出 `DEPENDENCY_MISSING <模块名>` 并停工，其他非零退出同样停工；
+      - 事后断言共享 venv 与新目录的文件清单、元数据都没有变化（没有生成 `__pycache__`）。
+      
+      这次冒烟同时承担新单元步骤第 4 步的审计钩子检查。
   - **新单元步骤**：
     1. 上面的只读核对全部通过；
     2. 创建 OS 用户；
@@ -924,18 +950,34 @@ CREATE TABLE IF NOT EXISTS config_audit (
     4. 用新目录与白名单 env 做 import 冒烟，并用审计钩子证明没有从新目录与 venv 以外加载模块或文件；
     5. 按白名单生成 env 文件（只打印变量名）；
     6. 安装单元文件；
-    7. 再核对一次 `NeedDaemonReload` 全为 `no`（第 6 步装的新单元除外），然后 `systemctl daemon-reload`；
-    8. 核对另三个单元的 MainPID 与启动时间都没有变；
-    9. `systemctl enable --now trader-v3-controlplane-watcher-gateway.service`；
-    10. `127.0.0.1:8186/health/role` 返回 `gateway: enabled`；
-    11. 回环探针；
-    12. 再核对一次共享目录的 sha（与第 1 步逐字相同）；
-    13. 舰队守卫。
+    7. 再核对一次 `NeedDaemonReload`：除第 6 步装的新单元外全为 `no`；
+    8. `systemctl enable --no-reload trader-v3-controlplane-watcher-gateway.service`；
+    9. **紧接着**执行本阶段唯一一次 `systemctl daemon-reload`，它同时加载新单元与 wants 链接；
+    10. 再核对一次 `NeedDaemonReload`，这次全部单元（含新单元）都必须为 `no`，以此证明第 9 步已清掉 manager 级的过期标志；
+    11. 核对另三个单元的 MainPID 与启动时间都没有变；
+    12. `systemctl start trader-v3-controlplane-watcher-gateway.service`；
+    13. `127.0.0.1:8186/health/role` 返回 `gateway: enabled`；
+    14. 回环探针；
+    15. 再核对一次共享目录的全量快照（与 preflight 逐项相同）；
+    16. 舰队守卫。
+    
+    （G-49，收录 wac-108 🟡-1 与 wac-096 第五轮 🟡-B）为什么这样排序：
+    - 在 systemd ≥ 255 上，只要 enable/disable 真的改了单元文件状态，就会置位 manager 级标志 `unit_file_state_outdated`（v255 `src/core/dbus-manager.c:2524` 等处）；
+    - 标志置位之后，`unit_need_daemon_reload()` 对**每一个**单元都返回真（`src/core/unit.c:3915`），直到下一次 daemon-reload 才清零（`manager.c:3586`）；v254 及以前的版本没有这个行为；
+    - 如果按旧顺序"先 reload、后 `enable --no-reload`"，apply 之后全机 NeedDaemonReload 都会变成 `yes`，verify 的隔离门禁就再也分辨不出是否有别的单元真的待加载；
+    - 不带 `--no-reload` 的 `enable`/`disable` 会隐式执行一次 daemon-reload（systemctl(1)），所以本阶段一律不用 `--now` 形式。
   - **影响窗口**：
     - 面板与 app 的现有读请求经 operator-query，零影响；
     - `/m/v1/watcher/*` 是新功能：阶段 C 之后、新单元启动之前返回 502；
     - Caddy 重启（阶段 C）沿用 D-02，本修订没有增加重启次数。
-  - **回滚**：只删新增的东西：`systemctl disable --now` 新单元，删除单元文件、新目录、env 文件与系统用户，然后 `daemon-reload`（之前同样先核对 `NeedDaemonReload`）。回滚前后都核对另三个单元的 MainPID 与共享目录的 sha 没有变。回滚不触碰共享目录，也不触碰另三个单元。
+  - **回滚**：只删新增的东西。（G-49 按"先撤暴露，reload 门看 disable 之前的快照"重排）
+    1. **记录**一次全量 `NeedDaemonReload` 快照。它只作记录，不是门槛，所以回滚永远不会在这一步卡住；
+    2. **无条件撤掉暴露**：`systemctl stop` 新单元，`systemctl disable --no-reload`，并断言新单元不处于 active 或 activating；删除 env 文件与新目录。这一步不经过 reload；
+    3. **reload 门按第 1 步的快照判定**（排除新单元）：
+       - 快照干净：删除单元文件与系统用户，执行 `daemon-reload`，然后再核对一次，全部单元都必须为 `no`；
+       - 快照不干净：输出 `DAEMON_RELOAD_PENDING units=<列表>`，保留一个已停止、已禁用的单元文件，由用户按 O0-A08R 决定。这时暴露已经撤掉，方向是安全的。
+    
+    回滚前后都核对另三个单元的 MainPID 与共享目录的全量快照没有变。回滚不触碰共享目录，也不触碰另三个单元。
   - `scripts/jp24-p1-control-plane.sh` 的 `apply` 会覆盖共享目录，并重启全部角色，**本阶段不得使用**。RS-18 只给它的数组与模板补上新角色，并在头注释中写明本阶段禁用，供以后的整体控制面升级使用。
 - **PC-6（O0-A05P 之前确认；取代 WGW-1.0.3 版）**：
   - (i) 候选 Caddyfile 上 V-1 的输出：没有 `GATEWAY_PORT_EXPOSED`；逐项确认每个 `UPSTREAM_UNRESOLVED` 在生产中不会解析到 8186。
@@ -943,7 +985,8 @@ CREATE TABLE IF NOT EXISTS config_audit (
   - (iii) jp-24 上除 Caddy 外，没有进程或规则把外部流量送到 `127.0.0.1:8186`（其他反向代理、SSH 隧道、iptables DNAT 或端口转发，含 unix socket 转发）。上线后由 S-06 复核 8186 只监听回环。可选的佐证是只读的 `ss -tnp`，需要授权。
   - (iv) 公网前面有没有 CDN 或中间层。V-5 只看状态码；如果中间层会改写状态码，由用户决定怎么处理。
   - (v) 只读核实生产 `operator-query.env` 中是否含 `AUTH_SECRET_KEY` 这个变量名：只看变量名，不看值，供 U-13 (iii) 决定。
-  - (vi) 部署前只读核对的输出：共享目录与 `67b401a` 一致，`NeedDaemonReload` 全为 `no`。
+  - (vi) 部署前只读核对的输出：共享目录与 `67b401a` 一致，或者 O0-A08D 已就 `MANIFEST_DRIFT` 作出决定（G-47）；`NeedDaemonReload` 全为 `no`，或者 O0-A08R 已作出决定。
+  - (vii) （G-49）jp-24 的 `systemctl --version` 第一行，取自 O0-A01 S-01 的只读输出。它决定上面第 8–10 步的理由是否成立（≥ 255）；无论版本高低，步骤都按 G-49 的顺序执行。
 - **U-13（取代 WGW-1.0.3 版；O0-A08 的前置）**：
   - (i) 选项 (e) 与 R23 已定，作记录；
   - (ii) 用户确认部署方式：新增单元与独立目录；不重启、不改动三个现有单元及其代码目录；本阶段没有 D-04；
@@ -1322,7 +1365,14 @@ CREATE TABLE IF NOT EXISTS config_audit (
    - `(watcher_gateway_upstream)` 必须恰好一次 `strip_path_prefix /m`，只拨 `127.0.0.1:8186`，没有 `rewrite`，没有 `transport` 覆盖。
    - 从 server 根到片段 `reverse_proxy` 的整条处理链上（含站点顶层的 `request_header`），不得有任何请求头操作。
    - 自测增加两个变异：片段上游改成 8183 → 失败；片段上游加 `transport http { … }` → 失败。
-3. **RS-12 V-1 主判据 I-2**：递归遍历整份 adapt JSON，排除 RS-11 认定的那个片段上游对象，按 §9.14.6 I-2 的 (1)–(3) 判 `GATEWAY_PORT_EXPOSED`：独立的 `8186` 字符串、数值 8186、端口范围含 8186。解析不出上游、又没有命中 (1)–(3) 的，只输出 `UPSTREAM_UNRESOLVED` 信息行。**不实现**任何针对 8183 转发的形状判定。
+3. **RS-12 V-1 主判据 I-2**：递归遍历整份 adapt JSON，排除 RS-11 认定的那个片段上游对象，按 §9.14.6 I-2 的 (1)–(5) 判 `GATEWAY_PORT_EXPOSED`：
+   - 独立的 `8186` 字符串，允许前导零；
+   - 数值 8186；
+   - 端口范围含 8186；
+   - 端口或整个 dial 含 `{env.*}`、`{system.*}` 以外的占位符；
+   - 代理 URL 解析出 host:port 后按 dial 规则判定。
+   
+   排除的片段上游是**每一个**片段逐路径组中的 `reverse_proxy`。解析不出、又只含 `{env.*}`、`{system.*}` 的，只输出 `UPSTREAM_UNRESOLVED` 信息行。对 8183 的转发**不作任何导致失败的形状判定**，按 §9.14.6 V-1 (c) 最多给 `HINT DEFENSE_IN_DEPTH`（G-44、G-46、G-50）。V-4 的文本规则同步允许前导零。
 4. **RS-13 V-2、V-3**：
    - 在 app 站点模拟四个 `/v1/watcher` 请求，期望守卫返回 404。
    - 探针用 8183 与 8186 两个独立的桩：表内路径只命中 8186 桩，`Authorization` 保持原值；其余所有探针都不命中 8186 桩。
@@ -1343,16 +1393,31 @@ CREATE TABLE IF NOT EXISTS config_audit (
      - `dynamic a { name localhost; port 8186 }`；
      - 主动健康检查的 `upstream` 指向 `127.0.0.1:8186`；
      - 合成 JSON 中非 http app 的 dial 为 8186。
-   - **信息（`UPSTREAM_UNRESOLVED`，不失败）**：`reverse_proxy {env.OQ}`（端口也是占位符）。
+   - （G-46、G-50）**FAIL** 追加：
+     - `reverse_proxy 127.0.0.1:08186`；
+     - `transport http { network_proxy url http://127.0.0.1:08186 }`，要求 V-4 也失败；
+     - `127.0.0.1:{http.request.header.X-Port}`、`reverse_proxy {http.request.header.X-Up}`、`127.0.0.1:{vars.p}`；
+     - `map` 的输出用作端口；
+     - `network_proxy url http://127.0.0.1:{http.request.header.X-Port}`。
+     
+     其中前导零 `network_proxy` 与 `X-Port` 两例，另做活体证明：8186 桩确实被命中。
+   - **信息（`UPSTREAM_UNRESOLVED`，不失败）**：`reverse_proxy {env.OQ}`（端口也是占位符）、`network_proxy url {env.PROXY}`。
+   - （G-44）**提示（`HINT DEFENSE_IN_DEPTH`，不失败）**：
+     - 站点顶层普通 `forward_auth 127.0.0.1:8183 { uri /v1/auth }`；
+     - 片段之后的 SPA `try_files`；
+     - 片段之前改路径进 `/v1/watcher` 空间的规则；
+     - 把前缀转发给 8183 的旧形状。
+     
+     对照组：同一个 `forward_auth` 加 `copy_headers Authorization` → **FAIL**（请求头操作）；上述任一形状改拨 8186 → **FAIL**。仿生产夹具仍为 0 失败、0 提示。
    - **FAIL（结构）**：片段上游拨 8183；片段上游带 `header_up Authorization …`；站点顶层 `request_header Authorization …`；删去守卫组。
    - **活体**：每个 PASS 用例都证明 8186 桩只被表内路径命中；每个拨 8186（含 `network_proxy`）的 FAIL 用例都证明 8186 桩被非表内请求命中。
 7. **RS-16 部署脚本（阶段 O，按 §9.14.6"部署与重启"与 R23 重写）**：新增 `o0_deploy_watcher_gateway.sh`，分 `preflight`、`apply`、`verify`、`rollback` 四个阶段。**任何阶段都不写共享目录、不写共享 venv、不重启另三个单元。**
    - **preflight**（只读，只写 staging）：
-     - 共享目录逐文件核对 sha256 是否等于 `67b401a`，得到 `MANIFEST_OK cp-shared-vs-67b401a`；不一致即停工；
-     - 全部单元的 `NeedDaemonReload` 都必须为 `no`，否则输出 `DAEMON_RELOAD_PENDING` 并停工；
+     - 共享目录逐文件核对 sha256 是否等于 `67b401a`：一致时输出 `MANIFEST_OK cp-shared-vs-67b401a`。不一致时输出 `MANIFEST_DRIFT` 并停工，漂移清单每行带当前 sha256，`drift_sha256` 同时绑定路径与内容；用户按 O0-A08D 选择 `--accept-shared-drift <drift_sha256>` 或先对齐。之后记录共享目录的全量快照（sha256、mode、uid、gid），作为后续的硬门禁（G-47）；
+     - 全部单元的 `NeedDaemonReload` 都必须为 `no`，否则输出 `DAEMON_RELOAD_PENDING units=<列表>` 并停工，交 O0-A08R；
      - 8186 没有监听，新单元、系统用户与新目录都不存在（或与 bundle 一致）；
      - 记录另三个单元的 MainPID 与启动时间；
-     - 对共享 venv 做依赖 import 检查（只读）；
+     - 依赖检查：就是 §9.14.6 G-48 规定的 `python -B` import 冒烟（新单元的 OS 用户、`env -i` 白名单、staging 中的新目录），缺模块时输出 `DEPENDENCY_MISSING <模块名>`；事后共享 venv 与新目录的元数据不变；
      - 在 staging 中展开 `git archive <release-sha>`，按清单核对 sha；
      - 做 import 冒烟：新目录、白名单 env、审计钩子，断言没有从新目录与 venv 以外加载任何东西；网关路由数大于 0；
      - 按白名单拼出变量名清单（只打印名字），并做 reader token 互异检查；
@@ -1364,17 +1429,27 @@ CREATE TABLE IF NOT EXISTS config_audit (
      4. 把新目录从 staging 以 root 0755 安装到 `$TRADER_ROOT/releases/watcher-gateway/<release-sha>/`，并做 sha 校验；
      5. 生成 0600 的 env；
      6. 安装单元；
-     7. `daemon-reload`；
-     8. 核对另三个单元的 MainPID 与启动时间不变；
-     9. `enable --now` 新单元；
-     10. 30 秒内 `/health/role` 返回 `gateway: enabled`；
-     11. 回环探针：在 8186 上，用 `SYSTEM_OBSERVER_TOKEN` 请求 `/v1/watcher/status` 得到 200（token 在进程内读取，只打印状态码），不带 token 得到 401；在 8183 上，`/v1/watcher/status` 得到 404；另做 Caddy 回环 `--resolve` 的 V-5 补充检查；
-     12. 再核对一次共享目录的 sha，必须与 preflight 相同；
-     13. 舰队守卫。
+     7. `NeedDaemonReload` 核对（排除新单元）；
+     8. `systemctl enable --no-reload` 新单元；
+     9. 紧接着唯一一次 `daemon-reload`；
+     10. 再核对 `NeedDaemonReload`，全部为 `no`；
+     11. 核对另三个单元的 MainPID 与启动时间不变；
+     12. `systemctl start` 新单元；
+     13. 30 秒内 `/health/role` 返回 `gateway: enabled`；
+     14. 回环探针：在 8186 上，用 `SYSTEM_OBSERVER_TOKEN` 请求 `/v1/watcher/status` 得到 200（token 在进程内读取，只打印状态码），不带 token 得到 401；在 8183 上，`/v1/watcher/status` 得到 404；另做 Caddy 回环 `--resolve` 的 V-5 补充检查；
+     15. 再核对共享目录的全量快照，必须与 preflight 逐项相同；
+     16. 舰队守卫。
+     
+     第 7–12 步的顺序按 G-49：systemd ≥ 255 的 `unit_file_state_outdated` 语义，且全程不用 `--now`。
      
      失败时自动回滚，回滚只针对新增的东西。
    - **verify**（O-3）：V-5 外部检查的证据是必需输入，没有就输出 `DIRECT_GUARD_UNVERIFIED`；另三个单元的 MainPID 不变；共享目录的 sha 不变；舰队守卫。
-   - **rollback**：先核对 `NeedDaemonReload`，然后停止并禁用新单元，删除单元文件、env、新目录与系统用户，再 `daemon-reload`；最后核对另三个单元的 MainPID 与共享目录的 sha 都不变。
+   - **rollback**（G-49）：
+     1. 记录一次全量 `NeedDaemonReload` 快照（不作门槛）；
+     2. 无条件 `stop`、`disable --no-reload`，断言新单元不处于 active 或 activating，删除 env 与新目录；
+     3. reload 门按第 1 步快照（排除新单元）判定：干净则删除单元文件与系统用户、`daemon-reload`，再核对全部为 `no`；不干净则输出 `DAEMON_RELOAD_PENDING`，保留已停止、已禁用的单元文件，交 O0-A08R；
+     4. 最后核对另三个单元的 MainPID 与共享目录的全量快照都不变。
+   - **测试桩**：`apply_rollback_test.sh` 的桩要模拟"manager 已过期"：任何带改动的 `enable`/`disable --no-reload` 之后，所有单元都报 `yes`，直到 `daemon-reload` 为止。apply 与回滚按这个语义重跑，并补一个用例："apply 成功后，verify 的隔离检查通过"。
 8. **RS-17 隔离门禁**（`o0_tool.py cp-isolation`，S-10）扩展到四个单元：
    - watcher-gateway 的 env 变量名只能是白名单的子集：默认不含 signal token，也不含 `AUTH_SECRET_KEY`，除非 U-13 (iii) 批准；
    - 另三个单元的 env 与 `Environment=` 中没有 `WATCHER_GATEWAY_TOKEN`；
@@ -1413,3 +1488,28 @@ CREATE TABLE IF NOT EXISTS config_audit (
 | G-41 | 🟢-5 | 采纳：请求头操作的检查范围扩到"从 server 根到片段 `reverse_proxy` 的整条处理链，含站点顶层 `request_header`" | §9.14.6 V-1 (a)；RS-11 |
 | G-42 | 🟢-6、🟢-7 | 🟢-6：§9.15 标明匿名请求结果来自 Planner 的转述，请 Planner 把原始输出（状态码、字节数，不含 body）附进任务记录；🟢-7：逐转发器标记探针保留为不阻断的信息输出 | §9.15；§9.14.6 V-3；RS-13 |
 | G-43 | 🟢-8 | 第 6 行 preamble 按 Planner 指示，由 Planner 在合并时更新（§1–§8 之外、§9 之前的文字不在本勘误的改动范围内） | — |
+
+**WGW-1.0.4 合并后勘误一（2026-09-30，任务 wac-110；版本号不变）**
+
+来源：
+- 复审报告 `docs/agent-team/reviews/wac-105.md`（wac-108，PASS）的 §4：执行者提出的契约冲突 (1)、(2)，以及建议收录的 E-2..E-4；
+- `docs/agent-team/reviews/wac-096.md` 第五轮的 🟡-A、🟡-B、🟡-C、🟢-1..🟢-4；其中 🟢-3 即共享目录漂移由用户决定。
+
+这些内容执行者（wac-104、wac-105、wac-109）都已经按任务书实现了，本次只是把契约文字补齐。
+
+版本号仍为 **WGW-1.0.4**，不另起 1.0.4a。原因是"1.0.4a"不符合 S-01 规定的 `WGW-<主>.<次>[.<勘误>]` 格式，而且本次改动不涉及 YAML、生成物，也不改任何接口。
+
+改动范围：只改 §9 的文字。§1–§8、YAML（`yaml_sha256` 不变）与四份生成物都不变；既有 `/v1` 端点、网关代码、角色 scope 都不变。文件第 6 行 preamble 在 §9 之外，由 Planner 在合并时决定是否提及本次勘误。
+
+| # | 来源 | 改动 | 位置 |
+|---|---|---|---|
+| G-44 | wac-108 §4 (1)；用户要求"不要限制得那么死" | 消除 V-1 (c)"遮蔽检查不变"与 Caddy 条款"对 8183 不作形状判定"之间的矛盾。<br>仍判失败：片段之前的请求头操作（含带 `copy_headers` 的 `forward_auth`）、改路径进 `/m/v1/watcher` 空间、把前缀转发到 9090/9100/8186，以及一切与 8186 有关的形状。<br>降为 `HINT DEFENSE_IN_DEPTH`：片段之前的普通 `forward_auth`、只可能改进 `/v1/watcher` 空间的规则、兜底与守卫之后无法求值的形状（SPA `try_files` 等）、指向 8183 的旧形状。<br>V-1 (d) 改为"不作导致失败的形状判定，最多给提示"。 | §9.14.6 Caddy 条款、V-1 (c)(d)；RS-12、RS-15 |
+| G-45 | wac-108 §4 (2) | 凭据文件名澄清：线上文件仍是 `$TRADER_ROOT/secrets/control-plane/watcher-gateway.env`，没有改名；凭据集内部的持有方文件 `controlplane-watcher-gateway.env` 只是为了和 watcher 容器的 `/srv/trader-secrets/watcher-gateway.env` 区分，不属于契约的规定范围 | §9.14.6 凭据"值的来源" |
+| G-46 | wac-096 第五轮 🟡-A（E-2） | I-2 新增 (4)：dial 的端口部分或整个 dial 含 `{env.*}`、`{system.*}` 以外的占位符（请求作用域、`map` 输出等）即判失败，`dynamic` 的 `port` 同样处理；`UPSTREAM_UNRESOLVED` 只留给 `{env.*}`、`{system.*}` | §9.14.6 I-2；RS-12、RS-15 |
+| G-47 | wac-096 第五轮 🟢-3；wac-108 🟡-6（E-2） | 共享目录漂移：输出 `MANIFEST_DRIFT` 并停工，不修复任何文件；清单带每个文件的当前 sha256，`drift_sha256` 同时绑定路径与内容；由用户按 O0-A08D 决定用 `--accept-shared-drift <drift_sha256>` 重跑，还是先对齐；前后全量快照逐项相同仍是硬门禁。修订 G-32 的"不一致即停工" | §9.14.6 部署前只读核对、PC-6 (vi)；RS-16 |
+| G-48 | wac-096 第五轮 🟡-C（E-2） | 依赖检查就是 `python -B` import 冒烟：以新单元用户身份，`env -i` 白名单，staging 新目录，`create_app("watcher-gateway")` 的网关路由数大于 0；缺模块输出 `DEPENDENCY_MISSING`；事后共享 venv 不变；不得用 `pip check` 之类的做法 | §9.14.6 部署前只读核对；RS-16 |
+| G-49 | wac-108 🟡-1（E-3）；wac-096 第五轮 🟡-B、🟢-4 | 适配 systemd ≥ 255 的 `unit_file_state_outdated` 语义：<br>apply 顺序改为：核对（排除新单元）→ `enable --no-reload` → 紧接着唯一一次 `daemon-reload` → 再核对全部为 `no` → 另三个单元 PID 不变 → `start`，全程不用 `--now`。<br>回滚改为：记录快照（不作门槛）→ 无条件 stop、`disable --no-reload`、删 env 与目录，先撤暴露 → reload 门看 disable 之前的快照。<br>`DAEMON_RELOAD_PENDING` 列出单元交给 O0-A08R；PC-6 (vii) 记录 `systemctl --version`；RS-16 的测试桩模拟 manager 过期标志 | §9.14.6 新单元步骤、回滚、PC-6；RS-16 |
+| G-50 | wac-108 🟡-5（E-4） | I-2 (1) 的正则允许前导零：`(?<![0-9])0*8186(?![0-9])`；新增 (5)：代理 URL 先解析出 host:port，再按 dial 规则判定；V-4 同步修改 | §9.14.6 I-2；RS-12、RS-15 |
+| G-51 | wac-096 第五轮 🟢-1、🟢-2 | 独立目录内容的措辞改为"在 p1 子集基础上取整个 `packages`"；I-2 排除的对象改为"每一个片段逐路径组中的 `reverse_proxy`"（复数） | §9.14.6 独立代码目录、I-2；RS-12 |
+
+没有收录的提示：wac-108 的 💭-4（新单元加 systemd 加固项）留给下一版契约考虑，本次不改单元 lint 的固定项；其余 💭 属于执行侧，由 wac-109 处理。
