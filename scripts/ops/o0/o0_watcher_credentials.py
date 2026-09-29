@@ -45,7 +45,10 @@ IDENTITIES = {
 }
 HOLDER_FILES = {
     # file name inside a credential set -> identities whose CURRENT value it holds
-    "operator-query.env": ("gateway", "snapshot"),
+    # WGW-1.0.4 (§9.14.6): the gateway token is held ONLY by the watcher-gateway role (its own env file); operator-query
+    # keeps only the snapshot token, applied later by the snapshot switch (o0-runbook-snapshot-switch.md), never in stage O
+    "controlplane-watcher-gateway.env": ("gateway",),   # NOT /srv/trader-secrets/watcher-gateway.env (the watcher container env)
+    "operator-query.env": ("snapshot",),
     "caddy.env": ("browser",),
 }
 WATCHER_FILE = "watcher.env"
@@ -436,6 +439,7 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
         )
         steady = [
             "check", "--watcher-env", str(set1 / WATCHER_FILE),
+            "--holder-env", str(set1 / "controlplane-watcher-gateway.env"),
             "--holder-env", str(set1 / "operator-query.env"),
             "--holder-env", str(set1 / "caddy.env"),
             "--catalog-env", str(catalog), "--require-catalog",
@@ -446,22 +450,24 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
         assert run(["rotate", "--identity", "gateway", "--from-dir", str(set1), "--out-dir", str(set2), "--allow-any-dir"]) == 0
         step1 = [
             "check", "--watcher-env", str(set2 / WATCHER_FILE),
-            "--holder-env", str(set1 / "operator-query.env"),
+            "--holder-env", str(set1 / "controlplane-watcher-gateway.env"),
             "--catalog-env", str(catalog), "--require-catalog",
         ]
         assert run(step1) == 1
         assert run(step1 + ["--allow-holder-on-previous"]) == 0
         step2 = [
             "check", "--watcher-env", str(set2 / WATCHER_FILE),
-            "--holder-env", str(set2 / "operator-query.env"),
+            "--holder-env", str(set2 / "controlplane-watcher-gateway.env"),
             "--catalog-env", str(catalog), "--require-catalog",
         ]
         assert run(step2) == 0
+        # WGW-1.0.4: operator-query holds only the snapshot token (never the gateway token)
+        assert "WATCHER_GATEWAY_TOKEN" not in parse_env_file(set2 / "operator-query.env")
         set3 = base / "set3"
         assert run(["retire", "--from-dir", str(set2), "--out-dir", str(set3), "--allow-any-dir"]) == 0
         step4 = [
             "check", "--watcher-env", str(set3 / WATCHER_FILE),
-            "--holder-env", str(set1 / "operator-query.env"),
+            "--holder-env", str(set1 / "controlplane-watcher-gateway.env"),
         ]
         assert run(step4) == 1, "retired old gateway value must be rejected"
         # collision with control-plane catalog must fail

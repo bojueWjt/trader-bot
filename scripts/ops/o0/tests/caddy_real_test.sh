@@ -63,6 +63,14 @@
 #      uri path_regexp then reverse_proxy /v1/*, A8 placeholder rewrite then reverse_proxy /v1/*, C1 intercept handle_response
 #      rewrite + forward, E1 handle_path inside handle_errors, E2 CONNECT ^/v1/watcherx$ + strip_suffix x: verify FAILS
 #      (A1 and C1 also live); handle_path /x/* { reverse_proxy /reports/* <oq> } and a top-level intercept that only answers pass.
+#   8. WGW-1.0.4 (§9.14.6, RS-11..RS-15; task wac-105) - where it differs, this overrides the items above: the fixture's
+#      snippet upstream dials 8186 (watcher-gateway); bad-* (F-12/F-13, RS-11 snippet upstream, RS-1 guard, I-2) must
+#      FAIL, bad-i2-* and every *-8186 twin with GATEWAY_PORT_EXPOSED; did-* (the pre-1.0.4 operator-query shapes, incl.
+#      review wac-099 r2 D2/D5 and the user's P4 forward_auth / A5 / P1 try_files leftovers) PASS with a HINT line; ok-*
+#      PASS (p8 unix socket and p13 {env.OQ} with UPSTREAM_UNRESOLVED); V-4 text rule; the probe copies: /m-space path
+#      changes reach the 8186 stub (fail), operator-query shapes pass with PROBE_HINT lines. RS-15 live: a runner puts
+#      8186 and 8183 on separate stubs in real Caddy: every I-2 case and twin gets a non-table request into the 8186 stub
+#      (a request-chosen network_proxy port is refused by Caddy at load time), no PASS/did original does.
 # Local only: 127.0.0.1 ports, a temporary directory, a random one-off basic-auth password.
 set -eo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -101,23 +109,46 @@ if [ "$ARC" = 0 ] && [ "$VRC" = 0 ]; then ok "real adapt + verify: $(tail -1 "$W
 else bad "real adapt ($ARC) + verify ($VRC) on the good fixture"; grep -E '^FAIL' "$WORK/Caddyfile.verify" | head -5; tail -3 "$WORK/Caddyfile.err" 2>/dev/null; fi
 
 # 2. variants (python edits the text; each must adapt, then verify must FAIL or PASS as stated)
+#    WGW-1.0.4 (task wac-105): bad-* must FAIL (bad-i2-* and every *-8186 twin with GATEWAY_PORT_EXPOSED); ok-* must PASS
+#    (an ok-*.want file names a line the output must contain: UPSTREAM_UNRESOLVED, a HINT); did-* are the pre-1.0.4
+#    operator-query (8183) shapes: verify PASSES with a HINT DEFENSE_IN_DEPTH line (defense in depth, §9.14.6 V-1 (d)),
+#    and each has a bad-<name>-8186 twin (its own dials written as 8186) that must FAIL. *.trig files list the requests
+#    the RS-15 live runner (section 8) sends.
 python3 - "$WORK" <<'PY'
-import sys
+import json, sys
 from pathlib import Path
 work = Path(sys.argv[1])
 good = (work / "Caddyfile").read_text()
 site_import = "\timport watcher_gateway_routes\n"
 mobile_handle = "\thandle /m/* {\n\t\turi strip_prefix /m\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n"
-def bad(name, text):
+panel_open = "\thandle /v1/* {\n\t\treverse_proxy 127.0.0.1:8183 {\n"
+upstream_def = "(watcher_gateway_upstream) {\n\turi strip_prefix /m\n\treverse_proxy 127.0.0.1:8186\n}\n"
+assert good.count(panel_open) == 1 and good.count(upstream_def) == 1
+obs = 'Authorization "Bearer {env.SYSTEM_OBSERVER_TOKEN}"'
+def write(kind, name, text, want="", trig=()):
     assert text != good, name
-    (work / f"bad-{name}.Caddyfile").write_text(text)
-def fine(name, text):
-    assert text != good, name
-    (work / f"ok-{name}.Caddyfile").write_text(text)
+    (work / f"{kind}-{name}.Caddyfile").write_text(text)
+    if want:
+        (work / f"{kind}-{name}.want").write_text(want)
+    if trig:
+        (work / f"{kind}-{name}.trig").write_text("\n".join(trig) + "\n")
+def bad(name, text, trig=()):
+    write("bad", name, text, trig=trig)
+def fine(name, text, want="", trig=()):
+    write("ok", name, text, want, trig)
+def did(name, insert, extra="", want="HINT DEFENSE_IN_DEPTH", trig=(), twin=(":8183", ":8186")):
+    """a pre-1.0.4 operator-query shape: PASS with a hint; its own dials as 8186 = the bad twin (I-2)"""
+    write("did", name, good.replace(site_import, site_import + insert) + extra, want, trig)
+    t_insert, t_extra = insert.replace(*twin), extra.replace(*twin)
+    if (t_insert, t_extra) != (insert, extra):
+        write("bad", f"{name}-8186", good.replace(site_import, site_import + t_insert) + t_extra, trig=trig)
+def panel(new_open):
+    return good.replace(panel_open, new_open)
+# ---- F-12 / F-13 / structure: still failures
 bad("handle-before-import", good.replace(site_import, mobile_handle + site_import))
-bad("handle-m-after-import", good.replace(site_import, site_import + mobile_handle))
 bad("toplevel-rewrite-after-import", good.replace(site_import, site_import + "\trewrite /m/v1/watcher/dialogs /m/v1/watcher/status\n"))
-bad("toplevel-request-header", good.replace(site_import, site_import + '\trequest_header Authorization "Bearer {env.SYSTEM_OBSERVER_TOKEN}"\n'))
+bad("toplevel-request-header", good.replace(site_import, site_import + f'\trequest_header {obs}\n'))
+bad("toplevel-request-header-other", good.replace(site_import, site_import + '\trequest_header X-Other 1\n'))  # V-1 (a): any request header op
 bad("toplevel-basic-auth", good.replace(site_import, site_import + "\tbasic_auth /m/* {\n\t\tu " + good.split("o0fixture ")[1].split("\n")[0] + "\n\t}\n"))
 bad("route-wrapped", good.replace(site_import, "\troute {\n\t\timport watcher_gateway_routes\n\t}\n"))
 bad("handle-path-wrapped", good.replace(site_import, "\thandle_path /m* {\n\t\timport watcher_gateway_routes\n\t}\n"))
@@ -126,30 +157,23 @@ bad("global-order-reverse-proxy", good.replace("\tadmin localhost:2019\n", "\tad
 bad("toplevel-redir-prefix", good.replace(site_import, site_import + "\tredir /m/v1/watcher/* /\n"))
 bad("toplevel-uri-strip-suffix", good.replace(site_import, site_import + "\turi /m/v1/watcher/* strip_suffix /never-there\n"))
 bad("toplevel-method-rewrite", good.replace(site_import, site_import + "\tmethod /m/v1/watcher/* POST\n"))
-bad("toplevel-forward-auth", good.replace(site_import, site_import + "\tforward_auth 127.0.0.1:7000 {\n\t\turi /check\n\t}\n"))
-# wac-090 (review wac-088 🟡-1, 🟡-2, G13)
+bad("toplevel-forward-auth-copy-headers", good.replace(site_import, site_import + "\tforward_auth 127.0.0.1:7000 {\n\t\turi /check\n\t\tcopy_headers Remote-User\n\t}\n"))
 bad("glob-question-rewrite", good.replace(site_import, site_import + "\trewrite /m/v1/w?tcher/status /index.html\n"))
 bad("glob-class-rewrite", good.replace(site_import, site_import + "\trewrite /m/v1/[w]atcher/dialogs /index.html\n"))
 bad("glob-placeholder-rewrite", good.replace(site_import, site_import + "\trewrite /m/v1/{http.request.uri.query.zz}watcher/status /index.html\n"))
 bad("glob-percent-rewrite-conservative", good.replace(site_import, site_import + "\trewrite /m/v1/%77atcher/status /index.html\n"))
-bad("glob-request-header-inject", good.replace(site_import, site_import + '\trequest_header /m/v1/w?tcher/trading/accounts Authorization "Bearer {env.SYSTEM_OBSERVER_TOKEN}"\n'))
+bad("glob-request-header-inject", good.replace(site_import, site_import + f'\trequest_header /m/v1/w?tcher/trading/accounts {obs}\n'))
 bad("mixed-case-rewrite", good.replace(site_import, site_import + "\trewrite /M/V1/Watcher/status /index.html\n"))
-bad("handle-m-localhost", good.replace(site_import, site_import + mobile_handle.replace("127.0.0.1:8183", "localhost:8183")))
-bad("handle-m-ipv6-loopback", good.replace(site_import, site_import + mobile_handle.replace("127.0.0.1:8183", "[::1]:8183")))
 bad("handle-m-unix-socket", good.replace(site_import, site_import + mobile_handle.replace("127.0.0.1:8183", "unix//run/oq.sock")))
-bad("dead-extra-forwarder", good.replace(site_import, site_import + "\thandle /m/v1/watcher/extra {\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n"))
 bad("regexp-extra-route", good.replace(site_import, site_import + "\t@wx path_regexp (?i)^/m/v1/watcher/extra$\n\thandle @wx {\n\t\trespond 204\n\t}\n"))
-# wac-092 (review wac-090 🟡-1..🟡-3: n07, n15b, n08, n19, n17b, n18)
-obs = 'Authorization "Bearer {env.SYSTEM_OBSERVER_TOKEN}"'
 bad("nonascii-dotted-i-inject", good.replace(site_import, site_import + f"\trequest_header /m/v1/watcher/tradİng/accounts {obs}\n"))
-bad("nonascii-kelvin-rewrite", good.replace(site_import, site_import + "\trewrite /m/v1/watcher/trading/risKs /index.html\n"))
+bad("nonascii-kelvin-rewrite", good.replace(site_import, site_import + "\trewrite /m/v1/watcher/trading/risKs /index.html\n"))
 bad("double-slash-inject", good.replace(site_import, site_import + f"\trequest_header /m//v1/watcher/trading/accounts {obs}\n"))
 bad("double-slash-rewrite", good.replace(site_import, site_import + "\trewrite /m/v1//watcher/status /index.html\n"))
 bad("double-slash-forwarder", good.replace(site_import, site_import + "\thandle /m//v1/watcher/* {\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n"))
 bad("host-middle-wildcard-inject", good.replace(site_import, site_import + f"\t@h host jp-bot.*.wang\n\trequest_header @h {obs}\n"))
 bad("host-placeholder-inject", good.replace(site_import, site_import + f"\t@h host {{http.request.host}}\n\trequest_header @h {obs}\n"))
 bad("host-alias-redir-conservative", good.replace(site_import, site_import + "\t@alias host alias.balen.wang\n\tredir @alias https://jp-bot.balen.wang{uri}\n"))
-# wac-094 (review wac-092 🟡-1, v14..v20): a concrete parameter value, suffix / middle globs, unanchored regexps
 bad("v15-param-value-inject", good.replace(site_import, site_import + f"\t@x path /m/v1/watcher/trading/accounts/account-a\n\trequest_header @x {obs}\n"))
 bad("v16-media-png-inject", good.replace(site_import, site_import + f"\t@x path /m/v1/watcher/media/*.png\n\trequest_header @x {obs}\n"))
 bad("v17-regexp-unanchored-inject", good.replace(site_import, site_import + f"\t@x path_regexp account-a$\n\trequest_header @x {obs}\n"))
@@ -157,7 +181,102 @@ bad("v18-middle-glob-inject", good.replace(site_import, site_import + f"\t@x pat
 bad("v19-method-param-glob-inject", good.replace(site_import, site_import + f"\t@x {{\n\t\tmethod PUT\n\t\tpath /m/v1/watcher/trading/accounts/a*\n\t}}\n\trequest_header @x {obs}\n"))
 bad("v14-regexp-pct-inject", good.replace(site_import, site_import + f"\t@x path_regexp %2[fF]\n\trequest_header @x {obs}\n"))
 bad("v20-channels-literal-prefix-rewrite", good.replace(site_import, site_import + "\trewrite /m/v1/watcher/trading/channels/[0-9]* /index.html\n"))
-bad("png-forwarder-dead", good.replace(site_import, site_import + "\t@png path *.png\n\thandle @png {\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n"))
+bad("g15-rewrite-static-into-prefix", good.replace(site_import, site_import + f"\t@s path /static/*\n\trequest_header @s {obs}\n\trewrite @s /m/v1/watcher/status\n"))
+bad("g16-uri-strip-prefix-into-prefix", good.replace(site_import, site_import + f"\t@s path /x/*\n\trequest_header @s {obs}\n\turi @s strip_prefix /x\n"))
+bad("g17-uri-replace-into-prefix", good.replace(site_import, site_import + f"\t@s path /s/*\n\trequest_header @s {obs}\n\turi @s replace /s/ /m/v1/watcher/ 1\n"))
+bad("strip-suffix-watcherx", good.replace(site_import, site_import + "\turi /m/v1/watcherx* strip_suffix x\n"))
+bad("strip-prefix-multiseg-encoded-dots", good.replace(site_import, site_import + f"\t@s path /m/m/*\n\trequest_header @s {obs}\n\turi @s strip_prefix /m/v1\n"))
+bad("g01c-re-class-bracket-alt-acct", good.replace(site_import, site_import + f"\t@x path_regexp `^/static[](]|account-a$`\n\trequest_header @x {obs}\n"))
+bad("g04c-re-class-bracket-alt-png", good.replace(site_import, site_import + f"\t@x path_regexp `^/static[](]|\\.png$`\n\trequest_header @x {obs}\n"))
+bad("g04d-re-negated-class-bracket-alt-acct", good.replace(site_import, site_import + f"\t@x path_regexp `^/static[^](]|account-a$`\n\trequest_header @x {obs}\n"))
+bad("re-class-bracket-alt-bmp", good.replace(site_import, site_import + f"\t@x path_regexp `^/static[](]|a\\.bmp$`\n\trequest_header @x {obs}\n"))
+bad("re-qe-alt-bmp", good.replace(site_import, site_import + f"\t@x path_regexp `^/static\\Q(\\E|a\\.bmp$`\n\trequest_header @x {obs}\n"))
+bad("re-posix-alt-bmp", good.replace(site_import, site_import + f"\t@x path_regexp `^/static[[:alpha:](]|a\\.bmp$`\n\trequest_header @x {obs}\n"))
+named_obs = f"&(obs) {{\n\treverse_proxy 127.0.0.1:8183 {{\n\t\theader_up {obs}\n\t}}\n}}\n"
+bad("handle-m-invoke-named-oq", good.replace(site_import, site_import + "\t@mm path /m/*\n\thandle @mm {\n\t\tinvoke obs\n\t}\n") + named_obs)
+bad("handle-response-to-oq", good.replace(site_import, site_import + "\t@mm path /m/*\n\thandle @mm {\n\t\treverse_proxy 127.0.0.1:7000 {\n\t\t\t@err status 5xx\n\t\t\thandle_response @err {\n\t\t\t\treverse_proxy 127.0.0.1:8183\n\t\t\t}\n\t\t}\n\t}\n"))
+bad("g16-inject-only-without-auth", good.replace(site_import, site_import + f"\t@s {{\n\t\tpath /x/*\n\t\tnot header Authorization *\n\t}}\n\trequest_header @s {obs}\n\turi @s strip_prefix /x\n"))
+# ---- RS-11: the snippet upstream (watcher_gateway_upstream) itself
+bad("rs11-upstream-8183", good.replace(upstream_def, upstream_def.replace("127.0.0.1:8186", "127.0.0.1:8183")))
+bad("rs11-upstream-transport-http", good.replace(upstream_def, upstream_def.replace("reverse_proxy 127.0.0.1:8186\n",
+    "reverse_proxy 127.0.0.1:8186 {\n\t\ttransport http {\n\t\t\tread_timeout 30s\n\t\t}\n\t}\n")))
+bad("rs11-upstream-header-up-authorization", good.replace(upstream_def, upstream_def.replace("reverse_proxy 127.0.0.1:8186\n",
+    f"reverse_proxy 127.0.0.1:8186 {{\n\t\theader_up {obs}\n\t}}\n")))
+# ---- I-2 (RS-15 FAIL list): these shapes dial 8186 (live: section 8 shows the 8186 stub gets non-table requests)
+# (the panel shapes are triggered with /v1/accounts: /v1/watcher/* is answered by the direct guard first)
+bad("i2-panel-8186", panel(panel_open.replace(":8183", ":8186")), trig=("GET /v1/accounts",))
+bad("i2-localhost-8186", good.replace(site_import, site_import + "\thandle /g/* {\n\t\treverse_proxy localhost:8186\n\t}\n"), trig=("GET /g/x",))
+bad("i2-ipv6-loopback-8186", good.replace(site_import, site_import + "\thandle /g/* {\n\t\treverse_proxy [::1]:8186\n\t}\n"), trig=("GET /g/x",))
+bad("i2-port-range-8180-8189", good.replace(site_import, site_import + "\thandle /g/* {\n\t\treverse_proxy 127.0.0.1:8180-8189 {\n\t\t\tlb_policy round_robin\n\t\t}\n\t}\n"),
+    trig=("GET /g/x",) * 12)
+bad("i2-network-proxy-8186", panel(panel_open + "\t\t\ttransport http {\n\t\t\t\tnetwork_proxy url http://127.0.0.1:8186\n\t\t\t}\n"), trig=("GET /v1/accounts",))
+bad("i2-forward-proxy-url-8186", panel(panel_open + "\t\t\ttransport http {\n\t\t\t\tforward_proxy_url http://127.0.0.1:8186\n\t\t\t}\n"), trig=("GET /v1/accounts",))
+bad("i2-dynamic-a-8186", good.replace(site_import, site_import + "\thandle /d/* {\n\t\treverse_proxy {\n\t\t\tdynamic a {\n\t\t\t\tname localhost\n\t\t\t\tport 8186\n\t\t\t}\n\t\t}\n\t}\n"),
+    trig=("GET /d/x",))
+bad("i2-health-upstream-8186", panel(panel_open + "\t\t\thealth_uri /o0h\n\t\t\thealth_interval 200ms\n\t\t\thealth_upstream 127.0.0.1:8186\n"), trig=("WAIT",))
+bad("i2-p11-dial-from-request-header", panel(panel_open.replace("127.0.0.1:8183", "{http.request.header.X-Up}")), trig=("GET /v1/accounts|X-Up: {GW}",))
+bad("i2-p12-port-from-request-header", panel(panel_open.replace("127.0.0.1:8183", "127.0.0.1:{http.request.header.X-Port}")),
+    trig=("GET /v1/accounts|X-Port: {GWPORT}",))
+# (Caddy v2.10.2 refuses to LOAD a network_proxy URL with a placeholder port - provision error - so the live runner
+# asserts that refusal; the static FAIL stays, it is the task's rule and costs nothing)
+bad("i2-network-proxy-from-request-header", panel(panel_open + "\t\t\ttransport http {\n\t\t\t\tnetwork_proxy url http://127.0.0.1:{http.request.header.Y}\n\t\t\t}\n"),
+    trig=("LOAD_REFUSED",))
+bad("i2-toplevel-forward-auth-8186", good.replace(site_import, site_import + "\tforward_auth 127.0.0.1:8186 {\n\t\turi /check\n\t}\n"), trig=("GET /anything",))
+bad("i2-upstream-snippet-imported-by-another-handle", good.replace(site_import, site_import + "\thandle /evil/* {\n\t\timport watcher_gateway_upstream\n\t}\n"),
+    trig=("GET /evil/m/v1/watcher/status",))
+# ---- RS-15 PASS list: common 8183 writings and unresolvable upstreams (info lines, never a silent "equal")
+fine("p8-unix-socket", good.replace(site_import, site_import + "\thandle /u/* {\n\t\treverse_proxy unix//run/app.sock\n\t}\n"), "UPSTREAM_UNRESOLVED")
+fine("p9-env-host-literal-port", good.replace(site_import, site_import + "\thandle /e/* {\n\t\treverse_proxy {env.OQ_HOST}:8183\n\t}\n"), trig=("GET /e/v1/watcher/status",))
+bad("p9-env-host-literal-port-8186", good.replace(site_import, site_import + "\thandle /e/* {\n\t\treverse_proxy {env.OQ_HOST}:8186\n\t}\n"), trig=("GET /e/v1/watcher/status",))
+fine("p10-dynamic-a-8183", good.replace(site_import, site_import + "\thandle /d/* {\n\t\treverse_proxy {\n\t\t\tdynamic a {\n\t\t\t\tname localhost\n\t\t\t\tport 8183\n\t\t\t}\n\t\t}\n\t}\n"),
+     trig=("GET /d/v1/watcher/status",))
+fine("p13-env-dial", good.replace(site_import, site_import + "\thandle /e/* {\n\t\treverse_proxy {env.OQ}\n\t}\n"), "UPSTREAM_UNRESOLVED")
+fine("toplevel-reverse-proxy-v1-8183", good.replace(site_import, site_import + "\treverse_proxy /v1/* 127.0.0.1:8183\n"), trig=("GET /v1/watcher/status",))
+bad("toplevel-reverse-proxy-v1-8186", good.replace(site_import, site_import + "\treverse_proxy /v1/* 127.0.0.1:8186\n"))
+fine("P1-spa-catch-all-try-files", good.replace("\t\troot * /srv/trader-dashboard/dist\n\t\tfile_server\n",
+     "\t\troot * /srv/trader-dashboard/dist\n\t\ttry_files {path} /index.html\n\t\tfile_server\n"), "HINT UNCOMPARABLE_AFTER_SNIPPET")
+fine("other-site-direct-guard", good + "http://other.example {\n\timport watcher_gateway_direct_guard\n\treverse_proxy 127.0.0.1:8183\n}\n", "optional direct guard")
+# ---- defense in depth (did-*): the pre-1.0.4 operator-query shapes, each with its 8186 twin
+did("P4-toplevel-forward-auth", "\tforward_auth 127.0.0.1:7000 {\n\t\turi /check\n\t}\n", twin=("127.0.0.1:7000", "127.0.0.1:8186"), trig=("GET /anything",))
+did("handle-m-after-import", mobile_handle, trig=("GET /m/v1/watcherx",))
+did("handle-m-localhost", mobile_handle.replace("127.0.0.1:8183", "localhost:8183"), trig=("GET /m/v1/watcherx",))
+did("handle-m-ipv6-loopback", mobile_handle.replace("127.0.0.1:8183", "[::1]:8183"), trig=("GET /m/v1/watcherx",))
+did("at-m-path-m-v1", "\t@m path /m/v1/*\n\thandle @m {\n\t\turi strip_prefix /m\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n", trig=("GET /m/v1/watcherx",))
+did("dead-extra-forwarder", "\thandle /m/v1/watcher/extra {\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n")
+did("png-forwarder-dead", "\t@png path *.png\n\thandle @png {\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n", trig=("GET /static/a.png",))
+did("g18-handle-path-to-oq-injected", f"\thandle_path /x/* {{\n\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n", trig=("GET /x/v1/watcher/status",))
+did("handle-path-to-oq-plain", "\thandle_path /x/* {\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n", trig=("GET /x/v1/watcher/status",))
+did("handle-path-p", "\thandle_path /p/* {\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n", trig=("GET /p/v1/watcher/status",))
+did("proxy-rewrite-into-prefix", "\thandle /q/* {\n\t\treverse_proxy 127.0.0.1:8183 {\n\t\t\trewrite /m/v1/watcher/status\n\t\t}\n\t}\n", trig=("GET /q/x",))
+did("handle-path-reports-daily-to-oq", "\thandle_path /reports/daily/* {\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n", trig=("GET /reports/daily/v1/watcher/status",))
+did("proxy-rewrite-v1-watcher-injected", f"\thandle /foo/* {{\n\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\trewrite /v1/watcher/dialogs\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n", trig=("GET /foo/x",))
+did("proxy-rewrite-v1-watcher-placeholder", "\thandle /foo/* {\n\t\treverse_proxy 127.0.0.1:8183 {\n\t\t\trewrite /v1/watcher{path}\n\t\t}\n\t}\n", trig=("GET /foo/status",))
+did("forward-auth-uri-v1-watcher", "\tforward_auth /bar/* 127.0.0.1:8183 {\n\t\turi /v1/watcher/status\n\t}\n", trig=("GET /bar/x",))
+did("handle-errors-to-oq-injected", f"\thandle_errors {{\n\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n", trig=("GET /watcher/",))
+did("invoke-named-oq-after-handle-path", "\thandle_path /x/* {\n\t\tinvoke obs\n\t}\n", extra=named_obs, trig=("GET /x/v1/watcher/status",))
+did("dead-extra-invoke-named-oq", "\thandle /m/v1/watcher/extra {\n\t\tinvoke obs\n\t}\n", extra=named_obs)
+did("q1-handle-path-proxy-rewrite-query", f"\thandle_path /x/* {{\n\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\trewrite ?a=1\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n", trig=("GET /x/v1/watcher/status",))
+did("q2-handle-errors-proxy-rewrite-query", f"\thandle_errors {{\n\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\trewrite ?a=1\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n", trig=("GET /watcher/",))
+did("q3-handle-errors-handle-response-original-request", f"\thandle_errors {{\n\t\treverse_proxy 127.0.0.1:18998 {{\n\t\t\trewrite /ping\n\t\t\t@any status 2xx 3xx 4xx 5xx\n\t\t\thandle_response @any {{\n\t\t\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\t\t\theader_up {obs}\n\t\t\t\t}}\n\t\t\t}}\n\t\t}}\n\t}}\n",
+    trig=("GET /watcher/",))
+did("q4-handle-path-proxy-rewrite-fragment", f"\thandle_path /x/* {{\n\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\trewrite \"#frag\"\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n", trig=("GET /x/v1/watcher/status",))
+did("handle-path-handle-response-original-request", "\thandle_path /x/* {\n\t\treverse_proxy 127.0.0.1:7001 {\n\t\t\trewrite /ping\n\t\t\t@any status 2xx 3xx 4xx 5xx\n\t\t\thandle_response @any {\n\t\t\t\treverse_proxy 127.0.0.1:8183\n\t\t\t}\n\t\t}\n\t}\n",
+    trig=("GET /x/v1/watcher/status",))
+did("A1-handle-path-proxy-v1-matcher-obs", f"\thandle_path /x/* {{\n\t\treverse_proxy /v1/* 127.0.0.1:8183 {{\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n", trig=("GET /x/v1/watcher/status",))
+did("A5-handle-path-proxy-m-matcher", "\thandle_path /x/* {\n\t\treverse_proxy /m/* 127.0.0.1:8183\n\t}\n", trig=("GET /x/m/v1/watcher/status",))
+did("A6-handle-path-nested-handle-v1-obs", f"\thandle_path /x/* {{\n\t\thandle /v1/* {{\n\t\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\t\theader_up {obs}\n\t\t\t}}\n\t\t}}\n\t}}\n", trig=("GET /x/v1/watcher/status",))
+did("A7-uri-path-regexp-proxy-v1-matcher-obs", f"\thandle /x/* {{\n\t\turi path_regexp ^/x/ /\n\t\treverse_proxy /v1/* 127.0.0.1:8183 {{\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n", trig=("GET /x/v1/watcher/status",))
+did("A8-rewrite-placeholder-proxy-v1-matcher-obs", f"\thandle /x/* {{\n\t\trewrite * /v1{{query.p}}\n\t\treverse_proxy /v1/* 127.0.0.1:8183 {{\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n", trig=("GET /x/a?p=/watcher/status",))
+did("C1-intercept-handle-response-rewrite-oq-obs", f"\thandle /x/* {{\n\t\tintercept {{\n\t\t\thandle_response {{\n\t\t\t\trewrite * /v1/watcher/dialogs\n\t\t\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\t\t\theader_up {obs}\n\t\t\t\t}}\n\t\t\t}}\n\t\t}}\n\t\trespond 404\n\t}}\n",
+    trig=("GET /x/anything",))
+did("E1-handle-errors-handle-path-oq-obs", f"\thandle_errors {{\n\t\thandle_path /x/* {{\n\t\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\t\theader_up {obs}\n\t\t\t}}\n\t\t}}\n\t\trespond 404\n\t}}\n", trig=("GET /x/v1/watcher/status",))
+did("E2-connect-exact-regexp-strip-suffix", "\t@s {\n\t\tmethod CONNECT\n\t\tpath_regexp ^/v1/watcherx$\n\t}\n\turi @s strip_suffix x\n")
+# review wac-099 r2 D2 / D5 (forward_auth between the path change and a matched 8183 forwarder): the hint text is pinned
+did("D2-uri-strip-forward-auth-proxy-v1-obs", f"\thandle /x/* {{\n\t\turi strip_prefix /x\n\t\tforward_auth 127.0.0.1:7000 {{\n\t\t\turi /check\n\t\t}}\n\t\treverse_proxy /v1/* 127.0.0.1:8183 {{\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n",
+    want="may forward a path changed into", trig=("GET /x/v1/watcher/dialogs",))
+did("D5-uri-path-regexp-forward-auth-proxy-v1-obs", f"\thandle /x/* {{\n\t\turi path_regexp ^/x/ /\n\t\tforward_auth 127.0.0.1:7000 {{\n\t\t\turi /check\n\t\t}}\n\t\treverse_proxy /v1/* 127.0.0.1:8183 {{\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n",
+    want="may forward a path changed into", trig=("GET /x/v1/watcher/dialogs",))
+# ---- benign writings (unchanged expectations)
 fine("static-suffix-response-header", good.replace(site_import, site_import + "\t@static path *.js *.css\n\theader @static Cache-Control max-age=3600\n"))
 fine("regexp-anchored-elsewhere-rewrite", good.replace(site_import, site_import + "\t@old path_regexp ^/api/(v1|v2)/old$\n\trewrite @old /api/new\n"))
 fine("glob-cannot-hit", good.replace(site_import, site_import + "\trewrite /static/?ld /static/old\n"))
@@ -165,81 +284,65 @@ fine("mobile-handle-localhost", good.replace("\t\turi strip_prefix /m\n\t\trever
                                              "\t\turi strip_prefix /m\n\t\treverse_proxy localhost:8183\n\t}\n\thandle /v1/*"))
 fine("whitelisted-toplevel", good.replace(site_import, site_import + "\tvars o0probe 1\n\theader -Server\n\tmap {path} {o0m} {\n\t\tdefault x\n\t}\n"))
 fine("redir-non-hitting", good.replace(site_import, site_import + "\tredir /old/* /new/\n\trewrite /static/x /static/y\n"))
-# wac-097 (review wac-095 🟡-2): path changes that bring a path from outside the prefix into it (g15..g18 of r095)
-bad("g15-rewrite-static-into-prefix", good.replace(site_import, site_import + f"\t@s path /static/*\n\trequest_header @s {obs}\n\trewrite @s /m/v1/watcher/status\n"))
-bad("g16-uri-strip-prefix-into-prefix", good.replace(site_import, site_import + f"\t@s path /x/*\n\trequest_header @s {obs}\n\turi @s strip_prefix /x\n"))
-bad("g17-uri-replace-into-prefix", good.replace(site_import, site_import + f"\t@s path /s/*\n\trequest_header @s {obs}\n\turi @s replace /s/ /m/v1/watcher/ 1\n"))
-bad("g18-handle-path-to-oq-injected", good.replace(site_import, site_import + f"\thandle_path /x/* {{\n\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n"))
-bad("handle-path-to-oq-plain", good.replace(site_import, site_import + "\thandle_path /x/* {\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n"))
-bad("proxy-rewrite-into-prefix", good.replace(site_import, site_import + "\thandle /q/* {\n\t\treverse_proxy 127.0.0.1:8183 {\n\t\t\trewrite /m/v1/watcher/status\n\t\t}\n\t}\n"))
-bad("strip-suffix-watcherx", good.replace(site_import, site_import + "\turi /m/v1/watcherx* strip_suffix x\n"))
-# wac-097 real-Caddy differential: /m/v1/%2e%2e/m/v1/watcher/status is matched as /m/m/v1/watcher/status; the strip of
-# /m/v1 happens on the escaped path and the encoded '..' then pops only /v1: the snippet sees /m/v1/watcher/status
-bad("strip-prefix-multiseg-encoded-dots", good.replace(site_import, site_import + f"\t@s path /m/m/*\n\trequest_header @s {obs}\n\turi @s strip_prefix /m/v1\n"))
-# wac-097 (review wac-095 🟡-3): classes whose first member is ']', \Q...\E and POSIX classes before a top-level '|'
-bad("g01c-re-class-bracket-alt-acct", good.replace(site_import, site_import + f"\t@x path_regexp `^/static[](]|account-a$`\n\trequest_header @x {obs}\n"))
-bad("g04c-re-class-bracket-alt-png", good.replace(site_import, site_import + f"\t@x path_regexp `^/static[](]|\\.png$`\n\trequest_header @x {obs}\n"))
-bad("g04d-re-negated-class-bracket-alt-acct", good.replace(site_import, site_import + f"\t@x path_regexp `^/static[^](]|account-a$`\n\trequest_header @x {obs}\n"))
-bad("re-class-bracket-alt-bmp", good.replace(site_import, site_import + f"\t@x path_regexp `^/static[](]|a\\.bmp$`\n\trequest_header @x {obs}\n"))
-bad("re-qe-alt-bmp", good.replace(site_import, site_import + f"\t@x path_regexp `^/static\\Q(\\E|a\\.bmp$`\n\trequest_header @x {obs}\n"))
-bad("re-posix-alt-bmp", good.replace(site_import, site_import + f"\t@x path_regexp `^/static[[:alpha:](]|a\\.bmp$`\n\trequest_header @x {obs}\n"))
 fine("p03-healthz-rewrite", good.replace(site_import, site_import + "\trewrite /healthz /api/status\n"))
 fine("p05-regexp-static-assets", good.replace(site_import, site_import + "\t@assets path_regexp ^/static/.*\\.(js|css)$\n\trewrite @assets /static/bundle.js\n"))
 fine("p06-uri-strip-suffix-api", good.replace(site_import, site_import + "\turi /api/* strip_suffix /\n"))
 fine("uri-strip-prefix-api-v2", good.replace(site_import, site_import + "\turi /api/v2/* strip_prefix /api\n"))
-# handle_path /reports/daily/* would strip ALL of /reports/daily (Caddy strips the matched prefix): /reports/daily/m/v1/watcher/x
-# becomes a prefix path, so every handle_path to operator-query fails; a narrower explicit strip is proven outside
 fine("handle-uri-strip-reports-to-oq", good.replace(site_import, site_import + "\thandle /reports/daily/* {\n\t\turi strip_prefix /reports\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n"))
-bad("handle-path-reports-daily-to-oq", good.replace(site_import, site_import + "\thandle_path /reports/daily/* {\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n"))
-# wac-097 (review wac-096 🔴-1): a reverse_proxy's OWN rewrite (reverse_proxy { rewrite }, forward_auth's uri) is a path change
-bad("proxy-rewrite-v1-watcher-injected", good.replace(site_import, site_import + f"\thandle /foo/* {{\n\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\trewrite /v1/watcher/dialogs\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n"))
-bad("proxy-rewrite-v1-watcher-placeholder", good.replace(site_import, site_import + "\thandle /foo/* {\n\t\treverse_proxy 127.0.0.1:8183 {\n\t\t\trewrite /v1/watcher{path}\n\t\t}\n\t}\n"))
-bad("forward-auth-uri-v1-watcher", good.replace(site_import, site_import + "\tforward_auth /bar/* 127.0.0.1:8183 {\n\t\turi /v1/watcher/status\n\t}\n"))
 fine("forward-auth-uri-v1-auth-on-bar", good.replace(site_import, site_import + "\tforward_auth /bar/* 127.0.0.1:8183 {\n\t\turi /v1/auth\n\t}\n"))
-# wac-097 (review wac-096 🟡-1): the error chain, named routes reached by invoke, handle_response routes
-bad("handle-errors-to-oq-injected", good.replace(site_import, site_import + f"\thandle_errors {{\n\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n"))
-named_obs = f"&(obs) {{\n\treverse_proxy 127.0.0.1:8183 {{\n\t\theader_up {obs}\n\t}}\n}}\n"
-bad("invoke-named-oq-after-handle-path", good.replace(site_import, site_import + "\thandle_path /x/* {\n\t\tinvoke obs\n\t}\n") + named_obs)
-bad("handle-m-invoke-named-oq", good.replace(site_import, site_import + "\t@mm path /m/*\n\thandle @mm {\n\t\tinvoke obs\n\t}\n") + named_obs)
-bad("dead-extra-invoke-named-oq", good.replace(site_import, site_import + "\thandle /m/v1/watcher/extra {\n\t\tinvoke obs\n\t}\n") + named_obs)
-bad("handle-response-to-oq", good.replace(site_import, site_import + "\t@mm path /m/*\n\thandle @mm {\n\t\treverse_proxy 127.0.0.1:7000 {\n\t\t\t@err status 5xx\n\t\t\thandle_response @err {\n\t\t\t\treverse_proxy 127.0.0.1:8183\n\t\t\t}\n\t\t}\n\t}\n"))
 fine("handle-errors-respond", good.replace(site_import, site_import + "\thandle_errors {\n\t\trespond \"{err.status_code}\" 502\n\t}\n"))
-# review wac-096 second round (coordinator's second addition): an empty uri path part ('?a=1', '#frag') changes nothing and
-# proves nothing; handle_response routes get the ORIGINAL request, not the proxy's rewritten copy (q1..q4 of the review)
-bad("q1-handle-path-proxy-rewrite-query", good.replace(site_import, site_import + f"\thandle_path /x/* {{\n\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\trewrite ?a=1\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n"))
-bad("q2-handle-errors-proxy-rewrite-query", good.replace(site_import, site_import + f"\thandle_errors {{\n\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\trewrite ?a=1\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n"))
-bad("q3-handle-errors-handle-response-original-request", good.replace(site_import, site_import + f"\thandle_errors {{\n\t\treverse_proxy 127.0.0.1:18998 {{\n\t\t\trewrite /ping\n\t\t\t@any status 2xx 3xx 4xx 5xx\n\t\t\thandle_response @any {{\n\t\t\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\t\t\theader_up {obs}\n\t\t\t\t}}\n\t\t\t}}\n\t\t}}\n\t}}\n"))
-bad("q4-handle-path-proxy-rewrite-fragment", good.replace(site_import, site_import + f"\thandle_path /x/* {{\n\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\trewrite \"#frag\"\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n"))
-bad("handle-path-handle-response-original-request", good.replace(site_import, site_import + "\thandle_path /x/* {\n\t\treverse_proxy 127.0.0.1:7001 {\n\t\t\trewrite /ping\n\t\t\t@any status 2xx 3xx 4xx 5xx\n\t\t\thandle_response @any {\n\t\t\t\treverse_proxy 127.0.0.1:8183\n\t\t\t}\n\t\t}\n\t}\n"))
-# a "default token" shape: injected only when the caller sends NO Authorization (the probe sends each entry both ways)
-# wac-099 (review wac-099 🔴-1, 🔴-2, 🟡-1): a matcher AFTER the path change only narrows it (A1, A6, A7, A8: only verify can
-# see A7 and A8, the probe builds no entry for a path_regexp or placeholder rewrite); intercept's handle_response (C1);
-# handle_path inside handle_errors (E1); an exact-literal regexp + strip_suffix x (E2)
-bad("A1-handle-path-proxy-v1-matcher-obs", good.replace(site_import, site_import + f"\thandle_path /x/* {{\n\t\treverse_proxy /v1/* 127.0.0.1:8183 {{\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n"))
-bad("A6-handle-path-nested-handle-v1-obs", good.replace(site_import, site_import + f"\thandle_path /x/* {{\n\t\thandle /v1/* {{\n\t\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\t\theader_up {obs}\n\t\t\t}}\n\t\t}}\n\t}}\n"))
-bad("A7-uri-path-regexp-proxy-v1-matcher-obs", good.replace(site_import, site_import + f"\thandle /x/* {{\n\t\turi path_regexp ^/x/ /\n\t\treverse_proxy /v1/* 127.0.0.1:8183 {{\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n"))
-bad("A8-rewrite-placeholder-proxy-v1-matcher-obs", good.replace(site_import, site_import + f"\thandle /x/* {{\n\t\trewrite * /v1{{query.p}}\n\t\treverse_proxy /v1/* 127.0.0.1:8183 {{\n\t\t\theader_up {obs}\n\t\t}}\n\t}}\n"))
-bad("C1-intercept-handle-response-rewrite-oq-obs", good.replace(site_import, site_import + f"\thandle /x/* {{\n\t\tintercept {{\n\t\t\thandle_response {{\n\t\t\t\trewrite * /v1/watcher/dialogs\n\t\t\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\t\t\theader_up {obs}\n\t\t\t\t}}\n\t\t\t}}\n\t\t}}\n\t\trespond 404\n\t}}\n"))
-bad("E1-handle-errors-handle-path-oq-obs", good.replace(site_import, site_import + f"\thandle_errors {{\n\t\thandle_path /x/* {{\n\t\t\treverse_proxy 127.0.0.1:8183 {{\n\t\t\t\theader_up {obs}\n\t\t\t}}\n\t\t}}\n\t\trespond 404\n\t}}\n"))
-bad("E2-connect-exact-regexp-strip-suffix", good.replace(site_import, site_import + "\t@s {\n\t\tmethod CONNECT\n\t\tpath_regexp ^/v1/watcherx$\n\t}\n\turi @s strip_suffix x\n"))
 fine("handle-path-proxy-reports-matcher", good.replace(site_import, site_import + "\thandle_path /x/* {\n\t\treverse_proxy /reports/* 127.0.0.1:8183\n\t}\n"))
 fine("C4-intercept-toplevel-respond", good.replace(site_import, site_import + "\tintercept /x/* {\n\t\thandle_response {\n\t\t\trespond 204\n\t\t}\n\t}\n"))
-bad("g16-inject-only-without-auth", good.replace(site_import, site_import + f"\t@s {{\n\t\tpath /x/*\n\t\tnot header Authorization *\n\t}}\n\trequest_header @s {obs}\n\turi @s strip_prefix /x\n"))
 PY
+# RS-1: the direct guard missing from the snippet (a variant with its own snippet copy next to it)
+mkdir -p "$WORK/noguard"
+python3 - "$SNIP" "$WORK/noguard/caddy-watcher-gateway.caddy" <<'PY'
+import sys
+t = open(sys.argv[1]).read()
+g = "\t@wgw_direct {\n\t\tpath_regexp ^(?i:/v1/watcher)(?:[/\\n%]|$)\n\t}\n\thandle @wgw_direct {\n\t\trespond 404\n\t}\n"
+assert t.count(g) == 2
+open(sys.argv[2], "w").write(t.replace(g + "}\n(watcher_gateway_direct_guard)", "}\n(watcher_gateway_direct_guard)", 1))
+PY
+cp "$WORK/Caddyfile" "$WORK/noguard/Caddyfile"
+adapt_verify "$WORK/noguard/Caddyfile"
+if [ "$ARC" = 0 ] && [ "$VRC" != 0 ] && grep -q "^FAIL direct guard .* present 0 time(s)" "$WORK/noguard/Caddyfile.verify"; then ok "RS-1 snippet without the direct guard: verify fails ($(grep -m1 '^FAIL direct guard' "$WORK/noguard/Caddyfile.verify" | cut -c1-90))"
+else bad "RS-1 snippet without the direct guard: adapt $ARC verify $VRC"; fi
 for f in "$WORK"/bad-*.Caddyfile; do
   n="$(basename "$f" .Caddyfile)"; adapt_verify "$f"
   if [ "$ARC" != 0 ]; then bad "$n: real caddy adapt failed rc=$ARC ($(tail -1 "$f.err" | cut -c1-120))"
-  elif [ "$VRC" != 0 ]; then ok "$n: verify fails ($(grep -m1 -E '^FAIL' "$f.verify" | cut -c1-150))"
-  else bad "$n: verify PASSED a violating config"; fi
+  elif [ "$VRC" = 0 ]; then bad "$n: verify PASSED a violating config"
+  elif { [ "${n#bad-i2-}" != "$n" ] || [ "${n%-8186}" != "$n" ]; } && ! grep -q '^FAIL GATEWAY_PORT_EXPOSED' "$f.verify"; then
+    bad "$n: verify failed, but without GATEWAY_PORT_EXPOSED ($(grep -m1 -E '^FAIL' "$f.verify" | cut -c1-120))"
+  else ok "$n: verify fails ($(grep -m1 -E '^FAIL' "$f.verify" | cut -c1-150))"; fi
 done
-for f in "$WORK"/ok-*.Caddyfile; do
-  n="$(basename "$f" .Caddyfile)"; adapt_verify "$f"
-  if [ "$ARC" = 0 ] && [ "$VRC" = 0 ]; then ok "$n: verify passes (two-step shadow check)"
-  else bad "$n: adapt $ARC verify $VRC"; grep -E '^FAIL' "$f.verify" 2>/dev/null | head -3; fi
+for f in "$WORK"/ok-*.Caddyfile "$WORK"/did-*.Caddyfile; do
+  n="$(basename "$f" .Caddyfile)"; adapt_verify "$f"; want="$(cat "${f%.Caddyfile}.want" 2>/dev/null || true)"
+  if [ "$ARC" = 0 ] && [ "$VRC" = 0 ] && { [ -z "$want" ] || grep -qF -- "$want" "$f.verify"; }; then
+    ok "$n: verify passes$( [ -n "$want" ] && echo " and prints '$want' ($(grep -m1 -F -- "$want" "$f.verify" | cut -c1-110))")"
+  else bad "$n: adapt $ARC verify $VRC want='$want'"; grep -E '^FAIL' "$f.verify" 2>/dev/null | head -3 || true; fi
 done
+# JSON-level (no stock Caddyfile directive): a non-http app that dials 8186 (I-2 covers every app)
+python3 - "$WORK/Caddyfile.json" "$WORK/l4.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+c["apps"]["layer4"] = {"servers": {"l4": {"listen": [":9443"], "routes": [{"handle": [{"handler": "proxy", "upstreams": [{"dial": ["127.0.0.1:8186"]}]}]}]}}}
+json.dump(c, open(sys.argv[2], "w"))
+PY
+if ! "${T[@]}" verify --adapted "$WORK/l4.json" --paths "$PATHS" --snippet "$SNIP" > "$WORK/l4.verify" 2>&1 && grep -q '^FAIL GATEWAY_PORT_EXPOSED \$\.apps\.layer4' "$WORK/l4.verify"; then
+  ok "non-http app (layer4) dialing 127.0.0.1:8186: GATEWAY_PORT_EXPOSED"
+else bad "non-http app dial 8186 not caught"; fi
 for n in handle-before-import route-wrapped handle-path-wrapped; do
   if "${T[@]}" caddyfile-check --caddyfile "$WORK/bad-$n.Caddyfile" >/dev/null 2>&1; then bad "caddyfile-check accepted $n"; else ok "caddyfile-check rejects $n (F-12 text rule)"; fi
 done
+# V-4 (RS-14): a standalone 8186 outside (watcher_gateway_upstream) fails the text check on its own
+for n in i2-panel-8186 i2-localhost-8186 i2-port-range-8180-8189 i2-network-proxy-8186 i2-health-upstream-8186 g18-handle-path-to-oq-injected-8186; do
+  if "${T[@]}" caddyfile-check --caddyfile "$WORK/bad-$n.Caddyfile" > "$WORK/cf-$n.txt" 2>&1; then bad "caddyfile-check (V-4) accepted $n"
+  elif grep -q '8186 outside (watcher_gateway_upstream)' "$WORK/cf-$n.txt"; then ok "caddyfile-check rejects $n (V-4: 8186 outside the upstream snippet)"
+  else bad "caddyfile-check rejected $n for another reason: $(grep -m1 '^FAIL' "$WORK/cf-$n.txt")"; fi
+done
+if "${T[@]}" caddyfile-check --caddyfile "$WORK/ok-other-site-direct-guard.Caddyfile" > "$WORK/cf-guard.txt" 2>&1 && grep -q 'optional import watcher_gateway_direct_guard' "$WORK/cf-guard.txt"; then
+  ok "caddyfile-check accepts the optional direct guard in another site and records it"
+else bad "caddyfile-check on the other-site direct guard"; fi
 if "${T[@]}" caddyfile-check --caddyfile "$WORK/bad-global-order-reverse-proxy.Caddyfile" | grep -q 'RECORD global line [0-9]*: order reverse_proxy before handle'; then
   ok "caddyfile-check records the global order option for the F-13 (2) manual record"
 else bad "global order option not recorded"; fi
@@ -383,7 +486,7 @@ open(out, "w").write(text)
 PY
 rc=0; probe --caddy "$CADDY" --caddyfile "$WORK/canary/Caddyfile" > "$WORK/probe-canary.txt" 2>&1 || rc=$?
 sleep 0.5
-sink_hits="$(grep -o 'stub_hits=oq:[0-9]*,watcher:[0-9]*,sink:[0-9]*' "$WORK/probe-canary.txt" | sed 's/.*sink://')"
+sink_hits="$(grep -o 'stub_hits=gw:[0-9]*,oq:[0-9]*,watcher:[0-9]*,sink:[0-9]*' "$WORK/probe-canary.txt" | sed 's/.*sink://' || true)"
 if [ "$rc" = 0 ] && [ ! -s "$WORK/canary.log" ] && [ "${sink_hits:-0}" -gt 0 ] \
    && grep -q "^PROBE_PIN dial 127.0.0.1:$CAN -> sink$" "$WORK/probe-canary.txt" && grep -q '^PROBE_PIN dial localhost:8183 -> oq$' "$WORK/probe-canary.txt" \
    && grep -q '^PROBE_PIN servers dropped (not probed): 1$' "$WORK/probe-canary.txt" && grep -q '^PROBE_PIN reverse_proxy health_checks removed' "$WORK/probe-canary.txt"; then
@@ -397,7 +500,7 @@ for mode in fallback-body inject-auth strip-auth watcherx-to-oq inject-dslash in
   case "$mode" in
     fallback-body) want='^FAIL fallback .* -> 404 body=1B' ;;
     inject-auth|strip-auth) want="^FAIL forward GET '/m/v1/watcher/trading/accounts'.*Authorization changed" ;;
-    watcherx-to-oq) want="^FAIL GET '/m/v1/watcherx' -> 200 reached operator-query or the watcher" ;;
+    watcherx-to-oq) want="^FAIL prefix probe GET '/m/v1/watcherx' -> 200 reached \[\('gw'" ;;   # WGW-1.0.4: the table route's copy now dials the gateway stub
     inject-dslash) want="^FAIL forward GET '/m/v1//watcher/status'.*Authorization changed" ;;   # wac-092 🟡-2
     inject-dslash-noauth) want="^FAIL forward GET '/m//v1/watcher/trading/accounts': the caller's Authorization changed" ;;
     inject-host) want="^FAIL forward GET '/m/v1/watcher/dialogs'.*Authorization changed" ;;                 # wac-092 🟡-3 (Host kept; first line, the print cap is 40)
@@ -433,24 +536,33 @@ for spec in "nonascii-dotted-i-inject|forward GET '/m/v1/watcher/trading/account
   else bad "probe copy $n rc=$rc"; grep -E '^FAIL|CADDY_PROBE' "$WORK/probe-$n.txt" | grep -v '^FAIL verify:' | head -5; fi
 done
 
-# 4d''. wac-097 (review wac-095 🟡-2): g16, g17, g18 as probe copies: verify fails AND the live rewrite-entry checks see the
-# injected Authorization (the probe sends the entries its path changes turn into prefix-space paths)
-for spec in "g16-uri-strip-prefix-into-prefix|rewrite entry GET '/x/m/v1/watcher/" \
-            "g17-uri-replace-into-prefix|rewrite entry GET '/s/" \
-            "g18-handle-path-to-oq-injected|rewrite entry GET '/x/m/v1/watcher/" \
-            "strip-prefix-multiseg-encoded-dots|rewrite entry GET '/m/v1/%2e%2e/m/v1/watcher/" \
-            "proxy-rewrite-v1-watcher-injected|rewrite entry GET '/foo/x'" \
-            "handle-errors-to-oq-injected|browser /watcher/ without credentials -> 200, stub hits 1" \
-            "q1-handle-path-proxy-rewrite-query|rewrite entry GET '/x/m/v1/watcher/" \
-            "g16-inject-only-without-auth|rewrite entry GET '/x/m/v1/watcher/status' (without Authorization)" \
-            "A1-handle-path-proxy-v1-matcher-obs|rewrite entry GET '/x/v1/watcher/" \
-            "C1-intercept-handle-response-rewrite-oq-obs|rewrite entry GET '/x/x'"; do
+# 4d''. wac-097 (review wac-095 🟡-2), WGW-1.0.4 V-3 (2): path changes INTO the /m/v1/watcher space before the snippet
+# (g16, g17, the multi-segment strip, the no-Authorization injection) as probe copies: verify fails AND a live rewrite entry
+# reaches the GATEWAY stub (not a table-path probe); the operator-query shapes (did-*) as probe copies: the probe PASSES
+# (8186 stub hit only by table paths) and the entries that reach operator-query are PROBE_HINT lines
+for spec in "bad-g16-uri-strip-prefix-into-prefix|rewrite entry (with Authorization) GET '/x/m/v1/watcher/" \
+            "bad-g17-uri-replace-into-prefix|rewrite entry (with Authorization) GET '/s/" \
+            "bad-strip-prefix-multiseg-encoded-dots|rewrite entry (with Authorization) GET '/m/v1/%2e%2e/m/v1/watcher/" \
+            "bad-g16-inject-only-without-auth|rewrite entry (without Authorization) GET '/x/m/v1/watcher/status'"; do
   n="${spec%%|*}"; want="${spec#*|}"
-  rc=0; probe --caddy "$CADDY" --caddyfile "$WORK/bad-$n.Caddyfile" > "$WORK/probe-$n.txt" 2>&1 || rc=$?
-  if [ "$rc" != 0 ] && grep -q '^FAIL verify:' "$WORK/probe-$n.txt" && grep -q "^FAIL $want" "$WORK/probe-$n.txt" \
-     && grep -q '^PROBE_REWRITE_ENTRIES targets=[1-9]' "$WORK/probe-$n.txt" && [ ! -e "$WORK/bad-$n.Caddyfile.o0probe" ]; then
-    ok "probe copy $n: verify fails and a live check sees it ($(grep -m1 "^FAIL $want" "$WORK/probe-$n.txt" | cut -c1-110))"
+  rc=0; probe --caddy "$CADDY" --caddyfile "$WORK/$n.Caddyfile" > "$WORK/probe-$n.txt" 2>&1 || rc=$?
+  if [ "$rc" != 0 ] && grep -q '^FAIL verify:' "$WORK/probe-$n.txt" && grep -qF "FAIL $want" "$WORK/probe-$n.txt" \
+     && [ ! -e "$WORK/$n.Caddyfile.o0probe" ]; then
+    ok "probe copy $n: verify fails and a live check sees it ($(grep -m1 -F "FAIL $want" "$WORK/probe-$n.txt" | cut -c1-120))"
   else bad "probe copy $n rc=$rc"; grep -E '^FAIL|CADDY_PROBE|PROBE_REWRITE' "$WORK/probe-$n.txt" | grep -v '^FAIL verify:' | head -5; fi
+done
+for spec in "did-g18-handle-path-to-oq-injected|rewrite entry (with Authorization) GET '/x/" \
+            "did-proxy-rewrite-v1-watcher-injected|rewrite entry (with Authorization) GET '/foo/x'" \
+            "did-handle-errors-to-oq-injected|browser /watcher/ without credentials -> 200" \
+            "did-q1-handle-path-proxy-rewrite-query|rewrite entry (with Authorization) GET '/x/" \
+            "did-A1-handle-path-proxy-v1-matcher-obs|rewrite entry (with Authorization) GET '/x/v1/watcher/" \
+            "did-C1-intercept-handle-response-rewrite-oq-obs|rewrite entry (with Authorization) GET '/x/x'"; do
+  n="${spec%%|*}"; want="${spec#*|}"
+  rc=0; probe --caddy "$CADDY" --caddyfile "$WORK/$n.Caddyfile" > "$WORK/probe-$n.txt" 2>&1 || rc=$?
+  if [ "$rc" = 0 ] && grep -q '^CADDY_PROBE_OK' "$WORK/probe-$n.txt" && grep -qF "PROBE_HINT DEFENSE_IN_DEPTH $want" "$WORK/probe-$n.txt" \
+     && [ ! -e "$WORK/$n.Caddyfile.o0probe" ]; then
+    ok "probe copy $n: passes (8186 stub hit by table paths only); operator-query shape reported: $(grep -m1 -F "PROBE_HINT DEFENSE_IN_DEPTH $want" "$WORK/probe-$n.txt" | cut -c1-110)"
+  else bad "probe copy $n rc=$rc"; grep -E '^FAIL|CADDY_PROBE|PROBE_HINT' "$WORK/probe-$n.txt" | head -5; fi
 done
 # the fixture's own path changes (@mobile strip /m, the browser strip /watcher) give entries that pass
 if grep -q '^PROBE_REWRITE_ENTRIES targets=10 ' "$WORK/probe.txt" && ! grep -q '^FAIL rewrite entry' "$WORK/probe.txt"; then
@@ -528,6 +640,119 @@ rc=0; HTTP_PROXY=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 ALL_PROXY=soc
 if [ "$rc" = 0 ] && [ "$(grep -c . "$EL")" -ge 3 ] && ! grep -v '^[a-z]* proxy=\[\] otel=\[OTEL_SDK_DISABLED=true,\]$' "$EL" | grep -q .; then
   ok "proxy and OTEL_* variables of the caller never reach Caddy ($(cut -d' ' -f1 "$EL" | tr '\n' ' ')); OTEL_SDK_DISABLED=true"
 else bad "proxy/OTEL environment reached Caddy rc=$rc"; sed 's/^/    /' "$EL"; fi
+
+# 8. RS-15 live (WGW-1.0.4 §9.14.6; task wac-105): real Caddy runs each variant with every 8186 dial (any loopback
+#    spelling, forward proxy URL, health-check upstream, dynamic a port, a request-chosen port) pointing at a local
+#    "gateway" stub and 8183 at a separate operator-query stub; every other upstream goes to a sink. Each I-2 FAIL case
+#    and every 8186 twin must get a NON-table request into the gateway stub (the static FAIL is a real exposure); the
+#    PASS and defense-in-depth originals must not (their table paths are the probe's business, sections 3 and 4d'').
+cat > "$WORK/live_i2.py" <<'LIVEPY'
+import json, os, re, signal, socket, subprocess, sys, threading, time, http.server
+from pathlib import Path
+caddy, o0dir, cfile, expect = sys.argv[1], sys.argv[2], Path(sys.argv[3]), sys.argv[4]
+reqs = sys.argv[5:]
+sys.path.insert(0, o0dir)
+import o0_caddy_watcher_routes as r
+hits = []
+def stub(label):
+    class H(http.server.BaseHTTPRequestHandler):
+        def _r(self):
+            hits.append((label, self.command, self.path))
+            self.send_response(200); self.send_header("Content-Length", "0"); self.end_headers()
+        do_GET = do_POST = do_PUT = do_DELETE = do_HEAD = do_PATCH = do_OPTIONS = do_CONNECT = _r
+        def log_message(self, *a):
+            pass
+    s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=s.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    return s, f"127.0.0.1:{s.server_address[1]}", str(s.server_address[1])
+(gs, gw, gwport), (os_, oq, _), (ws, wa, _), (ss, sink, _) = stub("gw"), stub("oq"), stub("watcher"), stub("sink")
+def free():
+    x = socket.socket(); x.bind(("127.0.0.1", 0)); n = x.getsockname()[1]; x.close(); return n
+port, hp, hsp = free(), free(), free()
+live = cfile.with_name(cfile.name + ".live")
+live.write_text(r.probe_caddyfile(cfile.read_text(), "jp-bot.balen.wang", port, hp, hsp, "jp-bot.balen.wang"))
+env = dict(os.environ, OQ_HOST="127.0.0.1", OQ=oq)
+proc = None
+try:
+    a = subprocess.run([caddy, "adapt", "--adapter", "caddyfile", "--config", str(live)], capture_output=True, text=True, env=env)
+    if a.returncode:
+        print(f"LIVE_I2_ERROR adapt rc={a.returncode}"); sys.exit(2)
+    cfg = json.loads(a.stdout)
+    def sub(v):
+        v = re.sub(r"(?:127\.0\.0\.1|localhost|\[::1\]|\{env\.OQ_HOST\}):8186(?![0-9])", gw, v)
+        v = re.sub(r"(?:127\.0\.0\.1|localhost|\[::1\]|\{env\.OQ_HOST\}):8183(?![0-9])", oq, v)
+        return re.sub(r"(?:127\.0\.0\.1|localhost|\[::1\]):9090(?![0-9])", wa, v)
+    def walk(n):
+        if isinstance(n, dict):
+            for k, v in list(n.items()):
+                if isinstance(v, str):
+                    n[k] = sub(v)
+                    if k == "dial" and n[k] not in (gw, oq, wa) and re.fullmatch(r"(127\.0\.0\.1|localhost|\[::1\]):[0-9]+", n[k]):
+                        n[k] = sink
+                else:
+                    walk(v)
+            if n.get("source") == "a" and "port" in n:
+                n["name"] = "127.0.0.1"
+                n["port"] = {"8186": gwport, "8183": oq.rsplit(":", 1)[1]}.get(str(n["port"]), n["port"])
+        elif isinstance(n, list):
+            for v in n:
+                walk(v)
+    walk(cfg)
+    run_json = cfile.with_name(cfile.name + ".live.json")
+    run_json.write_text(json.dumps(cfg))
+    proc = subprocess.Popen([caddy, "run", "--config", str(run_json)], env=env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    for _ in range(150):
+        if proc.poll() is not None:
+            break
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.2).close(); break
+        except OSError:
+            time.sleep(0.1)
+    if proc.poll() is not None:
+        print(f"LIVE_I2 {cfile.stem} caddy_run_refused=yes rc={proc.returncode}")
+        sys.exit(0 if reqs == ["LOAD_REFUSED"] else 1)
+    if reqs == ["LOAD_REFUSED"]:
+        print(f"LIVE_I2 {cfile.stem} caddy_run_refused=no (expected Caddy to refuse the config)")
+        sys.exit(1)
+    for spec in reqs:
+        if spec == "WAIT":
+            time.sleep(1.5); continue
+        line, *hdrs = spec.split("|")
+        method, target = line.split(" ", 1)
+        extra = "".join(h.replace("{GWPORT}", gwport).replace("{GW}", gw) + "\r\n" for h in hdrs)
+        c = socket.create_connection(("127.0.0.1", port), timeout=5)
+        c.sendall(f"{method} {target} HTTP/1.1\r\nHost: jp-bot.balen.wang\r\n{extra}Content-Length: 0\r\nConnection: close\r\n\r\n".encode())
+        while c.recv(65536):
+            pass
+        c.close()
+    time.sleep(0.3)
+finally:
+    if proc is not None and proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL); proc.wait()
+        except (ProcessLookupError, PermissionError):
+            proc.wait()
+    for f in (live, cfile.with_name(cfile.name + ".live.json")):
+        f.unlink(missing_ok=True)
+gwh = [h for h in hits if h[0] == "gw"]
+print(f"LIVE_I2 {cfile.stem} expect={expect} gw_hits={len(gwh)} oq_hits={sum(1 for h in hits if h[0] == 'oq')} "
+      f"gw_paths={sorted(set(h[2] for h in gwh))[:3]}")
+sys.exit(0 if (bool(gwh) if expect == "gw" else not gwh) else 1)
+LIVEPY
+live_n=0
+for tf in "$WORK"/*.trig; do
+  f="${tf%.trig}.Caddyfile"; n="$(basename "$f" .Caddyfile)"; reqs=()   # a did-* twin (bad-*-8186) carries the same requests
+  while IFS= read -r l; do [ -n "$l" ] && reqs+=("$l"); done < "$tf"
+  case "$n" in bad-*) exp=gw ;; *) exp=no-gw ;; esac
+  if (cd "$(dirname "$f")" && HOME="$WORK" python3 "$WORK/live_i2.py" "$CADDY" "$O0" "$f" "$exp" "${reqs[@]}") > "$WORK/live-$n.txt" 2>&1; then
+    ok "RS-15 live $n: $(tail -1 "$WORK/live-$n.txt")"; live_n=$((live_n + 1))
+  else bad "RS-15 live $n: $(tail -1 "$WORK/live-$n.txt")"; fi
+done
+[ "$live_n" -ge 40 ] && ok "RS-15 live: $live_n real-Caddy runs (8186 and 8183 on separate stubs)" || bad "RS-15 live ran only $live_n cases"
 
 if cat "$WORK"/probe-*.txt | grep -q '\$2a\$'; then bad "a probe output contains a bcrypt hash"; else ok "no probe output contains a bcrypt hash ($(ls "$WORK"/probe-*.txt | wc -l | tr -d ' ') runs)"; fi
 

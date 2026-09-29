@@ -50,11 +50,11 @@
 | R01 | "三路对照工具与报告" | 计划 §9 O-0；§4.3 T0-6 | P-11 | 报告 B/C 等价；切换 runbook §2 |
 | R02 | "服务端凭据生成、两两互异校验与 env 下发（不经 app）" | 计划 §9 O-0；§2.1 | — | `o0_watcher_credentials.py generate/check`；凭据 runbook §1–§2 |
 | R03 | "每个进程只持自己需要的那一个，watcher 环境里不放任何控制面 reader token" | 计划 §2.1 | P-04 | `check` 拒绝 watcher env 出现控制面密钥名；S-05；阶段 W verify |
-| R04 | "operator-query 缺 `gateway` 时只禁用网关路由并告警，不得让交易端点启动失败（上线前配置校验锁定）" | 计划 §2.1、§4.2 | C-1 R11 已实现 | 阶段 O preflight import 冒烟断言 `_LOAD_ERROR is None`；生产不做缺 token 负例 |
+| R04 | "operator-query 缺 `gateway` 时只禁用网关路由并告警，不得让交易端点启动失败（上线前配置校验锁定）" | 计划 §2.1、§4.2 | C-1 R11 已实现 | WGW-1.0.4：网关在独立角色 watcher-gateway（operator-query 本来就不挂网关，交易端点不受影响）；阶段 O 的依赖检查（`python -B` import 冒烟）断言网关路由数 > 0 且 `readiness()` 为真；`/health/role` 停用态 503 只影响 8186；生产不做缺 token 负例 |
 | R05 | "轮换用 `*_TOKEN` + `*_TOKEN_PREVIOUS` 双值，顺序为：watcher 先接受新旧两值，网关切到新值，确认请求与审计正常，再撤旧值" | 计划 §2.1；契约 §9.2 | P-02 | 凭据 runbook §3 |
 | R06 | "确认 import 与 handler 顺序" | 计划 §9 O-0；契约 F-12、F-13 | — | S-02（含全局 `order` 与前置指令）、S-03/S-04 + `verify --before-deploy`（前瞻遮蔽检查）；阶段 C：`caddyfile-check`（片段文件全局 import、站点顶层 import 在所有 handle 之前）、F-13 (2) 人工记录、`verify` 的两步遮蔽检查（第一条 wgw 路由之前与外层每一条路由）、本机 Caddy 探针（O0-A05P） |
 | R07 | "`/m` 只 strip 一次" | 计划 §9 O-0 | — | verify：每条样本恰好一次 `strip_path_prefix /m`；L-probe |
-| R08 | "上游仍是 8183" | 计划 §9 O-0 | — | verify：dial 恰为 `127.0.0.1:8183`；S-06 |
+| R08 | "上游仍是 8183" | 计划 §9 O-0；**用户裁决 2026-09-29 选项 (e)**（契约 §9.14.6） | — | 计划原文按裁决改读：片段上游 `(watcher_gateway_upstream)` 恰为 `127.0.0.1:8186`（RS-11：一次 strip、无 rewrite、无 transport、无头操作）；其他 `/m/v1/*` 移动样本仍到 8183（verify `--oq-upstream`）；计划 v0.6 §2.1 由 Planner 修订 |
 | R09 | "移动端 `Authorization` 保留且不被面板注入的 `system_observer` 覆盖" | 计划 §9 O-0 | — | verify：移动样本链路上无 Authorization 头操作；探针 `/m/v1/accounts` 无 token 必须 401（若被注入会变 200） |
 | R10 | "浏览器 basicauth 后先清头再注入" | 计划 §9 O-0；§2.1 | — | verify：浏览器样本经 authentication，先删 `X-Watcher-Actor`/`X-Watcher-Token-Fingerprint`，再 set `X-Watcher-Proxy-Auth={env.WATCHER_BROWSER_PROXY_TOKEN}` |
 | R11 | "`/media` 与其他公网入口没有绕过" | 计划 §9 O-0 | — | verify：任何代理到 9090/9100 的路由必须被浏览器样本覆盖且带认证，否则失败；S-06 只允许 127.0.0.1:9090；探针 `/media/<name>` 不得无认证返回图片 |
@@ -71,9 +71,10 @@
 | R22 | "浏览器 basicauth 路径回归不变" | 计划 §4.2 | — | 阶段 C/W 探针 + 用户浏览器核对 |
 | R23 | "不自动 RESUME；破坏性实验只在隔离环境" | 计划 §8 | — | 全部阶段；无 RESUME 命令 |
 | R24 | "生产只做只读/dry_run 冒烟，不做破坏性 CRUD" | 计划 §6.2 | — | 所有 verify 只读；切换冒烟只用 dry_run |
-| R25 | "开关默认关，旧 reader 保留"（`WATCHER_CONFIG_SNAPSHOT_ENABLED` 缺省 0） | 计划 §2.2、§4.1；契约 §9.11 | — | 阶段 O preflight 断言未设或为 0 |
+| R25 | "开关默认关，旧 reader 保留"（`WATCHER_CONFIG_SNAPSHOT_ENABLED` 缺省 0） | 计划 §2.2、§4.1；契约 §9.11 | — | WGW-1.0.4：阶段 O 不改 operator-query.env、不重启 operator-query，开关保持现值；快照切换 runbook 另行断言 |
 | R26 | 副本"无同步单元，已漂移……切换前必须逐行比对" | 计划 §1.2 | P-17 | S-09 `sync_operator_risk_db.py --check`；基线工具 |
 | R27 | "`db_manager.py` 写命令停用或改走服务；feeder 只读" | 计划 D1、§8；契约 §9.12 | P-02/P-03 | G7 + S-15 |
+| R28 | "网关独立端口、独立目录与 I-2"（契约 §9.14.6，RS-1、RS-11..RS-20；wac-105） | 契约 WGW-1.0.4；裁定 R23 | wac-104 | I-2 主判据（`i2_check`：整份 adapt JSON 中片段上游之外不得出现独立 8186、数值 8186、含 8186 的端口范围；上游端口或整个 dial 取自请求作用域占位符即 `GATEWAY_PORT_EXPOSED`；解析不出的上游只输出 `UPSTREAM_UNRESOLVED`）；V-2 app 站点 `/v1/watcher/*` 由守卫 404；V-3 探针 8186 与 8183 分桩，只有表内路径打到 8186；V-4 文本中独立 8186 只在 `(watcher_gateway_upstream)` 内；V-5 外部只看状态码（O0-A05X、O0-A08X）；对 8183 的旧检查降为 `HINT`（纵深防御），同形状拨 8186 仍失败；阶段 O `o0_deploy_watcher_gateway.sh`：独立单元、`releases/watcher-gateway/<sha>` 目录、白名单 env、共享目录逐文件对 `67b401a`（漂移即停、交用户）、`NeedDaemonReload` 门、`python -B` 依赖检查、回滚先撤暴露；`cp-isolation` 四单元（RS-17）；打包 G12 含 release 清单、单元 lint、env 白名单 |
 
 ## 3. B 类：契约 §9
 

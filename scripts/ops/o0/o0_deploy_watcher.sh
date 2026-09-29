@@ -78,7 +78,7 @@ phase_preflight() {
   o0_sh "no Telegram session in the compose build context (a future 'compose build' would bake it)" "test ! -e '$SRC/config.json' && echo 'config.json absent'"
   o0_step "credential set: format, pairwise distinct, holders, control-plane catalog (names only)" \
     "$O0_PY" "$TOOLS/o0_watcher_credentials.py" check --watcher-env "$CRED_SET/watcher.env" \
-    --holder-env "$CRED_SET/operator-query.env" --holder-env "$CRED_SET/caddy.env" "${CATALOG_ARGS[@]}" --require-catalog
+    --holder-env "$CRED_SET/controlplane-watcher-gateway.env" --holder-env "$CRED_SET/operator-query.env" --holder-env "$CRED_SET/caddy.env" "${CATALOG_ARGS[@]}" --require-catalog
   o0_sh "Caddy already injects the browser credential (stage C done; otherwise the site goes 401)" \
     "grep -c '^WATCHER_BROWSER_PROXY_TOKEN=' /etc/caddy/v3.env >/dev/null && curl -s -m 5 http://127.0.0.1:2019/config/ | grep -c 'env.WATCHER_BROWSER_PROXY_TOKEN' >/dev/null && echo CADDY_INJECTS_BROWSER_CREDENTIAL"
   o0_sh "disk headroom on /srv and docker root (build + DB copies)" "df -h /srv \$(docker info -f '{{.DockerRootDir}}') | sed 1d"
@@ -188,7 +188,7 @@ phase_apply() {
     "${TOOL[@]}" manifest-verify --root "$WATCHER_ROOT" --manifest "$BUNDLE/compose.baseline.sha256" --label compose-live-vs-baseline
   o0_step "credential set still valid against the catalog" \
     "$O0_PY" "$TOOLS/o0_watcher_credentials.py" check --watcher-env "$CRED_SET/watcher.env" \
-    --holder-env "$CRED_SET/operator-query.env" --holder-env "$CRED_SET/caddy.env" "${CATALOG_ARGS[@]}" --require-catalog
+    --holder-env "$CRED_SET/controlplane-watcher-gateway.env" --holder-env "$CRED_SET/operator-query.env" --holder-env "$CRED_SET/caddy.env" "${CATALOG_ARGS[@]}" --require-catalog
   o0_fleet_baseline before-watcher
   # ---- changes
   o0_sh "backups: rollback image tag, overwritten/new source list, compose, env_file state, DB online copy" \
@@ -207,7 +207,7 @@ phase_apply() {
   o0_sh "env_file is root 0600" "chown root:root '$ENV_TARGET'; chmod 600 '$ENV_TARGET'; stat -c '%a %U:%G %n' '$ENV_TARGET'"
   o0_step "installed env_file: format, distinct, and both holders match it (digests only)" \
     "$O0_PY" "$TOOLS/o0_watcher_credentials.py" check --watcher-env "$ENV_TARGET" \
-    --holder-env "$CRED_SET/operator-query.env" --holder-env "$CRED_SET/caddy.env" "${CATALOG_ARGS[@]}" --require-catalog
+    --holder-env "$CRED_SET/controlplane-watcher-gateway.env" --holder-env "$CRED_SET/operator-query.env" --holder-env "$CRED_SET/caddy.env" "${CATALOG_ARGS[@]}" --require-catalog
   o0_sh "install candidate watcher files into the live source tree; remove whitelisted files the candidate no longer ships" \
     "cd '$BUNDLE/watcher' && find . -type f | sed 's|^\\./||' | while read -r rel; do install -D -m 0644 \"\$rel\" '$SRC'/\"\$rel\"; done
      # awk, not grep: 0 ABSENT lines is the normal case and must not fail the step under pipefail

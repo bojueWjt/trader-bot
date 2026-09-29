@@ -277,11 +277,14 @@ def cmd_http_probe(args: argparse.Namespace) -> int:
         return 1 if args.expect_status else 0
     code = ""
     fields = ""
+    parsed_obj = None
     try:
         parsed = json.loads(body.decode("utf-8"))
+        parsed_obj = parsed
         if isinstance(parsed, dict):
             code = str(parsed.get("code") or parsed.get("detail") or "")[:60]
-            allowed = {"revision", "content_sha256", "schema_version", "generated_at", "snapshot_state", "observed_at", "connection", "listener"}
+            allowed = {"revision", "content_sha256", "schema_version", "generated_at", "snapshot_state", "observed_at", "connection", "listener",
+                       "status", "app_role", "database", "gateway"}
             wanted = [f for f in (args.show_json_field or []) if f in allowed]
             fields = " ".join(f"{f}={parsed.get(f)}" for f in wanted)
     except (ValueError, UnicodeDecodeError):
@@ -295,6 +298,11 @@ def cmd_http_probe(args: argparse.Namespace) -> int:
         ok = False
     if args.expect_no_location and resp.getheader("Location"):
         ok = False
+    for kv in args.expect_json or []:
+        k, _, v = kv.partition("=")
+        if k not in ("status", "app_role", "database", "gateway") or not isinstance(parsed_obj, dict) or str(parsed_obj.get(k)) != v:
+            ok = False
+            print(f"PROBE_FAIL json {k} != {v}")
     if not ok:
         print(f"PROBE_FAIL expected status={args.expect_status} code={args.expect_code}")
         return 1
@@ -663,7 +671,12 @@ def _parse_unit_show(text: str) -> dict:
             except ValueError:
                 words = value.split()
             out["env_names"] += [w.split("=", 1)[0] for w in words if "=" in w]
-        elif key in ("LoadState", "WorkingDirectory", "NeedDaemonReload", "FragmentPath", "DropInPaths"):
+            # the role is not a secret: its VALUE is kept (RS-17: every control-plane unit sets a non-'all' role explicitly)
+            out.setdefault("roles", []).extend(w.split("=", 1)[1] for w in words if w.startswith("CONTROL_PLANE_APP_ROLE="))
+        elif key == "ExecStart":
+            m = re.search(r"argv\[\]=([^;]*)", value)
+            out["ExecStart"] = (m.group(1) if m else value).strip()
+        elif key in ("LoadState", "WorkingDirectory", "NeedDaemonReload", "FragmentPath", "DropInPaths", "User"):
             out[key] = value.strip()
     return out
 
@@ -684,12 +697,34 @@ def _env_file_names(path: str) -> list[str] | None:
     return names
 
 
-def cp_isolation_check(shows: dict[str, str], oq_unit: str, other_units: list[str], oq_env: str,
-                       cp_root: str) -> tuple[int, list[str]]:
+def _uvicorn_listen_ok(argv: list[str]) -> bool:
+    def opt(name: str) -> str | None:
+        return argv[argv.index(name) + 1] if name in argv and argv.index(name) + 1 < len(argv) else None
+    return bool(argv) and argv[0].endswith("/uvicorn") and "read_api:app" in argv and opt("--host") == "127.0.0.1" and opt("--port") == WGW_PORT
+
+
+def cp_isolation_check(shows: dict[str, str], oq_unit: str, other_units: list[str], oq_env: str, cp_root: str,
+                       wgw_unit: str | None = None, wgw_env: str | None = None, wgw_root: str | None = None,
+                       wgw_may_be_absent: bool = False, allow_auth_secret: bool = False) -> tuple[int, list[str]]:
+    """S-10 as a gate, WGW-1.0.4 RS-17 (four units). The three existing units (operator-query, node-control, event-ingest):
+    loaded, NeedDaemonReload=no, an explicit non-'all' CONTROL_PLANE_APP_ROLE, WorkingDirectory still the shared directory,
+    no WATCHER_GATEWAY_TOKEN anywhere in their env files or Environment= (node-control / event-ingest: no WATCHER_*TOKEN name
+    at all, and they never load operator-query.env), none of them loads watcher-gateway.env. The watcher-gateway unit
+    (``wgw_unit``; absent before stage O when ``wgw_may_be_absent``): the only role watcher-gateway, User
+    trader-v3-cp-watcher-gateway, WorkingDirectory under ``wgw_root``, uvicorn on --host 127.0.0.1 --port 8186, exactly one
+    EnvironmentFiles= (``wgw_env``) whose names are a subset of the whitelist (no signal token, no AUTH_SECRET_KEY unless
+    U-13 (iii) - ``allow_auth_secret``), no CONTROL_PLANE_EXPECT_DATABASE_ROLE / DATABASE_URL. Names only, values never printed."""
     lines: list[str] = []
-    units = {u: _parse_unit_show(shows.get(u, "")) for u in [oq_unit] + other_units}
+    three = [oq_unit] + other_units
+    wanted = three + ([wgw_unit] if wgw_unit else [])
+    units = {u: _parse_unit_show(shows.get(u, "")) for u in wanted}
+    wgw_present = bool(wgw_unit)
     evidence = []
     for u, info in units.items():
+        if u == wgw_unit and info.get("LoadState") == "not-found" and wgw_may_be_absent:
+            wgw_present = False
+            lines.append(f"{u}: not installed yet (preflight before stage O)")
+            continue
         if info.get("LoadState") != "loaded":
             return 2, [f"CP_ISOLATION_UNCOMPARABLE {u}: LoadState={info.get('LoadState', '<missing>')} (unit unknown or systemctl output unreadable)"]
         # review wac-072 🟡-3: a drop-in changed on disk but not loaded is invisible to `systemctl show`;
@@ -703,53 +738,639 @@ def cp_isolation_check(shows: dict[str, str], oq_unit: str, other_units: list[st
         evidence.append(f"{u}: FragmentPath={info.get('FragmentPath') or '<none>'} DropInPaths={info.get('DropInPaths') or '<none>'}")
     violations = []
     oq_env_real = os.path.realpath(oq_env)
+    wgw_env_real = os.path.realpath(wgw_env) if wgw_env else None
     root = os.path.normpath(cp_root)
-    oq_wd = os.path.normpath(units[oq_unit].get("WorkingDirectory") or "/")
-    if oq_wd not in (root, os.path.join(root, "api")):
-        violations.append(f"CODE_DIR_MISMATCH {oq_unit} WorkingDirectory={oq_wd} is not {root} or {root}/api (--cp-root, S-13)")
-    for u in other_units:
-        info = units[u]
+
+    def env_names(u: str, info: dict) -> tuple[list[str], int | None]:
+        names: list[str] = []
         for path, ignore in info["envfiles"]:
-            if os.path.realpath(path) == oq_env_real or os.path.basename(path) == "operator-query.env":
-                violations.append(f"ENVFILE_ISOLATION VIOLATION {u} loads {path} (it would hold the watcher gateway/snapshot values after O-2)")
-                continue
-            names = _env_file_names(path)
-            if names is None:
+            got = _env_file_names(path)
+            if got is None:
                 if not ignore:
-                    return 2, [f"CP_ISOLATION_UNCOMPARABLE {u}: env file {path} unreadable"]
+                    return [], 2
                 lines.append(f"{u}: env file {path} absent (ignore_errors=yes)")
                 continue
-            bad = sorted(n for n in names if WATCHER_CRED_NAME.match(n))
-            if bad:
-                violations.append(f"ENVFILE_ISOLATION VIOLATION {u}: {path} defines {','.join(bad)}")
-        bad_env = sorted(n for n in info["env_names"] if WATCHER_CRED_NAME.match(n))
-        if bad_env:
-            violations.append(f"ENVFILE_ISOLATION VIOLATION {u}: Environment= defines {','.join(bad_env)}")
+            names += got
+        return names, None
+
+    for u in three:
+        info = units[u]
+        wd = os.path.normpath(info.get("WorkingDirectory") or "/")
+        if wd not in (root, os.path.join(root, "api")):
+            violations.append(f"CODE_DIR_MISMATCH {u} WorkingDirectory={wd} is not {root} or {root}/api (the three units keep the shared "
+                              "directory; WGW-1.0.4 never moves them)")
+        roles = info.get("roles") or []
+        if len(roles) != 1 or roles[0] in ("", "all") or roles[0].replace("_", "-") == "watcher-gateway":
+            violations.append(f"ROLE_NOT_EXPLICIT {u} CONTROL_PLANE_APP_ROLE={','.join(roles) or '<unset>'} (RS-17: an explicit non-'all' "
+                              "role; a missing role falls back to 'all')")
+        for path, _ignore in info["envfiles"]:
+            if wgw_env_real and (os.path.realpath(path) == wgw_env_real or os.path.basename(path) == "watcher-gateway.env"):
+                violations.append(f"ENVFILE_ISOLATION VIOLATION {u} loads {path} (the watcher-gateway env)")
+            if u != oq_unit and (os.path.realpath(path) == oq_env_real or os.path.basename(path) == "operator-query.env"):
+                violations.append(f"ENVFILE_ISOLATION VIOLATION {u} loads {path} (operator-query's env)")
+        names, err = env_names(u, info)
+        if err:
+            return 2, [f"CP_ISOLATION_UNCOMPARABLE {u}: an env file without ignore_errors is unreadable"]
+        names += info["env_names"]
+        bad = sorted({n for n in names if (WATCHER_CRED_NAME.match(n) if u != oq_unit else n.startswith(WGW_GATEWAY_TOKEN))})
+        if bad:
+            violations.append(f"ENVFILE_ISOLATION VIOLATION {u}: defines {','.join(bad)} (WGW-1.0.4: the gateway token lives only in "
+                              "watcher-gateway.env)")
         if not any(v.startswith(("ENVFILE_ISOLATION VIOLATION " + u)) for v in violations):
-            lines.append(f"ENVFILE_ISOLATION ok {u} envfiles={len(info['envfiles'])} env_names={len(info['env_names'])}")
-    shared = [u for u in other_units if os.path.normpath(units[u].get("WorkingDirectory") or "/") == oq_wd]
+            lines.append(f"ENVFILE_ISOLATION ok {u} role={roles[0] if roles else '<unset>'} envfiles={len(info['envfiles'])} env_names={len(info['env_names'])}")
+    if wgw_unit and wgw_present:
+        info = units[wgw_unit]
+        wd = os.path.normpath(info.get("WorkingDirectory") or "/")
+        rel_root = os.path.normpath(wgw_root or "/nonexistent")
+        if not (wd.startswith(rel_root + os.sep) and wd.endswith(os.path.join("services", "control-plane", "api"))):
+            violations.append(f"WGW_CODE_DIR {wgw_unit} WorkingDirectory={wd} is not <{rel_root}>/<release-sha>/services/control-plane/api (R23)")
+        if (info.get("roles") or []) != ["watcher-gateway"]:
+            violations.append(f"WGW_ROLE {wgw_unit} CONTROL_PLANE_APP_ROLE={','.join(info.get('roles') or []) or '<unset>'} (want watcher-gateway)")
+        if info.get("User") != WGW_USER:
+            violations.append(f"WGW_USER {wgw_unit} User={info.get('User') or '<unset>'} (want {WGW_USER})")
+        if not _uvicorn_listen_ok((info.get("ExecStart") or "").split()):
+            violations.append(f"WGW_LISTEN {wgw_unit} ExecStart is not 'uvicorn read_api:app --host 127.0.0.1 --port {WGW_PORT}'")
+        bad_env = sorted(n for n in info["env_names"] if n in ("CONTROL_PLANE_EXPECT_DATABASE_ROLE", "DATABASE_URL") or WATCHER_CRED_NAME.match(n))
+        if bad_env:
+            violations.append(f"WGW_ENVIRONMENT {wgw_unit} Environment= defines {','.join(bad_env)}")
+        files = [path for path, _ignore in info["envfiles"]]
+        if len(files) != 1 or not wgw_env_real or os.path.realpath(files[0]) != wgw_env_real:
+            violations.append(f"WGW_ENVFILE {wgw_unit} EnvironmentFiles={files} (want exactly [{wgw_env}])")
+        else:
+            try:
+                env = parse_env_file(Path(files[0]))
+            except (OSError, SystemExit):
+                return 2, [f"CP_ISOLATION_UNCOMPARABLE {wgw_unit}: its env file is unreadable"]
+            probs = _wgw_env_problems(env, allow_auth_secret)
+            violations += [f"WGW_ENV {wgw_unit}: {p}" for p in probs]
+            if not probs:
+                lines.append(f"WGW_ENV ok {wgw_unit} names={','.join(sorted(env))}")
     lines += evidence
-    lines.append(f"working directories: " + " ".join(f"{u}={os.path.normpath(units[u].get('WorkingDirectory') or '<unset>')}" for u in units))
+    lines.append("working directories: " + " ".join(f"{u}={os.path.normpath(units[u].get('WorkingDirectory') or '<unset>')}" for u in units))
     if violations:
         return 1, lines + violations + [f"CP_ISOLATION_FAILED violations={len(violations)} (stage O blocked; report to the user)"]
-    d04 = "yes (D-04 applies: their next restart loads the new code)" if shared else "no (D-04 does not apply)"
-    return 0, lines + [f"CP_ISOLATION_OK shared_code_dir={','.join(shared) or 'none'} d04={d04}"]
+    shared = [u for u in three if os.path.normpath(units[u].get("WorkingDirectory") or "/") in (root, os.path.join(root, "api"))]
+    return 0, lines + [f"CP_ISOLATION_OK units={len(three) + (1 if wgw_present else 0)} watcher_gateway={'present' if wgw_present else 'absent'} "
+                       f"shared_code_dir={','.join(shared) or 'none'} d04=no (WGW-1.0.4: this stage never touches the shared directory)"]
 
 
 def cmd_cp_isolation(args: argparse.Namespace) -> int:
     import subprocess
     shows = {}
-    for u in [args.oq_unit] + args.other_unit:
+    for u in [args.oq_unit] + args.other_unit + ([args.wgw_unit] if args.wgw_unit else []):
         r = subprocess.run(["systemctl", "show", u, "-p", "LoadState", "-p", "WorkingDirectory", "-p", "EnvironmentFiles", "-p", "Environment",
-                            "-p", "NeedDaemonReload", "-p", "FragmentPath", "-p", "DropInPaths"],
+                            "-p", "NeedDaemonReload", "-p", "FragmentPath", "-p", "DropInPaths", "-p", "ExecStart", "-p", "User"],
                            stdin=subprocess.DEVNULL, capture_output=True, text=True)
         if r.returncode != 0:
             print(f"CP_ISOLATION_UNCOMPARABLE systemctl show {u} rc={r.returncode}")
             return 2
         shows[u] = r.stdout
-    rc, lines = cp_isolation_check(shows, args.oq_unit, args.other_unit, args.oq_env, args.cp_root)
+    rc, lines = cp_isolation_check(shows, args.oq_unit, args.other_unit, args.oq_env, args.cp_root, args.wgw_unit, args.wgw_env,
+                                   args.wgw_root, args.wgw_may_be_absent, args.allow_auth_secret_key)
     print("\n".join(lines))
     return rc
+
+
+# ---------------------------------------------------------------- WGW-1.0.4 stage O (watcher-gateway, R23; RS-16/17/19)
+# Contract: contracts/backend-api.md §9.14.6 (new role, independent code dir, deploy steps, rollback, PC-6, U-13, V-5).
+# Nothing here writes outside --out / --snapshot-out, and no value of a secret is ever printed (names only).
+WGW_UNIT = "trader-v3-controlplane-watcher-gateway.service"
+WGW_USER = "trader-v3-cp-watcher-gateway"
+WGW_PORT = "8186"
+WGW_READER_TOKENS = ("RISK_ADMIN_TOKEN", "VIEWER_TOKEN", "REVIEWER_TOKEN", "SYSTEM_OBSERVER_TOKEN")
+WGW_GATEWAY_TOKEN = "WATCHER_GATEWAY_TOKEN"
+WGW_OPTIONAL = ("WATCHER_GATEWAY_URL", "WATCHER_GATEWAY_CONFIG_SLOTS", "WATCHER_GATEWAY_MEDIA_SLOTS")
+WGW_AUTH_SECRET = "AUTH_SECRET_KEY"      # only with U-13 (iii): PC-6 (v) and "the app needs session tokens"
+# §9.14.6 "不得写入" plus the default-not-written signal tokens (G-36)
+WGW_FORBIDDEN = ("DATABASE_URL", "WATCHER_SNAPSHOT_TOKEN", "NAUTILUS_NODE_TOKEN", "NAUTILUS_NODE_AUTH_JSON", "CONTROL_PLANE_AUTH_SECRET",
+                 "CONTROL_PLANE_EXPECT_DATABASE_ROLE", "WATCHER_BROWSER_PROXY_TOKEN", "SIGNAL_TOKEN_ACCOUNT_A", "SIGNAL_TOKEN_ACCOUNT_B",
+                 "SIGNAL_TOKEN_ACCOUNT_C", "SIGNAL_TOKEN_ACCOUNT_D")
+WGW_FORBIDDEN_RE = re.compile(r"^(SIGNAL_TOKEN_|BINANCE_|TELEGRAM_|TG_|EXCHANGE_|API_SECRET|API_KEY)")
+CONTRACT_TOKEN_RE = re.compile(r"^[\x21-\x7E]{32,}$")
+SHARED_SUBDIRS = ("services/control-plane", "services/nautilus-node/observability", "packages", "db/migrations")
+SNAPSHOT_SKIP_DIRS = ("__pycache__",)
+
+
+def wgw_whitelist(with_auth_secret: bool) -> tuple[str, ...]:
+    return (WGW_GATEWAY_TOKEN,) + WGW_READER_TOKENS + WGW_OPTIONAL + ((WGW_AUTH_SECRET,) if with_auth_secret else ())
+
+
+def _wgw_env_problems(env: dict[str, str], with_auth_secret: bool) -> list[str]:
+    """Names only. The watcher-gateway env: names within the whitelist, no forbidden name, the gateway token and the four
+    reader tokens configured in the contract format and pairwise distinct (§9.2 E-02; the in-process check sees only these)."""
+    problems = []
+    allowed = set(wgw_whitelist(with_auth_secret))
+    for name in sorted(env):
+        if name in WGW_FORBIDDEN or WGW_FORBIDDEN_RE.match(name) or (name == WGW_AUTH_SECRET and not with_auth_secret):
+            problems.append(f"forbidden name {name} (§9.14.6 env: never / not by default)")
+        elif name not in allowed:
+            problems.append(f"name {name} is not on the watcher-gateway whitelist")
+    digests: dict[str, list[str]] = {}
+    for name in (WGW_GATEWAY_TOKEN,) + WGW_READER_TOKENS:
+        value = (env.get(name) or "").strip()
+        if not value:
+            problems.append(f"{name} not configured")
+            continue
+        if not CONTRACT_TOKEN_RE.match(value):
+            problems.append(f"{name} violates the contract format ^[\\x21-\\x7E]{{32,}}$")
+        digests.setdefault(hashlib.sha256(value.encode()).hexdigest(), []).append(name)
+    for names in digests.values():
+        if len(names) > 1:
+            problems.append("values not distinct: " + ",".join(sorted(names)))
+    if with_auth_secret and not (env.get(WGW_AUTH_SECRET) or "").strip():
+        problems.append(f"{WGW_AUTH_SECRET} requested (U-13 (iii)) but not configured")
+    return problems
+
+
+def cmd_wgw_env(args: argparse.Namespace) -> int:
+    """Build (or --check) the watcher-gateway env file from the live operator-query env (the four reader tokens and, only
+    with --with-auth-secret-key, AUTH_SECRET_KEY) and the credential set's watcher-gateway.env (the gateway token)."""
+    if args.check:
+        env = parse_env_file(args.check)
+        problems = _wgw_env_problems(env, args.with_auth_secret_key)
+        mode = oct(args.check.stat().st_mode & 0o777)
+        if mode != "0o600":
+            problems.append(f"file mode {mode} (want 0600)")
+        for p in problems:
+            print(f"FAIL {p}")
+        print(f"WGW_ENV_{'FAILED' if problems else 'OK'} names={','.join(sorted(env))}")
+        return 1 if problems else 0
+    oq = parse_env_file(args.oq_env)
+    frag = parse_env_file(args.gateway_fragment)
+    items: list[tuple[str, str]] = []
+    if WGW_GATEWAY_TOKEN in frag:
+        items.append((WGW_GATEWAY_TOKEN, frag[WGW_GATEWAY_TOKEN]))
+    for name in WGW_READER_TOKENS:
+        if name in oq:
+            items.append((name, oq[name]))
+    for kv in args.set_optional or []:
+        name, _, value = kv.partition("=")
+        if name not in WGW_OPTIONAL or not re.fullmatch(r"[A-Za-z0-9:/._-]{1,200}", value):
+            print(f"WGW_ENV_REFUSED --set-optional {name}: only {','.join(WGW_OPTIONAL)} with a plain value")
+            return 1
+        items.append((name, value))
+    if args.with_auth_secret_key:
+        if WGW_AUTH_SECRET not in oq:
+            print(f"WGW_ENV_REFUSED {WGW_AUTH_SECRET} is not in the operator-query env (PC-6 (v) says no: U-13 (iii) cannot hold)")
+            return 1
+        items.append((WGW_AUTH_SECRET, oq[WGW_AUTH_SECRET]))
+    problems = _wgw_env_problems(dict(items), args.with_auth_secret_key)
+    extra = sorted(set(frag) - {WGW_GATEWAY_TOKEN})
+    if extra:
+        problems.append(f"the credential fragment carries other names too: {','.join(extra)}")
+    if problems:
+        for p in problems:
+            print(f"FAIL {p}")
+        print("WGW_ENV_FAILED nothing written")
+        return 1
+    if args.out.exists() or args.out.is_symlink():
+        print(f"WGW_ENV_REFUSED {args.out} already exists (never overwritten here)")
+        return 1
+    fd = os.open(args.out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write("".join(f"{k}={v}\n" for k, v in items))
+    print(f"WGW_ENV_WRITTEN names={','.join(k for k, _ in items)} mode=0600 file={args.out.name}")
+    return 0
+
+
+def _tree_snapshot(root: Path, subdirs: tuple[str, ...]) -> dict[str, list]:
+    """rel -> [kind, sha256 | link target, mode, uid, gid] for every entry under the sub-directories (nothing skipped)."""
+    out: dict[str, list] = {}
+    for sub in subdirs:
+        base = root / sub
+        if not base.exists():
+            out[sub] = ["absent", "", 0, 0, 0]
+            continue
+        for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+            dirnames.sort()
+            d = Path(dirpath)
+            st = d.lstat()
+            out[str(d.relative_to(root))] = ["dir", "", st.st_mode & 0o7777, st.st_uid, st.st_gid]
+            for name in sorted(filenames) + [n for n in dirnames if (d / n).is_symlink()]:
+                f = d / name
+                st = f.lstat()
+                rel = str(f.relative_to(root))
+                if f.is_symlink():
+                    out[rel] = ["link", os.readlink(f), st.st_mode & 0o7777, st.st_uid, st.st_gid]
+                elif f.is_file():
+                    out[rel] = ["file", sha256_file(f), st.st_mode & 0o7777, st.st_uid, st.st_gid]
+                else:
+                    out[rel] = ["other", "", st.st_mode & 0o7777, st.st_uid, st.st_gid]
+    return out
+
+
+def shared_tree_check(root: Path, manifest_text: str, subdirs: tuple[str, ...], accept: str | None) -> tuple[int, list[str], str]:
+    """(rc, lines, drift_sha256). The shared code directory against the 67b401a manifest (§9.14.6 部署前只读核对; task wac-105:
+    on drift list the files and the options, hand it to the user, never fix or overwrite)."""
+    lines: list[str] = []
+    entries = []
+    for raw in manifest_text.splitlines():
+        if raw.strip():
+            sha, rel = raw.split("  ", 1)
+            entries.append((sha, rel))
+    if not entries:
+        return 2, ["MANIFEST_UNCOMPARABLE cp-shared-vs-67b401a compared=0"], ""
+    drift = []
+    for sha, rel in entries:
+        f = root / rel
+        if f.is_symlink() or not f.is_file():
+            drift.append(f"MISSING {rel}")
+        elif sha256_file(f) != sha:
+            drift.append(f"MODIFIED {rel}")
+    known = {rel for _sha, rel in entries}
+    extra = []
+    for sub in subdirs:
+        base = root / sub
+        if not base.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = sorted(n for n in dirnames if n not in SNAPSHOT_SKIP_DIRS)
+            for name in sorted(filenames):
+                rel = str((Path(dirpath) / name).relative_to(root))
+                if rel not in known and not name.endswith(".pyc"):
+                    extra.append(rel)
+    drift_text = "\n".join(sorted(drift))
+    drift_sha = hashlib.sha256(drift_text.encode()).hexdigest() if drift else ""
+    for rel in extra[:50]:
+        lines.append(f"INFO EXTRA {rel} (not tracked at 67b401a; this stage does not load it, the new unit runs from its own directory)")
+    if not drift:
+        lines.append(f"MANIFEST_OK cp-shared-vs-67b401a compared={len(entries)} extra_untracked={len(extra)}")
+        return 0, lines, ""
+    lines += [f"DRIFT {d}" for d in sorted(drift)[:200]]
+    if accept and accept == drift_sha:
+        lines.append(f"MANIFEST_DRIFT_ACCEPTED cp-shared-vs-67b401a drift={len(drift)} drift_sha256={drift_sha} (the user's decision for this "
+                     "stage; the before/after snapshot of the shared directory stays a hard gate)")
+        return 0, lines, drift_sha
+    lines += [
+        f"MANIFEST_DRIFT cp-shared-vs-67b401a compared={len(entries)} drift={len(drift)} drift_sha256={drift_sha}",
+        "SUGGESTION stop here: nothing was changed. This stage neither reads nor writes these files at run time: watcher-gateway runs "
+        "from its own directory (R23) and the three running units keep what they loaded.",
+        "SUGGESTION option A (user decision): accept exactly this drift for this stage - re-run preflight with --accept-shared-drift "
+        f"{drift_sha} (bound to this list; any other difference still stops); before/after identity of the shared directory stays a gate.",
+        "SUGGESTION option B (user decision): align the shared directory first, in a separately authorized control-plane task (production "
+        "has had hot-mounted files outside git before), then re-run this preflight.",
+        "NEVER here: fix, restore, overwrite or copy any file of the shared directory.",
+    ]
+    return 1, lines, drift_sha
+
+
+def cmd_shared_tree(args: argparse.Namespace) -> int:
+    subdirs = tuple(args.sub or SHARED_SUBDIRS)
+    if args.compare:
+        before = json.loads(args.compare.read_text(encoding="utf-8"))
+        now = _tree_snapshot(args.root, subdirs)
+        changed = sorted(k for k in before.keys() & now.keys() if before[k] != now[k])
+        added, removed = sorted(now.keys() - before.keys()), sorted(before.keys() - now.keys())
+        if not before:
+            print("SHARED_UNCOMPARABLE the earlier snapshot is empty")
+            return 2
+        if changed or added or removed:
+            for k in (changed + added + removed)[:50]:
+                print(f"CHANGED {k}")
+            print(f"SHARED_CHANGED changed={len(changed)} added={len(added)} removed={len(removed)} (stop, report to the user; never repair here)")
+            return 1
+        print(f"SHARED_UNCHANGED entries={len(now)} (identical to {args.compare.name})")
+        return 0
+    rc, lines, _sha = shared_tree_check(args.root, args.manifest.read_text(encoding="utf-8"), subdirs, args.accept_drift_sha256)
+    print("\n".join(lines))
+    if args.snapshot_out and rc == 0:
+        fd = os.open(args.snapshot_out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(_tree_snapshot(args.root, subdirs), handle, sort_keys=True)
+        print(f"SHARED_SNAPSHOT_WRITTEN {args.snapshot_out.name}")
+    return rc
+
+
+def daemon_reload_check(show_text: str, exclude: list[str], require: list[str]) -> tuple[int, str]:
+    """`systemctl show -p Id -p NeedDaemonReload <every unit>` -> (rc, line). Any yes = DAEMON_RELOAD_PENDING (wac-060: a
+    daemon-reload acts on the whole host and would load every pending change; review wac-096 r5 🟢-4: the user decides)."""
+    units: dict[str, str] = {}
+    cur: dict[str, str] = {}
+    for raw in show_text.splitlines() + [""]:
+        if not raw.strip():
+            if cur.get("Id"):
+                units[cur["Id"]] = cur.get("NeedDaemonReload", "<missing>")
+            cur = {}
+            continue
+        k, _, v = raw.partition("=")
+        cur[k.strip()] = v.strip()
+    if not units:
+        return 2, "DAEMON_RELOAD_UNCOMPARABLE units=0 (systemctl output empty or unreadable)"
+    missing = [u for u in require if u not in units]
+    if missing:
+        return 2, f"DAEMON_RELOAD_UNCOMPARABLE required unit(s) absent from the list: {','.join(missing)}"
+    bad = sorted(u for u, v in units.items() if u not in exclude and v != "no")
+    if bad:
+        return 1, (f"DAEMON_RELOAD_PENDING units={','.join(bad[:20])} count={len(bad)} (stop: no daemon-reload here; report the list to the "
+                   "user, who decides whether to authorize one reload separately)")
+    return 0, f"DAEMON_RELOAD_CLEAN units={len(units)} excluded={','.join(exclude) or '-'}"
+
+
+def cmd_daemon_reload_check(args: argparse.Namespace) -> int:
+    rc, line = daemon_reload_check(args.show.read_text(encoding="utf-8"), args.exclude or [], args.require or [])
+    print(line)
+    return rc
+
+
+def port_check(ss_text: str, port: str, expect: str, record: tuple[int, int] | None) -> tuple[int, list[str]]:
+    """`ss -H -ltnp` output: expect 'free' (nothing listens on the port) or 'loopback-only' (>= 1 listener, all 127.0.0.1)."""
+    lines, listeners = [], []
+    for raw in ss_text.splitlines():
+        cols = raw.split()
+        if len(cols) < 4:
+            continue
+        local = cols[3]
+        host, _, p = local.rpartition(":")
+        if not p.isdigit():
+            continue
+        if p == port:
+            listeners.append(host)
+        if record and record[0] <= int(p) <= record[1]:
+            proc = re.search(r'users:\(\("([^"]{1,64})"', raw)
+            lines.append(f"RECORD port {p} local={host} process={proc.group(1) if proc else '?'}")
+    if expect == "free":
+        ok = not listeners
+        lines.append(f"PORT_{'FREE' if ok else 'IN_USE'} {port} listeners={len(listeners)}"
+                     + ("" if ok else " (stop: the contract port is taken; Planner recalls the Architect, O-0 never picks another port)"))
+    else:
+        ok = bool(listeners) and all(h in ("127.0.0.1",) for h in listeners)
+        lines.append(f"PORT_{'LOOPBACK_ONLY' if ok else 'NOT_LOOPBACK_ONLY'} {port} listeners={','.join(listeners) or 'none'}")
+    return (0 if ok else 1), lines
+
+
+def cmd_port_check(args: argparse.Namespace) -> int:
+    rec = tuple(int(x) for x in args.record_range.split("-")) if args.record_range else None
+    rc, lines = port_check(args.ss_file.read_text(encoding="utf-8"), args.port, args.expect, rec)  # type: ignore[arg-type]
+    print("\n".join(lines))
+    return rc
+
+
+# V-5 (§9.14.6, RS-19): the closed expectation set, status codes only
+V5_REQUESTS = (("/v1/watcher/status", "panel"), ("/v1/watcher/dialogs", "panel"), ("/V1/WATCHER/status", "panel"),
+               ("/m/v1/watcher/status", "mobile-gateway"), ("/m/v1/accounts", "mobile-control"))
+
+
+def v5_expected(kind: str, phase: str) -> tuple[int, ...]:
+    if kind == "panel":
+        return (404,)
+    if kind == "mobile-control":
+        return (401,)
+    return (401, 403) if phase == "unit-running" else (502,)
+
+
+def cmd_public_direct_check(args: argparse.Namespace) -> int:
+    """V-5. External mode (evidence for verify): run OUTSIDE jp-24, real DNS, no proxy (http.client ignores *_PROXY), no
+    --resolve, no credentials, no cookies; prints status, content_type and size only (the body is read and dropped).
+    --loopback: the jp-24 supplementary check (connects to 127.0.0.1 with the public name as SNI and Host); its output is
+    never accepted as external evidence (mode=loopback)."""
+    import socket
+    import ssl
+    if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?", args.host):
+        print("V5_PUBLIC_CHECK_FAILED --host is not a plain host name")
+        return 1
+    mode = "loopback" if args.loopback else ("external" if args.scheme == "https" and args.port == 443 else "test")
+    fails = 0
+    for path, kind in V5_REQUESTS:
+        want = v5_expected(kind, args.phase)
+        try:
+            if args.scheme == "https":
+                ctx = ssl.create_default_context()
+                conn = http.client.HTTPSConnection(args.host, args.port, timeout=args.timeout, context=ctx)
+                if args.loopback:
+                    raw = socket.create_connection(("127.0.0.1", args.port), timeout=args.timeout)
+                    conn.sock = ctx.wrap_socket(raw, server_hostname=args.host)
+            else:
+                conn = http.client.HTTPConnection("127.0.0.1" if args.loopback else args.host, args.port, timeout=args.timeout)
+            conn.putrequest("GET", path, skip_host=True, skip_accept_encoding=True)
+            conn.putheader("Host", args.host)
+            conn.putheader("User-Agent", "o0-v5-check")
+            conn.endheaders()
+            resp = conn.getresponse()
+            size = 0
+            while True:
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > 1 << 20:
+                    break
+            status, ctype = resp.status, (resp.getheader("Content-Type") or "").split(";")[0][:40]
+            conn.close()
+        except (OSError, http.client.HTTPException) as exc:
+            status, ctype, size = 0, "", 0
+            print(f"V5 GET {path} error={type(exc).__name__}")
+        ok = status in want
+        fails += 0 if ok else 1
+        print(f"V5 GET {path} status={status} content_type={ctype or '-'} size={size} want={'|'.join(map(str, want))} {'ok' if ok else 'FAIL'}")
+    now = int(time.time())
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+    tail = f"mode={mode} phase={args.phase} host={args.host} at={stamp} epoch={now} checks={len(V5_REQUESTS)}"
+    if fails:
+        print(f"V5_PUBLIC_CHECK_FAILED {tail} failed={fails}")
+        return 1
+    print(f"V5_PUBLIC_CHECK_OK {tail}")
+    return 0
+
+
+def v5_evidence_check(text: str, host: str, phase: str, not_before: int, max_age_s: int, now: float | None = None) -> tuple[bool, str]:
+    rows = [l for l in text.splitlines() if l.startswith("V5 GET ")]
+    last = next((l for l in reversed(text.splitlines()) if l.startswith(("V5_PUBLIC_CHECK_OK", "V5_PUBLIC_CHECK_FAILED"))), "")
+    m = re.fullmatch(r"V5_PUBLIC_CHECK_OK mode=(\S+) phase=(\S+) host=(\S+) at=\S+ epoch=([0-9]+) checks=([0-9]+)", last)
+    if not m:
+        return False, "no V5_PUBLIC_CHECK_OK line (failed or not an evidence file)"
+    ev_mode, ev_phase, ev_host, epoch, checks = m.group(1), m.group(2), m.group(3), int(m.group(4)), int(m.group(5))
+    if ev_mode != "external":
+        return False, f"mode={ev_mode}: only an external run (outside jp-24, real DNS, no proxy) is evidence"
+    if ev_phase != phase or ev_host != host:
+        return False, f"evidence is for phase={ev_phase} host={ev_host}, want phase={phase} host={host}"
+    ok_rows = [l for l in rows if l.endswith(" ok")]
+    if checks != len(V5_REQUESTS) or len(rows) != len(V5_REQUESTS) or len(ok_rows) != len(V5_REQUESTS):
+        return False, f"{len(ok_rows)}/{len(V5_REQUESTS)} requests ok in the evidence"
+    t = now if now is not None else time.time()
+    if epoch < not_before:
+        return False, f"evidence epoch {epoch} is older than the unit start {not_before} (run the external check after apply)"
+    if t - epoch > max_age_s:
+        return False, f"evidence is {int(t - epoch)} s old (max {max_age_s})"
+    return True, f"V5_EVIDENCE_OK host={host} phase={phase} epoch={epoch} age_s={int(t - epoch)}"
+
+
+def cmd_v5_evidence_check(args: argparse.Namespace) -> int:
+    if not args.evidence or not args.evidence.is_file():
+        print("DIRECT_GUARD_UNVERIFIED no external V-5 evidence file (verify is NOT complete; never report the rollout as done)")
+        return 1
+    ok, msg = v5_evidence_check(args.evidence.read_text(encoding="utf-8"), args.host, args.phase, args.not_before, args.max_age_s)
+    print(msg if ok else f"DIRECT_GUARD_UNVERIFIED {msg} (verify is NOT complete)")
+    return 0 if ok else 1
+
+
+def render_wgw_unit(trader_root: str, release_sha: str, resource_conf: str) -> str:
+    """The watcher-gateway unit (§9.14.6 单元; same shape as jp24-p1-control-plane.sh write_role_unit, without the database
+    parts): own user, own code dir (R23), own env file, uvicorn on 127.0.0.1:8186, single worker, no pyc writes; the
+    reader resource limits appended like the p1 script does (the conf without its first '[Service]' line)."""
+    if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
+        raise SystemExit("wgw unit: release sha must be 40 hex characters")
+    body = resource_conf.splitlines()
+    if not body or body[0].strip() != "[Service]":
+        raise SystemExit("wgw unit: the resource conf must start with [Service]")
+    wd = f"{trader_root}/releases/watcher-gateway/{release_sha}/services/control-plane/api"
+    head = ["[Unit]", "Description=Trader v3 control-plane role watcher-gateway (WGW-1.0.4: own code dir, no database)",
+            "After=network-online.target", "Wants=network-online.target", "", "[Service]",
+            f"User={WGW_USER}", f"Group={WGW_USER}", f"WorkingDirectory={wd}",
+            f"EnvironmentFile={trader_root}/secrets/control-plane/watcher-gateway.env",
+            "Environment=CONTROL_PLANE_APP_ROLE=watcher-gateway", "Environment=PYTHONDONTWRITEBYTECODE=1",
+            f"ExecStart={trader_root}/.venv-cp/bin/uvicorn read_api:app --host 127.0.0.1 --port {WGW_PORT}", "TimeoutStopSec=15"]
+    return "\n".join(head + body[1:] + ["", "[Install]", "WantedBy=multi-user.target"]) + "\n"
+
+
+def wgw_unit_lint(text: str, trader_root: str, release_sha: str) -> list[str]:
+    """Problems of a watcher-gateway unit file (package gate G12 and stage O preflight)."""
+    problems = []
+    want = {
+        "User": WGW_USER, "Group": WGW_USER,
+        "WorkingDirectory": f"{trader_root}/releases/watcher-gateway/{release_sha}/services/control-plane/api",
+        "EnvironmentFile": f"{trader_root}/secrets/control-plane/watcher-gateway.env",
+        "ExecStart": f"{trader_root}/.venv-cp/bin/uvicorn read_api:app --host 127.0.0.1 --port {WGW_PORT}",
+    }
+    seen: dict[str, list[str]] = {}
+    for raw in text.splitlines():
+        k, sep, v = raw.partition("=")
+        if sep and not raw.startswith(("#", "[")):
+            seen.setdefault(k.strip(), []).append(v.strip())
+    for k, v in want.items():
+        if seen.get(k) != [v]:
+            problems.append(f"{k} must be exactly {v!r} (got {seen.get(k)})")
+    envs = seen.get("Environment", [])
+    if sorted(envs) != sorted(["CONTROL_PLANE_APP_ROLE=watcher-gateway", "PYTHONDONTWRITEBYTECODE=1"]):
+        problems.append(f"Environment= must be exactly CONTROL_PLANE_APP_ROLE=watcher-gateway and PYTHONDONTWRITEBYTECODE=1 (got {len(envs)} line(s))")
+    for bad in ("ExecStartPre", "ExecStartPost", "ExecReload"):
+        if bad in seen:
+            problems.append(f"{bad} present (no pg_isready or other pre/post command: this role has no database)")
+    if "--workers" in text or "DATABASE" in text or "EXPECT_DATABASE_ROLE" in text:
+        problems.append("a worker count or a database setting in the unit")
+    if "0.0.0.0" in text or "--host ::" in text:
+        problems.append("a non-loopback listener")
+    return problems
+
+
+def cmd_wgw_unit(args: argparse.Namespace) -> int:
+    if args.render:
+        text = render_wgw_unit(args.trader_root, args.release_sha, args.resource_conf.read_text(encoding="utf-8"))
+        args.out.write_text(text, encoding="utf-8")
+        print(f"WGW_UNIT_RENDERED {args.out.name} release_sha={args.release_sha}")
+        return 0
+    problems = wgw_unit_lint(args.lint.read_text(encoding="utf-8"), args.trader_root, args.release_sha)
+    for p in problems:
+        print(f"FAIL {p}")
+    print(f"WGW_UNIT_{'LINT_FAILED' if problems else 'LINT_OK'} {args.lint.name}")
+    return 1 if problems else 0
+
+
+# RS-16 + review wac-096 r5 🟡-C (task wac-105 item 3): THE dependency check. `python -B` (no .pyc anywhere), `env -i` plus the
+# whitelisted env, CONTROL_PLANE_APP_ROLE=watcher-gateway, the code dir's services/control-plane/api as the working directory;
+# import read_api, build create_app("watcher-gateway"): gateway routes > 0 and ready; an audit hook proves nothing was opened
+# or imported from $TRADER_ROOT outside the code dir and the venv (R23 路径约束); the venv and the code dir are unchanged
+# afterwards (metadata snapshot). ImportError -> DEPENDENCY_MISSING <module> (stop; never pip anything: Planner decides).
+WGW_SMOKE = r'''
+import os, sys
+code_root, venv_root, trader_root = sys.argv[1], sys.argv[2], sys.argv[3]
+allowed = tuple(os.path.realpath(p) for p in (code_root, venv_root, sys.prefix, sys.exec_prefix, sys.base_prefix, sys.base_exec_prefix))
+os_allow = ("/etc/", "/usr/share/zoneinfo/", "/dev/", "/proc/", "/sys/", "/usr/lib/ssl/", "/usr/lib/locale/", "/usr/share/locale/", "/run/",
+            "/System/Library/", "/private/etc/", "/private/var/db/timezone/", "/usr/share/ca-certificates/", "/usr/lib/python3/dist-packages/")
+seen = set()
+def hook(event, args):
+    if event == "open" and args and isinstance(args[0], (str, bytes)):
+        p = args[0].decode() if isinstance(args[0], bytes) else args[0]
+        seen.add(os.path.realpath(p if os.path.isabs(p) else os.path.join(os.getcwd(), p)))
+    elif event == "import" and len(args) > 1 and isinstance(args[1], str):
+        seen.add(os.path.realpath(args[1]))
+sys.addaudithook(hook)
+try:
+    import read_api
+except ImportError as exc:
+    print("DEPENDENCY_MISSING", getattr(exc, "name", None) or type(exc).__name__)
+    sys.exit(3)
+import watcher_gateway
+app = read_api.create_app("watcher-gateway")
+names = [getattr(r, "name", "") for r in app.routes if getattr(r, "name", "").startswith("watcher_gateway__")]
+paths = {getattr(r, "path", "") for r in app.routes}
+ready = watcher_gateway.readiness()[0]
+tr = os.path.realpath(trader_root) + os.sep
+inside = [p for p in seen if p.startswith(tr) and not p.startswith(allowed)]
+outside = [p for p in seen if p.startswith("/") and not p.startswith(allowed) and not p.startswith(os_allow)]
+bad_path = [p for p in sys.path if p and os.path.realpath(p).startswith(tr) and not os.path.realpath(p).startswith(allowed)]
+problems = []
+if not names: problems.append("0 gateway routes")
+if not ready: problems.append("gateway not ready (disabled state or tokens missing; reason only in the log)")
+if "/v1/accounts" in paths or "/v1/operator/orders" in paths: problems.append("trading routes on the watcher-gateway app")
+if inside: problems.append("opened/imported under TRADER_ROOT outside the code dir and the venv: " + ",".join(sorted(inside)[:5]))
+if outside: problems.append("opened outside the code dir, the venv, the standard library and the OS allowlist: " + ",".join(sorted(outside)[:5]))
+if bad_path: problems.append("sys.path entries under TRADER_ROOT outside the code dir and the venv: " + ",".join(bad_path[:5]))
+print("SMOKE gateway_routes=%d ready=%s files_seen=%d" % (len(names), ready, len(seen)))
+for p in problems:
+    print("SMOKE_PROBLEM " + p)
+sys.exit(1 if problems else 0)
+'''
+
+
+def _meta_snapshot(root: Path) -> str:
+    h = hashlib.sha256()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for name in sorted(filenames) + sorted(dirnames):
+            f = Path(dirpath) / name
+            try:
+                st = f.lstat()
+            except OSError:
+                continue
+            h.update(f"{f.relative_to(root)} {st.st_size} {st.st_mtime_ns} {st.st_mode}\n".encode())
+    return h.hexdigest()
+
+
+def cmd_wgw_smoke(args: argparse.Namespace) -> int:
+    import subprocess
+    api = args.code_dir / "services" / "control-plane" / "api"
+    venv_py = args.venv / "bin" / "python"
+    if not api.is_dir() or not venv_py.exists():
+        print(f"SMOKE_FAILED code dir or venv python missing ({api.is_dir()}, {venv_py.exists()})")
+        return 2
+    env_vals = parse_env_file(args.env_file)
+    problems = _wgw_env_problems(env_vals, args.with_auth_secret_key)
+    if problems:
+        print("SMOKE_FAILED the env file is not a valid watcher-gateway env (run wgw-env --check)")
+        return 2
+    env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "CONTROL_PLANE_APP_ROLE": "watcher-gateway", "PYTHONDONTWRITEBYTECODE": "1", **env_vals}
+    cmd = [str(venv_py), "-B", "-c", WGW_SMOKE, str(args.code_dir.resolve()), str(args.venv.resolve()), str(args.trader_root)]
+    if args.as_user:
+        import shutil
+        setpriv = shutil.which("setpriv")      # resolved on the caller's PATH (the child's PATH is minimal)
+        if not setpriv:
+            print("SMOKE_FAILED setpriv (util-linux) not found: cannot run as the unit user")
+            return 2
+        cmd = [setpriv, f"--reuid={args.as_user}", f"--regid={args.as_user}", "--clear-groups", "--"] + cmd
+    before_v, before_c = _meta_snapshot(args.venv), _meta_snapshot(args.code_dir)
+    # values reach the child through its environment only: never on a command line, never printed
+    r = subprocess.run(cmd, cwd=api, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=args.timeout)
+    out = [l for l in r.stdout.splitlines() if l.startswith(("SMOKE", "DEPENDENCY_MISSING"))]
+    print("\n".join(out))
+    tokens = [v for v in env_vals.values() if len(v) >= 8]
+    if any(t in r.stderr for t in tokens):
+        print("SMOKE_FAILED the child's stderr contained an env value (not printed)")
+        return 1
+    after_v, after_c = _meta_snapshot(args.venv), _meta_snapshot(args.code_dir)
+    who = args.as_user or "current user (root in preflight, before the unit user exists)"
+    if r.returncode == 3:
+        print(f"DEPENDENCY_MISSING stop: the shared venv lacks a module the new code imports; never pip into {args.venv} - Planner decides "
+              "(optional: a separate venv inside the release dir)")
+        return 3
+    if after_v != before_v or after_c != before_c:
+        print(f"SMOKE_FAILED the import wrote into the {'venv' if after_v != before_v else 'code dir'} (must be byte-for-byte read-only)")
+        return 1
+    if r.returncode != 0:
+        err = (r.stderr.strip().splitlines() or [""])[-1]
+        print(f"SMOKE_FAILED rc={r.returncode} as={who} last_error_type={err.split(':')[0][:80]}")
+        return 1
+    print(f"SMOKE_OK as={who} python=-B venv_unchanged=yes code_dir_unchanged=yes")
+    return 0
 
 
 # ---------------------------------------------------------------- gates
@@ -939,6 +1560,218 @@ LEGIT_PATHS = (
 )
 
 
+def _selftest_wgw(base: Path, cp: Path, good_shows: dict, show, U_OQ: str, U_NC: str, U_EI: str, oq_env_f: Path) -> int:
+    """WGW-1.0.4 stage O helpers (task wac-105): RS-17 four-unit isolation, the env whitelist builder, the shared directory
+    manifest / drift report / snapshot, NeedDaemonReload, port checks, V-5 (RS-19) and its evidence check. Fake values only."""
+    import contextlib
+    import io
+    import secrets
+    import subprocess
+    import threading
+    checks = 0
+    tok = lambda: "o0fake" + secrets.token_urlsafe(32)  # noqa: E731
+    readers = {n: tok() for n in WGW_READER_TOKENS}
+    live_oq = base / "wgw-live-operator-query.env"
+    live_oq.write_text("".join(f"{k}={v}\n" for k, v in readers.items()) + "SIGNAL_TOKEN_ACCOUNT_A=" + tok() + "\nAUTH_SECRET_KEY=" + tok()
+                       + "\nDATABASE_URL=postgres://SENTINELdb\n", encoding="utf-8")
+    frag = base / "wgw-fragment.env"
+    frag.write_text(f"WATCHER_GATEWAY_TOKEN={tok()}\n", encoding="utf-8")
+
+    def run(argv):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = main(argv)
+        return rc, buf.getvalue()
+    # wgw-env: names only, 0600, never overwritten, signal / DB / AUTH_SECRET_KEY left out by default
+    out = base / "wgw.env"
+    rc, text = run(["wgw-env", "--oq-env", str(live_oq), "--gateway-fragment", str(frag), "--out", str(out)])
+    env = parse_env_file(out)
+    assert rc == 0 and set(env) == {WGW_GATEWAY_TOKEN, *WGW_READER_TOKENS} and oct(out.stat().st_mode & 0o777) == "0o600", (rc, text)
+    assert "o0fake" not in text and "SENTINEL" not in text, "wgw-env printed a value"
+    rc2, text2 = run(["wgw-env", "--oq-env", str(live_oq), "--gateway-fragment", str(frag), "--out", str(out)])
+    assert rc2 == 1 and "WGW_ENV_REFUSED" in text2, "an existing env file is never overwritten"
+    rc3, text3 = run(["wgw-env", "--check", str(out)])
+    assert rc3 == 0 and "WGW_ENV_OK" in text3, text3
+    out_a = base / "wgw-auth.env"
+    rc4, _t = run(["wgw-env", "--oq-env", str(live_oq), "--gateway-fragment", str(frag), "--out", str(out_a), "--with-auth-secret-key"])
+    assert rc4 == 0 and WGW_AUTH_SECRET in parse_env_file(out_a)
+    assert run(["wgw-env", "--check", str(out_a)])[0] == 1, "AUTH_SECRET_KEY without U-13 (iii) must fail the check"
+    # collision: a reader equal to the gateway token; a short reader; a missing reader
+    for name, text_env in (("gateway == reader", "".join(f"{k}={v}\n" for k, v in readers.items()) + f"WATCHER_GATEWAY_TOKEN={readers['VIEWER_TOKEN']}\n"),
+                           ("short reader", f"WATCHER_GATEWAY_TOKEN={tok()}\nRISK_ADMIN_TOKEN=short\nVIEWER_TOKEN={tok()}\nREVIEWER_TOKEN={tok()}\nSYSTEM_OBSERVER_TOKEN={tok()}\n"),
+                           ("missing reader", f"WATCHER_GATEWAY_TOKEN={tok()}\n"),
+                           ("signal token present", "".join(f"{k}={v}\n" for k, v in readers.items()) + f"WATCHER_GATEWAY_TOKEN={tok()}\nSIGNAL_TOKEN_ACCOUNT_B={tok()}\n")):
+        f = base / f"wgw-bad-{abs(hash(name))}.env"
+        f.write_text(text_env, encoding="utf-8")
+        os.chmod(f, 0o600)
+        rc_b, text_b = run(["wgw-env", "--check", str(f)])
+        assert rc_b == 1 and "o0fake" not in text_b, (name, text_b)
+        checks += 1
+    checks += 4
+    # RS-17: four units
+    rel = base / "releases" / "watcher-gateway"
+    wd = rel / ("0" * 40) / "services" / "control-plane" / "api"
+    wgw_show = ("LoadState=loaded\nNeedDaemonReload=no\nFragmentPath=/etc/systemd/system/w.service\nUser=trader-v3-cp-watcher-gateway\n"
+                f"WorkingDirectory={wd}\nEnvironmentFiles={out} (ignore_errors=no)\n"
+                "Environment=CONTROL_PLANE_APP_ROLE=watcher-gateway PYTHONDONTWRITEBYTECODE=1\n"
+                "ExecStart={ path=/srv/trader-v3/.venv-cp/bin/uvicorn ; argv[]=/srv/trader-v3/.venv-cp/bin/uvicorn read_api:app --host 127.0.0.1 --port 8186 ; }\n")
+    U_W = WGW_UNIT
+
+    def iso4(shows, **kw):
+        return cp_isolation_check(shows, U_OQ, [U_NC, U_EI], str(oq_env_f), str(cp), U_W, str(out), str(rel), **kw)
+    shows4 = dict(good_shows, **{U_W: wgw_show})
+    rc_i, lines_i = iso4(shows4)
+    assert rc_i == 0 and "CP_ISOLATION_OK units=4 watcher_gateway=present" in lines_i[-1], lines_i
+    rc_i, lines_i = iso4(dict(good_shows, **{U_W: "LoadState=not-found\nNeedDaemonReload=no\n"}), wgw_may_be_absent=True)
+    assert rc_i == 0 and "watcher_gateway=absent" in lines_i[-1], lines_i
+    assert iso4(dict(good_shows, **{U_W: "LoadState=not-found\nNeedDaemonReload=no\n"}))[0] == 2, "absent unit only when allowed"
+    for name, patch_ in (("port 8183", ("--port 8186", "--port 8183")), ("host 0.0.0.0", ("--host 127.0.0.1", "--host 0.0.0.0")),
+                         ("role all", ("ROLE=watcher-gateway", "ROLE=all")), ("DB role expected", ("PYTHONDONTWRITEBYTECODE=1", "CONTROL_PLANE_EXPECT_DATABASE_ROLE=x")),
+                         ("shared code dir", (str(wd), str(cp / "api"))), ("other user", ("User=trader-v3-cp-watcher-gateway", "User=root")),
+                         ("second env file", (f"EnvironmentFiles={out} (ignore_errors=no)", f"EnvironmentFiles={out} (ignore_errors=no)\nEnvironmentFiles={oq_env_f} (ignore_errors=no)"))):
+        rc_i, lines_i = iso4(dict(good_shows, **{U_W: wgw_show.replace(*patch_)}))
+        assert rc_i == 1, (name, lines_i)
+        checks += 1
+    rc_i, lines_i = iso4(dict(shows4, **{U_NC: show(cp / "api", [out], role="node-control")}))
+    assert rc_i == 1 and any("loads " + str(out) in l for l in lines_i), ("node-control loads the watcher-gateway env", lines_i)
+    rc_i, lines_i = iso4(dict(shows4, **{U_W: wgw_show.replace(str(out), str(out_a))}))
+    assert rc_i == 1, "an env file other than --wgw-env"
+    shutil_out = base / "wgw-auth-copy.env"
+    shutil_out.write_bytes(out_a.read_bytes())
+    rc_i, lines_i = cp_isolation_check(dict(good_shows, **{U_W: wgw_show.replace(str(out), str(shutil_out))}), U_OQ, [U_NC, U_EI], str(oq_env_f), str(cp),
+                                       U_W, str(shutil_out), str(rel), allow_auth_secret=True)
+    assert rc_i == 0, ("AUTH_SECRET_KEY allowed only with --allow-auth-secret-key", lines_i)
+    assert "o0fake" not in "\n".join(lines_i)
+    checks += 4
+    # shared directory: 67b401a manifest, drift report with suggestions (never a repair), acceptance bound to the list, snapshot
+    root = base / "trader-root"
+    (root / "services/control-plane/api").mkdir(parents=True)
+    (root / "packages/execution-domain").mkdir(parents=True)
+    (root / "services/control-plane/api/read_api.py").write_text("print(1)\n")
+    (root / "packages/execution-domain/a.py").write_text("x = 1\n")
+    man = base / "cp-shared.baseline.sha256"
+    man.write_text(f"{sha256_file(root / 'services/control-plane/api/read_api.py')}  services/control-plane/api/read_api.py\n"
+                   f"{sha256_file(root / 'packages/execution-domain/a.py')}  packages/execution-domain/a.py\n", encoding="utf-8")
+    snap = base / "shared-before.json"
+    rc, text = run(["shared-tree", "--root", str(root), "--manifest", str(man), "--snapshot-out", str(snap)])
+    assert rc == 0 and "MANIFEST_OK cp-shared-vs-67b401a compared=2" in text and snap.is_file(), text
+    assert run(["shared-tree", "--root", str(root), "--compare", str(snap)])[1].startswith("SHARED_UNCHANGED")
+    hot = root / "services/control-plane/api/read_api.py"
+    hot.write_text("print('hotfix')\n")
+    (root / "services/control-plane/api/extra_hotmount.py").write_text("y = 2\n")
+    before_bytes = hot.read_bytes()
+    rc, text = run(["shared-tree", "--root", str(root), "--manifest", str(man)])
+    drift_sha = re.search(r"drift_sha256=([0-9a-f]{64})", text).group(1)
+    assert rc == 1 and "DRIFT MODIFIED services/control-plane/api/read_api.py" in text and "SUGGESTION option A" in text \
+        and "INFO EXTRA services/control-plane/api/extra_hotmount.py" in text and hot.read_bytes() == before_bytes, text
+    rc, text = run(["shared-tree", "--root", str(root), "--manifest", str(man), "--accept-drift-sha256", drift_sha])
+    assert rc == 0 and "MANIFEST_DRIFT_ACCEPTED" in text, text
+    assert run(["shared-tree", "--root", str(root), "--manifest", str(man), "--accept-drift-sha256", "0" * 64])[0] == 1, "acceptance is bound to the list"
+    rc, text = run(["shared-tree", "--root", str(root), "--compare", str(snap)])
+    assert rc == 1 and "SHARED_CHANGED changed=1 added=1" in text, text
+    checks += 5
+    # NeedDaemonReload over every unit
+    show_all = "Id=caddy.service\nNeedDaemonReload=no\n\nId=trader-v3-controlplane-operator-query.service\nNeedDaemonReload=no\n\nId=x.timer\nNeedDaemonReload=no\n"
+    assert daemon_reload_check(show_all, [], ["caddy.service"])[0] == 0
+    assert daemon_reload_check(show_all.replace("x.timer\nNeedDaemonReload=no", "x.timer\nNeedDaemonReload=yes"), [], [])[0] == 1
+    assert daemon_reload_check(show_all + f"\nId={WGW_UNIT}\nNeedDaemonReload=yes\n", [WGW_UNIT], [])[0] == 0, "the unit this step installed"
+    assert daemon_reload_check("", [], [])[0] == 2 and daemon_reload_check(show_all, [], ["missing.service"])[0] == 2
+    assert daemon_reload_check("Id=a.service\n", [], [])[0] == 1, "a missing property is not 'no'"
+    checks += 5
+    # ports (PC-6 (ii), S-06)
+    ss = ('LISTEN 0 4096 127.0.0.1:8183 0.0.0.0:* users:(("uvicorn",pid=1,fd=3))\n'
+          'LISTEN 0 4096 127.0.0.1:8185 0.0.0.0:* users:(("other",pid=2,fd=3))\n')
+    assert port_check(ss, "8186", "free", (8184, 8189))[0] == 0 and any("RECORD port 8185" in l for l in port_check(ss, "8186", "free", (8184, 8189))[1])
+    assert port_check(ss + 'LISTEN 0 4096 127.0.0.1:8186 0.0.0.0:* users:(("uvicorn",pid=3,fd=3))\n', "8186", "free", None)[0] == 1
+    assert port_check(ss + 'LISTEN 0 4096 127.0.0.1:8186 0.0.0.0:*\n', "8186", "loopback-only", None)[0] == 0
+    assert port_check(ss + 'LISTEN 0 4096 0.0.0.0:8186 0.0.0.0:*\n', "8186", "loopback-only", None)[0] == 1
+    assert port_check(ss, "8186", "loopback-only", None)[0] == 1
+    checks += 5
+    # V-5 against a local http stand-in (the real run is https on 443 from outside jp-24): the closed status sets
+    import http.server
+
+    def v5_server(codes: dict):
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.headers.get("Authorization") or self.headers.get("Cookie"):
+                    code = 599
+                else:
+                    code = codes.get(self.path, 200)
+                self.send_response(code); self.send_header("Content-Length", "0"); self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        return srv
+    good_codes = {"/v1/watcher/status": 404, "/v1/watcher/dialogs": 404, "/V1/WATCHER/status": 404, "/m/v1/watcher/status": 401, "/m/v1/accounts": 401}
+    for phase, codes, want in (("unit-running", good_codes, 0), ("before-unit", dict(good_codes, **{"/m/v1/watcher/status": 502}), 0),
+                               ("unit-running", dict(good_codes, **{"/m/v1/watcher/status": 502}), 1),
+                               ("unit-running", dict(good_codes, **{"/v1/watcher/status": 200}), 1),
+                               ("unit-running", dict(good_codes, **{"/m/v1/accounts": 200}), 1),
+                               ("before-unit", good_codes, 1)):
+        srv = v5_server(codes)
+        try:
+            rc, text = run(["public-direct-check", "--host", "localhost", "--phase", phase, "--scheme", "http", "--port", str(srv.server_address[1])])
+        finally:
+            srv.shutdown(); srv.server_close()
+        assert rc == want and ("V5_PUBLIC_CHECK_OK mode=test" in text) == (want == 0), (phase, codes, text)
+        checks += 1
+    ev = ("\n".join(f"V5 GET {p_} status=404 content_type=- size=0 want=404 ok" for p_, _k in V5_REQUESTS)
+          + f"\nV5_PUBLIC_CHECK_OK mode=external phase=unit-running host=jp-bot.balen.wang at=x epoch=1000 checks=5\n")
+    assert v5_evidence_check(ev, "jp-bot.balen.wang", "unit-running", 900, 3600, now=1100)[0]
+    assert not v5_evidence_check(ev.replace("mode=external", "mode=loopback"), "jp-bot.balen.wang", "unit-running", 900, 3600, now=1100)[0]
+    assert not v5_evidence_check(ev, "jp-bot.balen.wang", "unit-running", 1200, 3600, now=1300)[0], "older than the unit start"
+    assert not v5_evidence_check(ev, "jp-bot.balen.wang", "unit-running", 900, 60, now=2000)[0], "too old"
+    assert not v5_evidence_check(ev.replace(" ok\nV5_PUBLIC", " FAIL\nV5_PUBLIC"), "jp-bot.balen.wang", "unit-running", 900, 3600, now=1100)[0]
+    rc, text = run(["v5-evidence-check", "--host", "jp-bot.balen.wang"])
+    assert rc == 1 and text.startswith("DIRECT_GUARD_UNVERIFIED"), text
+    checks += 6
+    # the unit file: render == lint-clean; each deviation is caught
+    conf = "[Service]\nMemoryMax=512M\nRestart=on-failure\n"
+    sha = "a" * 40
+    unit = render_wgw_unit("/srv/trader-v3", sha, conf)
+    assert wgw_unit_lint(unit, "/srv/trader-v3", sha) == [] and "MemoryMax=512M" in unit and "[Service]\n[Service]" not in unit, unit
+    for name, bad_unit in (("port 8183", unit.replace("--port 8186", "--port 8183")), ("pg_isready", unit.replace("TimeoutStopSec", "ExecStartPre=+/usr/bin/docker exec x pg_isready\nTimeoutStopSec")),
+                           ("DB role", unit.replace("PYTHONDONTWRITEBYTECODE=1", "PYTHONDONTWRITEBYTECODE=1\nEnvironment=CONTROL_PLANE_EXPECT_DATABASE_ROLE=x")),
+                           ("shared dir", unit.replace(f"releases/watcher-gateway/{sha}/", "")), ("other env file", unit.replace("watcher-gateway.env", "operator-query.env")),
+                           ("0.0.0.0", unit.replace("--host 127.0.0.1", "--host 0.0.0.0")), ("root user", unit.replace(f"User={WGW_USER}", "User=root"))):
+        assert wgw_unit_lint(bad_unit, "/srv/trader-v3", sha), ("unit lint missed", name)
+        checks += 1
+    # the RS-16 dependency check (python -B import smoke) on a fake code tree
+    tr = base / "smoke-root"
+    api = tr / "releases" / "watcher-gateway" / sha / "services" / "control-plane" / "api"
+    api.mkdir(parents=True)
+    (tr / "services" / "control-plane").mkdir(parents=True)
+    (tr / "services" / "control-plane" / "shared.txt").write_text("shared\n")
+    fake_venv = base / "fake-venv"
+    (fake_venv / "bin").mkdir(parents=True)
+    (fake_venv / "bin" / "python").symlink_to(sys.executable)
+    good_mod = ("class R:\n    def __init__(s, n, p): s.name, s.path = n, p\n"
+                "class A:\n    routes = [R('watcher_gateway__status', '/v1/watcher/status'), R('role_database_health', '/health/role')]\n"
+                "def create_app(role):\n    assert role == 'watcher-gateway'\n    return A()\n")
+    (api / "watcher_gateway.py").write_text("import os\ndef readiness():\n    return (bool(os.environ.get('WATCHER_GATEWAY_TOKEN')), 'ok')\n")
+
+    def smoke(read_api_text):
+        (api / "read_api.py").write_text(read_api_text)
+        return run(["wgw-smoke", "--code-dir", str(tr / "releases" / "watcher-gateway" / sha), "--venv", str(fake_venv), "--env-file", str(out),
+                    "--trader-root", str(tr)])
+    rc, text = smoke(good_mod)
+    assert rc == 0 and "SMOKE_OK" in text and "gateway_routes=1" in text and "o0fake" not in text, text
+    assert not list(api.rglob("__pycache__")), "python -B must not write __pycache__"
+    rc, text = smoke("import o0_no_such_module_httpx_stand_in\n" + good_mod)
+    assert rc == 3 and "DEPENDENCY_MISSING o0_no_such_module_httpx_stand_in" in text, text
+    rc, text = smoke(f"open({str(tr / 'services' / 'control-plane' / 'shared.txt')!r}).read()\n" + good_mod)
+    assert rc == 1 and "under TRADER_ROOT outside the code dir" in text, text
+    rc, text = smoke("open(__file__ + '.written', 'w').write('x')\n" + good_mod)
+    assert rc == 1 and "wrote into the code dir" in text, text
+    (api / "read_api.py.written").unlink()
+    rc, text = smoke(good_mod.replace("R('watcher_gateway__status', '/v1/watcher/status'), ", ""))
+    assert rc == 1 and "0 gateway routes" in text, text
+    checks += 5
+    return checks
+
+
 def cmd_selftest(_args: argparse.Namespace) -> int:
     import contextlib
     import io
@@ -1111,19 +1944,20 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
         cp = base / "cp"
         (cp / "api").mkdir(parents=True)
         oq_env_f, nc_env_f, bad_env_f = base / "operator-query.env", base / "node-control.env", base / "leaky.env"
-        oq_env_f.write_text("WATCHER_GATEWAY_TOKEN=SENTINELoqGW0123456789\nRISK_ADMIN_TOKEN=x\n", encoding="utf-8")
+        oq_env_f.write_text("WATCHER_SNAPSHOT_TOKEN=SENTINELoqSN0123456789\nRISK_ADMIN_TOKEN=x\n", encoding="utf-8")   # WGW-1.0.4: no gateway token
         nc_env_f.write_text("NAUTILUS_NODE_AUTH_JSON={}\n", encoding="utf-8")
         bad_env_f.write_text("export WATCHER_SNAPSHOT_TOKEN=SENTINELleak0123456789\n", encoding="utf-8")
         U_OQ, U_NC, U_EI = "trader-v3-controlplane-operator-query", "trader-v3-controlplane-node-control", "trader-v3-controlplane-event-ingest"
-        def show(wd, files, env="", reload="no"):
+        def show(wd, files, env="", reload="no", role=None):
+            role = "node-control" if role is None else role     # any explicit non-'all' role satisfies RS-17's role rule
             return "LoadState=loaded\nNeedDaemonReload=%s\nFragmentPath=/etc/systemd/system/x.service\nWorkingDirectory=%s\n%sEnvironment=%s\n" % (
-                reload, wd, "".join(f"EnvironmentFiles={f} (ignore_errors=no)\n" for f in files), env)
-        good_shows = {U_OQ: show(cp / "api", [oq_env_f], "PYTHONPATH=/x"), U_NC: show(cp / "api", [nc_env_f]),
-                      U_EI: show(cp / "api", [], "FOO=SENTINELvalue0123456789 BAR=1")}
+                reload, wd, "".join(f"EnvironmentFiles={f} (ignore_errors=no)\n" for f in files), (env + (" CONTROL_PLANE_APP_ROLE=" + role if role else "")).strip())
+        good_shows = {U_OQ: show(cp / "api", [oq_env_f], "PYTHONPATH=/x", role="operator-query"), U_NC: show(cp / "api", [nc_env_f], role="node-control"),
+                      U_EI: show(cp / "api", [], "FOO=SENTINELvalue0123456789 BAR=1", role="event-ingest")}
         def iso(shows):
             return cp_isolation_check(shows, U_OQ, [U_NC, U_EI], str(oq_env_f), str(cp))
         rc_i, lines_i = iso(good_shows)
-        assert rc_i == 0 and "CP_ISOLATION_OK shared_code_dir=" + U_NC + "," + U_EI in lines_i[-1], lines_i
+        assert rc_i == 0 and f"CP_ISOLATION_OK units=3 watcher_gateway=absent shared_code_dir={U_OQ},{U_NC},{U_EI} d04=no" in lines_i[-1], lines_i
         for name, shows_bad, want in (
             ("node-control loads operator-query.env", dict(good_shows, **{U_NC: show(cp / "api", [nc_env_f, oq_env_f])}), 1),
             ("event-ingest Environment= carries a watcher token name", dict(good_shows, **{U_EI: show(cp / "api", [], "WATCHER_GATEWAY_TOKEN=SENTINELenv0123456789")}), 1),
@@ -1139,9 +1973,18 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
             text_i = "\n".join(lines_i)
             assert "SENTINEL" not in text_i, (name, "env value printed")
             checks += 1
-        rc_i, lines_i = iso(dict(good_shows, **{U_NC: show(base / "other", [nc_env_f]), U_EI: show(base / "other", [])}))
-        assert rc_i == 0 and "shared_code_dir=none" in lines_i[-1], lines_i
-        rc_i, lines_i = iso(dict(good_shows, **{U_EI: "LoadState=loaded\nNeedDaemonReload=no\nWorkingDirectory=%s\nEnvironmentFiles=-%s\n" % (cp / "api", base / "missing.env")}))
+        # WGW-1.0.4 RS-17: the three units keep the shared directory, an explicit non-'all' role, no gateway token anywhere
+        rc_i, lines_i = iso(dict(good_shows, **{U_NC: show(base / "other", [nc_env_f], role="node-control"), U_EI: show(base / "other", [], role="event-ingest")}))
+        assert rc_i == 1 and any(l.startswith("CODE_DIR_MISMATCH " + U_NC) for l in lines_i), lines_i
+        for role in ("", "all", "watcher-gateway"):
+            rc_i, lines_i = iso(dict(good_shows, **{U_EI: show(cp / "api", [], role=role)}))
+            assert rc_i == 1 and any(l.startswith("ROLE_NOT_EXPLICIT " + U_EI) for l in lines_i), (role, lines_i)
+        leaky_oq = base / "oq-with-gw.env"
+        leaky_oq.write_text("WATCHER_GATEWAY_TOKEN=SENTINELoqGW0123456789\n", encoding="utf-8")
+        rc_i, lines_i = cp_isolation_check(dict(good_shows, **{U_OQ: show(cp / "api", [leaky_oq], role="operator-query")}), U_OQ, [U_NC, U_EI], str(leaky_oq), str(cp))
+        assert rc_i == 1 and any("VIOLATION " + U_OQ + ": defines WATCHER_GATEWAY_TOKEN" in l for l in lines_i) and "SENTINEL" not in "\n".join(lines_i), lines_i
+        checks += 3
+        rc_i, lines_i = iso(dict(good_shows, **{U_EI: "LoadState=loaded\nNeedDaemonReload=no\nWorkingDirectory=%s\nEnvironmentFiles=-%s\nEnvironment=CONTROL_PLANE_APP_ROLE=event-ingest\n" % (cp / "api", base / "missing.env")}))
         assert rc_i == 0, ("a missing '-' (optional) env file is not a violation", lines_i)
         checks += 2
         # review wac-072 🟡-3: unparseable EnvironmentFiles= and not-yet-loaded drop-ins are UNCOMPARABLE (rc 2), never OK
@@ -1169,13 +2012,15 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
         oq_pre.write_text("RISK_ADMIN_TOKEN=x\n", encoding="utf-8")          # before O-2: no watcher names yet
         link = base / "nc-link.env"
         link.symlink_to(oq_pre)
-        rc_i, lines_i = cp_isolation_check(dict(good_shows, **{U_NC: show(cp / "api", [link])}), U_OQ, [U_NC, U_EI], str(oq_pre), str(cp))
+        rc_i, lines_i = cp_isolation_check(dict(good_shows, **{U_NC: show(cp / "api", [link], role="node-control")}), U_OQ, [U_NC, U_EI], str(oq_pre), str(cp))
         assert rc_i == 1 and any("ENVFILE_ISOLATION VIOLATION " + U_NC + " loads" in l for l in lines_i), ("symlink to operator-query.env", lines_i)
         rc_i, lines_i = iso(dict(good_shows, **{U_EI: show(cp / "api", []) + f"EnvironmentFiles={base}/absent-optional.env (ignore_errors=yes)\n"}))
         assert rc_i == 0 and any("absent (ignore_errors=yes)" in l for l in lines_i), ("systemd ignore_errors=yes form", lines_i)
         rc_i, lines_i = iso(dict(good_shows, **{U_EI: show(cp / "api", []) + "EnvironmentFiles=/elsewhere/operator-query.env (ignore_errors=yes)\n"}))
         assert rc_i == 1 and any("loads /elsewhere/operator-query.env" in l for l in lines_i), ("operator-query.env by name", lines_i)
         checks += 4
+        wgw_checks = _selftest_wgw(base, cp, good_shows, show, U_OQ, U_NC, U_EI, oq_env_f)
+        checks += wgw_checks
         # warm-up
         j = ("Sep 26 x uvicorn[11]: INFO snapshot_warmup result=success revision=7 content_sha256=abcdefabcdef pid=11 role=operator-query duration_ms=40\n"
              "Sep 26 x uvicorn[12]: INFO snapshot_warmup result=success revision=7 content_sha256=abcdefabcdef pid=12 role=operator-query duration_ms=41\n")
@@ -1190,7 +2035,7 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
         for path in sorted(base.rglob("*"), reverse=True):
             path.unlink() if (path.is_symlink() or path.is_file()) else path.rmdir()
         base.rmdir()
-    print(f"SELFTEST_OK checks={checks} fleet_cases={len(cases)} redaction_shapes=3+2 path_shapes=4+{len(PATH_SHAPES_R3)} path_pins={len(PATH_RULE_PINS)} legit_paths={len(LEGIT_PATHS)} gates=14 fleet_params=12 cp_isolation=19 warmup=6")
+    print(f"SELFTEST_OK wgw_stage_o={wgw_checks} checks={checks} fleet_cases={len(cases)} redaction_shapes=3+2 path_shapes=4+{len(PATH_SHAPES_R3)} path_pins={len(PATH_RULE_PINS)} legit_paths={len(LEGIT_PATHS)} gates=14 fleet_params=12 cp_isolation=19 warmup=6")
     return 0
 
 
@@ -1232,6 +2077,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--expect-status", type=int, action="append")
     p.add_argument("--expect-code")
     p.add_argument("--expect-no-location", action="store_true")
+    p.add_argument("--expect-json", action="append", help="KEY=VALUE on a non-secret top-level key (status, app_role, database, gateway)")
     p.add_argument("--timeout", type=float, default=10.0)
     p.set_defaults(func=cmd_http_probe)
     p = sub.add_parser("closure")
@@ -1271,7 +2117,71 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--other-unit", action="append", required=True)
     p.add_argument("--oq-env", required=True)
     p.add_argument("--cp-root", required=True)
+    p.add_argument("--wgw-unit", help=f"RS-17: the watcher-gateway unit ({WGW_UNIT})")
+    p.add_argument("--wgw-env", help="its env file (secrets/control-plane/watcher-gateway.env)")
+    p.add_argument("--wgw-root", help="releases/watcher-gateway (its WorkingDirectory must be below)")
+    p.add_argument("--wgw-may-be-absent", action="store_true", help="preflight: the unit is not installed yet")
+    p.add_argument("--allow-auth-secret-key", action="store_true", help="U-13 (iii) approved: AUTH_SECRET_KEY may be in the watcher-gateway env")
     p.set_defaults(func=cmd_cp_isolation)
+    p = sub.add_parser("wgw-env", help="stage O: build (or --check) the watcher-gateway env file from the whitelist (names only printed)")
+    p.add_argument("--oq-env", type=Path, help="the live operator-query.env (source of the four reader tokens)")
+    p.add_argument("--gateway-fragment", type=Path, help="credential set watcher-gateway.env (WATCHER_GATEWAY_TOKEN)")
+    p.add_argument("--out", type=Path, help="new file (0600, never overwritten)")
+    p.add_argument("--set-optional", action="append", help="NAME=VALUE for WATCHER_GATEWAY_URL / _CONFIG_SLOTS / _MEDIA_SLOTS")
+    p.add_argument("--with-auth-secret-key", action="store_true", help="U-13 (iii) only: also copy AUTH_SECRET_KEY")
+    p.add_argument("--check", type=Path, help="validate an existing watcher-gateway env file instead")
+    p.set_defaults(func=cmd_wgw_env)
+    p = sub.add_parser("shared-tree", help="stage O: shared control-plane code dir vs the 67b401a manifest; before/after snapshot")
+    p.add_argument("--root", type=Path, required=True, help="TRADER_ROOT (/srv/trader-v3)")
+    p.add_argument("--manifest", type=Path, help="bundle cp-shared.baseline.sha256")
+    p.add_argument("--sub", action="append", help=f"sub-directories (default {' '.join(SHARED_SUBDIRS)})")
+    p.add_argument("--accept-drift-sha256", help="the user's decision for exactly this drift list (see the SUGGESTION lines)")
+    p.add_argument("--snapshot-out", type=Path, help="write the full snapshot (every entry: sha256, mode, owner)")
+    p.add_argument("--compare", type=Path, help="compare the directory now with an earlier snapshot")
+    p.set_defaults(func=cmd_shared_tree)
+    p = sub.add_parser("daemon-reload-check", help="stage O: every unit NeedDaemonReload=no (else DAEMON_RELOAD_PENDING)")
+    p.add_argument("--show", type=Path, required=True, help="output of `systemctl show -p Id -p NeedDaemonReload <every unit>`")
+    p.add_argument("--exclude", action="append", help="a unit this very step installed (never loaded yet)")
+    p.add_argument("--require", action="append", help="a unit that must be in the list (else UNCOMPARABLE)")
+    p.set_defaults(func=cmd_daemon_reload_check)
+    p = sub.add_parser("port-check", help="`ss -H -ltnp` output: a port free, or listening on loopback only")
+    p.add_argument("--ss-file", type=Path, required=True)
+    p.add_argument("--port", default=WGW_PORT)
+    p.add_argument("--expect", choices=("free", "loopback-only"), required=True)
+    p.add_argument("--record-range", help="e.g. 8184-8189: record every listener in the range (PC-6 (ii))")
+    p.set_defaults(func=cmd_port_check)
+    p = sub.add_parser("public-direct-check", help="V-5 (RS-19): five unauthenticated GETs, status codes only")
+    p.add_argument("--host", required=True, help="the public host name")
+    p.add_argument("--phase", choices=("unit-running", "before-unit"), required=True)
+    p.add_argument("--loopback", action="store_true", help="jp-24 supplementary check (127.0.0.1 with the public name); never external evidence")
+    p.add_argument("--scheme", choices=("https", "http"), default="https", help=argparse.SUPPRESS)
+    p.add_argument("--port", type=int, default=443, help=argparse.SUPPRESS)
+    p.add_argument("--timeout", type=float, default=10.0)
+    p.set_defaults(func=cmd_public_direct_check)
+    p = sub.add_parser("wgw-unit", help="render (--render) or lint (--lint) the watcher-gateway systemd unit")
+    p.add_argument("--render", action="store_true")
+    p.add_argument("--lint", type=Path)
+    p.add_argument("--trader-root", default="/srv/trader-v3")
+    p.add_argument("--release-sha", required=True)
+    p.add_argument("--resource-conf", type=Path, help="infra/systemd/account-stall-control-plane-reader.conf of the candidate")
+    p.add_argument("--out", type=Path)
+    p.set_defaults(func=cmd_wgw_unit)
+    p = sub.add_parser("wgw-smoke", help="RS-16 dependency check: python -B import smoke of the new code dir with the whitelisted env")
+    p.add_argument("--code-dir", type=Path, required=True, help="the release tree (staging in preflight, the installed dir in apply)")
+    p.add_argument("--venv", type=Path, required=True, help="the shared venv, read-only (/srv/trader-v3/.venv-cp)")
+    p.add_argument("--env-file", type=Path, required=True, help="the watcher-gateway env (read in-process, values never printed)")
+    p.add_argument("--trader-root", default="/srv/trader-v3")
+    p.add_argument("--as-user", help=f"run as this user via setpriv (apply: {WGW_USER})")
+    p.add_argument("--with-auth-secret-key", action="store_true")
+    p.add_argument("--timeout", type=float, default=120.0)
+    p.set_defaults(func=cmd_wgw_smoke)
+    p = sub.add_parser("v5-evidence-check", help="O-3: the external V-5 evidence file (else DIRECT_GUARD_UNVERIFIED)")
+    p.add_argument("--evidence", type=Path)
+    p.add_argument("--host", required=True)
+    p.add_argument("--phase", default="unit-running")
+    p.add_argument("--not-before", type=int, default=0, help="epoch of the unit start: older evidence is refused")
+    p.add_argument("--max-age-s", type=int, default=3600)
+    p.set_defaults(func=cmd_v5_evidence_check)
     p = sub.add_parser("gate-write")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--stage", required=True)

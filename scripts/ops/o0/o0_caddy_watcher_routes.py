@@ -1,5 +1,27 @@
 #!/usr/bin/env python3
-"""O-0 Caddy helper for the WGW-1.0.2 watcher-gateway snippet: check artifacts, verify adapted JSON, probe a local Caddy.
+"""O-0 Caddy helper for the watcher-gateway snippet: check artifacts, verify adapted JSON, probe a local Caddy.
+
+WGW-1.0.4 (contracts/backend-api.md §9.14.6, RS-1 and RS-11..RS-15; task wac-105) - read this first, it overrides
+the older text below where they differ:
+  * the gateway is the control-plane role watcher-gateway on 127.0.0.1:8186 (--upstream default); operator-query
+    (--oq-upstream, 8183) keeps the mobile /m/v1/* paths and the panel, and has NO gateway;
+  * the snippet is format v2 (RS-1): the routes snippet ends with the fallback group and then the direct guard
+    ``^(?i:/v1/watcher)(?:[/\n%]|$)`` (404); a second snippet watcher_gateway_direct_guard holds the guard alone;
+  * RS-11: every per-path route = one strip_path_prefix /m + reverse_proxy 127.0.0.1:8186, no rewrite, no transport,
+    no header operation; and no request header operation anywhere from the server root to it;
+  * the MAIN criterion is I-2 (i2_check, RS-12): nothing in the WHOLE adapted JSON but the snippet's upstreams names
+    8186 (string, number, port range), and no upstream port / whole dial comes from a request-scoped placeholder
+    (review wac-096 r5 🟡-A) -> GATEWAY_PORT_EXPOSED (fails); unresolvable upstreams -> UPSTREAM_UNRESOLVED (info,
+    PC-6 (i));
+  * DEFENSE IN DEPTH (§9.14.6 V-1 (d); the user: "not so strict"): the older operator-query (8183) checks - forwarders
+    of the prefix, forwarders after a path change, unknown containers, a pre-snippet path change into the /v1/watcher
+    space, a plain top-level forward_auth (review wac-097 P4), an unevaluable matcher AFTER the snippet (P1, the SPA
+    try_files catch-all) - print HINT lines and do not fail, unless the same shape reaches 8186 (then I-2 fails it);
+    the watcher ports (9090/9100), the F-12/F-13 shadow rules for /m/v1/watcher and every browser check still fail;
+  * V-2: the app site answers /v1/watcher/status, /V1/WATCHER/status, //v1/watcher/status, /v1/watcher/dialogs with the
+    guard's 404 (the emulator cleans the path like Caddy's MatchPathRE); V-3 (probe): separate 8186 and 8183 stubs,
+    only table paths may hit the 8186 stub; V-4 (caddyfile-check): a standalone 8186 only in (watcher_gateway_upstream).
+  Result lines carry hints=N upstream_unresolved=M; PC-6 (i) reviews every such line by hand.
 
 DRAFT for docs/agent-team/release/o0-runbook-deploy.md (stage C) and
 o0-site-checklist.md (S-02 .. S-04, L-A1).
@@ -140,18 +162,36 @@ APP_OUTER_PREFIX = "/v1/watcher"
 EXTERNAL_PREFIX = MOBILE_PREFIX + APP_OUTER_PREFIX          # /m/v1/watcher
 WATCHER_PREFIX = EXTERNAL_PREFIX + "/"
 LIST_FORMAT = "watcher-gateway-caddy-paths.v2"
-SNIPPET_FORMAT = "watcher-gateway-caddy-snippet.v1"
+# WGW-1.0.3 format v2 (RS-1): the routes snippet ends with the fallback group, then the direct guard group;
+# a second snippet (watcher_gateway_direct_guard) holds the same guard group alone (optional for other sites)
+SNIPPET_FORMAT = "watcher-gateway-caddy-snippet.v2"
 SNIPPET_FILE = "caddy-watcher-gateway.caddy"
 SNIPPET_NAME = "watcher_gateway_routes"
+GUARD_SNIPPET_NAME = "watcher_gateway_direct_guard"
 UPSTREAM_SNIPPET = "watcher_gateway_upstream"
 # §9.14.3, written out independently of the generator (the "\n" is the two characters \ and n)
 FALLBACK_REGEX = "^(?i:" + EXTERNAL_PREFIX + ")(?:[/\\n]|$)"
 FALLBACK_NAME = "wgw_fallback"
+# §9.14.3 format v2: direct = "^(?i:" + app_outer_prefix + ")(?:[/\n%]|$)" (one more class member than the fallback: '%')
+GUARD_REGEX = "^(?i:" + APP_OUTER_PREFIX + ")(?:[/\\n%]|$)"
+GUARD_NAME = "wgw_direct"
+# §9.14.4 item 1 (WGW-1.0.3 v2 entry), the guard probes as the contract lists them (Go regexp truth); the last
+# NO_MATCH entry is the uncleaned '//v1/watcher/status' (real Caddy cleans it first: V-2/V-3 expect the guard 404 there)
+GUARD_MATCH = ("/v1/watcher", "/v1/watcher/", "/V1/WATCHER/status", "/v1/watcher/status", "/v1/watcher\n", "/V1/WATCHER\n",
+               "/v1/watcher/status\n", "/v1/watcher%", "/v1/watcher%x", "/v1/watcher/media/1700000000000-1.png", "/v1/watcher/status#x")
+GUARD_NO_MATCH = ("/v1/watcherx", "/v1/watcherx\n", "/v1/watcher\r", "/v1/watcher#x", "/v1/other", "/v1/accounts", "/xv1/watcher",
+                  "/m/v1/watcher/status", "//v1/watcher/status")
+# §9.14.6 V-2: requests on the app site that the guard must answer with 404 (the emulator cleans the path like Caddy)
+DIRECT_PROBES = ("/v1/watcher/status", "/V1/WATCHER/status", "//v1/watcher/status", "/v1/watcher/dialogs")
 HEADER_KEYS = ("_generated_from", "_yaml_sha256", "_phase_max", "_format")
 HTTP_METHODS = ("DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT")
 LITERAL_SEGMENT = re.compile(r"^[a-z0-9-]+$")
 PARAM_SEGMENT = re.compile(r"^\{[a-z][a-z0-9_]*\}$")
-DEFAULT_GATEWAY_UPSTREAM = "127.0.0.1:8183"
+# WGW-1.0.4 (§9.14.6, RS-11): the gateway is the watcher-gateway control-plane role on its own loopback port 8186;
+# operator-query (8183) serves the mobile /m/v1/* paths and the panel /v1/*, and has no gateway at all
+DEFAULT_GATEWAY_UPSTREAM = "127.0.0.1:8186"
+DEFAULT_OQ_UPSTREAM = "127.0.0.1:8183"
+GATEWAY_PORT = "8186"
 DEFAULT_WATCHER_UPSTREAM = "127.0.0.1:9090"
 WATCHER_PORTS = ("9090", "9100")
 BROWSER_TOKEN_PLACEHOLDER = "{env.WATCHER_BROWSER_PROXY_TOKEN}"
@@ -305,13 +345,20 @@ def load_list(path: Path) -> tuple[list[Line], dict[str, str]]:
     return lines, meta
 
 
+def _guard_group() -> list[str]:
+    return [f"\t@{GUARD_NAME} {{", f"\t\tpath_regexp {GUARD_REGEX}", "\t}", f"\thandle @{GUARD_NAME} {{", "\t\trespond 404", "\t}"]
+
+
 def expected_snippet(lines: list[Line], meta: dict[str, str]) -> str:
-    """§9.14.3 snippet shape, rendered here from the list (independent of the generator)."""
+    """§9.14.3 snippet shape, format v2 (WGW-1.0.3, RS-1), rendered here from the list (independent of the generator):
+    ``(watcher_gateway_routes)`` = every per-path group, the fallback group, then the direct guard group;
+    ``(watcher_gateway_direct_guard)`` = the same guard group alone."""
     out = [f"# {k} {meta[k]}" for k in HEADER_KEYS[:3]] + [f"# _format {SNIPPET_FORMAT}", f"({SNIPPET_NAME}) {{"]
     for line in lines:
         out += [f"\t@{line.matcher_name} {{", f"\t\tpath_regexp {line.regex}", f"\t\tmethod {' '.join(line.methods)}", "\t}",
                 f"\thandle @{line.matcher_name} {{", f"\t\timport {UPSTREAM_SNIPPET}", "\t}"]
-    out += [f"\t@{FALLBACK_NAME} {{", f"\t\tpath_regexp {FALLBACK_REGEX}", "\t}", f"\thandle @{FALLBACK_NAME} {{", "\t\trespond 404", "\t}", "}"]
+    out += [f"\t@{FALLBACK_NAME} {{", f"\t\tpath_regexp {FALLBACK_REGEX}", "\t}", f"\thandle @{FALLBACK_NAME} {{", "\t\trespond 404", "\t}"]
+    out += _guard_group() + ["}", f"({GUARD_SNIPPET_NAME}) {{"] + _guard_group() + ["}"]
     return "\n".join(out) + "\n"
 
 
@@ -347,7 +394,7 @@ def cmd_check_artifacts(args: argparse.Namespace) -> int:
             print(f"CADDY_ARTIFACTS_FAILED {key} {meta[key]} != expected {want}")
             return 1
     print(f"CADDY_ARTIFACTS_OK lines={len(lines)} list_format={LIST_FORMAT} snippet_format={SNIPPET_FORMAT} "
-          f"yaml_sha256={meta['_yaml_sha256']} phase_max={meta['_phase_max']} fallback_verbatim=yes")
+          f"yaml_sha256={meta['_yaml_sha256']} phase_max={meta['_phase_max']} fallback_verbatim=yes direct_guard_verbatim=yes")
     return 0
 
 
@@ -423,6 +470,47 @@ class Outcome:
     chain: list[Step] = field(default_factory=list)
     responded: bool = False
     final_path: str = ""
+    # WGW-1.0.4: set once the request has passed every route of the snippet block without matching (after the direct
+    # guard); from there on only non-snippet routes remain and, with I-2 clean, none of them can dial 8186
+    after_snippet: bool = False
+
+
+class UncomparableAfterSnippet(Uncomparable):
+    """Raised by emulate() when the emulator gives up on a route that runs AFTER the whole snippet block (e.g. the
+    SPA catch-all ``handle { try_files {path} /index.html; file_server }`` and its ``file`` matcher, review wac-097
+    P1). For the gateway questions (does this request reach 8186?) that is not a failure: the request already passed
+    every snippet route, and I-2 proves nothing else in the config dials 8186 (run_verify reports it as a HINT)."""
+
+
+def go_path_clean(p: str) -> str:
+    """Go ``path.Clean`` (Python's posixpath.normpath keeps a leading '//', Go does not)."""
+    if p == "":
+        return "."
+    rooted = p.startswith("/")
+    out: list[str] = []
+    for seg in p.split("/"):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            if out and out[-1] != "..":
+                out.pop()
+            elif not rooted:
+                out.append("..")
+            continue
+        out.append(seg)
+    cleaned = ("/" if rooted else "") + "/".join(out)
+    return cleaned or ("/" if rooted else ".")
+
+
+def caddy_clean_path(p: str) -> str:
+    """Caddy v2.10.2 ``cleanPath`` (caddyhttp.go:302-308): path.Clean, but a trailing slash is kept; used by
+    MatchPathRE (matchers.go:701) before the regexp runs, so ``//v1/watcher/status`` is matched as /v1/watcher/status."""
+    if p == "":
+        return "/"
+    cleaned = go_path_clean(p)
+    if cleaned != "/" and p.endswith("/"):
+        cleaned += "/"
+    return cleaned
 
 
 class _BadGlob(Exception):
@@ -891,11 +979,11 @@ def _path_pattern_may_start_prefix(pattern: str, prefix: str = EXTERNAL_PREFIX) 
     return head.startswith(prefix) or prefix.startswith(head)
 
 
-def _item_may_hit_space(item: tuple[str, str]) -> bool:
+def _item_may_hit_space(item: tuple[str, str], spaces: tuple = _SPACES) -> bool:
     """In the /m/v1/watcher space OR operator-query's /v1/watcher gateway space (wac-097: a changed path may reach
     operator-query through any later route, e.g. a panel /v1/* forwarder, or be forwarded by the changing route)."""
     kind, value = item
-    for pfx, seps in _SPACES:
+    for pfx, seps in spaces:
         if kind == "path" and _path_pattern_may_hit_space(value, pfx, seps):
             return True
         if kind == "re" and _regexp_may_hit_space(value, pfx, seps):
@@ -903,9 +991,9 @@ def _item_may_hit_space(item: tuple[str, str]) -> bool:
     return False
 
 
-def _item_may_start_prefix(item: tuple[str, str]) -> bool:
+def _item_may_start_prefix(item: tuple[str, str], spaces: tuple = _SPACES) -> bool:
     kind, value = item
-    for pfx, _seps in _SPACES:
+    for pfx, _seps in spaces:
         if kind == "path" and _path_pattern_may_start_prefix(value, pfx):
             return True
         if kind == "re" and _regexp_may_start_prefix(value, pfx):
@@ -913,8 +1001,8 @@ def _item_may_start_prefix(item: tuple[str, str]) -> bool:
     return False
 
 
-def _paths_may_hit_space(paths: list | None) -> bool:
-    return paths is None or any(_item_may_hit_space(i) for i in paths)
+def _paths_may_hit_space(paths: list | None, spaces: tuple = _SPACES) -> bool:
+    return paths is None or any(_item_may_hit_space(i, spaces) for i in paths)
 
 
 def _paths_union(a: list | None, b: list | None) -> list | None:
@@ -995,7 +1083,7 @@ def _strip_suffix_safe(suffix: str) -> bool:
     return "/" not in s and s.strip(".") != ""
 
 
-def _paths_after_rewrite(spec: dict, paths: list | None) -> tuple[list | None, list[str]]:
+def _paths_after_rewrite(spec: dict, paths: list | None, spaces: tuple = _SPACES) -> tuple[list | None, list[str]]:
     """(possible paths after a rewrite handler, or a reverse_proxy's ``rewrite``; the path-changing fields that
     applied). Caddy's order: uri, strip_path_prefix, strip_path_suffix, uri_substring, path_regexp."""
     changed: list[str] = []
@@ -1013,7 +1101,7 @@ def _paths_after_rewrite(spec: dict, paths: list | None) -> tuple[list | None, l
         elif f == "strip_path_prefix":
             paths = _strip_prefix_paths(paths, str(value))
         elif f == "strip_path_suffix":
-            ok = _strip_suffix_safe(str(value)) and paths is not None and not any(_item_may_start_prefix(i) for i in paths)
+            ok = _strip_suffix_safe(str(value)) and paths is not None and not any(_item_may_start_prefix(i, spaces) for i in paths)
             paths = [_OUTSIDE] if ok else None
         else:
             paths = None
@@ -1021,7 +1109,8 @@ def _paths_after_rewrite(spec: dict, paths: list | None) -> tuple[list | None, l
     return paths, changed
 
 
-def _path_changes(handlers: list, paths: list | None, out: list, named: dict | None = None, stack: tuple = ()) -> list | None:
+def _path_changes(handlers: list, paths: list | None, out: list, named: dict | None = None, stack: tuple = (),
+                  spaces: tuple = _SPACES) -> list | None:
     """Follow the possible paths through a handler list; append (handler kind, fields, paths after) for every path
     change. Containers followed (wac-097, review wac-096 🟡-1): subroute routes; a reverse_proxy's own ``rewrite``
     (forward_auth, ``reverse_proxy { rewrite … }``: only the upstream COPY is rewritten, recorded, never carried on)
@@ -1032,23 +1121,23 @@ def _path_changes(handlers: list, paths: list | None, out: list, named: dict | N
     for h in handlers or []:
         kind = h.get("handler")
         if kind == "subroute":
-            paths = _route_list_changes(h.get("routes") or [], paths, out, named, stack)
+            paths = _route_list_changes(h.get("routes") or [], paths, out, named, stack, spaces)
             if _nested_route_keys(h):        # e.g. a subroute's own 'errors' routes
                 out.append((str(kind), ["nested routes this tool does not enumerate"], None))
                 paths = None
         elif kind == "rewrite":
-            new, fields = _paths_after_rewrite(h, paths)
+            new, fields = _paths_after_rewrite(h, paths, spaces)
             if fields:
                 out.append((kind, fields, new))
                 paths = new
         elif kind in ("reverse_proxy", "intercept"):
             if kind == "reverse_proxy" and isinstance(h.get("rewrite"), dict):
-                new, fields = _paths_after_rewrite(h["rewrite"], paths)
+                new, fields = _paths_after_rewrite(h["rewrite"], paths, spaces)
                 if fields:
                     out.append(("reverse_proxy rewrite", fields, new))
             # handle_response routes (reverse_proxy, and intercept - wac-099 🔴-2) run with the ORIGINAL request
             for hr in h.get("handle_response") or []:
-                paths = _route_list_changes(hr.get("routes") or [], paths, out, named, stack)
+                paths = _route_list_changes(hr.get("routes") or [], paths, out, named, stack, spaces)
             if _nested_route_keys(h):
                 out.append((str(kind), ["nested routes this tool does not enumerate"], None))
                 paths = None
@@ -1059,30 +1148,34 @@ def _path_changes(handlers: list, paths: list | None, out: list, named: dict | N
                 out.append((f"invoke {name!r}", ["unknown or recursive named route"], None))
                 paths = None
             else:
-                paths = _route_list_changes([route], paths, out, named, stack + (name,))
+                paths = _route_list_changes([route], paths, out, named, stack + (name,), spaces)
         elif _nested_route_keys(h):
             out.append((str(kind), ["nested routes this tool does not enumerate"], None))
             paths = None
     return paths
 
 
-def _route_list_changes(routes: list, paths: list | None, out: list, named: dict | None, stack: tuple) -> list | None:
+def _route_list_changes(routes: list, paths: list | None, out: list, named: dict | None, stack: tuple,
+                        spaces: tuple = _SPACES) -> list | None:
     cur = paths
     for r in routes or []:
         inner, _c = _paths_after_match(cur, r.get("match"))
-        cur = _paths_union(cur, _path_changes(r.get("handle") or [], inner, out, named, stack))
+        cur = _paths_union(cur, _path_changes(r.get("handle") or [], inner, out, named, stack, spaces))
     return cur
 
 
-def path_change_into_space(route: dict, named: dict | None = None) -> str | None:
+M_SPACE_ONLY = ((EXTERNAL_PREFIX, _SPACE_SEPARATORS),)
+
+
+def path_change_into_space(route: dict, named: dict | None = None, spaces: tuple = _SPACES) -> str | None:
     """F-13 step 1 addition (wac-097): the first path change of this route (containers as in _path_changes) whose
     result may lie in the /m/v1/watcher prefix space or operator-query's /v1/watcher gateway space, described; None
     when the route changes no path or every change is proven to stay outside both."""
     changes: list = []
     start, _c = _paths_after_match(None, route.get("match"))
-    _path_changes(route.get("handle") or [], start, changes, named)
+    _path_changes(route.get("handle") or [], start, changes, named, spaces=spaces)
     for kind, fields, after in changes:
-        if _paths_may_hit_space(after):
+        if _paths_may_hit_space(after, spaces):
             return (f"the /m/v1/watcher prefix space after a path change ({kind} {'+'.join(fields)}; not proven to stay "
                     f"outside it and operator-query's /v1/watcher space)")
     return None
@@ -1124,7 +1217,8 @@ def _match_one_set(mset: dict, req: Request) -> bool:
             if not any(_caddy_path_match(p, req.path) for p in value):
                 return False
         elif kind == "path_regexp":
-            if not re2_search(value.get("pattern", ""), req.path):
+            # Caddy matches the regexp on the CLEANED path (cleanPath), not the raw one
+            if not re2_search(value.get("pattern", ""), caddy_clean_path(req.path)):
                 return False
         elif kind == "method":
             if req.method.upper() not in [m.upper() for m in value]:
@@ -1166,13 +1260,18 @@ def _apply_rewrite(handler: dict, req: Request) -> None:
         req.path = req.path[: -len(suffix)]
 
 
-def _eval_routes(routes: list, req: Request, trail: tuple[int, ...], out: Outcome, matches: tuple = ()) -> bool:
+def _eval_routes(routes: list, req: Request, trail: tuple[int, ...], out: Outcome, matches: tuple = (),
+                 snippet_end: int | None = None) -> bool:
     done_groups: set[str] = set()
     for index, route in enumerate(routes):
         group = route.get("group")
         if group and group in done_groups:
+            if snippet_end is not None and id(route) == snippet_end:
+                out.after_snippet = True
             continue
         if not _match_sets(route.get("match"), req):
+            if snippet_end is not None and id(route) == snippet_end:
+                out.after_snippet = True
             continue
         if group:
             done_groups.add(group)
@@ -1181,7 +1280,7 @@ def _eval_routes(routes: list, req: Request, trail: tuple[int, ...], out: Outcom
         for handler in route.get("handle", []):
             kind = handler.get("handler")
             if kind == "subroute":
-                if _eval_routes(handler.get("routes", []), req, here, out, here_matches):
+                if _eval_routes(handler.get("routes", []), req, here, out, here_matches, snippet_end):
                     return True
                 continue
             if kind == "rewrite":
@@ -1189,6 +1288,10 @@ def _eval_routes(routes: list, req: Request, trail: tuple[int, ...], out: Outcom
             if kind == "invoke":      # wac-097: named routes are not emulated
                 raise Uncomparable(f"invoke {str(handler.get('name'))!r} (named routes are not emulated)")
             out.chain.append(Step(handler, here, list(here_matches)))
+            # WGW-1.0.4: a plain forward_auth passes the ORIGINAL request on when the auth sub-request succeeds; the
+            # emulator follows that success path (a failing auth answers the caller itself and reaches nothing else)
+            if kind == "reverse_proxy" and forward_auth_shape(handler) is None:
+                continue
             if kind in RESPONDERS:
                 out.responded = True
                 out.final_path = req.path
@@ -1212,9 +1315,16 @@ def _one_server(config: dict, listen_port: str) -> dict:
     return servers[0]
 
 
-def emulate(config: dict, req: Request, listen_port: str) -> Outcome:
+def emulate(config: dict, req: Request, listen_port: str, snippet_end: int | None = None) -> Outcome:
+    """``snippet_end`` = id() of the LAST route of the snippet block (the direct guard): once the emulated request
+    has passed it without a match, an Uncomparable further on is raised as UncomparableAfterSnippet."""
     outcome = Outcome()
-    _eval_routes(_one_server(config, listen_port).get("routes", []), req, (), outcome)
+    try:
+        _eval_routes(_one_server(config, listen_port).get("routes", []), req, (), outcome, snippet_end=snippet_end)
+    except Uncomparable as exc:
+        if outcome.after_snippet and not isinstance(exc, UncomparableAfterSnippet):
+            raise UncomparableAfterSnippet(str(exc)) from None
+        raise
     if not outcome.responded:
         outcome.final_path = req.path
     return outcome
@@ -1444,23 +1554,63 @@ def _handler_shadow_problem(h: dict) -> str | None:
     return None
 
 
-def _shadow_problems(route: dict) -> list[str]:
-    problems = []
+def forward_auth_shape(h: dict) -> str | None:
+    """None when ``h`` is a plain forward_auth (adapt: a reverse_proxy with handle_response whose routes only set vars or
+    RESPONSE headers) that does not dial the gateway port; else why not. WGW-1.0.4 (task wac-105, review wac-097 P4):
+    before the snippet such a forward_auth only sends a sub-request elsewhere and, on 2xx, lets the ORIGINAL request go
+    on unchanged - it cannot bring anything to 8186 or change the caller's Authorization - so the shadow check reports
+    it as a HINT. ``copy_headers`` adapts to a ``headers`` handler with ``request`` in the 2xx route: that rewrites the
+    request the gateway receives, a request header operation on the chain (V-1 (a)), and stays a failure."""
+    if h.get("handler") != "reverse_proxy" or not h.get("handle_response"):
+        return "not a forward_auth (reverse_proxy without handle_response)"
+    if any(dial_port(d) == GATEWAY_PORT or _literal_8186(d) for d in _dials(h)) or "dynamic_upstreams" in h:
+        return "forward_auth dials the gateway port or dynamic upstreams"
+    for hr in h.get("handle_response") or []:
+        for r in hr.get("routes") or []:
+            for x in _flat_handlers(r):
+                if x.get("handler") == "vars" or (x.get("handler") == "headers" and "request" not in x):
+                    continue
+                if x.get("handler") == "headers":
+                    return "forward_auth copies headers into the request (copy_headers: a request header operation before the gateway, V-1 (a))"
+                return f"forward_auth handle_response runs {x.get('handler')!r}"
+    return None
+
+
+def _shadow_problems(route: dict) -> tuple[list[str], list[str]]:
+    """(problems, hints) of a route that may see the prefix before the snippet."""
+    problems, hints = [], []
     handlers = route.get("handle") or []
     if not handlers:
         problems.append("empty handle")
-    problems += [p for p in (_handler_shadow_problem(h) for h in handlers) if p]
+    for h in handlers:
+        p = _handler_shadow_problem(h)
+        if not p:
+            continue
+        why = forward_auth_shape(h)
+        if why is None:
+            hints.append("forward_auth (auth sub-request elsewhere; on 2xx the request goes on unchanged; a failing auth answers "
+                         "the app itself - check it never refuses the app's own Bearer)")
+        else:
+            problems.append(p if why.startswith("not a forward_auth") else why)
     if route.get("terminal"):
         problems.append("terminal")
     if "group" in route:
         problems.append("group (a handle/handle_path block: mutually exclusive with the snippet, shadows it)")
-    return problems
+    return problems, hints
 
 
 class Report:
+    """PASS / FAIL as before; WGW-1.0.4 adds two NON-blocking channels, both printed and counted on the result line so
+    that nothing is accepted silently (an uncomparable is never read as equal): HINT (defense in depth: the pre-1.0.4
+    operator-query (8183) checks and review wac-097's leftovers; the user asked for them to warn, not block, unless the
+    shape can reach 8186) and UPSTREAM_UNRESOLVED (I-2: an upstream this tool cannot resolve; PC-6 (i) confirms by
+    hand that it never resolves to 8186)."""
+
     def __init__(self) -> None:
         self.passes = 0
         self.failures: list[str] = []
+        self.hints: list[str] = []
+        self.unresolved: list[str] = []
 
     def ok(self, msg: str) -> None:
         self.passes += 1
@@ -1469,6 +1619,233 @@ class Report:
     def fail(self, msg: str) -> None:
         self.failures.append(msg)
         print(f"FAIL {msg}")
+
+    def hint(self, msg: str) -> None:
+        self.hints.append(msg)
+        print(f"HINT {msg}")
+
+    def unresolved_upstream(self, msg: str) -> None:
+        self.unresolved.append(msg)
+        print(f"UPSTREAM_UNRESOLVED {msg}")
+
+
+# ---------------------------------------------------------------- I-2 (WGW-1.0.4 §9.14.6, RS-12): nothing but the snippet dials 8186
+# (1) any string with a standalone 8186, (2) any number equal to 8186, (3) any <digits>-<digits> range containing it, over the
+# WHOLE adapted JSON (every app, server, container, depth) except the snippet's own reverse_proxy objects. Review wac-096 r5
+# 🟡-A (task wac-105 item 1): an upstream whose PORT part, or whole dial, comes from a request-scoped placeholder is also
+# GATEWAY_PORT_EXPOSED (the client picks the port); a placeholder only in the host part with a literal non-8186 port passes;
+# {env.*} / {system.*} / {file.*} / {time.*} and other unresolvable upstreams (unix socket, a DNS SRV lookup) are
+# UPSTREAM_UNRESOLVED info lines. transport.network_proxy / forward_proxy_url: a request-scoped placeholder ANYWHERE in the
+# URL fails, any other placeholder is info. Values are never printed in full: only a short port-shaped excerpt, and nothing
+# at all under header / credential keys.
+STANDALONE_8186 = re.compile(r"(?<![0-9])" + GATEWAY_PORT + r"(?![0-9])")
+PORT_RANGE = re.compile(r"(?<![0-9])([0-9]{1,5})-([0-9]{1,5})(?![0-9])")
+PLACEHOLDER = re.compile(r"\{([^{}\s\"]+)\}")
+# Caddy global placeholders that do not depend on the request; everything else (http.request.*, http.vars.*, http.regexp.*,
+# http.matchers.*, http.reverse_proxy.*, http.auth.*, shorthands, unknown names) counts as request-scoped
+STATIC_PLACEHOLDER_PREFIXES = ("env.", "system.", "file.", "time.")
+I2_SENSITIVE_KEYS = {"headers", "header_up", "header_down", "request", "response", "password", "accounts", "providers", "body",
+                     "vars", "credentials", "tls", "client_authentication", "hash", "salt", "secret", "token", "authorization"}
+
+
+def _range_spans(value: str) -> list[tuple[int, int]]:
+    """Spans of every <digits>-<digits> range (I-2 (3)) that contains 8186."""
+    out = []
+    for r in PORT_RANGE.finditer(value):
+        lo, hi = int(r.group(1)), int(r.group(2))
+        if lo <= int(GATEWAY_PORT) <= hi <= 65535:
+            out.append(r.span())
+    return out
+
+
+def _literal_8186(value: str) -> bool:
+    """I-2 (1) or (3) on a string: a standalone 8186, or a port range that contains it."""
+    return bool(STANDALONE_8186.search(value) or _range_spans(value))
+
+
+def _placeholders(value) -> list[str]:
+    """Placeholder names in a string, or in every string of a JSON subtree."""
+    if isinstance(value, str):
+        return PLACEHOLDER.findall(value)
+    out: list[str] = []
+    if isinstance(value, dict):
+        for v in value.values():
+            out += _placeholders(v)
+    elif isinstance(value, list):
+        for v in value:
+            out += _placeholders(v)
+    return out
+
+
+def _request_scoped(names: list[str]) -> bool:
+    return any(not n.startswith(STATIC_PLACEHOLDER_PREFIXES) for n in names)
+
+
+def _split_host_port(dial: str) -> tuple[str, str | None]:
+    """(host part, port part or None) of a dial without its network prefix; the last ':' outside [] and {} splits."""
+    depth_b = depth_c = 0
+    cut = -1
+    for i, c in enumerate(dial):
+        if c == "{":
+            depth_c += 1
+        elif c == "}":
+            depth_c = max(0, depth_c - 1)
+        elif c == "[" and not depth_c:
+            depth_b += 1
+        elif c == "]" and not depth_c:
+            depth_b = max(0, depth_b - 1)
+        elif c == ":" and not depth_c and not depth_b:
+            cut = i
+    return (dial, None) if cut < 0 else (dial[:cut], dial[cut + 1:])
+
+
+def classify_dial(dial: str) -> tuple[str, str]:
+    """('exposed' | 'unresolved' | 'ok', reason) for one upstream dial / health-check upstream (I-2 + review 🟡-A)."""
+    d = str(dial).strip()
+    network = ""
+    if "/" in d and not d.startswith(("[", "{")):
+        network, _, d = d.partition("/")
+        if network.lower().startswith("unix"):
+            return "unresolved", "unix socket upstream (a local forwarder to 8186 is PC-6 (iii))"
+        if network.lower() not in ("tcp", "tcp4", "tcp6"):
+            return "unresolved", f"non-tcp network {network!r}"
+    host, port = _split_host_port(d)
+    if _literal_8186(d):
+        return "exposed", "dial names port 8186 (or a range containing it)"
+    if port is None:
+        names = _placeholders(d)
+        if names and _request_scoped(names):
+            return "exposed", "the whole dial is a request-scoped placeholder (the client picks the upstream)"
+        if names:
+            return "unresolved", "the dial is a placeholder without a literal port"
+        return "ok", "no port"
+    pnames = _placeholders(port)
+    if pnames and _request_scoped(pnames):
+        return "exposed", "the port comes from a request-scoped placeholder (the client picks it)"
+    if pnames:
+        return "unresolved", "the port is a non-request placeholder"
+    m = re.fullmatch(r"([0-9]{1,5})(?:-([0-9]{1,5}))?", port)
+    if not m:
+        return "unresolved", "port is not a number"
+    lo, hi = int(m.group(1)), int(m.group(2) or m.group(1))
+    if lo <= int(GATEWAY_PORT) <= hi:
+        return "exposed", "port (range) contains 8186"
+    return "ok", "literal port" + (" (placeholder host)" if _placeholders(host) else "")
+
+
+def _i2_excerpt(value: str, span: tuple[int, int], path: str) -> str:
+    if any(f".{k}" in path.lower() or f"[{k}]" in path.lower() for k in I2_SENSITIVE_KEYS):
+        return f"<value under a header/credential key, len={len(value)}>"
+    a, b = span
+    while a > 0 and b - a < 40 and re.match(r"[A-Za-z0-9.:\[\]_-]", value[a - 1]):
+        a -= 1
+    while b < len(value) and b - a < 48 and re.match(r"[A-Za-z0-9.:\[\]_-]", value[b]):
+        b += 1
+    return value[a:b]
+
+
+def _json_path(parent: str, key) -> str:
+    if isinstance(key, int):
+        return f"{parent}[{key}]"
+    return f"{parent}.{key}" if re.fullmatch(r"[A-Za-z0-9_@-]{1,64}", str(key)) else f"{parent}[<key len={len(str(key))}>]"
+
+
+def i2_check(rep: Report, config: dict, exclude: set[int], skeleton_note: bool = False) -> tuple[int, int]:
+    """Run I-2 over the whole adapted config. ``exclude`` = id() of the snippet's own reverse_proxy objects (every per-path
+    group's, RS-11 checks them separately). Returns (exposed, unresolved)."""
+    exposed = unresolved = 0
+
+    def expose(path: str, what: str) -> None:
+        nonlocal exposed
+        exposed += 1
+        rep.fail(f"GATEWAY_PORT_EXPOSED {path} {what}")
+
+    def unres(path: str, why: str) -> None:
+        nonlocal unresolved
+        unresolved += 1
+        rep.unresolved_upstream(f"{path} ({why}; PC-6 (i): confirm by hand it never resolves to 8186)")
+
+    def dial_rule(path: str, dial: str) -> None:
+        verdict, why = classify_dial(dial)
+        if verdict == "exposed" and not _literal_8186(str(dial)):
+            expose(path, f"<{why}>")          # the literal 8186 / range forms are reported by the string walk (1)/(3)
+        elif verdict == "unresolved":
+            unres(path, why)
+
+    def proxy_rules(node: dict, path: str) -> None:
+        for i, u in enumerate(node.get("upstreams") or []):
+            if isinstance(u, dict) and "dial" in u:
+                dial_rule(f"{path}.upstreams[{i}].dial", str(u["dial"]))
+        dyn = node.get("dynamic_upstreams")
+        if isinstance(dyn, dict):
+            dyn_rule(dyn, f"{path}.dynamic_upstreams")
+        active = ((node.get("health_checks") or {}).get("active") or {})
+        if isinstance(active.get("upstream"), str):
+            dial_rule(f"{path}.health_checks.active.upstream", active["upstream"])
+        transport = node.get("transport") or {}
+        for where, url in ((f"{path}.transport.network_proxy", transport.get("network_proxy")),
+                           (f"{path}.transport.forward_proxy_url", transport.get("forward_proxy_url"))):
+            if url is None:
+                continue
+            names = _placeholders(url)
+            if names and _request_scoped(names):
+                expose(where, "<forward proxy URL built from a request-scoped placeholder>")
+            elif names:
+                unres(where, "forward proxy URL with a non-request placeholder")
+
+    def dyn_rule(dyn: dict, path: str) -> None:
+        source = str(dyn.get("source", ""))
+        if source in ("a", "aaaa"):
+            port = str(dyn.get("port", ""))
+            pn = _placeholders(port)
+            if pn and _request_scoped(pn):
+                expose(f"{path}.port", "<dynamic a/aaaa port from a request-scoped placeholder>")
+            elif pn or not re.fullmatch(r"[0-9]{1,5}", port):
+                unres(f"{path}.port", f"dynamic {source} port is not a literal number")
+        elif source == "srv":
+            if _request_scoped(_placeholders(dyn)):
+                expose(path, "<dynamic srv lookup built from a request-scoped placeholder (the SRV record picks the port)>")
+            else:
+                unres(path, "dynamic srv upstream (the port comes from DNS)")
+        elif source == "multi":
+            for i, sub in enumerate(dyn.get("sources") or []):
+                if isinstance(sub, dict):
+                    dyn_rule(sub, f"{path}.sources[{i}]")
+        elif skeleton_note and source.startswith("<literal"):
+            unres(path, "dynamic upstream redacted by the skeleton: I-2 is judged on the full adapt JSON at stage C")
+        else:
+            unres(path, f"dynamic upstream source {source!r} not modelled")
+
+    def walk(node, path: str) -> None:
+        if isinstance(node, dict):
+            if id(node) in exclude:
+                return
+            if node.get("handler") == "reverse_proxy":
+                proxy_rules(node, path)
+            for k, v in node.items():
+                if isinstance(k, str) and (STANDALONE_8186.search(k)):
+                    expose(_json_path(path, "<key>"), "<an object key contains 8186>")
+                walk(v, _json_path(path, k))
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                walk(v, _json_path(path, i))
+        elif isinstance(node, bool) or node is None:
+            return
+        elif isinstance(node, (int, float)):
+            if node == int(GATEWAY_PORT):
+                expose(path, f"{node!r} (a number equal to 8186)")
+        elif isinstance(node, str):
+            m = STANDALONE_8186.search(node)
+            if m:
+                expose(path, _i2_excerpt(node, m.span(), path))
+            else:
+                for span in _range_spans(node)[:1]:
+                    expose(path, f"{_i2_excerpt(node, span, path)} (a port range containing 8186)")
+            if skeleton_note and node.startswith("<literal len=") and re.search(r"\.(dial|upstream|url|forward_proxy_url|port)$", path):
+                unres(path, "redacted by the skeleton: I-2 is judged on the full adapt JSON at stage C")
+
+    walk(config, "$")
+    return exposed, unresolved
 
 
 def shadow_probes(lines: list[Line]) -> tuple[str, ...]:
@@ -1495,19 +1872,26 @@ def _shadow_check(rep: Report, levels: list[tuple], host: str, label: str, probe
                 hits = [SPACE_LABEL]
             # wac-097 (review wac-095 🟡-2): whatever the matcher, a handler that changes the path may hand the
             # snippet a prefix-space path (with whatever the route injected) unless the result is proven outside
+            where = f"{label} level {depth} route {j} ({_route_matcher_summary(route.get('match'))})"
             if not hits and not _host_excludes_route(route, host, depth == 0):
-                moved = path_change_into_space(route, named)
+                # WGW-1.0.4: only a change INTO the /m/v1/watcher space can feed the snippet; a change that may only land in
+                # operator-query's /v1/watcher space is harmless there (8183 has no gateway): a defense-in-depth HINT
+                moved = path_change_into_space(route, named, M_SPACE_ONLY)
                 if moved:
                     hits = [moved]
-            where = f"{label} level {depth} route {j} ({_route_matcher_summary(route.get('match'))})"
+                elif path_change_into_space(route, named):
+                    rep.hint(f"DEFENSE_IN_DEPTH shadow {where}: a path change may land in the /v1/watcher space (operator-query; "
+                             "no gateway on 8183 since WGW-1.0.4)")
             if not hits:
                 print(f"INFO shadow {where}: no probe hit")
                 continue
             checked += 1
-            problems = _shadow_problems(route)
+            problems, hints = _shadow_problems(route)
             kinds = ",".join(str(h.get("handler")) for h in route.get("handle") or [])
             if problems:
                 rep.fail(f"shadow {where} hits {hits[0]!r} [{kinds}]: " + "; ".join(problems))
+            elif hints:
+                rep.hint(f"DEFENSE_IN_DEPTH shadow {where} hits {hits[0]!r} [{kinds}]: " + "; ".join(hints))
             else:
                 rep.ok(f"shadow {where} hits {hits[0]!r} but only whitelisted handlers [{kinds}]")
         if hi is not None:
@@ -1516,7 +1900,9 @@ def _shadow_check(rep: Report, levels: list[tuple], host: str, label: str, probe
                 checked += 1
                 problem = _handler_shadow_problem(h)
                 where = f"{label} level {depth} container route {index} handler before its subroute"
-                if problem:
+                if problem and forward_auth_shape(h) is None:
+                    rep.hint(f"DEFENSE_IN_DEPTH shadow {where}: forward_auth before the site's routes")
+                elif problem:
                     rep.fail(f"shadow {where}: {problem}")
                 else:
                     rep.ok(f"shadow {where}: {h.get('handler')} is whitelisted")
@@ -1525,7 +1911,7 @@ def _shadow_check(rep: Report, levels: list[tuple], host: str, label: str, probe
 
 @dataclass
 class WgwRoute:
-    kind: str            # "line" | "fallback"
+    kind: str            # "line" | "fallback" | "guard"
     ancestry: tuple
     routes: list
     index: int
@@ -1542,11 +1928,16 @@ def _find_wgw(config: dict, listen_port: str, rep: Report, line_regex: set[str])
                 continue
             if pattern == FALLBACK_REGEX:
                 found.append(WgwRoute("fallback", ancestry, routes, index, route, mset))
+            elif pattern == GUARD_REGEX:
+                found.append(WgwRoute("guard", ancestry, routes, index, route, mset))
             elif pattern.startswith("^" + WATCHER_PREFIX):
                 found.append(WgwRoute("line", ancestry, routes, index, route, mset))
-            elif EXTERNAL_PREFIX in pattern.lower() or "watcher" in pattern.lower():
+            elif EXTERNAL_PREFIX in pattern.lower():
                 rep.fail(f"route {_trail(ancestry, index)}: path_regexp {_redact_path(pattern)!r} touches the watcher prefix but is neither a "
                          "list line nor the verbatim fallback (old fallback, (?i), altered or extra route)")
+            elif "watcher" in pattern.lower():
+                rep.hint(f"DEFENSE_IN_DEPTH route {_trail(ancestry, index)}: path_regexp {_redact_path(pattern)!r} mentions 'watcher' but "
+                         "is neither a list line, the fallback nor the direct guard (outside /m/v1/watcher: no gateway behind it)")
     return found
 
 
@@ -1574,10 +1965,22 @@ def _check_wgw_structure(rep: Report, config: dict, lines: list[Line], listen_po
         rep.fail(f"list line present more than once: {pattern} {' '.join(methods)}")
     if seen and not (extra or missing or dupes):
         rep.ok(f"adapted (pattern, methods) == list (regex, methods): symmetric difference empty, rows={len(seen)}")
+    # RS-1: the direct guard routes. The one in the snippet block is part of that block (checked below); a guard in
+    # ANOTHER route list comes from the optional (watcher_gateway_direct_guard) import of another site on this server:
+    # allowed, but it must be the verbatim 404 as well
+    block_lists = {id(w.routes) for w in wgw if w.kind != "guard"}
+    guards = [w for w in wgw if w.kind == "guard"]
+    other_guards = [w for w in guards if id(w.routes) not in block_lists]
+    wgw = [w for w in wgw if w not in other_guards]
+    for w in other_guards:
+        if _is_static_404(w.route) and set(w.mset) == {"path_regexp"} and len(w.route.get("match") or []) == 1:
+            rep.ok(f"route {_trail(w.ancestry, w.index)}: optional direct guard (another site's {GUARD_SNIPPET_NAME} import) answers 404 only")
+        else:
+            rep.fail(f"route {_trail(w.ancestry, w.index)}: direct guard outside the snippet block is not the verbatim 'respond 404' group")
     # every wgw matcher set is exactly {path_regexp[, method]} and its route has that one set only
     for w in wgw:
         keys = set(w.mset)
-        want_keys = {"path_regexp"} if w.kind == "fallback" else {"path_regexp", "method"}
+        want_keys = {"path_regexp"} if w.kind in ("fallback", "guard") else {"path_regexp", "method"}
         if keys != want_keys or len(w.route.get("match") or []) != 1:
             rep.fail(f"route {_trail(w.ancestry, w.index)} ({w.kind}): matcher must be exactly {sorted(want_keys)} and the only "
                      f"matcher set of its route (got {sorted(keys)}, {len(w.route.get('match') or [])} set(s))")
@@ -1588,12 +1991,19 @@ def _check_wgw_structure(rep: Report, config: dict, lines: list[Line], listen_po
     else:
         fb = fallbacks[0]
         handlers = _flat_handlers(fb.route)
-        if [(h.get("handler"), str(h.get("status_code"))) for h in handlers] != [("static_response", "404")] or \
-                any(k not in ("handler", "status_code") for h in handlers for k in h):
+        if not _is_static_404(fb.route):
             rep.fail(f"fallback route answers {[h.get('handler') for h in handlers]} - want exactly 'respond 404' (empty body)")
         else:
             rep.ok("fallback present once, verbatim, no method matcher, answers 404 only")
-    # contiguous block, one list, fallback last
+    # (b') RS-1: the direct guard, exactly once in the block, verbatim 404
+    block_guards = [w for w in wgw if w.kind == "guard"]
+    if len(block_guards) != 1:
+        rep.fail(f"direct guard {GUARD_REGEX!r} present {len(block_guards)} time(s) in the snippet block, want exactly 1 (format v2, V-1 (a))")
+    elif not _is_static_404(block_guards[0].route):
+        rep.fail(f"direct guard answers {[h.get('handler') for h in _flat_handlers(block_guards[0].route)]} - want exactly 'respond 404' (empty body)")
+    else:
+        rep.ok("direct guard present once in the snippet block, verbatim, answers 404 only")
+    # contiguous block, one list, fallback then guard at the tail
     lists = {id(w.routes) for w in wgw}
     if len(lists) > 1:
         rep.fail(f"wgw routes are split over {len(lists)} route lists (snippet imported more than once or partly nested)")
@@ -1601,11 +2011,57 @@ def _check_wgw_structure(rep: Report, config: dict, lines: list[Line], listen_po
         idx = sorted({w.index for w in wgw})
         if idx != list(range(idx[0], idx[-1] + 1)):
             rep.fail(f"wgw routes are not contiguous in their list (indices {idx[0]}..{idx[-1]}, {len(idx)} routes)")
-        elif fallbacks and fallbacks[0].index != idx[-1]:
-            rep.fail(f"fallback at index {fallbacks[0].index} is not after the per-path routes (last wgw index {idx[-1]})")
-        elif fallbacks:
-            rep.ok(f"wgw block contiguous in one list ({len(idx)} routes), fallback last")
+        elif not (fallbacks and block_guards and fallbacks[0].index == idx[-2] and block_guards[0].index == idx[-1]):
+            rep.fail(f"the snippet block does not end with the fallback followed by the direct guard (fallback at "
+                     f"{fallbacks[0].index if fallbacks else None}, guard at {block_guards[0].index if block_guards else None}, "
+                     f"last wgw index {idx[-1]}; RS-1: 'the fallback is followed directly by the guard')")
+        else:
+            rep.ok(f"wgw block contiguous in one list ({len(idx)} routes), fallback then direct guard at the tail")
+    _check_snippet_upstreams(rep, [w for w in wgw if w.kind == "line"], upstream)
     return wgw
+
+
+def _is_static_404(route: dict) -> bool:
+    handlers = _flat_handlers(route)
+    return [(h.get("handler"), str(h.get("status_code"))) for h in handlers] == [("static_response", "404")] and \
+        not any(k not in ("handler", "status_code") for h in handlers for k in h)
+
+
+def snippet_proxy_ids(wgw: list[WgwRoute]) -> set[int]:
+    """id() of every reverse_proxy object inside the snippet's per-path routes: the ONLY objects I-2 excludes (review
+    wac-096 r5 🟢-2: every per-path group's upstream, not just the first)."""
+    return {id(h) for w in wgw if w.kind == "line" for h in _flat_handlers(w.route) if h.get("handler") == "reverse_proxy"}
+
+
+def _check_snippet_upstreams(rep: Report, lines_w: list[WgwRoute], upstream: str) -> None:
+    """RS-11 / V-1 (a): what (watcher_gateway_upstream) adapted to, in EVERY per-path route: exactly one
+    ``strip_path_prefix /m`` rewrite, then one reverse_proxy that dials exactly ``upstream`` (127.0.0.1:8186) and carries
+    nothing else - no rewrite, no transport override, no header operation, no dynamic upstreams, no handle_response."""
+    bad = 0
+    for w in lines_w:
+        handlers = _flat_handlers(w.route)
+        where = f"route {_trail(w.ancestry, w.index)} ({_route_matcher_summary(w.route.get('match'))})"
+        kinds = [h.get("handler") for h in handlers]
+        if kinds != ["rewrite", "reverse_proxy"]:
+            rep.fail(f"RS-11 {where}: handlers {kinds}, want exactly [rewrite (strip_path_prefix /m), reverse_proxy {upstream}]")
+            bad += 1
+            continue
+        rw, rp = handlers
+        problems = []
+        if {k: v for k, v in rw.items() if k != "handler"} != {"strip_path_prefix": MOBILE_PREFIX}:
+            problems.append(f"the rewrite is not exactly 'strip_path_prefix {MOBILE_PREFIX}' (fields {sorted(k for k in rw if k != 'handler')})")
+        if rp.get("upstreams") != [{"dial": upstream}]:
+            problems.append(f"the upstream is {_dials(rp)}, want exactly [{upstream}]")
+        for key in sorted(set(rp) - {"handler", "upstreams"}):
+            label = {"rewrite": "a rewrite", "transport": "a transport override", "headers": "header operations",
+                     "dynamic_upstreams": "dynamic upstreams", "handle_response": "handle_response routes"}.get(key, f"field {key!r}")
+            problems.append(f"the reverse_proxy carries {label}")
+        if problems:
+            rep.fail(f"RS-11 {where}: " + "; ".join(problems))
+            bad += 1
+    if lines_w and not bad:
+        rep.ok(f"RS-11 every per-path route ({len(lines_w)}) = one strip_path_prefix {MOBILE_PREFIX} + reverse_proxy {upstream} only "
+               "(no rewrite, no transport, no header operation)")
 
 
 def _mset_written_for_prefix(mset: dict, host: str, host_exact: bool = True) -> bool:
@@ -1620,7 +2076,7 @@ def _mset_written_for_prefix(mset: dict, host: str, host_exact: bool = True) -> 
 
 def _forwarder_check(rep: Report, routes: list, probes: list[str], host: str, upstream: str, skip: set[int], trail: tuple = (),
                      inherited: bool = False, named: dict | None = None, stack: tuple = (), chain: str = "",
-                     oq_only: bool = False) -> None:
+                     oq_only: bool = False, oq_upstream: str = DEFAULT_OQ_UPSTREAM) -> None:
     """§9.14.3 merge rule + F-10: no route but the snippet may proxy the prefix to operator-query or the
     watcher. Operator-query is recognised by the PORT of ``upstream`` on any host, the watcher by
     9090/9100 (``localhost:8183``, ``[::1]:8183``, ``tcp/127.0.0.1:8183`` ... are all caught); a
@@ -1636,8 +2092,12 @@ def _forwarder_check(rep: Report, routes: list, probes: list[str], host: str, up
     space or operator-query's /v1/watcher space (path_change_into_space) is not skipped: its nested routes are judged
     with every prefix probe as if the prefix arrived (``oq_only``: there only operator-query forwarders fail - a
     stripped browser path to the watcher behind basic auth is the browser checks' business). Unknown containers are
-    refused by _container_check whatever the matcher (wac-099 🔴-2)."""
+    refused by _container_check whatever the matcher (wac-099 🔴-2).
+    WGW-1.0.4 (§9.14.6 V-1 (d), task wac-105): a forwarder of the prefix to operator-query (``oq_upstream``'s port; 8183
+    has no gateway any more), an unparsable dial, dynamic upstreams and an unknown named route are HINTs (defense in
+    depth, printed and counted, not blocking); the gateway port (``upstream``, 8186) and the watcher ports still FAIL."""
     gw_port = dial_endpoint(upstream)[1]
+    oq_port = dial_endpoint(oq_upstream)[1]
     for index, route in enumerate(routes):
         if id(route) in skip:
             continue
@@ -1662,7 +2122,7 @@ def _forwarder_check(rep: Report, routes: list, probes: list[str], host: str, up
 
         def nested(sub_routes: list, sub_trail: tuple, sub_stack: tuple) -> None:
             _forwarder_check(rep, sub_routes or [], nested_probes, host, upstream, skip, sub_trail, inherited=nested_inherited,
-                             named=named, stack=sub_stack, chain=chain, oq_only=route_oq_only)
+                             named=named, stack=sub_stack, chain=chain, oq_only=route_oq_only, oq_upstream=oq_upstream)
 
         for h in route.get("handle", []) or []:
             kind = h.get("handler")
@@ -1672,7 +2132,8 @@ def _forwarder_check(rep: Report, routes: list, probes: list[str], host: str, up
                 name = str(h.get("name", ""))
                 target = (named or {}).get(name)
                 if not isinstance(target, dict) or name in stack:
-                    rep.fail(f"UNCOMPARABLE {where} may pass {what} to named route {name!r} (unknown or recursive invoke)")
+                    rep.hint(f"DEFENSE_IN_DEPTH {where} may pass {what} to named route {name!r} (unknown or recursive invoke; "
+                             "I-2 covers 8186 anywhere)")
                 else:
                     nested([target], here + (f"invoke:{name}",), stack + (name,))
             elif kind in ("reverse_proxy", "intercept"):
@@ -1682,17 +2143,20 @@ def _forwarder_check(rep: Report, routes: list, probes: list[str], host: str, up
                     continue
                 dials = _dials(h)
                 if "dynamic_upstreams" in h or not dials:
-                    rep.fail(f"UNCOMPARABLE {where} may forward {what} with dynamic or no static upstreams")
+                    rep.hint(f"DEFENSE_IN_DEPTH {where} may forward {what} with dynamic or no static upstreams (I-2 judges them)")
                     continue
                 for d in dials:
                     try:
                         _host_class, port = dial_endpoint(d)
                     except Uncomparable as exc:
-                        rep.fail(f"UNCOMPARABLE {where} may forward {what}: {exc}")
+                        rep.hint(f"DEFENSE_IN_DEPTH {where} may forward {what}: {exc} (I-2 judges the dial)")
                         continue
                     if port == gw_port or (port in WATCHER_PORTS and not route_oq_only):
                         rep.fail(f"{where} may forward {what} to {d} (port {port}): only the snippet may route the "
-                                 "/m/v1/watcher prefix to operator-query or the watcher (§9.14.3, F-10)")
+                                 "/m/v1/watcher prefix to the gateway (8186) or the watcher (§9.14.3, F-10, I-2)")
+                    elif port == oq_port:
+                        rep.hint(f"DEFENSE_IN_DEPTH {where} may forward {what} to {d} (port {port}): operator-query has no gateway "
+                                 "since WGW-1.0.4 (§9.14.6 V-1 (d): no shape rule for 8183)")
 
 
 def _container_check(rep: Report, server: dict) -> int:
@@ -1710,10 +2174,17 @@ def _container_check(rep: Report, server: dict) -> int:
                 seen += 1
                 bad = _nested_route_keys(h)
                 if bad:
-                    rep.fail(f"UNCOMPARABLE route {'.'.join(map(str, here))} ({_route_matcher_summary(r.get('match'))}): handler "
-                             f"{h.get('handler')!r} carries nested routes or handlers under {bad} that this tool does not follow "
-                             "(only subroute routes, reverse_proxy/intercept handle_response routes, invoke -> named routes and "
-                             "errors routes are followed)")
+                    watcher = []
+                    _walk_json({k: h[k] for k in bad}, lambda node: watcher.extend(
+                        str(u.get("dial")) for u in (node.get("upstreams") or []) if isinstance(u, dict) and _is_watcher_dial(str(u.get("dial", "")))))
+                    msg = (f"route {'.'.join(map(str, here))} ({_route_matcher_summary(r.get('match'))}): handler "
+                           f"{h.get('handler')!r} carries nested routes or handlers under {bad} that this tool does not follow "
+                           "(only subroute routes, reverse_proxy/intercept handle_response routes, invoke -> named routes and "
+                           "errors routes are followed)")
+                    if watcher:
+                        rep.fail(f"UNCOMPARABLE {msg}; it holds a watcher upstream ({len(watcher)} dial(s)) the browser checks cannot see")
+                    else:
+                        rep.hint(f"DEFENSE_IN_DEPTH {msg}; I-2 already covers 8186 inside it")
                 if h.get("handler") == "subroute":
                     rec(h.get("routes") or [], here)
                 elif h.get("handler") in ("reverse_proxy", "intercept"):
@@ -1788,7 +2259,7 @@ def _route_may_continue(route: dict) -> bool:
 
 
 def _rewrite_forwarder_check(rep: Report, routes: list, host: str, upstream: str, skip: set[int], named: dict | None = None,
-                             chain: str = "") -> int:
+                             chain: str = "", oq_upstream: str = DEFAULT_OQ_UPSTREAM) -> int:
     """wac-097 (review wac-095 🟡-2, g18; review wac-096 🔴-1, 🟡-1): a reverse_proxy to operator-query (recognised by
     the PORT of ``upstream`` on any host spelling) that runs after a PATH CHANGE on its own chain - ``handle_path``,
     ``uri strip_prefix`` / ``replace`` / ``path_regexp`` or ``rewrite`` between the matcher and the proxy, or the
@@ -1805,8 +2276,12 @@ def _rewrite_forwarder_check(rep: Report, routes: list, host: str, upstream: str
     wac-099 🔴-1: it no longer clears the change, so handle_path /x/* { reverse_proxy /v1/* <oq> } fails).
     The watcher ports (9090/9100) are not judged here: every route to the watcher must pass the browser checks (basic
     auth, cleared X-Watcher-* and Authorization, injected placeholder; an unexercised watcher route fails), and the
-    watcher serves no /m/... or /v1/... path. Returns the number of forwarders judged."""
+    watcher serves no /m/... or /v1/... path. Returns the number of forwarders judged.
+    WGW-1.0.4 (§9.14.6 V-1 (d), task wac-105): every finding here concerns operator-query (``oq_upstream``'s port), which
+    has no gateway since 1.0.4, so each is a HINT (defense in depth; review wac-099 r2 D2/D5 stay pinned as hints); the
+    same shape dialling the gateway port (``upstream``, 8186) still FAILS (and I-2 fails it independently)."""
     gw_port = dial_endpoint(upstream)[1]
+    oq_port = dial_endpoint(oq_upstream)[1]
     judged = 0
     # The walk carries TWO path sets (wac-099 🔴-1): U = paths that reached here unchanged, C = paths produced by a path
     # change ([] = none, None = any). A matcher narrows each set separately (_narrow_keep); a change moves U | C into C;
@@ -1852,13 +2327,16 @@ def _rewrite_forwarder_check(rep: Report, routes: list, host: str, upstream: str
                     try:
                         _host_class, port = dial_endpoint(d)
                     except Uncomparable as exc:
-                        rep.fail(f"UNCOMPARABLE {where} may forward a path changed into the /m/v1/watcher or /v1/watcher space: {exc}")
+                        rep.hint(f"DEFENSE_IN_DEPTH {where} may forward a path changed into the /m/v1/watcher or /v1/watcher space: {exc} "
+                                 "(I-2 judges the dial)")
                         continue
+                    text = (f"{where} may forward a path changed into the /m/v1/watcher prefix space or the /v1/watcher space "
+                            f"to {d} (port {port}) (a strip/replace/rewrite before reverse_proxy - handle_path, uri, the proxy's own "
+                            "rewrite; a matcher after the change only narrows it; not proven to stay outside)")
                     if port == gw_port:
-                        rep.fail(f"{where} may forward a path changed into the /m/v1/watcher prefix space or operator-query's "
-                                 f"/v1/watcher space to {d} (port {port}) (a strip/replace/rewrite before reverse_proxy - handle_path, "
-                                 "uri, the proxy's own rewrite; a matcher after the change only narrows it; not proven to stay "
-                                 "outside): only the snippet may route the prefix to operator-query (§9.14.3, wac-097)")
+                        rep.fail(f"{text}: only the snippet may route the prefix to the gateway (§9.14.3, I-2)")
+                    elif port == oq_port:
+                        rep.hint(f"DEFENSE_IN_DEPTH {text}: operator-query has no gateway since WGW-1.0.4 (§9.14.6 V-1 (d))")
             elif _nested_route_keys(h):
                 U, C = [], None              # unknown container: reported by _container_check
         return U, C
@@ -1918,14 +2396,21 @@ def _check_gateway_outcome(rep: Report, label: str, out: Outcome, line: Line, up
     if not out.final_path.startswith(APP_OUTER_PREFIX + "/"):
         rep.fail(f"{label}: upstream path {out.final_path!r} is not {APP_OUTER_PREFIX}/...")
         return
-    for step in out.chain:
+    for i, step in enumerate(out.chain):
         kind = step.handler.get("handler")
         if kind == "authentication":
             rep.fail(f"{label}: mobile path passes through authentication (basic auth) handler")
             return
+        if kind == "reverse_proxy" and i < len(out.chain) - 1:
+            continue    # a forward_auth passed on the way: its header_up only shapes its own sub-request
         names = _touched_names(_header_ops(step.handler))
         if _touches(names, "authorization") or any(_touches(names, h) for h in ("x-watcher-actor", "x-watcher-token-fingerprint", "x-watcher-proxy-auth")):
             rep.fail(f"{label}: {kind} rewrites Authorization or X-Watcher-* on the mobile path")
+            return
+        # V-1 (a) / RS-11 (review wac-096 🟢-5): no request header operation at all from the server root to the gateway
+        if names:
+            rep.fail(f"{label}: {kind} operates on request headers ({','.join(sorted(names))}) on the way to the gateway "
+                     "(V-1 (a): the chain from the server root to the snippet's reverse_proxy carries no request header operation)")
             return
     good = any("path_regexp" in m and m["path_regexp"].get("pattern") == line.regex and set(m.get("method", [])) == set(line.methods)
                for m in last.route_match or [])
@@ -1935,20 +2420,29 @@ def _check_gateway_outcome(rep: Report, label: str, out: Outcome, line: Line, up
     rep.ok(f"{label!r} -> {upstream}{out.final_path!r}")
 
 
+def may_be_gateway_dial(dial: str, upstream: str = DEFAULT_GATEWAY_UPSTREAM) -> bool:
+    """WGW-1.0.4: a dial may reach the gateway when it is the gateway's endpoint or I-2 would flag it (8186 anywhere in it,
+    a range containing it, a request-scoped port). Unresolvable dials (unix socket, {env.*}) are I-2's UPSTREAM_UNRESOLVED
+    lines, confirmed by hand (PC-6 (i)), not counted here."""
+    return same_endpoint(dial, upstream) is True or classify_dial(dial)[0] == "exposed"
+
+
 def _reaches_gateway(out: Outcome, upstream: str) -> bool:
     return (
         out.responded
         and out.chain[-1].handler.get("handler") == "reverse_proxy"
-        # an unparsable dial (None) counts as reaching the gateway: fail-safe for the negatives
-        and any(same_endpoint(d, upstream) is not False for d in _dials(out.chain[-1].handler) or [""])
-        and out.final_path.lower().startswith(APP_OUTER_PREFIX)
+        and any(may_be_gateway_dial(d, upstream) for d in _dials(out.chain[-1].handler) or [""])
     )
 
 
-def _is_fallback_404(out: Outcome) -> bool:
+def _is_fallback_404(out: Outcome, pattern: str = FALLBACK_REGEX) -> bool:
     return (out.responded and out.chain[-1].handler.get("handler") == "static_response"
             and str(out.chain[-1].handler.get("status_code")) == "404"
-            and any((m.get("path_regexp") or {}).get("pattern") == FALLBACK_REGEX for m in out.chain[-1].route_match or []))
+            and any((m.get("path_regexp") or {}).get("pattern") == pattern for m in out.chain[-1].route_match or []))
+
+
+def _is_guard_404(out: Outcome) -> bool:
+    return _is_fallback_404(out, GUARD_REGEX)
 
 
 def _check_browser_outcome(rep: Report, label: str, out: Outcome) -> bool:
@@ -2023,12 +2517,26 @@ def line_negatives(lines: list[Line]) -> tuple[list[tuple[str, str]], list[tuple
 
 
 def run_verify(config: dict, lines: list[Line], *, host: str, listen_port: str, upstream: str,
-               mobile_samples, browser_samples, before_deploy: bool = False) -> Report:
+               mobile_samples, browser_samples, before_deploy: bool = False, oq_upstream: str = DEFAULT_OQ_UPSTREAM,
+               skeleton: bool = False) -> Report:
+    """V-1 / V-2 (WGW-1.0.4 §9.14.6). ``upstream`` = the gateway (watcher-gateway, 127.0.0.1:8186); ``oq_upstream`` =
+    operator-query (127.0.0.1:8183, the mobile /m/v1/* samples and the panel). The main criterion is I-2 (i2_check); the
+    pre-1.0.4 operator-query checks run on as defense in depth and print HINT lines (task wac-105)."""
     rep = Report()
+    snippet_end: list[int | None] = [None]
 
-    def emu(method: str, path: str) -> Outcome | None:
+    def emu(method: str, path: str, after_snippet_hint: bool = False) -> Outcome | None:
         try:
-            return emulate(config, Request(method, path, host), listen_port)
+            return emulate(config, Request(method, path, host), listen_port, snippet_end[0])
+        except UncomparableAfterSnippet as exc:
+            if after_snippet_hint:
+                # review wac-097 P1 (SPA catch-all try_files): the request already passed every snippet route; with I-2
+                # clean nothing after them dials 8186, so it cannot reach the gateway
+                rep.hint(f"UNCOMPARABLE_AFTER_SNIPPET {method} {path!r}: {exc} (it passed the whole snippet block without a match; "
+                         "after it nothing may dial 8186, I-2)")
+            else:
+                rep.fail(f"UNCOMPARABLE {method} {path!r}: {exc}")
+            return None
         except Uncomparable as exc:
             rep.fail(f"UNCOMPARABLE {method} {path!r}: {exc}")
             return None
@@ -2054,6 +2562,9 @@ def run_verify(config: dict, lines: list[Line], *, host: str, listen_port: str, 
     else:
         wgw = _check_wgw_structure(rep, config, lines, listen_port, upstream)
         skip = {id(w.route) for w in wgw}
+        guard = [w for w in wgw if w.kind == "guard"]
+        if len(guard) == 1 and len({id(w.routes) for w in wgw}) == 1 and guard[0].index == max(w.index for w in wgw):
+            snippet_end[0] = id(guard[0].route)
         if wgw and len({id(w.routes) for w in wgw}) == 1:
             first = min(wgw, key=lambda w: w.index)
             try:
@@ -2071,25 +2582,40 @@ def run_verify(config: dict, lines: list[Line], *, host: str, listen_port: str, 
                 out = emu(method, line.sample())
                 if out is not None:
                     _check_gateway_outcome(rep, f"{method} {line.sample()}", out, line, upstream)
+    # RS-1: the optional (watcher_gateway_direct_guard) in a site on ANOTHER server (another listener) must be the verbatim 404
+    for sname, other in sorted((config.get("apps", {}).get("http", {}).get("servers", {}) or {}).items()):
+        if other is server:
+            continue
+        for trail, route in _walk_all_routes(other):
+            if any((m.get("path_regexp") or {}).get("pattern") == GUARD_REGEX for m in route.get("match") or []):
+                if _is_static_404(route) and len(route.get("match") or []) == 1 and set(route["match"][0]) == {"path_regexp"}:
+                    rep.ok(f"server {sname} route {'.'.join(map(str, trail))}: optional direct guard ({GUARD_SNIPPET_NAME}) answers 404 only")
+                else:
+                    rep.fail(f"server {sname} route {'.'.join(map(str, trail))}: direct guard is not the verbatim 'respond 404' group")
+    # I-2 (the main criterion, RS-12): over the WHOLE adapted JSON, only the snippet's own upstream objects excluded
+    exposed, unresolved = i2_check(rep, config, snippet_proxy_ids(wgw) if not before_deploy else set(), skeleton_note=skeleton)
+    if not exposed:
+        rep.ok(f"I-2: nothing but the snippet's upstreams dials 8186 (whole adapted JSON; {unresolved} UPSTREAM_UNRESOLVED info line(s))")
     named = server.get("named_routes") or {}
     errors = (server.get("errors") or {}).get("routes") or []
+    hints_before = len(rep.hints)
     before_c = len(rep.failures)
     inspected = _container_check(rep, server)
-    if len(rep.failures) == before_c:
+    if len(rep.failures) == before_c and len(rep.hints) == hints_before:
         rep.ok(f"every nested route container is one this tool follows ({inspected} handler(s) in routes, errors, named routes)")
-    _forwarder_check(rep, server.get("routes", []), list(PREFIX_PROBES), host, upstream, skip, named=named)
+    _forwarder_check(rep, server.get("routes", []), list(PREFIX_PROBES), host, upstream, skip, named=named, oq_upstream=oq_upstream)
     # wac-097 (review wac-096 🟡-1): the error chain (handle_errors) is a second entry; nothing in it may forward the prefix
-    _forwarder_check(rep, errors, list(PREFIX_PROBES), host, upstream, set(), named=named, chain="errors ")
-    before = len(rep.failures)
-    judged = _rewrite_forwarder_check(rep, server.get("routes", []), host, upstream, skip, named)
-    judged += _rewrite_forwarder_check(rep, errors, host, upstream, set(), named, chain="errors ")
-    if len(rep.failures) == before:
-        rep.ok(f"no forwarder to operator-query sends a path changed into the /m/v1/watcher or /v1/watcher space "
+    _forwarder_check(rep, errors, list(PREFIX_PROBES), host, upstream, set(), named=named, chain="errors ", oq_upstream=oq_upstream)
+    before, hints_before = len(rep.failures), len(rep.hints)
+    judged = _rewrite_forwarder_check(rep, server.get("routes", []), host, upstream, skip, named, oq_upstream=oq_upstream)
+    judged += _rewrite_forwarder_check(rep, errors, host, upstream, set(), named, chain="errors ", oq_upstream=oq_upstream)
+    if len(rep.failures) == before and len(rep.hints) == hints_before:
+        rep.ok(f"no forwarder sends a path changed into the /m/v1/watcher or /v1/watcher space to the gateway or operator-query "
                f"({judged} forwarder(s) after a path change judged; routes, errors, handle_response, named routes)")
     neg, pos = line_negatives(lines)
     neg += [("GET", p) for p in FALLBACK_NO_MATCH]
     for method, path in neg:
-        out = emu(method, path)
+        out = emu(method, path, after_snippet_hint=True)
         if out is None:
             continue
         if _reaches_gateway(out, upstream):
@@ -2111,23 +2637,36 @@ def run_verify(config: dict, lines: list[Line], *, host: str, listen_port: str, 
                 last = out.chain[-1].handler.get("handler") if out.chain else "none"
                 rep.fail(f"fallback GET {path!r} is not answered by the fallback 404 (responder={last})")
         for path in FALLBACK_NO_MATCH:
-            out = emu("GET", path)
+            out = emu("GET", path, after_snippet_hint=True)
             if out is not None and _is_fallback_404(out):
                 rep.fail(f"GET {path!r} answered by the fallback, but RE2 says it must not match (emulator or pattern drift)")
+        # V-2 (§9.14.6, RS-13): on the app site the direct guard answers /v1/watcher requests with 404 (the emulator cleans
+        # the path for path_regexp like Caddy, so '//v1/watcher/status' is judged as /v1/watcher/status)
+        for path in DIRECT_PROBES:
+            out = emu("GET", path)
+            if out is None:
+                continue
+            if _is_guard_404(out):
+                rep.ok(f"V-2 GET {path!r} on {host} -> 404 by {GUARD_NAME}")
+            else:
+                last = out.chain[-1].handler.get("handler") if out.chain else "none"
+                rep.fail(f"V-2 GET {path!r} on {host} is not answered by the direct guard 404 (responder={last})")
+            if out.responded and _reaches_gateway(out, upstream):
+                rep.fail(f"V-2 GET {path!r} reaches the gateway {upstream}")
     for sample in mobile_samples:
         method, path = _parse_sample(sample)
         out = emu(method, path)
         if out is None:
             continue
-        if not out.responded or not any(same_endpoint(d, upstream) for d in _dials(out.chain[-1].handler)):
-            rep.fail(f"mobile {sample}: does not reach {upstream}")
+        if not out.responded or not any(same_endpoint(d, oq_upstream) for d in _dials(out.chain[-1].handler)):
+            rep.fail(f"mobile {sample}: does not reach operator-query {oq_upstream}")
             continue
         strips = [s for s in out.chain if s.handler.get("handler") == "rewrite"]
         touched = any(_touches(_touched_names(_header_ops(s.handler)), "authorization") for s in out.chain)
         if len(strips) != 1 or touched:
             rep.fail(f"mobile {sample}: strips={len(strips)} authorization_touched={touched}")
         else:
-            rep.ok(f"mobile {sample} -> {upstream}{out.final_path} (one strip, Authorization untouched)")
+            rep.ok(f"mobile {sample} -> {oq_upstream}{out.final_path} (one strip, Authorization untouched)")
     watcher_routes = [(t, r) for t, r in _walk_all_routes(server)
                       if any(h.get("handler") == "reverse_proxy" and any(_is_watcher_dial(d) for d in _dials(h))
                              for h in r.get("handle", []))]
@@ -2170,13 +2709,17 @@ def cmd_verify(args: argparse.Namespace) -> int:
         config, lines, host=args.host, listen_port=args.listen_port, upstream=args.upstream,
         mobile_samples=args.mobile_sample or DEFAULT_MOBILE_SAMPLES,
         browser_samples=args.browser_sample or DEFAULT_BROWSER_SAMPLES,
-        before_deploy=args.before_deploy,
+        before_deploy=args.before_deploy, oq_upstream=args.oq_upstream, skeleton=args.skeleton,
     )
+    tail = (f"hints={len(rep.hints)} upstream_unresolved={len(rep.unresolved)} "
+            "(PC-6 (i): every HINT and UPSTREAM_UNRESOLVED line above is reviewed by hand)")
     if rep.failures or rep.passes == 0:
-        print(f"CADDY_WATCHER_ROUTES_FAILED failures={len(rep.failures)} passes={rep.passes}")
+        exposed = sum(1 for f in rep.failures if f.startswith("GATEWAY_PORT_EXPOSED"))
+        print(f"CADDY_WATCHER_ROUTES_FAILED failures={len(rep.failures)} gateway_port_exposed={exposed} passes={rep.passes} {tail}")
         return 1
     mode = "before_deploy" if args.before_deploy else "snippet"
-    print(f"CADDY_WATCHER_ROUTES_OK mode={mode} lines={len(lines)} passes={rep.passes} yaml_sha256={meta['_yaml_sha256']} phase_max={meta['_phase_max']}")
+    print(f"CADDY_WATCHER_ROUTES_OK mode={mode} lines={len(lines)} passes={rep.passes} i2=clean {tail} "
+          f"yaml_sha256={meta['_yaml_sha256']} phase_max={meta['_phase_max']}")
     return 0
 
 
@@ -2233,6 +2776,13 @@ def caddyfile_check(text: str, redact) -> tuple[list[str], list[str]]:
             end = next((j for j in range(i + 1, len(toks)) if toks[j][1] == 0), len(toks))
             body = toks[i + 1:end]
             imports = [k for k, (_n, bd, bt) in enumerate(body) if bd == 1 and bt[:2] == ["import", SNIPPET_NAME]]
+            guard_imports = [bn for bn, _bd, bt in body if bt[:2] == ["import", GUARD_SNIPPET_NAME]]
+            if guard_imports and imports:
+                problems.append(f"site at line {n}: imports both {SNIPPET_NAME} and {GUARD_SNIPPET_NAME} (both define @{GUARD_NAME}; "
+                                f"the routes snippet already holds the guard, §9.14.3 format v2)")
+            elif guard_imports:
+                record.append(f"RECORD site line {n}: optional import {GUARD_SNIPPET_NAME} at line(s) {','.join(map(str, guard_imports))} "
+                              "(defense in depth for a site that forwards to operator-query)")
             if imports:
                 sites.append((n, " ".join(x if re.fullmatch(r"[A-Za-z0-9.*:-]{1,253}|\{\$[A-Z0-9_]+\}", x.rstrip(",")) else f"<literal len={len(x)}>" for x in t[:-1])))
                 handles = [k for k, (_n, bd, bt) in enumerate(body) if bd == 1 and bt[0] in ("handle", "handle_path", "route")]
@@ -2248,6 +2798,25 @@ def caddyfile_check(text: str, redact) -> tuple[list[str], list[str]]:
             i = end
             continue
         i += 1
+    # V-4 (WGW-1.0.4 §9.14.6, RS-14): a standalone 8186 (or a port range containing it) only inside (watcher_gateway_upstream)
+    inside = False
+    upstream_blocks = 0
+    for n, d, t in toks:
+        if d == 0:
+            inside = False          # a line that starts at depth 0 is outside every block (the block's own "}" starts at depth 1)
+        if d == 0 and t and t[0] == f"({UPSTREAM_SNIPPET})" and t[-1] == "{":
+            inside = True
+            upstream_blocks += 1
+            continue
+        words = []
+        for w in t:
+            if w.startswith("#"):
+                break          # an inline comment: the rest of the line is not configuration
+            words.append(w)
+        if not inside and any(_literal_8186(w) for w in words):
+            problems.append(f"line {n}: 8186 outside ({UPSTREAM_SNIPPET}) (V-4: only the snippet upstream may name the gateway port)")
+    if upstream_blocks != 1:
+        problems.append(f"({UPSTREAM_SNIPPET}) defined {upstream_blocks} time(s), want exactly 1")
     nested = [(n, d) for n, d, t in toks if t[:2] == ["import", SNIPPET_NAME] and d != 1]
     for n, d in nested:
         problems.append(f"line {n}: import {SNIPPET_NAME} at depth {d}: only at the top level of the app site block "
@@ -2283,7 +2852,8 @@ def cmd_caddyfile_check(args: argparse.Namespace) -> int:
     if problems:
         print(f"CADDYFILE_CHECK_FAILED problems={len(problems)}")
         return 1
-    print("CADDYFILE_CHECK_OK snippet_import=top-level site_import=before-every-handle (F-13 (2) record above: fill in by hand)")
+    print("CADDYFILE_CHECK_OK snippet_import=top-level site_import=before-every-handle port_8186=only-in-upstream-snippet "
+          "(F-13 (2) record above: fill in by hand)")
     return 0
 
 
@@ -2403,11 +2973,12 @@ def _walk_json(node, fn) -> None:
 
 
 def pin_probe_config(adapted: dict, site_port: int, gateway_upstream: str, watcher_upstream: str,
-                     stubs: dict[str, str]) -> tuple[dict, list[str]]:
+                     stubs: dict[str, str], oq_upstream: str = DEFAULT_OQ_UPSTREAM) -> tuple[dict, list[str]]:
     """The config the probe RUNS (review wac-088 🟡-3): only the server of the probe site, listening
     on 127.0.0.1:<site_port>; every reverse_proxy upstream anywhere in it (handle, subroutes,
-    handle_response, errors, named routes) pinned to a local stub: operator-query (any loopback
-    spelling of ``gateway_upstream``) -> stubs["oq"], the watcher -> stubs["watcher"], everything
+    handle_response, errors, named routes) pinned to a local stub: the gateway (any loopback spelling of
+    ``gateway_upstream``, WGW-1.0.4: 8186) -> stubs["gw"], operator-query (``oq_upstream``, 8183) -> stubs["oq"]
+    (V-3: two SEPARATE stubs), the watcher -> stubs["watcher"], everything
     else (other services, Tailscale addresses, unix sockets, placeholders) -> stubs["sink"];
     forward proxies and active health checks removed; admin off, config not persisted; no other
     server and no other app (tls, pki, logging ...). dynamic_upstreams cannot be pinned: refused."""
@@ -2427,7 +2998,7 @@ def pin_probe_config(adapted: dict, site_port: int, gateway_upstream: str, watch
     for key in ("tls_connection_policies", "logs"):
         if server.pop(key, None) is not None:
             notes.append(f"server {key} removed")
-    counts = {"oq": 0, "watcher": 0, "sink": 0}
+    counts = {"gw": 0, "oq": 0, "watcher": 0, "sink": 0}
     seen: dict[str, str] = {}
 
     def pin(node: dict) -> None:
@@ -2441,7 +3012,8 @@ def pin_probe_config(adapted: dict, site_port: int, gateway_upstream: str, watch
         new = []
         for u in ups:
             dial = str(u.get("dial", ""))
-            label = "oq" if same_endpoint(dial, gateway_upstream) else "watcher" if same_endpoint(dial, watcher_upstream) else "sink"
+            label = ("gw" if same_endpoint(dial, gateway_upstream) else "oq" if same_endpoint(dial, oq_upstream)
+                     else "watcher" if same_endpoint(dial, watcher_upstream) else "sink")
             counts[label] += 1
             seen.setdefault(dial, label)
             new.append({"dial": stubs[label]})
@@ -2455,7 +3027,7 @@ def pin_probe_config(adapted: dict, site_port: int, gateway_upstream: str, watch
 
     _walk_json(server, pin)
     notes += [f"dial {d} -> {label}" for d, label in sorted(seen.items())]
-    notes.append(f"dials pinned: oq={counts['oq']} watcher={counts['watcher']} sink={counts['sink']}")
+    notes.append(f"dials pinned: gw={counts['gw']} oq={counts['oq']} watcher={counts['watcher']} sink={counts['sink']}")
     http = {k: v for k, v in adapted["apps"]["http"].items() if k in ("http_port", "https_port")}
     pinned = {"admin": {"disabled": True, "config": {"persist": False}}, "apps": {"http": {**http, "servers": {name: server}}}}
     return pinned, notes
@@ -2463,7 +3035,7 @@ def pin_probe_config(adapted: dict, site_port: int, gateway_upstream: str, watch
 
 def assert_probe_pinned(cfg: dict, allowed_dials: set[str], site_port: int) -> list[str]:
     """Machine check right before `caddy run`: nothing in the config may listen off loopback or dial
-    anything but the three stubs. Returns the problems (empty = safe to run)."""
+    anything but the stubs. Returns the problems (empty = safe to run)."""
     problems = []
     admin = cfg.get("admin") or {}
     if admin.get("disabled") is not True or (admin.get("config") or {}).get("persist") is not False:
@@ -2580,7 +3152,7 @@ _ENTRY_TARGET = re.compile(r"/(?:[A-Za-z0-9/._~-]|%2e)*")
 
 def _is_wgw_route(route: dict) -> bool:
     return any((m.get("path_regexp") or {}).get("pattern", "").startswith("^" + WATCHER_PREFIX)
-               or (m.get("path_regexp") or {}).get("pattern") == FALLBACK_REGEX for m in route.get("match") or [])
+               or (m.get("path_regexp") or {}).get("pattern") in (FALLBACK_REGEX, GUARD_REGEX) for m in route.get("match") or [])
 
 
 def rewrite_entry_targets(config: dict, listen_port: str) -> list[str]:
@@ -2673,20 +3245,49 @@ def double_slash_variants(path: str) -> list[str]:
     return [path[:i] + "/" + path[i:] for i, c in enumerate(path) if c == "/"]
 
 
-def _probe_live_checks(port: int, hits: list, lines: list[Line], host: str = "127.0.0.1",
-                       entries: list[str] | tuple = ()) -> tuple[int, list[str]]:
-    """The raw-request checks against the running probe Caddy. Every forward to operator-query carries
-    a fake caller Authorization that must arrive unchanged, without X-Watcher-Proxy-Auth (review
-    wac-088 🟡-1: any header rewrite that shadows a table path shows up here). Every request carries
-    ``Host: <host>`` (the production site name, wac-092). wac-097: every rewrite entry target
-    (rewrite_entry_targets) is sent with and without the fake Authorization; whatever reaches operator-query
-    must carry exactly what the caller sent and no X-Watcher-Proxy-Auth, and nothing may reach the watcher
-    (the probe sends no basic credentials)."""
-    fails: list[str] = []
-    n = 0
+PANEL_PROBES = ("/v1/accounts", "/v1/operator/orders", "/v1/mirror/positions")
 
-    def req(method, target, headers=None):
-        return _raw_request(port, method, target, headers, host)
+
+def site_hosts(config: dict, listen_port: str, app_host: str) -> list[str]:
+    """Every other literal site name of the probe server (V-3 (2): "every other site host gets the same /v1/watcher group");
+    a label '*' becomes 'o0x'; placeholders are skipped (reported by the caller)."""
+    out: list[str] = []
+    try:
+        server = _one_server(config, listen_port)
+    except Uncomparable:
+        return out
+    for route in server.get("routes") or []:
+        for m in route.get("match") or []:
+            for h in m.get("host") or []:
+                h = str(h)
+                if "{" in h or not h.isascii():
+                    continue
+                name = ".".join("o0x" if lab == "*" else lab for lab in h.split("."))
+                if name.lower() != app_host.lower() and PROBE_HOST_RE.fullmatch(name) and name not in out:
+                    out.append(name)
+    return out
+
+
+def _probe_live_checks(port: int, hits: list, lines: list[Line], host: str = "127.0.0.1",
+                       entries: list[str] | tuple = (), other_hosts: list[str] | tuple = ()) -> tuple[int, list[str], list[str]]:
+    """The raw-request checks against the running probe Caddy (V-3, WGW-1.0.4 §9.14.6 / RS-13). Two SEPARATE stubs:
+    ``gw`` (the gateway, 8186) and ``oq`` (operator-query, 8183).
+    (1) every list line and every method of it reaches the gw stub, ``/m`` stripped, the caller's fake Authorization
+        unchanged and no X-Watcher-Proxy-Auth (review wac-088 🟡-1: any header rewrite that shadows a table path shows up);
+    (2) NOTHING else may hit the gw stub: the V-2 requests (/v1/watcher/..., answered by the guard with an empty 404 on
+        the app site), the panel /v1/* samples, the prefix-space and parameter-value probes, the fallback probes, every
+        rewrite entry, and the /v1/watcher group sent with the Host of every other site of the server.
+    Every request carries ``Host: <host>`` (the production site name, wac-092). What only concerns operator-query (a
+    prefix probe or a rewrite entry reaching the oq stub, with or without a changed Authorization) is a HINT (defense in
+    depth, WGW-1.0.3 per-forwarder marker probes kept as non-blocking output, §9.14.6 V-3); the watcher stays a failure.
+    Returns (checks, failures, hints)."""
+    fails: list[str] = []
+    hints: list[str] = []
+    n = 0
+    table_gw: set[int] = set()        # indices of hits accepted under (1)
+
+    def req(method, target, headers=None, h=None):
+        return _raw_request(port, method, target, headers, h or host)
 
     def expect(cond: bool, msg: str) -> None:
         nonlocal n
@@ -2699,11 +3300,12 @@ def _probe_live_checks(port: int, hits: list, lines: list[Line], host: str = "12
         before = len(hits)
         status, _body = req(method, target, hdrs)
         new = hits[before:]
-        ok = status == 200 and len(new) == 1 and new[0][:3] == ("oq", method, path)
-        expect(ok, f"forward {method} {target!r} -> {status} hits={[h[:3] for h in new]} want oq {path!r}")
+        ok = status == 200 and len(new) == 1 and new[0][:3] == ("gw", method, path)
+        expect(ok, f"forward {method} {target!r} -> {status} hits={[h[:3] for h in new]} want gw {path!r}")
         if ok:
+            table_gw.add(before)
             expect(new[0][3] == hdrs.get("Authorization") and not new[0][4],
-                   f"forward {method} {target!r}: the caller's Authorization changed or X-Watcher-Proxy-Auth injected on the way to operator-query")
+                   f"forward {method} {target!r}: the caller's Authorization changed or X-Watcher-Proxy-Auth injected on the way to the gateway")
         return new[0] if ok else None
 
     def fallback404(method, target):
@@ -2711,11 +3313,24 @@ def _probe_live_checks(port: int, hits: list, lines: list[Line], host: str = "12
         status, body = req(method, target)
         expect(status == 404 and body == b"" and len(hits) == before, f"fallback {method} {target!r} -> {status} body={len(body)}B hits={len(hits) - before}")
 
-    def not_forwarded(method, target):
+    def guard404(target):
         before = len(hits)
-        status, _body = req(method, target)
-        new = [h for h in hits[before:] if h[0] in ("oq", "watcher")]
-        expect(not new, f"{method} {target!r} -> {status} reached operator-query or the watcher {[h[:3] for h in new]}")
+        status, body = req("GET", target, {"Authorization": PROBE_FAKE_AUTH})
+        expect(status == 404 and body == b"" and len(hits) == before,
+               f"V-2 guard GET {target!r} on {host} -> {status} body={len(body)}B hits={[h[:3] for h in hits[before:]]} (want the guard's empty 404)")
+
+    def not_gateway(method, target, what, headers=None, h=None):
+        before = len(hits)
+        status, _body = req(method, target, headers, h)
+        new = hits[before:]
+        bad = [x for x in new if x[0] in ("gw", "watcher")]
+        expect(not bad, f"{what} {method} {_redact_path(target)!r} -> {status} reached {[(x[0], _redact_path(x[2])) for x in bad]} "
+                        "(V-3 (2): only table paths may reach the gateway; nothing may reach the watcher without basic credentials)")
+        for x in new:
+            if x[0] == "oq" and (x[3] != (headers or {}).get("Authorization") or x[4] or _in_any_space(x[2].split("?")[0])):
+                hints.append(f"DEFENSE_IN_DEPTH {what} {method} {_redact_path(target)!r} reached operator-query as {_redact_path(x[2])!r}"
+                             f"{' with a changed Authorization' if x[3] != (headers or {}).get('Authorization') else ''} (no gateway on 8183)")
+        return new
 
     for line in lines:
         ex = line.sample("x")
@@ -2741,9 +3356,7 @@ def _probe_live_checks(port: int, hits: list, lines: list[Line], host: str = "12
         # and forwarded with the caller's Authorization untouched
         for target in double_slash_variants(ex):
             forwarded(m0, target, ex[len(MOBILE_PREFIX):])
-        # wac-094 (review wac-092 🟡-1): a header rewrite written for ONE parameter value, a suffix or a case
-        # (…/accounts/account-a, media/*.png, */risks/btcusdt) never sees the 'x' fill: every parameter line is
-        # sent again with each PROBE_PARAM_VALUES entry, with every method of the line
+        # wac-094 (review wac-092 🟡-1): every parameter line again with each PROBE_PARAM_VALUES entry and every method
         if line.param_count():
             for value in PROBE_PARAM_VALUES:
                 target = line.sample(value)
@@ -2753,7 +3366,7 @@ def _probe_live_checks(port: int, hits: list, lines: list[Line], host: str = "12
                    "/M/V1/WATCHER%0A", "/m/v1/watcher/status%0A", "/m/v1/watcher/status#x", "/m/v1/watcher/config", "/m/V1/watcher/status"):
         fallback404("GET", target)
     for target in ("/m/v1/watcherx", "/m/v1/other", "/m/v1/watcherx%0A", "/m/v1/watcher%0D", "/m/v1/watcher#x"):
-        not_forwarded("GET", target)
+        not_gateway("GET", target, "prefix probe")
     # F-13 (3): literal dot segments and // are CLEANED by uri strip_prefix and forwarded (never expected as 404)
     forwarded("GET", "/m/v1/watcher/x/../status", "/v1/watcher/status")
     forwarded("GET", "/m/v1/watcher/./status", "/v1/watcher/status")
@@ -2763,7 +3376,7 @@ def _probe_live_checks(port: int, hits: list, lines: list[Line], host: str = "12
     # encoded forms and '#' are forwarded raw (the gateway's '%' rule answers 404 there)
     forwarded("GET", "/m/v1/watcher/x/%2e%2e/status", "/v1/watcher/x/%2e%2e/status")
     forwarded("GET", "/m/v1/watcher/media/a#x", "/v1/watcher/media/a%23x")
-    # no caller Authorization: nothing may be injected on the way to operator-query
+    # no caller Authorization: nothing may be injected on the way to the gateway
     forwarded("GET", "/m/v1/watcher/status", "/v1/watcher/status", {})
     forwarded("GET", "/m/v1/watcher/trading/accounts", "/v1/watcher/trading/accounts", {})
     forwarded("GET", "/m//v1/watcher/trading/accounts", "/v1/watcher/trading/accounts", {})
@@ -2775,18 +3388,30 @@ def _probe_live_checks(port: int, hits: list, lines: list[Line], host: str = "12
     for target in ("/watcher/", "/api/status", "/media/1700000000000-1.jpg"):
         before = len(hits)
         status, _b = req("GET", target)
-        expect(status == 401 and len(hits) == before, f"browser {target} without credentials -> {status}, stub hits {len(hits) - before}")
-    # wac-097 (review wac-095 🟡-2): entries that a path change in the site turns into prefix-space paths (g16-g18)
+        new = hits[before:]
+        expect(not any(h[0] in ("watcher", "gw") for h in new),
+               f"browser {target} without credentials -> {status}, reached {[h[0] for h in new]} (basic auth must hold)")
+        if status != 401 or new:
+            # WGW-1.0.4: e.g. handle_errors forwarding the basic-auth 401 to operator-query (the panel's own exposure, §9.15)
+            hints.append(f"DEFENSE_IN_DEPTH browser {target} without credentials -> {status}, stub hits {[h[0] for h in new]} (not the watcher)")
+    # V-2 / V-3 (2): the app site's guard answers /v1/watcher with an empty 404; the panel's /v1/* never reaches the gateway
+    for target in DIRECT_PROBES:
+        guard404(target)
+    for target in PANEL_PROBES:
+        not_gateway("GET", target, "panel sample", {"Authorization": PROBE_FAKE_AUTH})
+        not_gateway("GET", target, "panel sample (no Authorization)")
+    for other in other_hosts:
+        for target in DIRECT_PROBES + PANEL_PROBES[:1]:
+            not_gateway("GET", target, f"other site {other}", {"Authorization": PROBE_FAKE_AUTH}, other)
+    # wac-097 (review wac-095 🟡-2): entries that a path change in the site turns into prefix-space paths (g16-g18);
+    # WGW-1.0.4: reaching operator-query is a HINT, the gateway or the watcher a failure
     for target in entries:
         for hdrs in ({"Authorization": PROBE_FAKE_AUTH}, {}):
-            before = len(hits)
-            status, _b = req("GET", target, hdrs)
-            new = hits[before:]
-            wrong = [h for h in new if h[0] == "watcher" or (h[0] == "oq" and (h[3] != hdrs.get("Authorization") or h[4]))]
-            expect(not wrong, f"rewrite entry GET {_redact_path(target)!r} ({'with' if hdrs else 'without'} Authorization) -> {status}: "
-                              f"reached {[(h[0], _redact_path(h[2])) for h in wrong]} with a changed Authorization, X-Watcher-Proxy-Auth, "
-                              "or the watcher without basic credentials")
-    return n, fails
+            not_gateway("GET", target, f"rewrite entry ({'with' if hdrs else 'without'} Authorization)", hdrs)
+    stray = [h for i, h in enumerate(hits) if h[0] == "gw" and i not in table_gw]
+    expect(not stray, f"V-3 (2): {len(stray)} request(s) reached the gateway stub outside the table-path probes "
+                      f"({[_redact_path(h[2]) for h in stray[:5]]})")
+    return n, fails, hints
 
 
 PROBE_TMP_PREFIX = "o0-caddy-probe-xdg-"
@@ -3124,13 +3749,14 @@ def cmd_probe(args: argparse.Namespace) -> int:
     print(f"PROBE_INPUT {ident}  (stage C C-1: --probe-candidate-sha256 {cand_sha} --probe-snippet-sha256 {snip_sha})")
     hits: list = []
     fails: list[str] = []
-    n, version, verify_passes = 0, "?", 0
+    live_hints: list[str] = []
+    n, version, verify_passes, verify_hints, verify_unresolved = 0, "?", 0, 0, 0
     interrupted: int | None = None
     try:
         # everything that writes (the .o0probe copy holds the bcrypt hash, the temp dir the pinned JSON)
         # or starts a process is inside this try and registered with `run` first (review wac-090 🟡-4)
         xdg = run.mkdtemp()
-        oq, wa, sink = run.add_stub("oq", hits), run.add_stub("watcher", hits), run.add_stub("sink", hits)
+        gw, oq, wa, sink = run.add_stub("gw", hits), run.add_stub("oq", hits), run.add_stub("watcher", hits), run.add_stub("sink", hits)
         port, hp, hsp = _free_port(), _free_port(), _free_port()
         original = copy_path.read_text(encoding="utf-8")
         text = probe_caddyfile(original, args.site_address, port, hp, hsp, host)
@@ -3147,13 +3773,14 @@ def cmd_probe(args: argparse.Namespace) -> int:
             return 1
         config = json.loads(adapted.stdout)
         # verify the copy as written (production upstream addresses and site name), exactly like stage C preflight
-        rep = run_verify(config, lines, host=host, listen_port=str(port), upstream=args.upstream,
+        rep = run_verify(config, lines, host=host, listen_port=str(port), upstream=args.upstream, oq_upstream=args.oq_upstream,
                          mobile_samples=DEFAULT_MOBILE_SAMPLES, browser_samples=DEFAULT_BROWSER_SAMPLES)
         verify_passes = rep.passes
+        verify_hints, verify_unresolved = len(rep.hints), len(rep.unresolved)
         fails = [f"verify: {f}" for f in rep.failures]
         pinned, notes = pin_probe_config(config, port, args.upstream, args.watcher_upstream,
-                                         {"oq": oq.addr, "watcher": wa.addr, "sink": sink.addr})
-        problems = assert_probe_pinned(pinned, {oq.addr, wa.addr, sink.addr}, port)
+                                         {"gw": gw.addr, "oq": oq.addr, "watcher": wa.addr, "sink": sink.addr}, args.oq_upstream)
+        problems = assert_probe_pinned(pinned, {gw.addr, oq.addr, wa.addr, sink.addr}, port)
         for note in notes:
             print(f"PROBE_PIN {redact_line(note)}")
         if problems:
@@ -3183,7 +3810,11 @@ def cmd_probe(args: argparse.Namespace) -> int:
             return 1
         entries = rewrite_entry_targets(config, str(port))
         print(f"PROBE_REWRITE_ENTRIES targets={len(entries)} (path changes outside the snippet; each sent with and without Authorization)")
-        n, live_fails = _probe_live_checks(port, hits, lines, host, entries)
+        others = site_hosts(config, str(port), host)
+        print(f"PROBE_OTHER_SITES hosts={len(others)} (each gets the /v1/watcher group: V-3 (2))")
+        n, live_fails, live_hints = _probe_live_checks(port, hits, lines, host, entries, others)
+        for h in live_hints[:40]:
+            print(f"PROBE_HINT {h}")
         fails += live_fails
     except ArtifactError as exc:
         print(f"CADDY_PROBE_FAILED {exc} {ident}")
@@ -3199,8 +3830,9 @@ def cmd_probe(args: argparse.Namespace) -> int:
     if interrupted is not None:
         print(f"CADDY_PROBE_INTERRUPTED signal={signal.Signals(interrupted).name}: .o0probe and the temporary dir removed, caddy stopped {ident}")
         return 128 + interrupted
-    counts = {label: sum(1 for h in hits if h[0] == label) for label in ("oq", "watcher", "sink")}
-    stub_hits = f"stub_hits=oq:{counts['oq']},watcher:{counts['watcher']},sink:{counts['sink']}"
+    counts = {label: sum(1 for h in hits if h[0] == label) for label in ("gw", "oq", "watcher", "sink")}
+    stub_hits = f"stub_hits=gw:{counts['gw']},oq:{counts['oq']},watcher:{counts['watcher']},sink:{counts['sink']}"
+    stub_hits += f" hints=verify:{verify_hints},live:{len(live_hints)} upstream_unresolved={verify_unresolved}"
     # verify and live failures are capped SEPARATELY: an UNCOMPARABLE matcher makes verify fail on every emulated
     # request, which must not hide what the running Caddy did (wac-092)
     verify_fails = [f for f in fails if f.startswith("verify: ")]
@@ -3229,16 +3861,18 @@ def _fixture(lines: list[Line]) -> dict:
             h["headers"] = {"request": headers}
         return h
 
-    def strip_proxy():
-        return {"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/m"}, proxy("127.0.0.1:8183")]}]}
+    def strip_proxy(dial="127.0.0.1:8183"):
+        return {"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/m"}, proxy(dial)]}]}
 
     g = "group21"
     site: list = [{"handle": [{"handler": "headers", "response": {"set": {"X-Content-Type-Options": ["nosniff"]}}},
                               {"handler": "encode", "encodings": {"gzip": {}}, "prefer": ["gzip"]}]}]
     for line in lines:
         site.append({"group": g, "match": [{"method": list(line.methods), "path_regexp": {"name": line.matcher_name, "pattern": line.regex}}],
-                     "handle": [strip_proxy()]})
+                     "handle": [strip_proxy(DEFAULT_GATEWAY_UPSTREAM)]})
     site.append({"group": g, "match": [{"path_regexp": {"name": FALLBACK_NAME, "pattern": FALLBACK_REGEX}}],
+                 "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "static_response", "status_code": 404}]}]}]})
+    site.append({"group": g, "match": [{"path_regexp": {"name": GUARD_NAME, "pattern": GUARD_REGEX}}],
                  "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "static_response", "status_code": 404}]}]}]})
     site.append({"group": g, "match": [{"path": ["/m/v1/accounts", "/m/v1/mirror/positions", "/m/v1/operator/orders", "/m/v1/operator/orders/*"]}],
                  "handle": [strip_proxy()]})
@@ -3266,14 +3900,30 @@ def _site(cfg: dict) -> list:
 
 
 def cmd_selftest(args: argparse.Namespace) -> int:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    # The selftest tests the TOOL. It renders the format v2 snippet in memory from the list (expected_snippet) instead of
+    # reading the committed file, so it runs while the committed file is still v1 (wac-104 B-3 regenerates it); whether
+    # the committed file is byte-identical to that rendering is `check-artifacts` (run_all.sh, package gate G3).
+    lines, meta = load_list(args.paths)
+    if args.snippet:
+        load_snippet(args.snippet, lines, meta)
+        snippet_path = args.snippet
+    else:
+        snippet_dir = Path(tempfile.mkdtemp(prefix="o0-caddy-selftest-snippet-"))
+        snippet_path = snippet_dir / SNIPPET_FILE
+        snippet_path.write_text(expected_snippet(lines, meta), encoding="ascii")
+    try:
+        return _cmd_selftest(args, lines, meta, snippet_path)
+    finally:
+        if not args.snippet:
+            shutil.rmtree(snippet_path.parent, ignore_errors=True)
+
+
+def _cmd_selftest(args: argparse.Namespace, lines: list[Line], meta: dict[str, str], snippet_path: Path) -> int:
     import contextlib
     import io
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
     from o0_tool import caddy_skeleton, redact_line  # the structure the site check exports from jp-24
-
-    lines, meta = load_artifacts(args.paths, args.snippet)
-    snippet_path = args.snippet or args.paths.parent / SNIPPET_FILE
     checks = 0
 
     # 1. RE2 pins: the emulator must agree with Go regexp on the contract's probes (§9.14.4 item 1)
@@ -3285,6 +3935,29 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     assert re.search("^/m/v1/watcher/status$", "/m/v1/watcher/status\n"), "sanity: Python '$' differs (this is why the emulator translates)"
     assert re2_search("^/m/v1/watcher/media/[^/]+$", "/m/v1/watcher/media/a\n") and re2_search("^a[$]$", "a$")
     assert not re2_search("^/m/v1/watcher/status$", "/M/V1/WATCHER/status"), "path_regexp is case-sensitive"
+    # RS-1 (§9.14.4 item 1, format v2): the direct guard regexp, independently spelled, and its probes; the two prefix
+    # regexps do not intersect
+    assert GUARD_REGEX == "^(?i:/v1/watcher)(?:[/\\n%]|$)", GUARD_REGEX
+    for p_ in GUARD_MATCH:
+        assert re2_search(GUARD_REGEX, p_) and not re2_search(FALLBACK_REGEX, p_), ("guard must match, fallback not", p_)
+    for p_ in GUARD_NO_MATCH:
+        assert not re2_search(GUARD_REGEX, p_), ("guard must not match", p_)
+    for p_ in ("/m/v1/watcher", "/m/v1/watcher/status"):
+        assert not re2_search(GUARD_REGEX, p_), ("guard must not match the mobile prefix", p_)
+    # Caddy cleanPath (MatchPathRE matches the cleaned path; Go path.Clean, not posixpath: '//' at the start is merged)
+    for raw_p, want in (("//v1/watcher/status", "/v1/watcher/status"), ("/a//b/../c/", "/a/c/"), ("/", "/"), ("", "/"), ("/..", "/"),
+                        ("/m/v1/watcher/x/./status", "/m/v1/watcher/x/status"), ("/v1/watcher\n", "/v1/watcher\n")):
+        assert caddy_clean_path(raw_p) == want, ("cleanPath", raw_p, caddy_clean_path(raw_p))
+    # I-2 dial classification (RS-12, review wac-096 r5 🟡-A): request-scoped port or whole dial -> exposed
+    for dial, want in (("127.0.0.1:8183", "ok"), ("{env.OQ_HOST}:8183", "ok"), ("{http.request.host}:8183", "ok"), ("localhost", "ok"),
+                       ("127.0.0.1:8186", "exposed"), ("[::1]:8186", "exposed"), ("localhost:8186", "exposed"), ("127.0.0.1:8180-8189", "exposed"),
+                       ("127.0.0.1:{http.request.header.X-Port}", "exposed"), ("{http.request.header.X-Up}", "exposed"),
+                       ("127.0.0.1:{http.vars.p}", "exposed"), ("{header.X}", "exposed"), ("127.0.0.1:{http.regexp.1}", "exposed"),
+                       ("{env.OQ}", "unresolved"), ("127.0.0.1:{env.P}", "unresolved"), ("unix//run/a.sock", "unresolved"),
+                       ("unix+h2c//run/a.sock", "unresolved"), ("udp/127.0.0.1:53", "unresolved"), ("tcp/127.0.0.1:18186", "ok"),
+                       ("127.0.0.1:81860", "ok"), ("10.0.0.8:1186", "ok")):
+        assert classify_dial(dial)[0] == want, ("classify_dial", dial, classify_dial(dial))
+    checks += 5
     try:
         re2_search(r"^/\pL+$", "/a")
         raise AssertionError("RE2-only syntax must be uncomparable here")
@@ -3509,6 +4182,9 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     try:
         good_list = args.paths.read_text(encoding="ascii")
         good_snip = snippet_path.read_text(encoding="ascii")
+        GUARD_BLOCK = "\n".join(_guard_group()) + "\n"
+        FALLBACK_BLOCK = (f"\t@{FALLBACK_NAME} {{\n\t\tpath_regexp {FALLBACK_REGEX}\n\t}}\n\thandle @{FALLBACK_NAME} {{\n\t\trespond 404\n\t}}\n")
+        assert good_snip.count(GUARD_BLOCK) == 2 and good_snip.count(FALLBACK_BLOCK + GUARD_BLOCK + "}\n") == 1, "v2 tail shape"
 
         def art(list_text: str, snip_text: str) -> str | None:
             (base / "l.txt").write_text(list_text, encoding="latin1")
@@ -3551,6 +4227,15 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             "extra method": good_snip.replace("path_regexp ^/m/v1/watcher/status$\n\t\tmethod GET", "path_regexp ^/m/v1/watcher/status$\n\t\tmethod GET PATCH"),
             "upstream address in the snippet": good_snip.replace("\t\timport watcher_gateway_upstream\n", "\t\treverse_proxy 127.0.0.1:8183\n", 1),
             "yaml sha differs": good_snip.replace(meta["_yaml_sha256"], "0" * 64),
+            # RS-1 (format v2)
+            "format v1 header": good_snip.replace(SNIPPET_FORMAT, "watcher-gateway-caddy-snippet.v1"),
+            "direct_guard snippet missing": good_snip[:good_snip.index(f"({GUARD_SNIPPET_NAME})")],
+            "guard missing from the routes snippet": good_snip.replace(GUARD_BLOCK + "}\n(" + GUARD_SNIPPET_NAME, "}\n(" + GUARD_SNIPPET_NAME, 1),
+            "guard before the fallback": good_snip.replace(FALLBACK_BLOCK + GUARD_BLOCK, GUARD_BLOCK + FALLBACK_BLOCK, 1),
+            "guard regexp without '%'": good_snip.replace(GUARD_REGEX, "^(?i:/v1/watcher)(?:[/\\n]|$)"),
+            "guard answers 403": good_snip.replace("\thandle @wgw_direct {\n\t\trespond 404", "\thandle @wgw_direct {\n\t\trespond 403"),
+            "snippets in the other order": good_snip[:good_snip.index(f"({SNIPPET_NAME})")] + good_snip[good_snip.index(f"({GUARD_SNIPPET_NAME})"):]
+                                          + good_snip[good_snip.index(f"({SNIPPET_NAME})"):good_snip.index(f"({GUARD_SNIPPET_NAME})")],
         }
         for name, text in snip_bad.items():
             assert art(good_list, text) is not None, ("snippet accepted", name)
@@ -3558,11 +4243,15 @@ def cmd_selftest(args: argparse.Namespace) -> int:
 
         # 3. Caddyfile text checks (F-12 position, F-13 (2) record)
         cf_good = ("{\n\tadmin localhost:2019\n\torder rate_limit before basic_auth\n}\nimport caddy-watcher-gateway.caddy\n"
-                   "(watcher_gateway_upstream) {\n\turi strip_prefix /m\n\treverse_proxy 127.0.0.1:8183\n}\n"
+                   "(watcher_gateway_upstream) {\n\turi strip_prefix /m\n\treverse_proxy 127.0.0.1:8186 # the gateway 8186\n}\n"
                    "jp-bot.balen.wang {\n\timport watcher_gateway_routes\n\tencode gzip\n\theader X-Frame-Options DENY\n"
                    "\thandle /v1/* {\n\t\treverse_proxy 127.0.0.1:8183\n\t}\n}\n")
         probs, record = caddyfile_check(cf_good, redact_line)
         assert not probs, probs
+        # the optional direct guard in ANOTHER site, and 8186 only in a comment elsewhere, pass
+        cf_other = cf_good + "other.example {\n\timport watcher_gateway_direct_guard\n\treverse_proxy 127.0.0.1:8183 # never 8186\n}\n"
+        probs_o, record_o = caddyfile_check(cf_other, redact_line)
+        assert not probs_o and any(GUARD_SNIPPET_NAME in r for r in record_o), (probs_o, record_o)
         assert any("order rate_limit before basic_auth" in r for r in record) and sum("pre-handle directive" in r for r in record) == 2, record
         leaky = cf_good.replace("\theader X-Frame-Options DENY\n", "\theader X-Api-Key SENTINELhdr12\n\trequest_header @m Authorization \"Bearer SENTINELbearer\"\n"
                                 "\trewrite /hook/SENTINELpath0123456789/* /x\n").replace("\torder rate_limit before basic_auth\n", "\torder SENTINELord9x before handle\n")
@@ -3578,6 +4267,12 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             "site does not import the routes": cf_good.replace("\timport watcher_gateway_routes\n", ""),
             "imported twice": cf_good.replace("\timport watcher_gateway_routes\n", "\timport watcher_gateway_routes\n\timport watcher_gateway_routes\n"),
             "extra nested import besides the top-level one": cf_good.replace("\t\treverse_proxy 127.0.0.1:8183\n\t}\n}\n", "\t\treverse_proxy 127.0.0.1:8183\n\t}\n\thandle /x/* {\n\t\timport watcher_gateway_routes\n\t}\n}\n"),
+            # V-4 (RS-14): a standalone 8186 only inside (watcher_gateway_upstream)
+            "V-4 panel dials 8186": cf_good.replace("\thandle /v1/* {\n\t\treverse_proxy 127.0.0.1:8183", "\thandle /v1/* {\n\t\treverse_proxy 127.0.0.1:8186"),
+            "V-4 network_proxy to 8186 in another site": cf_good + "other.example {\n\treverse_proxy 127.0.0.1:8183 {\n\t\ttransport http {\n\t\t\tnetwork_proxy url http://localhost:8186\n\t\t}\n\t}\n}\n",
+            "V-4 port range 8180-8189": cf_good.replace("\thandle /v1/* {\n\t\treverse_proxy 127.0.0.1:8183", "\thandle /v1/* {\n\t\treverse_proxy 127.0.0.1:8180-8189"),
+            "V-4 upstream snippet defined twice": cf_good.replace("jp-bot.balen.wang {", "(watcher_gateway_upstream) {\n\treverse_proxy 127.0.0.1:8186\n}\njp-bot.balen.wang {"),
+            "both snippets imported in the same site": cf_good.replace("\timport watcher_gateway_routes\n", "\timport watcher_gateway_routes\n\timport watcher_gateway_direct_guard\n"),
         }.items():
             assert caddyfile_check(text, redact_line)[0], ("caddyfile check accepted", name)
             checks += 1
@@ -3587,12 +4282,12 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         base.rmdir()
 
     # 4. adapted-config verification: good fixture, skeleton, broken variants (raw and skeleton)
-    def verdict(cfg: dict, before_deploy: bool = False) -> tuple[bool, str]:
+    def verdict(cfg: dict, before_deploy: bool = False, skeleton: bool = False) -> tuple[bool, str]:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rep = run_verify(cfg, lines, host="jp-bot.balen.wang", listen_port="443", upstream=DEFAULT_GATEWAY_UPSTREAM,
                              mobile_samples=DEFAULT_MOBILE_SAMPLES, browser_samples=DEFAULT_BROWSER_SAMPLES,
-                             before_deploy=before_deploy)
+                             before_deploy=before_deploy, skeleton=skeleton)
         return (not rep.failures and rep.passes > 0), buf.getvalue()
 
     good = _fixture(lines)
@@ -3621,7 +4316,10 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         return gw_index(site, "^/m/v1/watcher/")
 
     def fb(site):
-        return gw_index(site, "(?i:")
+        return gw_index(site, "(?i:/m/v1/watcher)")
+
+    def tail(site):     # right after the snippet block (fallback, then the direct guard)
+        return gw_index(site, "(?i:/v1/watcher)(?:[/\\n%]") + 1
 
     def strip_proxy_route(match, group="group21", dial="127.0.0.1:8183"):
         r = {"match": match, "handle": [{"handler": "subroute", "routes": [{"handle": [
@@ -3671,7 +4369,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         "fallback 404 preceded by another handler": lambda s: s[fb(s)]["handle"][0]["routes"][0]["handle"].insert(0, {"handler": "headers", "response": {"set": {"X-A": ["1"]}}}),
         "fallback not last (before the per-path routes)": lambda s: s.insert(first_wgw(s), s.pop(fb(s))),
         "fallback with a method matcher": lambda s: s[fb(s)]["match"][0].update({"method": ["GET"]}),
-        "fallback duplicated": lambda s: s.insert(fb(s) + 1, copy.deepcopy(s[fb(s)])),
+        "fallback duplicated": lambda s: s.insert(tail(s), copy.deepcopy(s[fb(s)])),
         # F-12 / F-13 shadow (c)
         "handle /m/* before the import (F-12)": lambda s: s.insert(first_wgw(s), strip_proxy_route([{"path": ["/m/*"]}])),
         "top-level rewrite hits the prefix (F-13 a)": lambda s: s.insert(0, {"match": [{"path": ["/m/v1/watcher/dialogs"]}], "handle": [
@@ -3711,8 +4409,8 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         "last line nested at the same index (padded)": lambda s: s.insert(fb(s) - 1, {"handle": [{"handler": "subroute", "routes":
             [{"match": [{"path": [f"/o0-pad/{i}"]}], "handle": [{"handler": "vars", "p": str(i)}]} for i in range(fb(s) - 1)] + [s.pop(fb(s) - 1)]}]}),
         # forwarders of the prefix (d) and emulation (e)
-        "forwarder of the prefix hidden behind the fallback": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m/v1/watcher/*"]}])),
-        "/m/* forwarder after the fallback (watcherx reaches OQ)": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m/*"]}])),
+        "forwarder of the prefix hidden behind the fallback": lambda s: s.insert(tail(s), strip_proxy_route([{"path": ["/m/v1/watcher/*"]}])),
+        "/m/* forwarder after the fallback (watcherx reaches OQ)": lambda s: s.insert(tail(s), strip_proxy_route([{"path": ["/m/*"]}])),
         "double strip": lambda s: s[gw_index(s, "watcher/status")]["handle"][0]["routes"].insert(0, {"handle": [{"handler": "rewrite", "strip_path_prefix": "/m"}]}),
         "upstream snippet injects the panel Authorization": lambda s: s[gw_index(s, "watcher/status")]["handle"][0]["routes"][0]["handle"][1].update(
             {"headers": {"request": {"set": {"Authorization": ["Bearer {env.SYSTEM_OBSERVER_TOKEN}"]}}}}),
@@ -3724,7 +4422,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         "reverse_proxy deletes X-Watcher-* wildcard": lambda s: browser(s)[-1]["headers"]["request"].update({"delete": ["X-Watcher-*"]}),
         "browser does not clear actor header": lambda s: browser(s).pop(2),
         "browser keeps basic Authorization": lambda s: browser(s).pop(5),
-        "unauthenticated watcher route for /media": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/media/*"]}], "handle": [
+        "unauthenticated watcher route for /media": lambda s: s.insert(tail(s), {"group": "group21", "match": [{"path": ["/media/*"]}], "handle": [
             {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:9090"}]}]}),
         # wac-090 (review wac-088 🟡-1): path matchers with Caddy glob semantics and placeholders
         "glob '?' rewrite hits a table path": lambda s: s.insert(0, {"match": [{"path": ["/m/v1/w?tcher/status"]}], "handle": [
@@ -3739,31 +4437,31 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         "mixed-case path matcher /M/V1/Watcher/* (case-insensitive)": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"], "path": ["/M/V1/Watcher/*"]}],
             "handle": [{"handler": "rewrite", "strip_path_suffix": "/never-there"}]}),
         # isolated: behind the fallback, answers without proxying: only "touches the prefix but is neither a line nor the fallback" (G13)
-        "(?i) extra route after the fallback": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path_regexp": {
+        "(?i) extra route after the fallback": lambda s: s.insert(tail(s), {"group": "group21", "match": [{"path_regexp": {
             "name": "wx", "pattern": "(?i)^/m/v1/watcher/extra$"}}], "handle": [{"handler": "static_response", "status_code": 204}]}),
         # isolated: a correct browser route for /healthz that ALSO lists /m/v1/watcher/* (dead behind the fallback): only the
         # watcher-port rule of the forwarder check can refuse it (G17)
-        "watcher-port forwarder of the prefix hidden in a browser route": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+        "watcher-port forwarder of the prefix hidden in a browser route": lambda s: s.insert(tail(s), {"group": "group21",
             "match": [{"path": ["/m/v1/watcher/*", "/healthz"]}], "handle": copy.deepcopy(s[-2]["handle"])}),
         # isolated: basic auth on the mobile path inside the upstream snippet (G18)
         "basic auth in the upstream snippet": lambda s: s[gw_index(s, "watcher/status")]["handle"][0]["routes"][0]["handle"].insert(0,
             {"handler": "authentication", "providers": {"http_basic": {"accounts": [{"password": "HASH", "username": "u"}]}}}),
         # review wac-088 🟡-2: operator-query by port on every spelling, unparsable dials, dead forwarders
-        "localhost:8183 forwarder of /m/* after the fallback": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m/*"]}], dial="localhost:8183")),
-        "[::1]:8183 forwarder of /m/* after the fallback": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m/*"]}], dial="[::1]:8183")),
-        "unix-socket forwarder of /m/* (uncomparable)": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m/*"]}], dial="unix//run/oq.sock")),
-        "dead /m/v1/watcher/extra forwarder behind the fallback": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m/v1/watcher/extra"]}])),
+        "localhost:8183 forwarder of /m/* after the fallback": lambda s: s.insert(tail(s), strip_proxy_route([{"path": ["/m/*"]}], dial="localhost:8183")),
+        "[::1]:8183 forwarder of /m/* after the fallback": lambda s: s.insert(tail(s), strip_proxy_route([{"path": ["/m/*"]}], dial="[::1]:8183")),
+        "unix-socket forwarder of /m/* (uncomparable)": lambda s: s.insert(tail(s), strip_proxy_route([{"path": ["/m/*"]}], dial="unix//run/oq.sock")),
+        "dead /m/v1/watcher/extra forwarder behind the fallback": lambda s: s.insert(tail(s), strip_proxy_route([{"path": ["/m/v1/watcher/extra"]}])),
         # isolated: CONNECT-only (emulation unaffected) and the pattern hits ONE table path, none of F-13's three probes:
         # only the list-line shadow probes (shadow_probes) reach step 2
         "CONNECT rewrite on a single table path": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"], "path": ["/m/v1/watcher/trading/accounts"]}],
             "handle": [{"handler": "rewrite", "strip_path_suffix": "/never-there"}]}),
         # isolated: dead behind the fallback (no negative reaches it), operator-query spelled differently / unparsable:
         # only the port rule and the UNCOMPARABLE dial rule of the forwarder check see them
-        "dead /m/v1/watcher/extra forwarder spelled localhost:8183": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m/v1/watcher/extra"]}],
+        "dead /m/v1/watcher/extra forwarder spelled localhost:8183": lambda s: s.insert(tail(s), strip_proxy_route([{"path": ["/m/v1/watcher/extra"]}],
             dial="localhost:8183")),
-        "dead /m/v1/watcher/extra forwarder to a unix socket (uncomparable)": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m/v1/watcher/extra"]}],
+        "dead /m/v1/watcher/extra forwarder to a unix socket (uncomparable)": lambda s: s.insert(tail(s), strip_proxy_route([{"path": ["/m/v1/watcher/extra"]}],
             dial="unix//run/oq.sock")),
-        "dead dynamic_upstreams forwarder behind the fallback (uncomparable)": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+        "dead dynamic_upstreams forwarder behind the fallback (uncomparable)": lambda s: s.insert(tail(s), {"group": "group21",
             "match": [{"path": ["/m/v1/watcher/extra"]}], "handle": [{"handler": "reverse_proxy", "dynamic_upstreams": {"source": "srv", "name": "oq"}}]}),
         # wac-092 (review wac-090 🟡-1): non-ASCII path patterns
         "request_header on /m/v1/watcher/tradİng/accounts injects the observer token (review n07)": lambda s: s.insert(0, {
@@ -3776,7 +4474,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             "match": [{"path": ["/m//v1/watcher/trading/accounts"]}], "handle": [inject_observer()]}),
         "CONNECT rewrite on /m/v1//watcher/status (only the '//' rule)": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"],
             "path": ["/m/v1//watcher/status"]}], "handle": [{"handler": "rewrite", "strip_path_suffix": "/never-there"}]}),
-        "'//' forwarder of the prefix to operator-query after the fallback": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["/m//v1/watcher/*"]}])),
+        "'//' forwarder of the prefix to operator-query after the fallback": lambda s: s.insert(tail(s), strip_proxy_route([{"path": ["/m//v1/watcher/*"]}])),
         # 🟡-3: host matchers inside the site
         "host jp-bot.*.wang + request_header injection (review n17b)": lambda s: s.insert(0, {"match": [{"host": ["jp-bot.*.wang"]}],
             "handle": [inject_observer()]}),
@@ -3787,7 +4485,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         "CONNECT rewrite behind a host matcher for another name": lambda s: s.insert(0, {"match": [{"host": ["alias.balen.wang"], "method": ["CONNECT"],
             "path": ["/m/v1/watcher/*"]}], "handle": [{"handler": "rewrite", "strip_path_suffix": "/never-there"}]}),
         # isolated: a /m/* forwarder to operator-query for another name after the fallback: only the forwarder check's host rule
-        "operator-query forwarder of /m/* behind a host matcher for another name": lambda s: s.insert(fb(s) + 1, strip_proxy_route(
+        "operator-query forwarder of /m/* behind a host matcher for another name": lambda s: s.insert(tail(s), strip_proxy_route(
             [{"host": ["alias.balen.wang"], "path": ["/m/*"]}])),
         # wac-094 (review wac-092 🟡-1, v15..v20): matchers that miss every sample path but select other parameter values,
         # suffixes or cases of table paths; each injects the observer token
@@ -3804,7 +4502,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         "v20 rewrite on …/channels/[0-9]* (literal prefix; a channel id may start with it)": lambda s: s.insert(0, {
             "match": [{"path": ["/m/v1/watcher/trading/channels/[0-9]*"]}], "handle": [{"handler": "rewrite", "uri": "/index.html"}]}),
         # isolated: dead forwarder of *.png to operator-query after the fallback (only the forwarder check's space rule)
-        "dead *.png forwarder to operator-query after the fallback": lambda s: s.insert(fb(s) + 1, strip_proxy_route([{"path": ["*.png"]}])),
+        "dead *.png forwarder to operator-query after the fallback": lambda s: s.insert(tail(s), strip_proxy_route([{"path": ["*.png"]}])),
         # wac-097 (review wac-095 🟡-2): path changes that bring a path from outside the prefix into it (g15..g18)
         "g16 strip_prefix /x + request_header on /x/* (one route)": lambda s: s.insert(0, {"match": [{"path": ["/x/*"]}], "handle": [
             {"handler": "rewrite", "strip_path_prefix": "/x"}, inject_observer()]}),
@@ -3812,7 +4510,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             {"handler": "rewrite", "uri_substring": [{"find": "/s/", "limit": 1, "replace": "/m/v1/watcher/"}]}, inject_observer()]}),
         "g15 rewrite /static/* to /m/v1/watcher/status (group)": lambda s: s.insert(0, {"group": "group22", "match": [{"path": ["/static/*"]}],
             "handle": [{"handler": "rewrite", "uri": "/m/v1/watcher/status"}]}),
-        "g18 handle_path /x/* to operator-query with the observer token": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/x/*"]}],
+        "g18 handle_path /x/* to operator-query with the observer token": lambda s: s.insert(tail(s), {"group": "group21", "match": [{"path": ["/x/*"]}],
             "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}, {"handler": "reverse_proxy",
                 "upstreams": [{"dial": "127.0.0.1:8183"}], "headers": {"request": {"set": {"Authorization": ["Bearer {env.SYSTEM_OBSERVER_TOKEN}"]}}}}]}]}]}),
         # isolated (wac-099 rework): without the panel /v1/* forwarder, a pre-snippet path change can only feed the snippet, so only
@@ -3822,10 +4520,10 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             s.insert(0, {"match": [{"method": ["CONNECT"], "path": ["/x/*"]}], "handle": [{"handler": "rewrite", "strip_path_prefix": "/x"},
                                                                                         inject_observer()]})),
         # isolated: behind the fallback, nothing injected, no probe or sample reaches /x/*: only the path-change forwarder rule
-        "handle_path /x/* to operator-query, nothing injected": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/x/*"]}],
+        "handle_path /x/* to operator-query, nothing injected": lambda s: s.insert(tail(s), {"group": "group21", "match": [{"path": ["/x/*"]}],
             "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"},
                                                                      {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
-        "reverse_proxy's own rewrite (strip /q) to localhost:8183": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/q/*"]}],
+        "reverse_proxy's own rewrite (strip /q) to localhost:8183": lambda s: s.insert(tail(s), {"group": "group21", "match": [{"path": ["/q/*"]}],
             "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "localhost:8183"}], "rewrite": {"strip_path_prefix": "/q"}}]}),
         # isolated: CONNECT-only (emulation unaffected), matcher outside the space: only the path-change rule of step 1
         "CONNECT strip_prefix /x on /x/* before the snippet": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"], "path": ["/x/*"]}],
@@ -3852,80 +4550,80 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         "CONNECT rewrite on ^/api[^](][^]]|/status$": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"], "path_regexp": {"name": "x",
             "pattern": "^/api[^](][^]]|/status$"}}], "handle": [{"handler": "rewrite", "strip_path_suffix": "/never-there"}]}),
         # wac-097 (review wac-096 🔴-1): a reverse_proxy's OWN rewrite (reverse_proxy { rewrite … }, forward_auth's uri)
-        "review wac-096: handle /foo/* { reverse_proxy <oq> { rewrite /v1/watcher/dialogs; header_up observer } }": lambda s: s.insert(fb(s) + 1, {
+        "review wac-096: handle /foo/* { reverse_proxy <oq> { rewrite /v1/watcher/dialogs; header_up observer } }": lambda s: s.insert(tail(s), {
             "group": "group21", "match": [{"path": ["/foo/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "reverse_proxy",
                 "headers": {"request": {"set": {"Authorization": ["Bearer {env.SYSTEM_OBSERVER_TOKEN}"]}}}, "rewrite": {"uri": "/v1/watcher/dialogs"},
                 "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
-        "reverse_proxy <oq> { rewrite /v1/watcher{path} } on /foo/* (placeholder)": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+        "reverse_proxy <oq> { rewrite /v1/watcher{path} } on /foo/* (placeholder)": lambda s: s.insert(tail(s), {"group": "group21",
             "match": [{"path": ["/foo/*"]}], "handle": [{"handler": "reverse_proxy", "rewrite": {"uri": "/v1/watcher{http.request.uri.path}"},
                                                          "upstreams": [{"dial": "127.0.0.1:8183"}]}]}),
         "forward_auth /bar/* <oq> { uri /v1/watcher/status } before the snippet": lambda s: s.insert(0, {"match": [{"path": ["/bar/*"]}], "handle": [
             {"handler": "reverse_proxy", "rewrite": {"method": "GET", "uri": "/v1/watcher/status"}, "upstreams": [{"dial": "127.0.0.1:8183"}],
              "handle_response": [{"match": {"status_code": [2]}, "routes": [{"handle": [{"handler": "vars"}]}]}]}]}),
         # wac-097 (review wac-096 🟡-1): handle_response routes and unknown containers are followed
-        "sink reverse_proxy on /m/* whose handle_response forwards to <oq>": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/m/*"]}],
+        "sink reverse_proxy on /m/* whose handle_response forwards to <oq>": lambda s: s.insert(tail(s), {"group": "group21", "match": [{"path": ["/m/*"]}],
             "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:7000"}], "handle_response": [{"match": {"status_code": [5]},
                 "routes": [{"handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}]}),
-        "unknown handler with nested routes on /m/* (uncomparable)": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/m/*"]}],
+        "unknown handler with nested routes on /m/* (uncomparable)": lambda s: s.insert(tail(s), {"group": "group21", "match": [{"path": ["/m/*"]}],
             "handle": [{"handler": "o0_plugin", "routes": [{"handle": [{"handler": "static_response", "status_code": 204}]}]}]}),
         # isolated: dead behind the fallback (no emulated request reaches it, no path change): only the forwarder check's
         # UNCOMPARABLE for a container it does not enumerate
-        "dead /m/v1/watcher/extra with an unknown nested-route container (uncomparable)": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+        "dead /m/v1/watcher/extra with an unknown nested-route container (uncomparable)": lambda s: s.insert(tail(s), {"group": "group21",
             "match": [{"path": ["/m/v1/watcher/extra"]}], "handle": [{"handler": "o0_plugin", "routes": [{"handle": [
                 {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
         # review wac-096 second round (q1, q4, 🔴-A, 🔴-B; coordinator's second addition to wac-097)
-        "q1 handle_path /x/* { reverse_proxy <oq> { rewrite ?a=1 } }": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/x/*"]}],
+        "q1 handle_path /x/* { reverse_proxy <oq> { rewrite ?a=1 } }": lambda s: s.insert(tail(s), {"group": "group21", "match": [{"path": ["/x/*"]}],
             "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]}, {"handle": [
                 {"handler": "reverse_proxy", "rewrite": {"uri": "?a=1"}, "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
-        "q4 handle_path /x/* { reverse_proxy <oq> { rewrite #frag } }": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/x/*"]}],
+        "q4 handle_path /x/* { reverse_proxy <oq> { rewrite #frag } }": lambda s: s.insert(tail(s), {"group": "group21", "match": [{"path": ["/x/*"]}],
             "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]}, {"handle": [
                 {"handler": "reverse_proxy", "rewrite": {"uri": "#frag"}, "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
         # isolated: /foo/* cannot hit, no other change: only "an empty path part proves nothing"
-        "handle /foo/* { reverse_proxy <oq> { rewrite ?a=1 } } (empty path part)": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+        "handle /foo/* { reverse_proxy <oq> { rewrite ?a=1 } } (empty path part)": lambda s: s.insert(tail(s), {"group": "group21",
             "match": [{"path": ["/foo/*"]}], "handle": [{"handler": "reverse_proxy", "rewrite": {"uri": "?a=1"}, "upstreams": [{"dial": "127.0.0.1:8183"}]}]}),
         # isolated: handle_response routes get the ORIGINAL request (after the strip, before the proxy's own rewrite /ping)
-        "handle_path /x/* { reverse_proxy sink { rewrite /ping; handle_response { reverse_proxy <oq> } } }": lambda s: s.insert(fb(s) + 1, {
+        "handle_path /x/* { reverse_proxy sink { rewrite /ping; handle_response { reverse_proxy <oq> } } }": lambda s: s.insert(tail(s), {
             "group": "group21", "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [
                 {"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]},
                 {"handle": [{"handler": "reverse_proxy", "rewrite": {"uri": "/ping"}, "upstreams": [{"dial": "127.0.0.1:7001"}],
                              "handle_response": [{"routes": [{"handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}]}]}]}),
         # wac-099 🔴-1 (review wac-099 A1, A6, A7, A8): a matcher AFTER the path change (reverse_proxy /v1/*, handle /v1/*)
-        "A1 handle_path /x/* { reverse_proxy /v1/* <oq> +observer }": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/x/*"]}],
+        "A1 handle_path /x/* { reverse_proxy /v1/* <oq> +observer }": lambda s: s.insert(tail(s), {"group": "group21", "match": [{"path": ["/x/*"]}],
             "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]},
                                                          {"match": [{"path": ["/v1/*"]}], "handle": [inject_rp()]}]}]}),
-        "A6 handle_path /x/* { handle /v1/* { reverse_proxy <oq> +observer } }": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+        "A6 handle_path /x/* { handle /v1/* { reverse_proxy <oq> +observer } }": lambda s: s.insert(tail(s), {"group": "group21",
             "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]},
                 {"group": "group1", "match": [{"path": ["/v1/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [inject_rp()]}]}]}]}]}),
-        "A7 handle /x/* { uri path_regexp ^/x/ /; reverse_proxy /v1/* <oq> +observer }": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+        "A7 handle /x/* { uri path_regexp ^/x/ /; reverse_proxy /v1/* <oq> +observer }": lambda s: s.insert(tail(s), {"group": "group21",
             "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "path_regexp": [
                 {"find": "^/x/", "replace": "/"}]}]}, {"match": [{"path": ["/v1/*"]}], "handle": [inject_rp()]}]}]}),
-        "A8 handle /x/* { rewrite * /v1{query.p}; reverse_proxy /v1/* <oq> +observer }": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+        "A8 handle /x/* { rewrite * /v1{query.p}; reverse_proxy /v1/* <oq> +observer }": lambda s: s.insert(tail(s), {"group": "group21",
             "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [{"group": "group17", "handle": [{"handler": "rewrite",
                 "uri": "/v1{http.request.uri.query.p}"}]}, {"match": [{"path": ["/v1/*"]}], "handle": [inject_rp()]}]}]}),
         # wac-099 🔴-2 (review wac-099 C1): intercept's handle_response rewrites and forwards
         "C1 handle /x/* { intercept { handle_response { rewrite * /v1/watcher/dialogs; reverse_proxy <oq> +observer } } respond 404 }":
-            lambda s: s.insert(fb(s) + 1, {"group": "group22", "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [
+            lambda s: s.insert(tail(s), {"group": "group22", "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [
                 {"handler": "intercept", "handle_response": [{"routes": [{"group": "group17", "handle": [{"handler": "rewrite", "uri": "/v1/watcher/dialogs"}]},
                                                                          {"handle": [inject_rp()]}]}]},
                 {"handler": "static_response", "status_code": 404}]}]}]}),
         # isolated: the forwarder inside intercept's handle_response has its own /v1/* matcher, so only the path-change
         # forwarder rule, following intercept, sees it
-        "C1b intercept handle_response { rewrite * /v1/watcher/dialogs; reverse_proxy /v1/* <oq> +observer }": lambda s: s.insert(fb(s) + 1, {
+        "C1b intercept handle_response { rewrite * /v1/watcher/dialogs; reverse_proxy /v1/* <oq> +observer }": lambda s: s.insert(tail(s), {
             "group": "group22", "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [
                 {"handler": "intercept", "handle_response": [{"routes": [{"group": "group17", "handle": [{"handler": "rewrite", "uri": "/v1/watcher/dialogs"}]},
                                                                          {"match": [{"path": ["/v1/*"]}], "handle": [inject_rp()]}]}]},
                 {"handler": "static_response", "status_code": 404}]}]}]}),
         # isolated: matcher cannot hit, no path change: only _container_check refuses what it cannot follow
-        "unknown container on /zzz/* (no path change, matcher misses the prefix)": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+        "unknown container on /zzz/* (no path change, matcher misses the prefix)": lambda s: s.insert(tail(s), {"group": "group21",
             "match": [{"path": ["/zzz/*"]}], "handle": [{"handler": "o0_plugin", "routes": [{"handle": [{"handler": "reverse_proxy",
                 "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
-        "subroute with its own errors routes on /zzz/*": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/zzz/*"]}],
+        "subroute with its own errors routes on /zzz/*": lambda s: s.insert(tail(s), {"group": "group21", "match": [{"path": ["/zzz/*"]}],
             "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "static_response", "status_code": 204}]}],
                         "errors": {"routes": [{"handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}}]}),
         # review wac-099 E2 / M12: exact-literal path_regexp, CONNECT-only
         "E2 CONNECT ^/v1/watcherx$ + uri strip_suffix x": lambda s: s.insert(0, {"match": [{"method": ["CONNECT"], "path_regexp": {"name": "e2",
             "pattern": "^/v1/watcherx$"}}], "handle": [{"handler": "rewrite", "strip_path_suffix": "x"}]}),
-        "reverse_proxy <oq> { rewrite {uri /v1/auth, uri_substring auth -> watcher/dialogs} } on /foo/*": lambda s: s.insert(fb(s) + 1, {
+        "reverse_proxy <oq> { rewrite {uri /v1/auth, uri_substring auth -> watcher/dialogs} } on /foo/*": lambda s: s.insert(tail(s), {
             "group": "group21", "match": [{"path": ["/foo/*"]}], "handle": [{"handler": "reverse_proxy", "rewrite": {"uri": "/v1/auth", "uri_substring": [
                 {"find": "auth", "replace": "watcher/dialogs"}]}, "upstreams": [{"dial": "127.0.0.1:8183"}]}]}),
     }
@@ -3947,16 +4645,16 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     # wac-097 (review wac-096 🟡-1): server-level containers - the error chain and named routes reached by invoke
     server_variants = {
         "handle_errors { reverse_proxy <oq> + observer } (review wac-096)": lambda c: with_errors(c, [copy.deepcopy(oq_obs)]),
-        "handle_path /x/* { invoke obs }, obs -> <oq> + observer": lambda c: with_named(c, lambda s: s.insert(fb(s) + 1, {"group": "group21",
+        "handle_path /x/* { invoke obs }, obs -> <oq> + observer": lambda c: with_named(c, lambda s: s.insert(tail(s), {"group": "group21",
             "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]},
                                                                                          {"handle": [{"handler": "invoke", "name": "obs"}]}]}]})),
-        "handle /m/* { invoke obs } after the fallback, obs -> <oq>": lambda c: with_named(c, lambda s: s.insert(fb(s) + 1, {"group": "group21",
+        "handle /m/* { invoke obs } after the fallback, obs -> <oq>": lambda c: with_named(c, lambda s: s.insert(tail(s), {"group": "group21",
             "match": [{"path": ["/m/*"]}], "handle": [{"handler": "invoke", "name": "obs"}]})),
         # isolated: dead behind the fallback, so the emulator (which refuses invoke) never meets it: only the forwarder
         # check's invoke following
-        "dead /m/v1/watcher/extra { invoke obs } behind the fallback, obs -> <oq>": lambda c: with_named(c, lambda s: s.insert(fb(s) + 1, {
+        "dead /m/v1/watcher/extra { invoke obs } behind the fallback, obs -> <oq>": lambda c: with_named(c, lambda s: s.insert(tail(s), {
             "group": "group21", "match": [{"path": ["/m/v1/watcher/extra"]}], "handle": [{"handler": "invoke", "name": "obs"}]})),
-        "invoke of an unknown named route on /m/* (uncomparable)": lambda c: _site(c).insert(fb(_site(c)) + 1, {"group": "group21",
+        "invoke of an unknown named route on /m/* (uncomparable)": lambda c: _site(c).insert(tail(_site(c)), {"group": "group21",
             "match": [{"path": ["/m/*"]}], "handle": [{"handler": "invoke", "name": "nope"}]}),
         "handle_errors forwards /api/* to the watcher (basic auth bypass by the error chain)": lambda c: with_errors(c, [{"handler": "reverse_proxy",
             "upstreams": [{"dial": "127.0.0.1:9090"}]}], [{"path": ["/api/*"]}]),
@@ -3988,26 +4686,175 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         ok_c, text_c = verdict(candidate)
         assert not ok_c and "container route 0 handler before its subroute" in text_c, ("enclosing-level handler not caught", form)
     checks += 1
-    for name, fn in variants.items():
-        cfg = mutated(fn)
-        for form, candidate in (("raw", cfg), ("skeleton", caddy_skeleton(cfg))):
-            ok_variant, text_variant = verdict(candidate)
-            if ok_variant:
-                print(f"SELFTEST_MISSED {name} ({form})")
-                print(text_variant)
-                return 1
-        caught += 1
-    for name, fn in server_variants.items():
+    # ---- WGW-1.0.4 (task wac-105). RS-11 / RS-1 structure, I-2 (RS-12 incl. review wac-096 r5 🟡-A), and the user's
+    # "not so strict": the pre-1.0.4 operator-query (8183) shapes below are DEFENSE-IN-DEPTH now - verify passes and prints
+    # a HINT DEFENSE_IN_DEPTH line - and each one's automatic 8186 twin (every NEW dial ':8183' of the variant written as
+    # ':8186') must FAIL with GATEWAY_PORT_EXPOSED ("hints unless they can bring a request to 8186").
+    def line_proxy(site, needle="watcher/status"):
+        return site[gw_index(site, needle)]["handle"][0]["routes"][0]["handle"][1]
+
+    def guard_i(site):
+        return gw_index(site, "(?i:/v1/watcher)")
+
+    panel = lambda s: next(r for r in s if (r.get("match") or [{}])[0].get("path") == ["/v1/*"])["handle"][0]["routes"][0]["handle"][0]  # noqa: E731
+
+    def at_tail(route):
+        return lambda s: s.insert(tail(s), {"group": "group21", **route})
+
+    def rp(dial, **extra):
+        return {"handler": "reverse_proxy", "upstreams": [{"dial": dial}], **extra}
+
+    variants.update({
+        # RS-11 (+ the review's two mutations)
+        "RS-11 snippet upstream dials 8183 (operator-query)": lambda s: line_proxy(s).update({"upstreams": [{"dial": "127.0.0.1:8183"}]}),
+        "RS-11 snippet upstream with transport http { }": lambda s: line_proxy(s).update({"transport": {"protocol": "http"}}),
+        "RS-11 snippet upstream with its own rewrite": lambda s: line_proxy(s, "dialogs").update({"rewrite": {"uri": "/v1/watcher/status"}}),
+        "RS-11 snippet upstream header_up X-Other (any request header op)": lambda s: line_proxy(s).update({"headers": {"request": {"set": {"X-Other": ["1"]}}}}),
+        "RS-11 snippet upstream also dials a second upstream": lambda s: line_proxy(s).update({"upstreams": [{"dial": "127.0.0.1:8186"}, {"dial": "127.0.0.1:7000"}]}),
+        "V-1 (a) top-level request_header X-Other (no Authorization)": lambda s: s[0]["handle"].insert(0, {"handler": "headers", "request": {"set": {"X-Other": ["1"]}}}),
+        "V-1 (a) forward_auth with copy_headers before the snippet": lambda s: s.insert(0, {"handle": [rp("127.0.0.1:7000",
+            handle_response=[{"match": {"status_code": [2]}, "routes": [{"handle": [{"handler": "vars"}]}, {"handle": [{"handler": "headers",
+                "request": {"set": {"Remote-User": ["{http.reverse_proxy.header.Remote-User}"]}}}]}]}])]}),
+        # RS-1 direct guard
+        "direct guard removed": lambda s: s.pop(guard_i(s)),
+        "direct guard answers 200": lambda s: s[guard_i(s)]["handle"][0]["routes"][0]["handle"][0].update({"status_code": 200}),
+        "direct guard before the fallback": lambda s: s.insert(fb(s), s.pop(guard_i(s))),
+        "direct guard with a method matcher": lambda s: s[guard_i(s)]["match"][0].update({"method": ["GET"]}),
+        "direct guard duplicated": lambda s: s.insert(guard_i(s) + 1, copy.deepcopy(s[guard_i(s)])),
+        "direct guard regexp without '%' (the fallback's class)": lambda s: s[guard_i(s)]["match"][0]["path_regexp"].update(
+            {"pattern": "^(?i:/v1/watcher)(?:[/\\n]|$)"}),
+        # I-2 (RS-15 FAIL list): the shapes that dial 8186
+        "I-2 panel /v1/* dials 8186": lambda s: panel(s).update({"upstreams": [{"dial": "127.0.0.1:8186"}]}),
+        "I-2 localhost:8186 forwarder": at_tail({"match": [{"path": ["/g/*"]}], "handle": [rp("localhost:8186")]}),
+        "I-2 [::1]:8186 forwarder": at_tail({"match": [{"path": ["/g/*"]}], "handle": [rp("[::1]:8186")]}),
+        "I-2 port range 8180-8189 (adapt expands it)": at_tail({"match": [{"path": ["/g/*"]}], "handle": [{"handler": "reverse_proxy",
+            "upstreams": [{"dial": f"127.0.0.1:{p_}"} for p_ in range(8180, 8190)]}]}),
+        "I-2 unexpanded range string 127.0.0.1:8180-8189": at_tail({"match": [{"path": ["/g/*"]}], "handle": [rp("127.0.0.1:8180-8189")]}),
+        "I-2 panel 8183 through network_proxy http://127.0.0.1:8186": lambda s: panel(s).update({"transport": {"protocol": "http",
+            "network_proxy": {"from": "url", "url": "http://127.0.0.1:8186"}}}),
+        "I-2 panel 8183 through forward_proxy_url http://127.0.0.1:8186": lambda s: panel(s).update({"transport": {"protocol": "http",
+            "forward_proxy_url": "http://127.0.0.1:8186"}}),
+        "I-2 dynamic a { name localhost; port 8186 }": at_tail({"match": [{"path": ["/g/*"]}], "handle": [{"handler": "reverse_proxy",
+            "dynamic_upstreams": {"source": "a", "name": "localhost", "port": "8186"}}]}),
+        "I-2 active health check upstream 127.0.0.1:8186": lambda s: panel(s).update({"health_checks": {"active": {"uri": "/h",
+            "upstream": "127.0.0.1:8186"}}}),
+        "I-2 p11 dial {http.request.header.X-Up} (review wac-096 r5 🟡-A)": lambda s: panel(s).update({"upstreams": [{"dial": "{http.request.header.X-Up}"}]}),
+        "I-2 p12 dial 127.0.0.1:{http.request.header.X-Port} (review wac-096 r5 🟡-A)": lambda s: panel(s).update(
+            {"upstreams": [{"dial": "127.0.0.1:{http.request.header.X-Port}"}]}),
+        "I-2 network_proxy url built from {http.request.header.Y}": lambda s: panel(s).update({"transport": {"protocol": "http",
+            "network_proxy": {"from": "url", "url": "http://127.0.0.1:{http.request.header.Y}"}}}),
+        "I-2 dynamic a port {http.vars.p}": at_tail({"match": [{"path": ["/g/*"]}], "handle": [{"handler": "reverse_proxy",
+            "dynamic_upstreams": {"source": "a", "name": "localhost", "port": "{http.vars.p}"}}]}),
+        "I-2 top-level forward_auth to 8186": lambda s: s.insert(0, {"handle": [rp("127.0.0.1:8186",
+            handle_response=[{"match": {"status_code": [2]}, "routes": [{"handle": [{"handler": "vars"}]}]}])]}),
+        "I-2 (watcher_gateway_upstream) imported by another handle (/evil/*)": at_tail({"match": [{"path": ["/evil/*"]}], "handle": [
+            {"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/m"}, rp("127.0.0.1:8186")]}]}]}),
+    })
+    server_variants.update({
+        "I-2 non-http app (layer4) dials 127.0.0.1:8186": lambda c: c["apps"].update({"layer4": {"servers": {"l4": {"listen": [":9443"],
+            "routes": [{"handle": [{"handler": "proxy", "upstreams": [{"dial": ["127.0.0.1:8186"]}]}]}]}}}}),
+        "I-2 a number 8186 anywhere (max_conns)": lambda c: srv(c).update({"max_header_bytes": 8186}),
+        "I-2 handle_errors forwards to 8186": lambda c: with_errors(c, [rp("127.0.0.1:8186")]),
+    })
+    # the pre-1.0.4 operator-query shapes: defense in depth now (a HINT, not a failure) - each has an 8186 twin below
+    did_names = {
+        "top-level forward_auth (reverse_proxy) without matcher", "forwarder of the prefix hidden behind the fallback",
+        "/m/* forwarder after the fallback (watcherx reaches OQ)", "localhost:8183 forwarder of /m/* after the fallback",
+        "[::1]:8183 forwarder of /m/* after the fallback", "dead /m/v1/watcher/extra forwarder behind the fallback",
+        "dead /m/v1/watcher/extra forwarder spelled localhost:8183", "dead /m/v1/watcher/extra forwarder to a unix socket (uncomparable)",
+        "operator-query forwarder of /m/* behind a host matcher for another name", "dead *.png forwarder to operator-query after the fallback",
+        "g18 handle_path /x/* to operator-query with the observer token", "handle_path /x/* to operator-query, nothing injected",
+        "reverse_proxy's own rewrite (strip /q) to localhost:8183",
+        "review wac-096: handle /foo/* { reverse_proxy <oq> { rewrite /v1/watcher/dialogs; header_up observer } }",
+        "reverse_proxy <oq> { rewrite /v1/watcher{path} } on /foo/* (placeholder)", "forward_auth /bar/* <oq> { uri /v1/watcher/status } before the snippet",
+        "dead /m/v1/watcher/extra with an unknown nested-route container (uncomparable)", "q1 handle_path /x/* { reverse_proxy <oq> { rewrite ?a=1 } }",
+        "q4 handle_path /x/* { reverse_proxy <oq> { rewrite #frag } }", "handle /foo/* { reverse_proxy <oq> { rewrite ?a=1 } } (empty path part)",
+        "handle_path /x/* { reverse_proxy sink { rewrite /ping; handle_response { reverse_proxy <oq> } } }",
+        "A1 handle_path /x/* { reverse_proxy /v1/* <oq> +observer }", "A6 handle_path /x/* { handle /v1/* { reverse_proxy <oq> +observer } }",
+        "A7 handle /x/* { uri path_regexp ^/x/ /; reverse_proxy /v1/* <oq> +observer }",
+        "A8 handle /x/* { rewrite * /v1{query.p}; reverse_proxy /v1/* <oq> +observer }",
+        "C1 handle /x/* { intercept { handle_response { rewrite * /v1/watcher/dialogs; reverse_proxy <oq> +observer } } respond 404 }",
+        "C1b intercept handle_response { rewrite * /v1/watcher/dialogs; reverse_proxy /v1/* <oq> +observer }",
+        "unknown container on /zzz/* (no path change, matcher misses the prefix)", "subroute with its own errors routes on /zzz/*",
+        "reverse_proxy <oq> { rewrite {uri /v1/auth, uri_substring auth -> watcher/dialogs} } on /foo/*",
+        "E2 CONNECT ^/v1/watcherx$ + uri strip_suffix x",
+        "handle_errors { reverse_proxy <oq> + observer } (review wac-096)", "handle_path /x/* { invoke obs }, obs -> <oq> + observer",
+        "dead /m/v1/watcher/extra { invoke obs } behind the fallback, obs -> <oq>", "E1 handle_errors { handle_path /x/* { reverse_proxy <oq> +observer } respond 404 }",
+        "E1b handle_errors { handle_path /x/* { reverse_proxy /v1/* <oq> +observer } }",
+        "server route [host other | host site + /x/*] { strip /x; reverse_proxy <oq> }", "q2 handle_errors { reverse_proxy <oq> { rewrite ?a=1 } }",
+        "q3 handle_errors { reverse_proxy sink { rewrite /ping; handle_response { reverse_proxy <oq> } } }",
+        "dead dynamic_upstreams forwarder behind the fallback (uncomparable)",
+    }
+    # the user's review wac-097 leftovers and review wac-099 r2 D2/D5 (the forward_auth one-line fix stays pinned as a hint)
+    variants.update({
+        "D2 handle /x/* { uri strip_prefix /x; forward_auth sink { uri /check }; reverse_proxy /v1/* <oq> +observer }": at_tail({
+            "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [
+                {"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}, rp("127.0.0.1:7000", rewrite={"method": "GET", "uri": "/check"},
+                            handle_response=[{"match": {"status_code": [2]}, "routes": [{"handle": [{"handler": "vars"}]}]}])]},
+                {"match": [{"path": ["/v1/*"]}], "handle": [inject_rp()]}]}]}),
+        "D5 handle /x/* { uri path_regexp ^/x/ /; forward_auth sink { uri /check }; reverse_proxy /v1/* <oq> +observer }": at_tail({
+            "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [
+                {"handle": [{"handler": "rewrite", "path_regexp": [{"find": "^/x/", "replace": "/"}]}, rp("127.0.0.1:7000",
+                    rewrite={"method": "GET", "uri": "/check"}, handle_response=[{"match": {"status_code": [2]}, "routes": [{"handle": [{"handler": "vars"}]}]}])]},
+                {"match": [{"path": ["/v1/*"]}], "handle": [inject_rp()]}]}]}),
+        "A5 handle_path /x/* { reverse_proxy /m/* <oq> } (oq only ever gets /m/..., harmless)": at_tail({"match": [{"path": ["/x/*"]}], "handle": [
+            {"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]},
+                                               {"match": [{"path": ["/m/*"]}], "handle": [rp("127.0.0.1:8183")]}]}]}),
+    })
+    did_names |= {n for n in variants if n.startswith(("D2 ", "D5 ", "A5 "))}
+    did_hint = {n: "may forward a path changed into" for n in variants if n.startswith(("D2 ", "D5 "))}
+
+    def twin_8186(build) -> dict | None:
+        """The same variant with every NEW dial ':8183' (objects the variant created) written as ':8186'; None if none."""
         cfg = copy.deepcopy(good)
-        fn(cfg)
+        before: set[int] = set()
+        _walk_json(cfg, lambda node: before.add(id(node)))
+        build(cfg)
+        changed = []
+
+        def flip(node: dict) -> None:
+            if id(node) not in before and isinstance(node.get("dial"), str) and node["dial"].endswith(":8183"):
+                node["dial"] = node["dial"][:-4] + GATEWAY_PORT
+                changed.append(1)
+        _walk_json(cfg, flip)
+        return cfg if changed else None
+
+    missed: list[str] = []
+    did_ok = twins = 0
+    builders = [(n, (lambda f: lambda c: f(_site(c)))(fn)) for n, fn in variants.items()] + list(server_variants.items())
+    for name, build in builders:
+        cfg = copy.deepcopy(good)
+        build(cfg)
         for form, candidate in (("raw", cfg), ("skeleton", caddy_skeleton(cfg))):
-            ok_variant, text_variant = verdict(candidate)
-            if ok_variant:
-                print(f"SELFTEST_MISSED {name} ({form})")
-                print(text_variant)
-                return 1
-        caught += 1
-    variants_total = len(variants) + len(server_variants)
+            ok_variant, text_variant = verdict(candidate, skeleton=form == "skeleton")
+            if name in did_names:
+                want = did_hint.get(name, "")
+                if not ok_variant or "\nHINT DEFENSE_IN_DEPTH" not in "\n" + text_variant or (want and want not in text_variant):
+                    missed.append(f"{name} ({form}): want PASS with a HINT DEFENSE_IN_DEPTH line{' ' + repr(want) if want else ''}; "
+                                  f"failures: {[l[:140] for l in text_variant.splitlines() if l.startswith('FAIL')][:2]}")
+            elif ok_variant and not (form == "skeleton" and name.startswith("I-2 ") and "UPSTREAM_UNRESOLVED" in text_variant
+                                     and "redacted by the skeleton" in text_variant):
+                # (the skeleton redacts transport / health-check / dynamic values: there I-2 must at least say it cannot
+                # judge them - UPSTREAM_UNRESOLVED; stage C judges the full adapt JSON)
+                missed.append(f"{name} ({form}): verify PASSED a violating config")
+            elif form == "raw" and name.startswith("I-2 ") and "GATEWAY_PORT_EXPOSED" not in text_variant:
+                missed.append(f"{name} (raw): failed, but not with GATEWAY_PORT_EXPOSED")
+        if name in did_names:
+            did_ok += 1
+            twin = twin_8186(build)
+            if twin is not None:
+                twins += 1
+                ok_t, text_t = verdict(twin)
+                if ok_t or "GATEWAY_PORT_EXPOSED" not in text_t:
+                    missed.append(f"{name} 8186 twin: want FAIL with GATEWAY_PORT_EXPOSED")
+        else:
+            caught += 1
+    if missed:
+        for m in missed:
+            print(f"SELFTEST_MISSED {m}")
+        return 1
+    checks += twins
+    variants_total = len(variants) + len(server_variants) - did_ok
     # verify prints matcher summaries (INFO/FAIL): a token inside a path must come out redacted
     leak_cfg = mutated(lambda s: s.insert(0, {"match": [{"path": ["/hook/SENTINELpath0123456789/*"]}, {"path_regexp": {"name": "t", "pattern": "^/tg/SENTINELre0123456789ab/.*$"}}],
                                              "handle": [{"handler": "static_response", "status_code": 204}]}))
@@ -4035,14 +4882,14 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         # (a query-only uri counts as "may hit" since review wac-096 second round 🔴-A: see 1b')
         "method-only rewrite": lambda s: s.insert(0, {"match": [{"path": ["/old/*"]}], "handle": [{"handler": "rewrite", "method": "GET"}]}),
         # wac-099: a matcher after the change that proves the forwarded path outside both spaces; an intercept that only answers
-        "handle_path /x/* { reverse_proxy /reports/* <oq> }": lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/x/*"]}],
+        "handle_path /x/* { reverse_proxy /reports/* <oq> }": lambda s: s.insert(tail(s), {"group": "group21", "match": [{"path": ["/x/*"]}],
             "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]},
                 {"match": [{"path": ["/reports/*"]}], "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
         # a route that stops (it proxies elsewhere) hands no changed path to later routes of another group
         "stopping handle_path /x/* to another service, then a route-group /v1/* forwarder to <oq>": lambda s: (
-            s.insert(fb(s) + 1, {"group": "group99", "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [
+            s.insert(tail(s), {"group": "group99", "match": [{"path": ["/x/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [
                 {"handler": "rewrite", "strip_path_prefix": "/x"}, {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:7000"}]}]}]}]}),
-            s.insert(fb(s) + 2, {"match": [{"path": ["/v1/*"]}], "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]})),
+            s.insert(tail(s) + 1, {"match": [{"path": ["/v1/*"]}], "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]})),
         "intercept /x/* { handle_response { respond 204 } } before the snippet": lambda s: s.insert(0, {"match": [{"path": ["/x/*"]}],
             "handle": [{"handler": "intercept", "handle_response": [{"routes": [{"handle": [{"handler": "static_response", "status_code": 204}]}]}]}]}),
         # wac-097 (review wac-096 🔴-1): forward_auth's own rewrite to a constant outside both spaces, on a matcher that cannot hit
@@ -4050,7 +4897,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             {"handler": "reverse_proxy", "rewrite": {"method": "GET", "uri": "/v1/auth"}, "upstreams": [{"dial": "127.0.0.1:8183"}],
              "handle_response": [{"match": {"status_code": [2]}, "routes": [{"handle": [{"handler": "vars"}]}]}]}]}),
         # (handle_path /reports/daily/* would strip all of /reports/daily - real adapt - and fail: see caddy_real_test)
-        "handle /reports/daily/* { uri strip_prefix /reports } to operator-query (cut /daily/* outside)": lambda s: s.insert(fb(s) + 1, {"group": "group21",
+        "handle /reports/daily/* { uri strip_prefix /reports } to operator-query (cut /daily/* outside)": lambda s: s.insert(tail(s), {"group": "group21",
             "match": [{"path": ["/reports/daily/*"]}], "handle": [{"handler": "subroute", "routes": [{"handle": [
                 {"handler": "rewrite", "strip_path_prefix": "/reports"}, {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
         "not-matcher with encode only": lambda s: s.insert(0, {"match": [{"not": [{"path": ["/x"]}]}], "handle": [{"handler": "encode", "encodings": {"zstd": {}}}]}),
@@ -4078,11 +4925,43 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         assert ok_b, (name, text_b)
         assert verdict(caddy_skeleton(cfg))[0], (name, "skeleton")
         checks += 1
+    # WGW-1.0.4 RS-15 PASS list (no false stop): what the review's p8..p10, p13 and the user's P1 must give - PASS, with the
+    # stated info line where the tool cannot resolve something (it is never silently "equal")
+    def catch_all(s):
+        return next(r for r in s if not r.get("match") and r.get("group"))["handle"][0]["routes"]
+    benign_info = {
+        "p8 panel /v1/* to a unix socket (UPSTREAM_UNRESOLVED, PC-6 (iii))": (lambda s: panel(s).update({"upstreams": [{"dial": "unix//run/app.sock"}]}),
+                                                                             "UPSTREAM_UNRESOLVED"),
+        "p9 panel /v1/* to {env.OQ_HOST}:8183 (literal port)": (lambda s: panel(s).update({"upstreams": [{"dial": "{env.OQ_HOST}:8183"}]}), ""),
+        "placeholder host from the request, literal port 8183": (lambda s: panel(s).update({"upstreams": [{"dial": "{http.request.header.X-H}:8183"}]}), ""),
+        "p10 panel /v1/* dynamic a { name localhost; port 8183 }": (lambda s: panel(s).update({"dynamic_upstreams": {"source": "a", "name": "localhost",
+                                                                                                                    "port": "8183"}}) or panel(s).pop("upstreams"), ""),
+        "p13 panel /v1/* to {env.OQ} (UPSTREAM_UNRESOLVED)": (lambda s: panel(s).update({"upstreams": [{"dial": "{env.OQ}"}]}), "UPSTREAM_UNRESOLVED"),
+        # the real adapt shape (checked with Caddy v2.10.2): [vars root], [file matcher -> rewrite], [file_server]
+        "P1 SPA catch-all handle { root; try_files {path} /index.html; file_server } (review wac-097)": (lambda s: catch_all(s).__setitem__(
+            slice(None), [{"handle": [{"handler": "vars", "root": "/srv/trader-dashboard/dist"}]},
+                          {"match": [{"file": {"try_files": ["{http.request.uri.path}", "/index.html"]}}],
+                           "handle": [{"handler": "rewrite", "uri": "{http.matchers.file.relative}"}]},
+                          {"handle": [{"handler": "file_server"}]}]), "HINT UNCOMPARABLE_AFTER_SNIPPET"),
+        "optional direct guard in another site on the same server": (None, "optional direct guard"),
+    }
+    for name, (fn, want) in benign_info.items():
+        cfg = copy.deepcopy(good)
+        if fn is None:
+            cfg["apps"]["http"]["servers"]["srv0"]["routes"].insert(0, {"match": [{"host": ["other.example"]}], "terminal": True, "handle": [
+                {"handler": "subroute", "routes": [{"group": "g1", "match": [{"path_regexp": {"name": GUARD_NAME, "pattern": GUARD_REGEX}}],
+                                                     "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "static_response", "status_code": 404}]}]}]},
+                                                    {"group": "g1", "handle": [rp("127.0.0.1:8183")]}]}]})
+        else:
+            fn(_site(cfg))
+        ok_b, text_b = verdict(cfg)
+        assert ok_b and (not want or want in text_b), (name, want, [l for l in text_b.splitlines() if l.startswith(("FAIL", "HINT", "UPSTREAM"))][:6])
+        checks += 1
     # wac-097: server-level containers that must stay quiet: an error page, a named route to another service
     for name, fn in {
             "handle_errors { respond 502 }": lambda c: with_errors(c, [{"handler": "static_response", "status_code": 502}]),
             "named route to another service invoked on /reports/*": lambda c: (srv(c).update({"named_routes": {"rep": {"handle": [
-                {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:7000"}]}]}}}), _site(c).insert(fb(_site(c)) + 1, {"group": "group21",
+                {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:7000"}]}]}}}), _site(c).insert(tail(_site(c)), {"group": "group21",
                 "match": [{"path": ["/reports/*"]}], "handle": [{"handler": "invoke", "name": "rep"}]})),
     }.items():
         cfg = copy.deepcopy(good)
@@ -4094,7 +4973,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     # before-deploy (site check S-03/S-04): no snippet yet
     base_cfg = copy.deepcopy(good)
     site = _site(base_cfg)
-    site[:] = [r for r in site if not any("/m/v1/watcher" in (m.get("path_regexp") or {}).get("pattern", "") for m in (r.get("match") or []))]
+    site[:] = [r for r in site if not _is_wgw_route(r)]
     brw = site[-2]["handle"][0]["routes"][0]["handle"]
     brw[:] = [h for h in brw if not (h.get("handler") == "headers" and "request" in h)]
     brw[-1].pop("headers", None)
@@ -4115,10 +4994,17 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         "handle_path /x/* to operator-query before stage C": lambda s: s.insert(1, {"group": "group21", "match": [{"path": ["/x/*"]}],
             "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "rewrite", "strip_path_prefix": "/x"},
                                                                      {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}),
+        # WGW-1.0.4: an 8186 forwarder already in production would be exposed the moment the unit starts
+        "panel /v1/* already dials 8186 before stage C (I-2)": lambda s: panel(s).update({"upstreams": [{"dial": "127.0.0.1:8186"}]}),
     }.items():
         bad = copy.deepcopy(base_cfg)
         fn(_site(bad))
-        assert not verdict(bad, before_deploy=True)[0], f"before-deploy must flag: {name}"
+        ok_bd, text_bd = verdict(bad, before_deploy=True)
+        if name in ("existing /m wildcard to 8183", "handle_path /x/* to operator-query before stage C"):
+            # WGW-1.0.4: operator-query shapes are defense in depth (a HINT, not a failure)
+            assert ok_bd and "\nHINT DEFENSE_IN_DEPTH" in "\n" + text_bd, f"before-deploy must pass with a HINT: {name}"
+        else:
+            assert not ok_bd, f"before-deploy must flag: {name}"
         checks += 1
     # wac-097 (review wac-095 🟡-2): the probe's rewrite entries - outside the space, and the g15..g18 ones present
     entry_cfg = mutated(lambda s: [s.insert(0, {"match": [{"path": ["/x/*"]}], "handle": [{"handler": "rewrite", "strip_path_prefix": "/x"}]}),
@@ -4135,7 +5021,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     all_tails = REWRITE_ENTRY_TAILS + OQ_ENTRY_TAILS
     assert good_entries and set(good_entries) <= {"/m" + t for t in all_tails} | {"/watcher" + t for t in all_tails}, good_entries
     # review wac-096 🔴-1 / 🟡-1: a reverse_proxy's own rewrite into /v1/watcher, invoke and the error chain are followed
-    rp_cfg = mutated(lambda s: s.insert(fb(s) + 1, {"group": "group21", "match": [{"path": ["/foo/*"]}], "handle": [{"handler": "subroute", "routes": [
+    rp_cfg = mutated(lambda s: s.insert(tail(s), {"group": "group21", "match": [{"path": ["/foo/*"]}], "handle": [{"handler": "subroute", "routes": [
         {"handle": [{"handler": "reverse_proxy", "rewrite": {"uri": "/v1/watcher/dialogs"}, "upstreams": [{"dial": "127.0.0.1:8183"}]}]}]}]}))
     rp_cfg["apps"]["http"]["servers"]["srv0"]["named_routes"] = {"obs": {"handle": [{"handler": "rewrite", "strip_path_prefix": "/n"}]}}
     _site(rp_cfg).insert(0, {"match": [{"path": ["/q/*"]}], "handle": [{"handler": "invoke", "name": "obs"}]})
@@ -4144,7 +5030,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     assert {"/foo/x", "/n/m/v1/watcher/status", "/n/v1/watcher/dialogs", "/e/v1/watcher/status"} <= set(rp_entries), rp_entries
     checks += 1
     # 5. probe pinning (review wac-088 🟡-3): the config the probe RUNS listens on loopback only and dials only the stubs
-    stubs = {"oq": "127.0.0.1:1", "watcher": "127.0.0.1:2", "sink": "127.0.0.1:3"}
+    stubs = {"gw": "127.0.0.1:4", "oq": "127.0.0.1:1", "watcher": "127.0.0.1:2", "sink": "127.0.0.1:3"}
     raw = copy.deepcopy(good)
     raw["admin"] = {"disabled": True}
     raw["logging"] = {"logs": {"default": {"writer": {"output": "file", "filename": "/var/log/caddy/x.log"}}}}
@@ -4152,7 +5038,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     raw["apps"]["http"]["servers"]["srv2"] = {"listen": ["0.0.0.0:8080"], "routes": [{"handle": [
         {"handler": "reverse_proxy", "upstreams": [{"dial": "100.89.58.40:8183"}]}]}]}
     site_r = _site(raw)
-    site_r.insert(fb(site_r) + 1, {"group": "group21", "match": [{"path": ["/o0/*"]}], "handle": [{
+    site_r.insert(tail(site_r), {"group": "group21", "match": [{"path": ["/o0/*"]}], "handle": [{
         "handler": "reverse_proxy", "upstreams": [{"dial": "[::1]:8183"}, {"dial": "unix//run/x.sock"}, {"dial": "localhost:9090", "max_requests": 1}],
         "health_checks": {"active": {"uri": "/h", "upstream": "10.0.0.1:1"}},
         "transport": {"protocol": "http", "network_proxy": {"from": "url", "url": "http://10.0.0.2:3128"}},
@@ -4169,7 +5055,8 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     assert [u["dial"] for u in o0_route["upstreams"]] == [stubs["oq"], stubs["sink"], stubs["watcher"]], o0_route["upstreams"]
     assert o0_route["handle_response"][0]["routes"][0]["handle"][0]["upstreams"] == [{"dial": stubs["sink"]}], "nested reverse_proxy pinned"
     assert "health_checks" not in o0_route and "network_proxy" not in o0_route["transport"], "no own dialing left"
-    assert set(all_dials) <= set(stubs.values()) and all_dials.count(stubs["oq"]) == len(lines) + 3, all_dials  # lines, mobile, /v1/*, [::1]:8183
+    # WGW-1.0.4 V-3: the table lines go to the gateway stub, operator-query's three dials (mobile, /v1/*, [::1]:8183) to its own
+    assert set(all_dials) <= set(stubs.values()) and all_dials.count(stubs["gw"]) == len(lines) and all_dials.count(stubs["oq"]) == 3, all_dials
     for name, cfg in (("admin not off", {**copy.deepcopy(raw), "admin": {}}),
                       ("dynamic_upstreams", mutated(lambda s: s.insert(0, {"handle": [{"handler": "reverse_proxy", "dynamic_upstreams": {"source": "srv"}}]})))):
         if name == "dynamic_upstreams":
@@ -4223,7 +5110,9 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         os.environ.update(saved_env)
     checks += 1
     checks += _selftest_probe_process(args, snippet_path)
-    print(f"SELFTEST_OK good_passes={passes} variants_caught={caught}/{variants_total} (raw and skeleton) benign_two_step={len(benign)} "
+    print(f"SELFTEST_OK good_passes={passes} variants_caught={caught}/{variants_total} (raw and skeleton) "
+          f"defense_in_depth_hints={did_ok} (8186 twins caught={twins}) benign_info={len(benign_info)} benign_two_step={len(benign)} "
+          f"snippet_format=v2 i2=ok v2_guard=ok v4_text=ok "
           f"checks={checks} lines={len(lines)} list_format=v2 snippet_verbatim=ok re2_pins=ok caddyfile_text=ok skeleton_verify=ok before_deploy_mode=ok "
           f"probe_pinning=ok matchpath_pins=ok non_ascii=uncomparable double_slash=uncomparable host_matchpins=ok probe_cleanup_signals=ok "
           f"prefix_space=ok probe_residue=ok path_changes=ok re2_classes=ok rewrite_entries=ok")
@@ -4557,7 +5446,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--adapted", type=Path, required=True, help="JSON from `caddy adapt` or GET :2019/config/")
     p.add_argument("--host", default="jp-bot.balen.wang")
     p.add_argument("--listen-port", default="443")
-    p.add_argument("--upstream", default=DEFAULT_GATEWAY_UPSTREAM)
+    p.add_argument("--upstream", default=DEFAULT_GATEWAY_UPSTREAM, help="the gateway: watcher-gateway role (WGW-1.0.4: 127.0.0.1:8186)")
+    p.add_argument("--oq-upstream", default=DEFAULT_OQ_UPSTREAM, help="operator-query (mobile /m/v1/* samples, panel): 127.0.0.1:8183")
+    p.add_argument("--skeleton", action="store_true", help="the input is o0_tool caddy-skeleton output (redacted strings under "
+                   "upstream keys become UPSTREAM_UNRESOLVED; judge I-2 on the full adapt JSON at stage C)")
     p.add_argument("--expect-phase-max", default="P2")
     p.add_argument("--before-deploy", action="store_true", help="site check S-03/S-04 before stage C: no snippet expected, no injection expected")
     p.add_argument("--mobile-sample", action="append")
@@ -4575,7 +5467,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--snippet", type=Path, help=snippet_help)
     p.add_argument("--site-address", default="jp-bot.balen.wang", help="the site address token on the site header line of the copy")
     p.add_argument("--host", default="", help="production host name the probe site keeps and every probe request sends as Host (default: --site-address)")
-    p.add_argument("--upstream", default=DEFAULT_GATEWAY_UPSTREAM, help="operator-query as the copy writes it (any loopback spelling maps to the stub)")
+    p.add_argument("--upstream", default=DEFAULT_GATEWAY_UPSTREAM, help="the gateway (watcher-gateway, 8186) as the copy writes it "
+                   "(any loopback spelling maps to the gateway stub)")
+    p.add_argument("--oq-upstream", default=DEFAULT_OQ_UPSTREAM, help="operator-query as the copy writes it (maps to the operator-query stub)")
     p.add_argument("--watcher-upstream", default=DEFAULT_WATCHER_UPSTREAM)
     p.add_argument("--adapt-env", action="append", help="NAME=VALUE for {$NAME} adapt-time placeholders (fake values only)")
     p.add_argument("--keep", action="store_true", help="keep <copy>.o0probe (it contains the bcrypt hash: delete it yourself)")
