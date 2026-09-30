@@ -746,14 +746,18 @@ class IntentExecutionStrategy(Strategy):
             self._reject_durable_intent(intent, denial)
 
     def _retry_deferred_management_intents(self) -> None:
+        """Re-plan (never replay) deferred management; one per instrument per tick,
+        so a second reducing action sees the first one's fills before it plans."""
         self._expire_deferred_management_intents()
-        for key, (intent, continuation) in tuple(self._deferred_management_intents.items()):
+        seen: set[str] = set()
+        for key, (intent, _continuation) in tuple(self._deferred_management_intents.items()):
+            instrument = str(getattr(intent, "instrument_id", ""))
+            if instrument in seen:
+                continue
+            seen.add(instrument)
             self._deferred_management_intents.pop(key, None)
-            if continuation:
-                self._continue_management_after_persist(continuation)
-            else:
-                self._handle_intent_ready(intent, exchange_state_ready=True,
-                                          durable_async=bool(self._terminal_exchange_worker))
+            self._handle_intent_ready(intent, exchange_state_ready=True,
+                                      durable_async=bool(self._terminal_exchange_worker))
 
     def _on_protection_watchdog_timer(
         self,
@@ -889,7 +893,8 @@ class IntentExecutionStrategy(Strategy):
         return side
 
     def _snapshot_book_has_robot_stop(self, snapshot: Mapping[str, Any], symbol: str, book: str) -> bool:
-        """Any robot reduce-only STOP on this book. Price, qty, and plan id are irrelevant."""
+        """Any robot reduce-only exit-side STOP on this book. Price, qty, and plan id are irrelevant."""
+        exit_side = "SELL" if book == "LONG" else "BUY"
         for field in ("regular_orders", "algo_orders"):
             for row in snapshot[field]:
                 if _canonical_symbol(str(row.get("symbol") or "")) != symbol:
@@ -902,6 +907,9 @@ class IntentExecutionStrategy(Strategy):
                     continue
                 kind = str(row.get("order_type") or row.get("type") or "").upper()
                 if "TAKE_PROFIT" in kind or "STOP" not in kind:
+                    continue
+                side = str(row.get("side") or "").upper()
+                if side and side != exit_side:
                     continue
                 return True
         return False
@@ -1067,6 +1075,9 @@ class IntentExecutionStrategy(Strategy):
             return
         position = self._protection_position(instrument_id, entry_side)
         if position is None:
+            return
+        if stash.get("batch_entry_ids") and Decimal(self._protection_quantity(stash, position)) == 0:
+            self._sync_protection(intent_key)
             return
         missing_keys = (("stop_loss", None),)
         repaired = self._repair_missing_protection_orders(
@@ -9812,13 +9823,23 @@ class IntentExecutionStrategy(Strategy):
         return PositionId(f"{order.instrument_id}-{book}")
 
     def _cancel_close_position_entries(self, plan: ManagementPlan) -> None:
+        """Best effort: the reduce-only close never waits on entry cancels.
+
+        Legs left resting when the mirror is unavailable are cancelled by the
+        entry-expiry sweep once the plan's position has ended.
+        """
         side = str(plan.target_position_side).upper()
         ids = []
         mirror = self._exchange_state_mirror
         if not mirror:
-            raise ExchangeCancelError("exchange state mirror unavailable")
+            return
         entry_side = "BUY" if side == "LONG" else "SELL"
-        for order in mirror.orders_for_instrument(plan.instrument_id):
+        try:
+            resting = mirror.orders_for_instrument(plan.instrument_id)
+        except ExchangeCancelError as exc:
+            self._record_denial(OrderDenied("close_entry_cancel_skipped", repr(exc)))
+            return
+        for order in resting:
             client_id = object_client_order_id(order)
             if not is_robot_client_order_id(client_id):
                 continue
@@ -10028,12 +10049,7 @@ class IntentExecutionStrategy(Strategy):
             continuation.get("disabling_take_profits", False)
         )
         if plan.action == "close_position":
-            try:
-                self._cancel_close_position_entries(plan)
-            except ExchangeCancelError as exc:
-                self._deferred_management_intents[str(source_intent.intent_id)] = (source_intent, continuation)
-                self._record_denial(OrderDenied("exchange_state_refresh_failed", repr(exc)))
-                return
+            self._cancel_close_position_entries(plan)
         if not disabling_take_profits:
             for order_plan in plan.orders:
                 if self._submit_order_plan(order_plan):

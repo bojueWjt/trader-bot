@@ -1863,6 +1863,7 @@ class ControlPlaneExchangeStateMirror:
         self._orders: tuple[ExchangeOrderRef, ...] = ()
         self._fresh = False
         self._refreshing = False
+        self._lazy_refresh_failed_at = float("-inf")
         self._lock = threading.Lock()
         self._writer_identity_lock = threading.Lock()
         self._writer_identity: tuple[str, str, int] | None = None
@@ -2007,12 +2008,19 @@ class ControlPlaneExchangeStateMirror:
                 return self._orders
             if self._refreshing:
                 raise ExchangeCancelError("exchange state mirror is not fresh")
+            # After a failed lazy refresh, fail fast for 10s instead of blocking the loop again.
+            if time.monotonic() - self._lazy_refresh_failed_at < 10.0:
+                raise ExchangeCancelError("exchange state mirror is not fresh")
             self._refreshing = True
         try:
             return self.refresh()
         except ExchangeCancelError:
+            with self._lock:
+                self._lazy_refresh_failed_at = time.monotonic()
             raise
         except Exception as exc:
+            with self._lock:
+                self._lazy_refresh_failed_at = time.monotonic()
             raise ExchangeCancelError(f"exchange state mirror refresh failed: {exc}") from exc
         finally:
             with self._lock:
