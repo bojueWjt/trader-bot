@@ -56,6 +56,9 @@ def simulate(req: ExecutionRequest, *, kernel: Literal["A", "B"] = "A", market: 
         from quant_lab.market.kernel_a import simulate_a
         res = simulate_a(req, market)
     elif kernel == "B":
+        from quant_lab.market.contract import resolve_policy
+        if resolve_policy(req.policy_version).time_exit_at_horizon:
+            raise ContractError("内核 B 尚未实现到期平仓；base-v1-timeexit 仅支持内核 A")
         from quant_lab.market.nautilus_adapter import simulate_b
         res = simulate_b(req, market)
     else:

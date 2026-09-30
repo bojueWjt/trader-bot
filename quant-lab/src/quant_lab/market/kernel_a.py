@@ -30,8 +30,9 @@ ZERO = Decimal(0)
 US = dt.timedelta(microseconds=1)
 
 
-def kernel_build_id() -> str:
-    """内核构建身份 = 版本串 + 本文件源码摘要（S12：代码改动必须改 trace_hash）。"""
+def kernel_build_id(time_exit_at_horizon: bool = False) -> str:
+    """内核构建身份 = 版本串 + 本文件源码摘要（S12：代码改动必须改 trace_hash）。
+    不为任何策略冻结：冻结会让以后改内核时旧策略的 trace_hash 不变，结果悄悄过期。"""
     h = hashlib.sha256()
     for name in _SRC_FILES:
         h.update((Path(__file__).parent / name).read_bytes())
@@ -432,7 +433,7 @@ class KernelA:
         self.exit_qty += q
         self.exit_value += px * q
 
-    def finish_if_flat(self, ts) -> None:
+    def finish_if_flat(self, ts, reason=None) -> None:
         if self.pos == 0 and self.entry_qty > 0 and not self.closed:
             for o in self.live_orders("tp"):
                 self.cancel(ts, o, "position_closed")
@@ -443,7 +444,7 @@ class KernelA:
                 self.cancel(ts, o, "position_closed")
             if any(o.live for o in self.orders.values()):
                 raise ExecutionInvariantError("closed 前仍有存活订单")
-            self.emit(ts, "closed", "bracket-0", "close")
+            self.emit(ts, "closed", "bracket-0", "close", reason=reason)
             self.closed = True
             self.close_at = ts
 
@@ -563,6 +564,41 @@ class KernelA:
         cands = [p for p in self.all_marks if p.ts <= ts and p.path_step in ("none", "C")]
         return cands[-1] if cands else None
 
+    def time_exit(self, ts: dt.datetime, reason: str) -> None:
+        """P2 到期：用终点前已知行情，先完成证据门，再市价平掉所有余仓。"""
+        if not self.market.funding_schedule_complete:
+            self.censor_now("FUNDING_SCHEDULE_GAP", "funding_ok")
+        marks = [p for p in self.all_marks if p.ts < ts and
+                 (p.bar_open_time is None or p.bar_open_time >= self.t_start or p.path_step == "C")]
+        mark = marks[-1] if marks else None
+        if mark is None or (ts - mark.ts).total_seconds() > self.policy.mark_max_staleness_s:
+            self.censor_now("MARK_STALE", "mark_ok")
+        point = next((mo.lasts[-1] for mo in reversed(self.moment_list) if mo.ts < ts and mo.lasts), None)
+        if point is None or (ts - point.ts).total_seconds() > self.policy.mark_max_staleness_s:
+            self.censor_now("BAR_GAP", "bars_ok")
+        if self.censor is not None:
+            return
+        self.mark, self.mark_ts = mark.price, mark.ts
+        for entry in self.live_orders("entry"):
+            entry.status = "expired"
+            self.emit(ts, "expired", entry.id, "entry", tb="expiry", qty=entry.leaves, reason=reason)
+        for tp in self.live_orders("tp"):
+            self.cancel(ts, tp, "time_exit")
+        sl = self.orders.get("sl-0")
+        if sl is not None and sl.live:
+            self.cancel(ts, sl, "time_exit")
+        qty = abs(self.pos)
+        side = "sell" if self.sign > 0 else "buy"
+        order = Order("close-0", "close", side, "market", None, qty)
+        self.orders[order.id] = order
+        self.emit(ts, "submitted", order.id, "close", qty=qty)
+        self.emit(ts, "accepted", order.id, "close")
+        self.emit(ts, "working", order.id, "close")
+        px = self.market_px(point.price, side)
+        self.slippage += abs(px - point.price) * qty * self.mult
+        self.apply_exit_fill(ts, order, px, qty, True, point.bar_open_time, point.path_step)
+        self.finish_if_flat(ts, reason="time_exit")
+
     def settle_funding(self, ts, row) -> None:
         if ts in self.settled_keys:
             if self.settled_keys[ts] != row.rate:
@@ -613,10 +649,16 @@ class KernelA:
                     self.censor_now("BAR_GAP", "bars_ok")
                     break
                 if (mo.hold_end or (self.hold_end is not None and ts >= self.hold_end)) and self.pos != 0:
-                    self.censor_now("LABEL_RIGHT_CENSORED")           # S04：持仓上限先于同刻 funding/撮合
+                    if self.policy.time_exit_at_horizon:
+                        self.time_exit(ts, "max_holding")
+                    else:
+                        self.censor_now("LABEL_RIGHT_CENSORED")       # S04：持仓上限先于同刻 funding/撮合
                     break
                 if mo.horizon and self.pos != 0:
-                    self.censor_now("LABEL_RIGHT_CENSORED")           # 观察终点先于同刻 funding
+                    if self.policy.time_exit_at_horizon:
+                        self.time_exit(ts, "horizon_end")
+                    else:
+                        self.censor_now("LABEL_RIGHT_CENSORED")       # 观察终点先于同刻 funding
                     break
                 if ts == self.t_start and not self.orders:
                     self.submit_entries(ts)
@@ -687,7 +729,7 @@ class KernelA:
         net = None if censored else quantize_money(gross - self.fees + self.funding_total)
         fill_status = "none" if self.entry_qty == 0 else ("filled" if self.entry_qty >= self.plan_qty else "partial")
         rc = request_canonical(self.req, self.policy, t_start=self.t_start, market_manifest_hash=self.market.manifest_hash)
-        kv = kernel_build_id()
+        kv = kernel_build_id(self.policy.time_exit_at_horizon)
         res = ExecutionResult(
             canonical_events=self.events, fill_status=fill_status, filled_qty=self.entry_qty,
             fees=quantize_money(self.fees), funding=quantize_money(self.funding_total), slippage=quantize_money(self.slippage),

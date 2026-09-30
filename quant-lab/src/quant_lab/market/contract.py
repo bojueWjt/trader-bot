@@ -11,7 +11,8 @@
   （filled, leg=sl, trigger_basis=last）。TP 只按 last：tp_triggered(trigger_basis=last) → filled/partial_fill（价格取限价与 last 的更优者）。
 - funding：kind=funding, leg=funding, trigger_basis=funding, price=结算 mark, qty=结算前有符号仓位, cash_delta=-qty×price×rate（C05 扩展列）。
 - 仓位归零：剩余兄弟腿 cancelled → closed（每 bracket 一次）。未成交到期：expired → closed(reason=no_fill)。
-- 观察窗结束仍有仓：无 closed，censor_reason=LABEL_RIGHT_CENSORED，net_pnl/net_R=null。
+- 观察窗或持仓上限结束仍有仓：旧策略无 closed，censor_reason=LABEL_RIGHT_CENSORED，net_pnl/net_R=null；
+  仅 base-v1-timeexit 在行情完整时按市价平余仓，closed(reason=time_exit)，net_pnl/net_R 为已实现值。
 """
 from __future__ import annotations
 
@@ -38,8 +39,8 @@ Leg = Literal["entry", "sl", "tp", "close", "funding"]
 TriggerBasis = Literal["mark", "last", "funding", "expiry", "none"]
 PathStep = Literal["O", "H", "L", "C", "none"]
 FillStatus = Literal["none", "partial", "filled"]
-# A15（research-schema §9.10.11）：reconstructed_outcome.kind 七值；映射表见 docs/adr/report-G2-outcome-kind-mapping.md
-OUTCOME_KINDS = ("filled_closed", "unfilled_expired", "stopped", "tp_hit", "right_censored", "unevaluable", "rejected")
+# A15 七值加可选到期平仓；旧策略映射保持不变。
+OUTCOME_KINDS = ("filled_closed", "unfilled_expired", "stopped", "tp_hit", "right_censored", "unevaluable", "rejected", "time_exit")
 EVIDENCE_CENSORS = ("MARK_STALE", "BAR_GAP", "FUNDING_SCHEDULE_GAP", "RULE_HISTORY_MISSING", "SYMBOL_TIME_INVALID")
 EXIT_LEG_ORDER = ("sl", "tp", "close")
 CENSOR_REASONS = ("LABEL_RIGHT_CENSORED", "MARK_STALE", "BAR_GAP", "FUNDING_SCHEDULE_GAP", "RULE_HISTORY_MISSING", "SYMBOL_TIME_INVALID")
@@ -325,6 +326,14 @@ class ExecutionPolicy(_Model):
     entry_fraction_rule: Literal["equal"] = "equal"     # §5.10 B8：单腿 [1]；n 腿等分（标度 12，余量末腿）
     tp_fraction_rule: Literal["equal"] = "equal"
     tp_total_fraction: Decimal = Decimal(1)
+    # 底层排除默认值；model_dump 仅为启用策略显式写出 true，保留旧策略字节内容。
+    time_exit_at_horizon: bool = Field(default=False, exclude=True)
+
+    def model_dump(self, *args, **kwargs):
+        payload = super().model_dump(*args, **kwargs)
+        if self.time_exit_at_horizon:
+            payload["time_exit_at_horizon"] = True
+        return payload
 
     @field_validator("latency_s")
     @classmethod
@@ -363,6 +372,8 @@ POLICIES: dict[str, ExecutionPolicy] = {
                                                          slippage_ticks=1, slippage_bps=Decimal(2))},
                                participation=Decimal("0.1"), wallet=Decimal(100000), leverage=Decimal(10)),
 }
+POLICIES["base-v1-timeexit"] = POLICIES["base-v1"].model_copy(
+    update={"version": "base-v1-timeexit", "time_exit_at_horizon": True})
 
 
 POLICY_HASH_REGISTRY = Path(__file__).with_name("policy_hashes.json")   # S12：version→hash 跨修订登记（改内容必须改版本名并更新登记）
@@ -615,7 +626,7 @@ class ExecutionResult(_Model):
 
     @property
     def outcome_kind(self) -> str:
-        """A15 七值（派生量，不进 model_dump / trace_hash：它是结果的读法，不是内核的输入）。"""
+        """A15 七值及可选 time_exit（派生量，不进 model_dump / trace_hash）。"""
         return outcome_kind(self)
 
     @property
@@ -688,12 +699,13 @@ def exit_legs(res: "ExecutionResult") -> tuple[str, ...]:
 
 
 def outcome_kind(res: "ExecutionResult") -> str:
-    """ExecutionResult → reconstructed_outcome.kind（A15 七值）。纯函数，不读行情；判定顺序见规格 §1。
+    """ExecutionResult → reconstructed_outcome.kind（A15 七值及可选 time_exit）。纯函数，不读行情。
 
     先回答"这条样本能不能评"（①②），再回答"它怎么结束"（③–⑦）：
     ① 数据齐全但标签未成熟 → right_censored；② 看世界所需的数据缺了 → unevaluable（禁映 right_censored）。
     ③ 根本没挂出去 → rejected（禁并入 unfilled_expired）；④ 挂了市场没来 → unfilled_expired。
-    ⑤ 止损参与即 stopped（保守）；⑥ 出场全为 TP → tp_hit；⑦ 其余已平仓 → filled_closed（v0 无政策平仓腿，暂不可达）。
+    ⑤ 新策略到期市价平余仓 → time_exit；⑥ 止损参与即 stopped（保守）；
+    ⑦ 出场全为 TP → tp_hit；⑧ 其余已平仓 → filled_closed。
     """
     if res.censor_reason == "LABEL_RIGHT_CENSORED":
         return "right_censored"
@@ -716,6 +728,8 @@ def outcome_kind(res: "ExecutionResult") -> str:
         raise ContractError(
             f"outcome_kind 未命中契约 §3 任何规则（B10 禁止兜底贴值）；未删失且有成交却无 closed，"
             f"fill_status={res.fill_status} censor={res.censor_reason} 实际事件集合={sorted(kinds)}")
+    if "close" in legs and any(e.kind == "closed" and e.reason == "time_exit" for e in res.canonical_events):
+        return "time_exit"
     if "sl" in legs:
         return "stopped"
     if legs and set(legs) == {"tp"}:
