@@ -91,6 +91,8 @@ def build_candidates(cp: pl.DataFrame, mv: pl.DataFrame, ex: pl.DataFrame | None
         for plan in plans:
             if plan.source_version_id in versions:
                 versions[plan.source_version_id]["available_at"] = plan.available_at
+    from .graph import dependency_index
+    dep_index = dependency_index(versions)  # after the clock fill above; versions is not changed again
     batch_id = cp["batch_id"][0] if cp.height else "tg-empty"
     by_msg: dict[tuple[int, int], list[Plan]] = {}
     for p in plans:
@@ -153,7 +155,7 @@ def build_candidates(cp: pl.DataFrame, mv: pl.DataFrame, ex: pl.DataFrame | None
 
     def edge(ev: Plan, root: Plan, method: str, strength: str, evidence: dict, deps: list[Plan], reasons: list[str] | None = None) -> dict[str, Any]:
         from .graph import plan_dependencies
-        closures = [plan_dependencies(p.row, versions, {}) for p in [ev, root] + deps]
+        closures = [plan_dependencies(p.row, versions, {}, index=dep_index) for p in [ev, root] + deps]
         ea = _max_or_none([clock for clock, _ in closures])
         closure_refs = sorted({ref for _, refs in closures for ref in refs})
         rs = list(reasons or [])

@@ -75,15 +75,20 @@ def dependency_closure(root: str, nodes: dict[str, dict[str, Any]]) -> tuple[dat
     return max(times), sorted(set(visited))
 
 
-def plan_dependencies(root: dict, versions: dict[str, dict], rule_versions: dict[str, str], *, purpose: str = "entry_decision") -> tuple[datetime | None, list[str]]:
-    """Structural source/album/reply, field, rule and purpose-specific validation dependencies."""
-    from datetime import UTC
-    source = root["source_version_id"]
-    nodes = {}
-    by_message = {}
+def dependency_index(versions: dict[str, dict]) -> dict[str, Any]:
+    """Root-independent source/album/reply nodes, built once per versions table.
+
+    plan_dependencies used to rebuild this for every plan, and the album pass compared every version with every
+    other one: O(plans × versions²). A 21k-message, six-channel build ran 11 hours without finishing. Callers that
+    resolve many plans against one table build this once and pass it as `index=`; the result is identical."""
+    nodes: dict[str, dict[str, Any]] = {}
+    by_message: dict[tuple, list[str]] = {}
+    groups: dict[tuple, list[str]] = {}
     for ref, row in versions.items():
         identity = row.get("source_id") or {}
         by_message.setdefault((row.get("channel_id"), identity.get("message_id")), []).append(ref)
+        if row.get("grouped_id") is not None:
+            groups.setdefault((row.get("channel_id"), row.get("grouped_id")), []).append(ref)
         deps = []
         for media in row.get("media_hashes") or []:
             media_ref = f"media:{ref}:{media}"
@@ -95,10 +100,8 @@ def plan_dependencies(root: dict, versions: dict[str, dict], rule_versions: dict
         group = row.get("grouped_id")
         if group is None:
             continue
-        for member_ref, member in versions.items():
-            if member.get("channel_id") != row.get("channel_id") or member.get("grouped_id") != group:
-                continue
-            for media in member.get("media_hashes") or []:
+        for member_ref in groups[(row.get("channel_id"), group)]:
+            for media in versions[member_ref].get("media_hashes") or []:
                 nodes[ref]["dependencies"].append(f"media:{member_ref}:{media}")
     # Reply evidence is recursively traversed.
     for ref, row in versions.items():
@@ -113,11 +116,23 @@ def plan_dependencies(root: dict, versions: dict[str, dict], rule_versions: dict
         if known:
             candidates = [max(known, key=lambda r: versions[r]["available_at"])]
         nodes[ref]["dependencies"].extend(candidates)
+    return {"nodes": nodes, "groups": groups}
+
+
+def plan_dependencies(root: dict, versions: dict[str, dict], rule_versions: dict[str, str], *, purpose: str = "entry_decision",
+                      index: dict[str, Any] | None = None) -> tuple[datetime | None, list[str]]:
+    """Structural source/album/reply, field, rule and purpose-specific validation dependencies."""
+    from collections import ChainMap
+    from datetime import UTC
+    index = index if index is not None else dependency_index(versions)
+    # Root-specific nodes go into their own layer; the shared structural layer is never written.
+    nodes = ChainMap({}, index["nodes"])
+    source = root["source_version_id"]
     dependencies = [source]
     row = versions.get(source, {})
     group = row.get("grouped_id")
     if group is not None:
-        dependencies.extend(ref for ref, member in versions.items() if member.get("channel_id") == row.get("channel_id") and member.get("grouped_id") == group)
+        dependencies.extend(index["groups"].get((row.get("channel_id"), group), []))
     # The named historical processing model is a frozen assumption, not a claimed historical runtime.
     for name, version in sorted(rule_versions.items()):
         ref = f"rule:{name}:{version}"

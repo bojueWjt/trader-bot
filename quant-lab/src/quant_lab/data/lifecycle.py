@@ -25,7 +25,7 @@ from . import extract as _extract
 from . import linker as _linker
 from . import normalize as _normalize
 from . import validate as _validate
-from .graph import DEFAULT_PROCESSING_DELAY_S, closure_available_at, plan_dependencies, decision_visible, is_tombstoned, publish_manifest, read_manifest, snapshot_hash, t_dec_of
+from .graph import DEFAULT_PROCESSING_DELAY_S, closure_available_at, dependency_index, plan_dependencies, decision_visible, is_tombstoned, publish_manifest, read_manifest, snapshot_hash, t_dec_of
 from .lake import D12, LayerLedger, Layout, append_quarantine, cum_prev, loss_row_from_ledger, mapping_rows, now_utc, preserve_ingested_at, quarantine_row, schema_hash, stable_id, write_loss, write_mapping, write_parquet_atomic
 from .reasons import Reason
 
@@ -211,6 +211,7 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
     plans = {r["plan_id"]: r for r in select_plans(cp, plan_source, extracted_event).iter_rows(named=True)}
     conflicts = disagreements(cp, extracted_event)
     mvd = {r["source_version_id"]: r for r in mv.iter_rows(named=True)}
+    dep_index = dependency_index(mvd)  # mvd is read-only below
     dg_rows = {r["source_version_id"]: r for r in dg.iter_rows(named=True)} if dg is not None and dg.height else {}
     dg_members: dict[str, list[str]] = {}
     for r in dg_rows.values():
@@ -265,8 +266,8 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
         evs.sort(key=lambda e: (e["edge_available_at"] or obs_end, 0 if e["root"] else 1, mvd.get(plans[e["pid"]]["source_version_id"], {}).get("sequence") or 0))
         # 依赖闭包（S03）：根版本 + 根必要媒体（同版本时钟）+ 品种登记 + 规则版本；任一未知 → 无决策
         decision_eligible_at = t_dec = None
-        a_star, dep_refs = plan_dependencies(root, mvd, rule_versions)
-        price_a_star, price_refs = plan_dependencies(root, mvd, rule_versions, purpose="price_check")
+        a_star, dep_refs = plan_dependencies(root, mvd, rule_versions, index=dep_index)
+        price_a_star, price_refs = plan_dependencies(root, mvd, rule_versions, purpose="price_check", index=dep_index)
         h1 = root.get("time_grade") == "H1"
         if not is_orphan and not h1 and root["instrument_id"] is not None:
             decision_eligible_at = a_star
