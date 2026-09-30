@@ -253,7 +253,7 @@ def test_orphan_cleanup_keeps_evidence_and_late_fill_guards(tmp_path, guard):
         cancel.assert_not_called()
 
 
-def test_parent_management_has_private_position_orders_and_close_barrier(tmp_path):
+def test_parent_management_keeps_owned_quantity_but_cancels_all_same_book_entries(tmp_path):
     strategy, intent, context = batch_fixture(tmp_path)
     plans = _plans(strategy, intent, context)
     sibling_id = uuid4()
@@ -271,8 +271,13 @@ def test_parent_management_has_private_position_orders_and_close_barrier(tmp_pat
     assert Decimal(narrowed.position.quantity) == Decimal('0.118')
     assert narrowed.reconciled_state is None
     own_order = SimpleNamespace(client_order_id=plans[1].client_order_id, status='ACCEPTED', side='BUY')
-    with patch.object(strategy, '_cache_orders_all', return_value=(own_order, sibling)):
-        assert strategy._close_entry_ids(intent.instrument_id, 'LONG', set(), str(intent.intent_id)) == {own_order.client_order_id}
+    for order in (own_order, sibling):
+        order.position_side = 'LONG'
+        order.reduce_only = False
+    strategy._exchange_state_mirror = SimpleNamespace(orders_for_instrument=lambda _iid: (own_order, sibling))
+    with patch.object(strategy, '_cancel_scoped_venue_orders') as cancel:
+        strategy._cancel_close_position_entries(SimpleNamespace(instrument_id=intent.instrument_id, target_position_side='LONG'))
+    assert set(cancel.call_args.args[1]) == {own_order.client_order_id, sibling.client_order_id}
     strategy._entry_protection_stash[str(intent.intent_id)]['batch_fills'] = {}
     narrowed = strategy._batch_management_context(management, replace(context, position=position, positions=(position,)))
     assert narrowed.position.quantity == '0'

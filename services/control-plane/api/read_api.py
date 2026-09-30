@@ -653,6 +653,8 @@ def _execution_order_plan(order_plan: dict | None, risk_budget: dict | None,
             out["time_in_force"] = "IOC" if raw_entry_type == "market" else "GTC"
         if op.get("quantity") is not None:
             out["quantity"] = str(op.get("quantity"))
+        if op.get("fraction") is not None:
+            out["fraction"] = str(op.get("fraction"))
         if op.get("price") is not None:
             out["price"] = op.get("price")
         if op.get("limit_price") is not None:

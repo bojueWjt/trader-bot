@@ -48,28 +48,25 @@ ROBOT_OLD_TP_ID = "Bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb02"
 
 
 class StrategyManageShellTest(unittest.TestCase):
-    def test_close_waits_for_real_worker_cancel_and_replans_after_racing_fill(self) -> None:
-        self._exercise_close_entry_barrier("confirmed")
+    def test_close_submits_without_waiting_for_real_worker_cancel(self) -> None:
+        self._exercise_close_without_entry_barrier("confirmed")
 
-    def test_close_cancel_unknown_or_stale_evidence_remains_pending(self) -> None:
+    def test_close_cancel_unknown_or_stale_evidence_does_not_block_reduce_only(self) -> None:
         for outcome in ("unknown", "stale", "cache_lag", "missing_evidence"):
             with self.subTest(outcome=outcome):
-                self._exercise_close_entry_barrier(outcome)
+                self._exercise_close_without_entry_barrier(outcome)
 
-    def _exercise_close_entry_barrier(self, outcome: str) -> None:
+    def _exercise_close_without_entry_barrier(self, outcome: str) -> None:
         from threading import Event
         entry_id = "Bcccccccccccccccccccccccccccccccc01"
-        entry = SimpleNamespace(
-            account_id=ACCOUNT_ID, symbol="BTCUSDT", position_side="LONG",
+        entry = SimpleNamespace(account_id=ACCOUNT_ID, symbol="BTCUSDT", position_side="LONG",
             order_kind="regular", venue_order_id="entry-1", client_order_id=entry_id,
             instrument_id=INSTRUMENT_ID, side="BUY", order_type="LIMIT",
-            quantity="0.2", price="26000", reduce_only=False, status="ACCEPTED",
-        )
+            quantity="0.2", price="26000", reduce_only=False, status="ACCEPTED")
         manual = SimpleNamespace(**{**vars(entry), "client_order_id": "aos_manual"})
         strategy = _HarnessStrategy(orders=[entry, manual])
         started, release = Event(), Event()
-        cancelled = []
-        results = []
+        cancelled, results = [], []
 
         def cancel(_action, request, **_kwargs):
             cancelled.append(request.client_order_id)
@@ -84,89 +81,36 @@ class StrategyManageShellTest(unittest.TestCase):
             return SimpleNamespace(terminal_status="CANCELED", outcome="canceled")
 
         def snapshot(**kwargs):
-            self.assertTrue(kwargs["force_refresh"])
             fetched = datetime.now(timezone.utc)
             if outcome == "stale":
                 fetched -= timedelta(seconds=30)
             return {"positions_fetched_at": fetched, "positions": [
-                {"symbol": "BTCUSDT", "position_side": "LONG", "quantity": "0.6"},
-            ]}
+                {"symbol": "BTCUSDT", "position_side": "LONG", "quantity": "0.6"}]}
 
         if outcome != "missing_evidence":
             strategy._exchange_evidence_provider = SimpleNamespace(snapshot=snapshot)
-        worker = TerminalExchangeWorker(
-            account_id=ACCOUNT_ID, mirror=strategy._exchange_state_mirror,
-            adapter=SimpleNamespace(cancel=cancel), result_publisher=results.append,
-            total_deadline_seconds=2,
-        )
+        worker = TerminalExchangeWorker(account_id=ACCOUNT_ID, mirror=strategy._exchange_state_mirror,
+            adapter=SimpleNamespace(cancel=cancel), result_publisher=results.append, total_deadline_seconds=2)
         worker.start()
         strategy.set_terminal_exchange_worker(worker)
         intent = _intent(action="close_position", order_plan={"type": "market", "position_side": "LONG"})
-        identity = _intent_execution_identity(intent)
         try:
             self.assertTrue(strategy._queue_intent_receive(intent))
             _pump_durable(strategy)
             self.assertTrue(worker.wait_empty(timeout_seconds=1))
             strategy._on_terminal_exchange_result(results.pop(0))
+            _pump_durable(strategy)
             self.assertTrue(started.wait(1))
-            self.assertEqual(strategy.submitted_plans, [])
-            self.assertEqual(strategy._intent_execution_inbox.get(identity).state, IntentExecutionState.RECEIVED)
+            # Closing uses the planner's current quantity even while cancellation is blocked.
+            self.assertEqual(len(strategy.submitted_plans), 1)
+            self.assertEqual(strategy.submitted_plans[0].quantity, "0.500")
+            self.assertTrue(strategy.submitted_plans[0].reduce_only)
             release.set()
             self.assertTrue(worker.wait_empty(timeout_seconds=1))
             strategy._on_terminal_exchange_result(results.pop(0))
             _pump_durable(strategy)
             self.assertEqual(cancelled, [entry_id])
-            if outcome == "confirmed":
-                self.assertEqual(len(strategy.submitted_plans), 1)
-                self.assertEqual(strategy.submitted_plans[0].quantity, "0.600")
-                self.assertTrue(strategy.submitted_plans[0].reduce_only)
-                restarted = _HarnessStrategy()
-                restarted._intent_execution_inbox = JsonIntentExecutionInbox(
-                    strategy._state_dir / "intent-execution-inbox.json",
-                )
-                try:
-                    fresh = _intent(action="add_position", order_plan={
-                        "type": "limit", "side": "buy", "quantity": "0.1", "price": "26000",
-                    })
-                    fresh_identity = _intent_execution_identity(fresh)
-                    restarted._intent_execution_inbox.register_received(fresh_identity, _intent_execution_payload(fresh))
-                    from strategy.intent_execution_planner import OrderPlan
-                    new_plan = OrderPlan(
-                        intent_id=fresh.intent_id, client_order_id=encode_client_order_id(fresh.intent_id),
-                        tags=("action=add_position",), instrument_id=INSTRUMENT_ID,
-                        side="BUY", order_type="LIMIT", quantity="0.1", price="26000", time_in_force="GTC",
-                    )
-                    self.assertFalse(restarted._submit_order_plan(new_plan, intent_execution=fresh_identity))
-                    self.assertEqual(restarted.denials[-1].reason, "position_close_reconciling")
-                    close_order_id = strategy.submitted_plans[0].client_order_id
-                    strategy._orders.append(SimpleNamespace(
-                        client_order_id=close_order_id, instrument_id=INSTRUMENT_ID, status="FILLED",
-                    ))
-                    strategy._positions[0].quantity = "0"
-                    strategy.on_order_filled(SimpleNamespace(
-                        client_order_id=close_order_id, instrument_id=INSTRUMENT_ID,
-                    ))
-                    _pump_durable(strategy)
-                    restarted._intent_execution_inbox = JsonIntentExecutionInbox(
-                        strategy._state_dir / "intent-execution-inbox.json",
-                    )
-                    persisted = restarted._intent_execution_inbox.get(identity)
-                    self.assertEqual(persisted.terminal_client_order_ids, (close_order_id,))
-                    fresh_open = _intent(action="open_position", order_plan={
-                        "type": "limit", "side": "buy", "quantity": "0.1", "price": "26000",
-                    })
-                    open_identity = _intent_execution_identity(fresh_open)
-                    restarted._intent_execution_inbox.register_received(open_identity, _intent_execution_payload(fresh_open))
-                    from dataclasses import replace
-                    open_plan = replace(new_plan, intent_id=fresh_open.intent_id,
-                                        client_order_id=encode_client_order_id(fresh_open.intent_id), tags=("action=open_position",))
-                    self.assertTrue(restarted._submit_order_plan(open_plan, intent_execution=open_identity))
-                finally:
-                    restarted.on_stop()
-            else:
-                self.assertEqual(strategy.submitted_plans, [])
-                self.assertEqual(strategy._intent_execution_inbox.get(identity).state, IntentExecutionState.RECEIVED)
-                self.assertEqual(strategy.denials[-1].reason, "close_entries_reconciling")
+            self.assertEqual(len(strategy.submitted_plans), 1)
         finally:
             release.set()
             worker.stop()

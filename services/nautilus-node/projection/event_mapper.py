@@ -40,11 +40,15 @@ ACCOUNT_EVENT_TYPES = frozenset(
         "AccountMargin",
     }
 )
+WATCHDOG_EVENT_TYPES = frozenset(
+    {"ProtectionWatchdogSymbolStopped", "ProtectionWatchdogSymbolRecovered"}
+)
 
 EVENT_MAPPING_CATALOG = {
     **{event_type: "order" for event_type in sorted(ORDER_EVENT_TYPES)},
     **{event_type: "position" for event_type in sorted(POSITION_EVENT_TYPES)},
     **{event_type: "account" for event_type in sorted(ACCOUNT_EVENT_TYPES)},
+    **{event_type: "account" for event_type in sorted(WATCHDOG_EVENT_TYPES)},
 }
 
 
@@ -105,13 +109,16 @@ class ProjectionEventMapper:
             return None
         intent_id = _intent_id(event, client_order_id)
         payload = _payload(event, instrument_id=instrument_id, extra=payload_extra)
+        if event_type in WATCHDOG_EVENT_TYPES:
+            payload.update(_attr(event, "payload") or {})
         event_id = stable_event_id(
             account_id=self._config.account_id,
             event_type=event_type,
             client_order_id=client_order_id,
             venue_order_id=venue_order_id,
             trade_id=trade_id,
-            ts_event_raw=ts_event_raw,
+            ts_event_raw=(_attr(event, "event_key") or ts_event_raw)
+            if event_type in WATCHDOG_EVENT_TYPES else ts_event_raw,
         )
         return ExecutionEventEnvelopeV1(
             schema_version="1.0",

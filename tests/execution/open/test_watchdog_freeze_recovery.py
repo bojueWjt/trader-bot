@@ -113,12 +113,12 @@ def test_watchdog_flat_recovery(tmp_path, case):
         stash['tp_market_fallbacks'] = {'x': {'status': 'submitted', 'remaining_quantity': '1'}}
     order_before = vars(order).copy()
     tick(strategy, snapshot)
-    assert SYMBOL in strategy._symbol_open_freezes
+    recovered = case not in {'long', 'both', 'short_stash', 'missing', 'stale', 'read_error', 'other_reason'}
+    assert (SYMBOL not in strategy._symbol_open_freezes) == recovered
     tick(strategy, snapshot, 60)
-    recovered = case in {'flat_new', 'manual_fill', 'old_fill', 'multi_flat'}
     assert (SYMBOL not in strategy._symbol_open_freezes) == recovered
     if recovered:
-        assert stash['watchdog_repair_failure_count'] == 0
+        assert stash.get('watchdog_repair_failure_count', 0) == 0
     if case == 'protection_frozen':
         assert stash['protection_frozen'] is True
     if case == 'pending_fallback':
@@ -128,78 +128,19 @@ def test_watchdog_flat_recovery(tmp_path, case):
 
 @pytest.mark.parametrize('timestamp', [0, -1, None, '123', 1.5, True])
 @pytest.mark.parametrize('status,quantity', [('FILLED', '0'), ('PARTIALLY_FILLED', '0'), ('CANCELED', '1')])
-def test_invalid_robot_fill_timestamp_blocks_thaw(tmp_path, timestamp, status, quantity):
+def test_invalid_robot_fill_timestamp_does_not_block_fresh_flat_thaw(tmp_path, timestamp, status, quantity):
     strategy, snapshot = frozen_fixture(tmp_path)
     strategy.cache.orders.return_value = [
         robot_order(strategy, status=status, filled_qty=quantity, ts_last=timestamp)]
     tick(strategy, snapshot)
     tick(strategy, snapshot, 60)
-    assert strategy._symbol_open_freezes[SYMBOL] == REASON
-    assert SYMBOL not in strategy._watchdog_flat_observations
-
-
-def test_two_independent_snapshots_and_intervening_fill_reset(tmp_path):
-    strategy, snapshot = frozen_fixture(tmp_path)
-    tick(strategy, snapshot)
-    first = snapshot['positions_fetched_at']
-    tick(strategy, snapshot)
-    tick(strategy, snapshot, 59)
-    assert strategy._symbol_open_freezes[SYMBOL] == REASON
-    assert strategy._watchdog_flat_observations[SYMBOL] == first
-    order = robot_order(strategy, status='FILLED', filled_qty='1',
-                        ts_last=int((first + timedelta(seconds=30)).timestamp() * 1e9))
-    strategy.cache.orders.return_value = [order]
-    tick(strategy, snapshot, 1)
-    assert strategy._symbol_open_freezes[SYMBOL] == REASON
-    assert SYMBOL not in strategy._watchdog_flat_observations
-    tick(strategy, snapshot, 1)
-    assert strategy._watchdog_flat_observations[SYMBOL] == snapshot['positions_fetched_at']
-    tick(strategy, snapshot, 60)
     assert SYMBOL not in strategy._symbol_open_freezes
 
 
-@pytest.mark.parametrize('failure', ['position', 'history', 'stash_time', 'protection', 'fallback', 'snapshot'])
-def test_invalid_intermediate_evidence_clears_first_observation(tmp_path, failure):
-    strategy, snapshot = frozen_fixture(tmp_path)
-    stash = next(iter(strategy._entry_protection_stash.values()))
-    tick(strategy, snapshot)
-    assert SYMBOL in strategy._watchdog_flat_observations
-    if failure == 'position':
-        snapshot['positions'][0]['quantity'] = '1'
-    if failure == 'history':
-        strategy.cache.orders.side_effect = RuntimeError('unavailable')
-    if failure == 'stash_time':
-        stash['last_entry_fill_at'] = 'invalid'
-    if failure == 'protection':
-        stash['protection_frozen'] = True
-    if failure == 'fallback':
-        stash['tp_market_fallbacks'] = {'x': {'status': 'submitted', 'remaining_quantity': '1'}}
-    if failure == 'snapshot':
-        strategy._exchange_evidence_provider.cached_snapshot.return_value = None
-    tick(strategy, snapshot, 30)
-    assert SYMBOL not in strategy._watchdog_flat_observations
-    assert SYMBOL in strategy._symbol_open_freezes
-    snapshot['positions'][0]['quantity'] = '0'
-    strategy.cache.orders.side_effect = None
-    stash.pop('last_entry_fill_at', None)
-    stash.pop('protection_frozen', None)
-    stash.pop('tp_market_fallbacks', None)
-    strategy._exchange_evidence_provider.cached_snapshot.return_value = snapshot
-    tick(strategy, snapshot, 30)
-    assert SYMBOL in strategy._symbol_open_freezes
-    tick(strategy, snapshot, 60)
-    assert SYMBOL not in strategy._symbol_open_freezes
 
 
-def test_denial_warning_is_per_symbol_rate_limited(tmp_path):
-    strategy, snapshot = frozen_fixture(tmp_path)
-    strategy.cache.orders.side_effect = RuntimeError('history unavailable')
-    tick(strategy, snapshot)
-    tick(strategy, snapshot, 60)
-    strategy.log.warning.assert_called_once()
-    assert 'history unavailable' in strategy.log.warning.call_args.args[0]
-    tick(strategy, snapshot, 540)
-    assert strategy.log.warning.call_count == 2
+
+
 
 
 def test_manual_flat_then_robot_position_refreezes_after_two_failed_repairs(tmp_path):
@@ -213,14 +154,14 @@ def test_manual_flat_then_robot_position_refreezes_after_two_failed_repairs(tmp_
     # 9/24: a manual position kept the symbol occupied while robot entry stayed NEW.
     snapshot['positions'][0]['quantity'] = '2'
     tick(strategy, snapshot)
-    assert SYMBOL not in strategy._watchdog_flat_observations
+    assert SYMBOL in strategy._symbol_open_freezes
     snapshot['positions'][0]['quantity'] = '0'
     tick(strategy, snapshot, 1)
-    assert SYMBOL in strategy._symbol_open_freezes
+    assert SYMBOL not in strategy._symbol_open_freezes
     tick(strategy, snapshot, 60)
     assert SYMBOL not in strategy._symbol_open_freezes
     assert entry.status == 'NEW'
-    assert stash['watchdog_repair_failure_count'] == 0
+    assert stash.get('watchdog_repair_failure_count', 0) == 0
     # A subsequent attributed fill and matching real venue/cache position need protection again.
     now = snapshot['fetched_at'] + timedelta(seconds=1)
     entry.status = 'FILLED'
@@ -246,9 +187,9 @@ def test_manual_flat_then_robot_position_refreezes_after_two_failed_repairs(tmp_
 
 @pytest.mark.parametrize('case,expected', [
     ('approved_expired', True), ('created_expired', True), ('not_due', False),
-    ('halted', False), ('no_anchor', False), ('created_priority', False),
+    ('halted', False), ('no_anchor', False), ('created_priority', True),
     ('explicit_priority', False), ('explicit_expired', True), ('naive', False),
-    ('batch_no_fallback', False), ('batch_explicit', True), ('wrong_account', False),
+    ('batch_no_fallback', True), ('batch_explicit', True), ('wrong_account', False),
     ('wrong_action', False), ('zone_add', True),
     ('rejected_naive_anchor', True), ('rejected_bad_anchor', True),
     ('closing_naive_anchor', True), ('naive_anchor', False), ('bad_anchor', False),
@@ -315,10 +256,10 @@ def test_entry_expiry_anchor_and_cancel_scope(tmp_path, case, expected):
 
 
 @pytest.mark.parametrize('case,expected', [
-    ('in_progress', False), ('venue_flat', True), ('venue_missing', True), ('venue_stale', True),
+    ('in_progress', False), ('venue_flat', True), ('venue_missing', False), ('venue_stale', False),
     ('venue_short_only', True), ('no_owned_fill', True), ('exited', True),
     ('rejected', True), ('closing', True), ('not_due', False), ('explicit_in_progress', True),
-    ('venue_larger', True), ('venue_smaller', True), ('closed_marker', True),
+    ('venue_larger', False), ('venue_smaller', False), ('closed_marker', True),
 ])
 def test_started_plan_remaining_entries_do_not_expire(tmp_path, case, expected):
     strategy, _, _ = batch_fixture(tmp_path)
@@ -384,8 +325,8 @@ def test_explicit_stash_batch_expiry_still_closes_started_plan(tmp_path, in_prog
                     positions=[dict(symbol=SYMBOL, position_side='LONG', quantity='1' if in_progress else '0')])
     strategy._exchange_evidence_provider = SimpleNamespace(cached_snapshot=Mock(return_value=snapshot))
     with patch.object(strategy, '_trading_state', return_value='ACTIVE'), patch.object(
-        strategy, '_cancel_batch_entries',
+        strategy, '_cancel_scoped_venue_orders',
     ) as cancel:
         strategy._check_entry_expiry([])
-    assert stash.get('batch_closing') is True
+    assert not stash.get('batch_closing')
     assert cancel.called

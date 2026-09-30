@@ -88,7 +88,7 @@ class StrategyShellTest(unittest.TestCase):
                 # Isolate receipt-generation ABA here; the management worker
                 # suite separately exercises already-dispatched entry barriers.
                 with patch.object(strategy, "_cache_positions", side_effect=lambda _instrument: tuple(positions)), patch.object(
-                    strategy, "_close_entry_ids", return_value=set(),
+                    strategy, "_exchange_state_mirror", SimpleNamespace(orders_for_instrument=lambda _iid: ()),
                 ):
                     try:
                         # Real receipt worker and prepare worker run, but the
@@ -1302,10 +1302,8 @@ class StrategyShellTest(unittest.TestCase):
                 strategy._entry_protection_stash[first] = _watchdog_stash(first)
                 strategy._entry_protection_stash[second] = _watchdog_stash(second)
                 strategy._symbol_open_freezes["SOLUSDT"] = other_reason
-                def observed(key, _stash):
-                    return (("stop_loss", None),) if key == first else ()
-                with patch.object(strategy, "_exchange_protection_keys", side_effect=observed):
-                    strategy._check_protection_watchdog(first)
+                # No real robot stop: the symbol remains unsafe regardless of owners.
+                strategy._check_protection_watchdog(first)
                 self.assertEqual(strategy.symbol_open_freezes["SOLUSDT"], other_reason)
 
     def test_watchdog_repair_submission_does_not_clear_freeze(self) -> None:
@@ -1322,8 +1320,8 @@ class StrategyShellTest(unittest.TestCase):
         strategy._entry_protection_stash[key] = _watchdog_stash(key)
         strategy._symbol_open_freezes["SOLUSDT"] = "protection order repair failed twice"
         strategy._pending_order_confirmations["pending-order"] = "SOLUSDT-PERP.BINANCE"
-        with patch.object(strategy, "_exchange_protection_keys", return_value=(("stop_loss", None),)):
-            strategy._check_protection_watchdog(key)
+        strategy._exchange_evidence_provider.rows = [{'symbol': 'SOLUSDT', 'client_order_id': encode_client_order_id(uuid4(), 11)}]
+        strategy._check_protection_watchdog(key)
         self.assertEqual(strategy.symbol_open_freezes["SOLUSDT"], "robot order terminal confirmation pending")
 
     def test_watchdog_confirmed_recovery_clears_only_protection_freeze(self) -> None:
@@ -1333,8 +1331,8 @@ class StrategyShellTest(unittest.TestCase):
         strategy._check_protection_watchdog(str(intent_id))
         strategy._check_protection_watchdog(str(intent_id))
         self.assertIn("SOLUSDT", strategy.symbol_open_freezes)
-        with patch.object(strategy, "_exchange_protection_keys", return_value=(("stop_loss", None),)):
-            strategy._check_protection_watchdog(str(intent_id))
+        strategy._exchange_evidence_provider.rows = [{'symbol': 'SOLUSDT', 'client_order_id': encode_client_order_id(uuid4(), 11)}]
+        strategy._check_protection_watchdog(str(intent_id))
         self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
 
     def test_protection_watchdog_repairs_missing_stop_without_freezing_symbol(
@@ -1393,7 +1391,7 @@ class StrategyShellTest(unittest.TestCase):
             ["PENGUUSDT-PERP.BINANCE"],
         )
 
-    def test_protection_watchdog_repairs_missing_take_profit_without_freezing_symbol(
+    def test_protection_watchdog_existing_stop_does_not_repair_missing_take_profit(
         self,
     ) -> None:
         intent_id = uuid4()
@@ -1423,55 +1421,23 @@ class StrategyShellTest(unittest.TestCase):
 
         strategy._check_protection_watchdog(str(intent_id))
 
-        self.assertEqual(strategy.repair_attempts, 1)
-        self.assertEqual(
-            strategy.repair_keys,
-            [(("take_profit", "110"),)],
-        )
+        self.assertEqual(strategy.repair_attempts, 0)
+        self.assertEqual(strategy.repair_keys, [])
         self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
         self.assertEqual(strategy.reported_events, [])
 
-    def test_protection_watchdog_submits_only_missing_take_profit(
-        self,
-    ) -> None:
+    def test_protection_watchdog_existing_stop_submits_nothing_for_missing_take_profit(self) -> None:
         intent_id = uuid4()
-        stop_client_order_id = encode_client_order_id(
-            intent_id,
-            sequence=11,
-        )
-        strategy = _ActualProtectionWatchdogStrategy(
-            evidence_rows=[
-                {
-                    "symbol": "SOLUSDT",
-                    "client_order_id": stop_client_order_id,
-                }
-            ],
-        )
+        stop_id = encode_client_order_id(intent_id, 11)
+        strategy = _ActualProtectionWatchdogStrategy(evidence_rows=[{'symbol': 'SOLUSDT', 'client_order_id': stop_id}])
         stash = _watchdog_stash(intent_id)
-        stash["take_profits"] = ("110",)
-        stash["protection_ids"] = (stop_client_order_id,)
-        stash["protection_roles"] = {
-            stop_client_order_id: {
-                "role": "stop_loss",
-                "tp_price": None,
-            }
-        }
+        stash.update(take_profits=('110',), protection_ids=(stop_id,),
+                     protection_roles={stop_id: {'role': 'stop_loss'}})
         strategy._entry_protection_stash[str(intent_id)] = stash
-
         strategy._check_protection_watchdog(str(intent_id))
-
-        self.assertEqual(len(strategy.submitted_plans), 1)
-        plan = strategy.submitted_plans[0]
-        self.assertIn("lifecycle_role=take_profit", plan.tags)
-        self.assertEqual(plan.trigger_price, "110.00")
-        self.assertNotIn("SOLUSDT", strategy.symbol_open_freezes)
-        self.assertEqual(
-            stash["protection_ids"],
-            (
-                stop_client_order_id,
-                plan.client_order_id,
-            ),
-        )
+        self.assertEqual(strategy.submitted_plans, [])
+        self.assertEqual(stash['protection_ids'], (stop_id,))
+        self.assertNotIn('SOLUSDT', strategy.symbol_open_freezes)
 
     def test_trading_state_getter_accepts_enum_values(self) -> None:
         class TradingState(Enum):
@@ -6157,7 +6123,7 @@ class _ProtectionWatchdogStrategy(IntentExecutionStrategy):
             lambda event: self.reported_events.append(event) is None or True
         )
         self.set_exchange_evidence_provider(
-            _MissingProtectionEvidence(evidence_rows)
+            _MissingProtectionEvidence(evidence_rows, strategy=self)
         )
 
     def _cache_positions(self, instrument_id):
@@ -6233,7 +6199,8 @@ class _RecoveredFillProtectionStrategy(_ProtectionWatchdogStrategy):
 
 
 class _MissingProtectionEvidence:
-    def __init__(self, rows: list[dict] | None = None) -> None:
+    def __init__(self, rows: list[dict] | None = None, *, strategy=None) -> None:
+        self.strategy = strategy
         self.rows = list(
             rows
             or [
@@ -6243,6 +6210,16 @@ class _MissingProtectionEvidence:
                 }
             ]
         )
+
+    def cached_snapshot(self, **_kwargs):
+        strategy = self.strategy
+        instrument = next((row['instrument_id'] for row in strategy._entry_protection_stash.values()), 'SOLUSDT-PERP.BINANCE')
+        positions = strategy._cache_positions(instrument)
+        return {'fetched_at': strategy._now(), 'positions_fetched_at': strategy._now(),
+                'positions': [{'symbol': str(p.instrument_id).split('-')[0], 'position_side': p.side,
+                               'quantity': p.quantity} for p in positions],
+                'regular_orders': [dict(row, position_side='LONG', reduce_only=True, order_type='STOP_MARKET')
+                                   for row in self.rows], 'algo_orders': []}
 
     def snapshot(self, *, force_refresh: bool = False) -> dict:
         assert force_refresh is True
@@ -6263,7 +6240,7 @@ class _ActualProtectionWatchdogStrategy(IntentExecutionStrategy):
             )
         )
         self.set_exchange_evidence_provider(
-            _MissingProtectionEvidence(evidence_rows)
+            _MissingProtectionEvidence(evidence_rows, strategy=self)
         )
 
     def _cache_positions(self, instrument_id):

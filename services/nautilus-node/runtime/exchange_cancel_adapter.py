@@ -1862,6 +1862,7 @@ class ControlPlaneExchangeStateMirror:
         self._monotonic = monotonic
         self._orders: tuple[ExchangeOrderRef, ...] = ()
         self._fresh = False
+        self._refreshing = False
         self._lock = threading.Lock()
         self._writer_identity_lock = threading.Lock()
         self._writer_identity: tuple[str, str, int] | None = None
@@ -1996,11 +1997,26 @@ class ControlPlaneExchangeStateMirror:
 
     def orders_for_instrument(self, instrument_id: str) -> tuple[ExchangeOrderRef, ...]:
         target = str(instrument_id)
-        with self._lock:
-            if not self._fresh:
-                raise ExchangeCancelError("exchange state mirror is not fresh")
-            orders = self._orders
+        orders = self._ensure_fresh_orders()
         return tuple(order for order in orders if order.instrument_id == target)
+
+    def _ensure_fresh_orders(self) -> tuple[ExchangeOrderRef, ...]:
+        """One lazy refresh. Failure raises; it is never an empty success."""
+        with self._lock:
+            if self._fresh:
+                return self._orders
+            if self._refreshing:
+                raise ExchangeCancelError("exchange state mirror is not fresh")
+            self._refreshing = True
+        try:
+            return self.refresh()
+        except ExchangeCancelError:
+            raise
+        except Exception as exc:
+            raise ExchangeCancelError(f"exchange state mirror refresh failed: {exc}") from exc
+        finally:
+            with self._lock:
+                self._refreshing = False
 
     def find_order(self, instrument_id: str, client_order_id: str) -> ExchangeOrderRef | bool:
         for order in self.orders_for_instrument(instrument_id):

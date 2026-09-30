@@ -627,7 +627,8 @@ class ExchangeStateMirrorTest(unittest.TestCase):
             with self.assertRaisesRegex(ExchangeCancelError, "stale"):
                 mirror.refresh()
 
-        with self.assertRaisesRegex(ExchangeCancelError, "not fresh"):
+        with patch.object(EXCHANGE_CANCEL_ADAPTER.urllib.request, "urlopen",
+                          side_effect=EXCHANGE_CANCEL_ADAPTER.URLError("still offline")), self.assertRaisesRegex(ExchangeCancelError, "refresh failed"):
             mirror.find_order("BTCUSDT-PERP.BINANCE", "fresh-order")
 
     def test_refresh_failure_invalidates_previous_orders(self) -> None:
@@ -651,7 +652,8 @@ class ExchangeStateMirrorTest(unittest.TestCase):
             with self.assertRaisesRegex(ExchangeCancelError, "refresh failed"):
                 mirror.refresh()
 
-        with self.assertRaisesRegex(ExchangeCancelError, "not fresh"):
+        with patch.object(EXCHANGE_CANCEL_ADAPTER.urllib.request, "urlopen",
+                          side_effect=EXCHANGE_CANCEL_ADAPTER.URLError("still offline")), self.assertRaisesRegex(ExchangeCancelError, "refresh failed"):
             mirror.orders_for_instrument("BTCUSDT-PERP.BINANCE")
 
 

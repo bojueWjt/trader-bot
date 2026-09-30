@@ -1,0 +1,115 @@
+def _execution_order_plan(order_plan: dict | None, risk_budget: dict | None,
+                          symbol: str | None = None,
+                          action: str | None = None) -> dict:
+    """A↔B seam: translate A's semantic order_plan ({side:long/short, entry:{type,price}})
+    to B's execution order_plan ({side:buy/sell, type, quantity, ...}). Sizes the order
+    from risk_budget.max_notional / price (notional-capped): limit/zone use the entry price;
+    a MARKET order with no entry price uses the live Binance mark price. Pass through if
+    already in B's shape."""
+    op = dict(order_plan or {})
+    if 'entry_batch' in op:
+        batch = op['entry_batch']
+        if not isinstance(batch, dict) or batch.get('version') != '1':
+            raise ValueError('unsupported entry batch version')
+        if batch.get('allocation') != 'equal_notional' or len(batch.get('tranches', [])) not in (2, 3):
+            raise ValueError('invalid entry batch')
+        out = {
+            'type': 'entry_batch', 'batch_version': '1',
+            'side': {'long': 'buy', 'short': 'sell'}.get(op.get('side'), op.get('side')),
+            'tranches': copy.deepcopy(batch['tranches']),
+            'estimated_stop_risk': batch['estimated_stop_risk'],
+            'stop_loss': op.get('stop_loss'), 'take_profits': op.get('take_profits') or [],
+        }
+        if op.get('expire_hours'):
+            out['expire_hours'] = op['expire_hours']
+        if op.get('entry_expires_at'):
+            out['entry_expires_at'] = op['entry_expires_at']
+        return _preserve_execution_order_plan_metadata(op, out)
+    side = str(op.get("side") or "").lower()
+    if op.get("type") == "zone_ladder" and isinstance(op.get("tranches"), list):
+        out = {key: value for key, value in op.items() if key != "entry"}
+        out["side"] = {"long": "buy", "short": "sell"}.get(side, side)
+        return out
+    if op.get("type") and op.get("quantity") is not None and side in ("buy", "sell"):
+        return op  # already B execution format
+    b_side = {"long": "buy", "buy": "buy", "short": "sell", "sell": "sell"}.get(side, side)
+    entry = op.get("entry") or {}
+    raw_entry_type = str(entry.get("type") or op.get("type") or "").lower()
+    act = str(action or "").lower()
+    if act in _MANAGEMENT_ACTIONS:
+        out: dict = {"side": b_side}
+        if raw_entry_type and raw_entry_type != "none":
+            out["type"] = raw_entry_type
+            out["time_in_force"] = "IOC" if raw_entry_type == "market" else "GTC"
+        if op.get("quantity") is not None:
+            out["quantity"] = str(op.get("quantity"))
+        if op.get("fraction") is not None:
+            out["fraction"] = str(op.get("fraction"))
+        if op.get("price") is not None:
+            out["price"] = op.get("price")
+        if op.get("limit_price") is not None:
+            out["limit_price"] = op.get("limit_price")
+        if op.get("stop_price") is not None:
+            out["stop_price"] = op.get("stop_price")
+        elif act == "move_stop_loss" and op.get("stop_loss") is not None:
+            out["stop_price"] = op.get("stop_loss")
+        if op.get("trigger_price") is not None:
+            out["trigger_price"] = op.get("trigger_price")
+        if op.get("stop_loss") is not None:
+            out["stop_loss"] = op.get("stop_loss")
+        if op.get("take_profits") is not None:
+            out["take_profits"] = op.get("take_profits")
+        if op.get("cancel_client_order_id") is not None:
+            out["cancel_client_order_id"] = op.get("cancel_client_order_id")
+        if op.get("leverage") is not None:
+            out["leverage"] = op.get("leverage")
+        # Hedge-mode book hint must survive the A->B translation, otherwise the
+        # node planner denies dual-side instruments with position_not_unique
+        # (2026-07-12 ETH short SL incident, intent 15748ddd).
+        if op.get("position_side") is not None:
+            out["position_side"] = op.get("position_side")
+        return _preserve_execution_order_plan_metadata(op, out)
+
+    entry_type = raw_entry_type or "market"
+    if entry_type == "none":
+        entry_type = "market"
+    time_in_force = str(
+        entry.get("time_in_force")
+        or op.get("time_in_force")
+        or ""
+    ).upper()
+    if not time_in_force:
+        if entry_type == "market":
+            time_in_force = "IOC"
+        else:
+            time_in_force = "GTC"
+    entry_price = entry.get("price") if entry.get("price") is not None else entry.get("price_min")
+    price_min = entry.get("price_min")
+    price_max = entry.get("price_max")
+
+    single_plan = _single_execution_order_plan(
+        op,
+        risk_budget,
+        symbol,
+        b_side,
+        entry_type,
+        entry_price,
+        price_min,
+        price_max,
+        time_in_force,
+    )
+    if entry_type == "zone":
+        try:
+            ladder_plan = _zone_ladder_order_plan(
+                op,
+                risk_budget,
+                symbol,
+                b_side,
+                price_min,
+                price_max,
+            )
+            if ladder_plan is not None:
+                return ladder_plan
+        except Exception:
+            return single_plan
+    return single_plan
