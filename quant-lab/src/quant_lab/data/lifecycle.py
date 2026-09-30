@@ -268,7 +268,8 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
         decision_eligible_at = t_dec = None
         a_star, dep_refs = plan_dependencies(root, mvd, rule_versions, index=dep_index)
         price_a_star, price_refs = plan_dependencies(root, mvd, rule_versions, purpose="price_check", index=dep_index)
-        h1 = root.get("time_grade") == "H1"
+        # H1 默认不作决策根；仅当该版本在敏感性口径下已按最后编辑时刻定可见时刻时放行（假设写在 temporal_assumptions）。
+        h1 = root.get("time_grade") == "H1" and not json.loads(root_mv.get("temporal_assumptions") or "{}").get("edit_visible_at_last_edit")
         if not is_orphan and not h1 and root["instrument_id"] is not None:
             decision_eligible_at = a_star
             t_dec = t_dec_of(a_star, processing_delay_s)

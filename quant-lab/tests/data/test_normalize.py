@@ -263,3 +263,20 @@ def test_media_path_windows_separators(tmp_path):
     assert safe_media_path(chat, "\\\\server\\share\\x")[1] == "absolute_path"
     real, why = safe_media_path(chat, "photos\\ok.png")
     assert why is None and real == (chat / "photos" / "ok.png").resolve()
+
+
+def test_h1_edit_visible_sensitivity_uses_last_edit_not_post_time(tmp_path):
+    """Opt-in only: without an export snapshot the final version is visible from the last edit (10:20), never the
+    original post (10:00); the assumption is written down and the version stays H1."""
+    import shutil
+    fx = tmp_path / "fx"
+    shutil.copytree(FIX / "AlphaSignals", fx / "AlphaSignals")
+    (fx / "AlphaSignals" / "export_manifest.json").unlink()
+    layout = Layout.flat(tmp_path / "lake")
+    normalize.run(fx, layout, ingested_at=datetime(2026, 9, 11, tzinfo=UTC), edit_visible_at_last_edit=True)
+    d = pl.read_parquet(layout.message_version)
+    r = d.filter((pl.col("source_id").struct.field("message_id") == A["CE1_edited_sl"])).row(0, named=True)
+    ta = json.loads(r["temporal_assumptions"])
+    assert r["time_grade"] == "H1" and r["available_at"] == datetime(2024, 4, 2, 10, 20, tzinfo=UTC)
+    assert ta["clock"] == "last_edit_at" and ta["edit_visible_at_last_edit"] is True
+    assert "VERSION_TIME_UNKNOWN" not in r["reason_codes"]

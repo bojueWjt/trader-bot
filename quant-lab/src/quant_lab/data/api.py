@@ -108,7 +108,8 @@ def quarantine(flow: str, *, status: str | None = None) -> pl.DataFrame:
 def build(fixture_dir: str | os.PathLike | None, layout: Layout, *, graph_version: str, llm_fixture: str | os.PathLike | None = None, ocr_fixture: str | os.PathLike | None = None,
           adjudicator_fixture: str | os.PathLike | None = None, ingested_at: datetime | None = None, alias: bool = False, llm: str | None = None,
           market_lake: str | os.PathLike | None = None, market: str = "fixture",
-          export_dir: str | os.PathLike | None = None, channel: int | None = None, plan_source: str = "parser") -> dict[str, Any]:
+          export_dir: str | os.PathLike | None = None, channel: int | None = None, plan_source: str = "parser",
+          edit_visible_at_last_edit: bool = False) -> dict[str, Any]:
     """端到端：归一 → 去重 → 抽取 → 行情校验 → 链接 → 生命周期 + 发布。
     仅显式 market=real 或 market_lake 启用真实行情，默认保持夹具行为。
     alias=True：把 graph_version 当别名，实际发布不可变版本 `<alias>@<input_hash[:8]>` 并把别名指过去；旧版本原样保留，不删除（T04）。"""
@@ -151,7 +152,8 @@ def build(fixture_dir: str | os.PathLike | None, layout: Layout, *, graph_versio
         normalize_kwargs = {"source_messages": list(read_all(source, allowed_peer_ids=allowed))}
     # 使用独立派生工作集，避免累计 harvest 湖或前一次其他老师构建混入本次图。
     if real or export_dir is not None or allowed is not None:
-        scope = stable_id("build-scope", sorted(allowed) if allowed is not None else [], str(source.resolve()))[:16]
+        scope = stable_id("build-scope", sorted(allowed) if allowed is not None else [], str(source.resolve()),
+                          *(["edit-visible"] if edit_visible_at_last_edit else []))[:16]
         work = layout.gold_dir.parent / "_build" / scope
         scoped = Layout(work / "bronze", work / "silver", layout.gold_dir,
                         work / "_loss", layout.quarantine_path)
@@ -163,7 +165,7 @@ def build(fixture_dir: str | os.PathLike | None, layout: Layout, *, graph_versio
         provider = LakeMarket(market_lake if market_lake is not None else root / "lake" / "market")
         lifecycle_kwargs["registry_version"] = provider.registry.version
     out: dict[str, Any] = {}
-    out["normalize"] = normalize.run(source, layout, ingested_at=ingested_at, **normalize_kwargs)
+    out["normalize"] = normalize.run(source, layout, ingested_at=ingested_at, edit_visible_at_last_edit=edit_visible_at_last_edit, **normalize_kwargs)
     out["dedup"] = dedup.run(layout, ingested_at=ingested_at)
     out["extract"] = extract.run(layout, llm_fixture=llm_fixture, ocr_fixture=ocr_fixture, ingested_at=ingested_at, llm=llm)
     if provider is None:
@@ -193,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--channel", type=int, help="只构建该频道（白名单内的 Telegram peer id）")
     ap.add_argument("--plan-source", choices=["parser", "llm", "reconciled"], default="parser")
     ap.add_argument("--graph-version", default="fixture-v1")
+    ap.add_argument("--edit-visible-at-last-edit", action="store_true",
+                    help="敏感性口径：编辑过的历史消息按最后编辑时刻可见（默认按导出快照，编辑版不作决策根）")
     providers = ap.add_mutually_exclusive_group()
     providers.add_argument("--llm-fixture")
     providers.add_argument("--llm", choices=["grok"], help="显式使用本机 grok；另需 QUANT_LAB_ALLOW_LLM=1")
@@ -212,7 +216,8 @@ def main(argv: list[str] | None = None) -> int:
             ap.error("--build 需要 --fixture、--export-dir 或显式真实行情模式")
         try:
             res = build(a.fixture, layout, graph_version=a.graph_version, llm_fixture=a.llm_fixture, ocr_fixture=a.ocr_fixture, adjudicator_fixture=a.adjudicator_fixture, alias=a.alias, llm=a.llm,
-                        market_lake=a.market_lake, market=a.market, export_dir=a.export_dir, channel=a.channel, plan_source=a.plan_source)
+                        market_lake=a.market_lake, market=a.market, export_dir=a.export_dir, channel=a.channel, plan_source=a.plan_source,
+                        edit_visible_at_last_edit=a.edit_visible_at_last_edit)
         except (PermissionError, ValueError) as exc:
             ap.error(str(exc))
         print(json.dumps({k: {kk: vv for kk, vv in v.items() if kk not in ("paths", "inputs", "raw_hashes", "items")} for k, v in res.items()}, ensure_ascii=False, indent=2, default=str))

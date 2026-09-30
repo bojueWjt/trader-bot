@@ -27,6 +27,9 @@ TDESKTOP_KNOWN_KEYS = frozenset(
         "saved_from", "photo", "photo_file_size", "width", "height", "file", "file_name", "file_size", "thumbnail",
         "thumbnail_file_size", "media_type", "mime_type", "duration_seconds", "sticker_emoji", "views", "author",
         "inline_bot_buttons", "poll", "location_information", "contact_information", "members", "message_id",
+        # 新版 TDesktop 导出带的无害字段：reactions 是导出时刻的表情计数（事后数据，任何特征都不读它），
+        # inviter 出现在入群服务消息上。未登记时坚果TV 4656 条、其余频道数十至上百条被整条判为 SCHEMA_DRIFT。
+        "reactions", "inviter",
         # 本项目扩展（合成夹具 / Telethon 补充导出会带）
         "grouped_id", "forwarded_from_id", "forwarded_from_message_id", "forwarded_date_unixtime",
         "first_seen_at", "snapshot_at",

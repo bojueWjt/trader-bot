@@ -491,3 +491,14 @@ def test_s10_mv_clock_change_changes_input_hash(tmp_path):
     assert lifecycle.input_hash_of(la, ingested_at=T_BUILD) != h1
     with pytest.raises(RuntimeError):
         lifecycle.run(la, graph_version="fixture-v1", ingested_at=T_BUILD)
+
+
+def test_edit_visible_sensitivity_revives_h1_at_last_edit_time_only_when_opted_in(tmp_path, ep):
+    """Sensitivity variant: the final edited version is visible from Telegram's last-edit time (10:20), never 10:00.
+    It is still H1 with the original entry quarantined; the default build (fixture `ep`) keeps it out of decisions."""
+    layout, _ = _build(tmp_path / "ev", gv="fixture-ev", edit_visible_at_last_edit=True)
+    ep_ev = pl.read_parquet(layout.episode("fixture-ev"))
+    r = _ep(ep_ev, "A", A["CE1_edited_sl"])
+    assert r["time_grade_min"] == "H1" and r["t_dec"] == t_dec_of(datetime(2024, 4, 2, 10, 20, tzinfo=UTC))
+    assert r["eligibility_by_estimand"]["original_entry"] is False and "EDIT_ORIGINAL_UNAVAILABLE" in r["reason_codes"]
+    assert _ep(ep, "A", A["CE1_edited_sl"])["t_dec"] is None

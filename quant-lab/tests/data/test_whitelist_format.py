@@ -49,3 +49,14 @@ def test_appledouble_companions_in_pull_dir_are_ignored(tmp_path):
     msgs, listings = ingest_pull_dir(pull, allowed_peer_ids=None, root=tmp_path)
     assert msgs == [] and listings == []
     assert harvest._pull_jsonl_files(tmp_path) == []
+
+
+def test_export_reactions_and_inviter_are_not_schema_drift(tmp_path):
+    """Newer TDesktop exports add export-time reaction counts; they must not quarantine the message."""
+    from quant_lab.data.sources import _raw_from_tdesktop_item
+    base = {"id": 1, "type": "message", "date": "2025-01-01T00:00:00", "date_unixtime": "1735689600", "text": "仿写 BTC 做多"}
+    kw = dict(peer=-100, name="虚构", raw_uri="x", raw_hash="h", snapshot_at=None, chat_dir=tmp_path)
+    ok = _raw_from_tdesktop_item(dict(base, reactions=[{"type": "emoji", "count": 3, "emoji": "👍"}], inviter="x"), 0, **kw)
+    assert ok.unknown_keys == []
+    drift = _raw_from_tdesktop_item(dict(base, brand_new_field=1), 0, **kw)
+    assert drift.unknown_keys == ["brand_new_field"]
