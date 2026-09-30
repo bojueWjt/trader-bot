@@ -312,3 +312,80 @@ def test_entry_expiry_anchor_and_cancel_scope(tmp_path, case, expected):
             cancel.assert_not_called()
         if 'naive_anchor' in case or 'bad_anchor' in case or 'hours_' in case:
             assert any(denial.reason == 'entry_expiry_invalid' for denial in strategy.denials)
+
+
+@pytest.mark.parametrize('case,expected', [
+    ('in_progress', False), ('venue_flat', True), ('venue_missing', True), ('venue_stale', True),
+    ('venue_short_only', True), ('no_owned_fill', True), ('exited', True),
+    ('rejected', True), ('closing', True), ('not_due', False), ('explicit_in_progress', True),
+    ('venue_larger', True), ('venue_smaller', True), ('closed_marker', True),
+])
+def test_started_plan_remaining_entries_do_not_expire(tmp_path, case, expected):
+    strategy, _, _ = batch_fixture(tmp_path)
+    key = uuid4()
+    ids = tuple(encode_client_order_id(key, seq) for seq in (1, 2, 3))
+    now = strategy._now()
+    payload = {'order_plan': {'type': 'zone_ladder', 'expire_hours': 48},
+               'approved_at': (now - timedelta(hours=47 if case == 'not_due' else 49)).isoformat()}
+    if case == 'explicit_in_progress':
+        payload['order_plan']['entry_expires_at'] = (now - timedelta(hours=1)).isoformat()
+    fills = {} if case == 'no_owned_fill' else {ids[0]: {'role': 'entry', 'trades': {}, 'filled': '0.212'}}
+    if case == 'exited':
+        fills[encode_client_order_id(key, 11)] = {'role': 'exit', 'trades': {}, 'filled': '0.212'}
+    stash = {'instrument_id': INSTRUMENT, 'entry_side': 'BUY', 'batch_entry_ids': list(ids),
+             'batch_fills': fills, 'batch_exit_ids': [], 'batch_expires_at': ''}
+    if case == 'closing':
+        stash['batch_closing'] = True
+    if case == 'closed_marker':
+        stash['position_closed_at'] = (now - timedelta(minutes=5)).isoformat()
+    strategy._entry_protection_stash[str(key)] = stash
+    fetched = now - timedelta(seconds=10_000 if case == 'venue_stale' else 1)
+    positions = [dict(symbol=SYMBOL, position_side='LONG', quantity='0.212')]
+    if case == 'venue_flat':
+        positions[0]['quantity'] = '0'
+    if case == 'venue_short_only':
+        positions[0]['position_side'] = 'SHORT'
+    if case in {'venue_larger', 'venue_smaller'}:
+        positions[0]['quantity'] = '0.5' if case == 'venue_larger' else '0.1'
+    snapshot = dict(fetched_at=fetched, positions_fetched_at=fetched,
+                    positions=positions, regular_orders=[], algo_orders=[])
+    strategy._exchange_evidence_provider = (
+        SimpleNamespace() if case == 'venue_missing'
+        else SimpleNamespace(cached_snapshot=Mock(return_value=snapshot)))
+    record = SimpleNamespace(account_id=str(strategy.config.account_id), action='open_position',
+                             intent_payload=payload, intent_id=str(key),
+                             state=IntentExecutionState.REJECTED if case == 'rejected' else IntentExecutionState.DISPATCHED,
+                             client_order_ids=ids, instrument_id=INSTRUMENT)
+    orders = [SimpleNamespace(client_order_id=cid, reduce_only=False, order_kind='regular', status='NEW')
+              for cid in ids[1:]]
+    strategy._exchange_state_mirror = SimpleNamespace(orders_for_instrument=lambda _: orders)
+    strategy._terminal_exchange_worker = None
+    with patch.object(strategy, '_trading_state', return_value='ACTIVE'), patch.object(
+        strategy, '_cancel_via_exchange_adapter',
+    ) as cancel:
+        strategy._check_entry_expiry([record])
+    if expected:
+        assert {call.args for call in cancel.call_args_list} == {(INSTRUMENT, ids[1]), (INSTRUMENT, ids[2])}
+    else:
+        cancel.assert_not_called()
+
+
+@pytest.mark.parametrize('in_progress', [True, False])
+def test_explicit_stash_batch_expiry_still_closes_started_plan(tmp_path, in_progress):
+    strategy, _, _ = batch_fixture(tmp_path)
+    key = uuid4()
+    ids = [encode_client_order_id(key, seq) for seq in (1, 2)]
+    now = strategy._now()
+    stash = {'instrument_id': INSTRUMENT, 'entry_side': 'BUY', 'batch_entry_ids': ids,
+             'batch_fills': {ids[0]: {'role': 'entry', 'trades': {}, 'filled': '1'}},
+             'batch_exit_ids': [], 'batch_expires_at': (now - timedelta(hours=1)).isoformat()}
+    strategy._entry_protection_stash = {str(key): stash}
+    snapshot = dict(fetched_at=now, positions_fetched_at=now, regular_orders=[], algo_orders=[],
+                    positions=[dict(symbol=SYMBOL, position_side='LONG', quantity='1' if in_progress else '0')])
+    strategy._exchange_evidence_provider = SimpleNamespace(cached_snapshot=Mock(return_value=snapshot))
+    with patch.object(strategy, '_trading_state', return_value='ACTIVE'), patch.object(
+        strategy, '_cancel_batch_entries',
+    ) as cancel:
+        strategy._check_entry_expiry([])
+    assert stash.get('batch_closing') is True
+    assert cancel.called

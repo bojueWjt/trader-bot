@@ -762,6 +762,7 @@ class IntentExecutionStrategy(Strategy):
             closing = bool(stash and stash.get("batch_closing"))
             order_plan = record.intent_payload.get("order_plan") or {}
             expiry = order_plan.get("entry_expires_at")
+            explicit_expiry = bool(expiry)
             if not expiry and order_plan.get("type") != "entry_batch":
                 anchor = record.intent_payload.get("created_at") or record.intent_payload.get("approved_at")
                 hours = order_plan.get("expire_hours")
@@ -782,6 +783,8 @@ class IntentExecutionStrategy(Strategy):
                 except (TypeError, ValueError):
                     self._record_denial(OrderDenied("entry_expiry_invalid", record.intent_id))
                     continue
+            if expired and not explicit_expiry and self._plan_in_progress(stash):
+                expired = False
             if not (expired or rejected or closing):
                 continue
             ids = tuple(cid for cid in record.client_order_ids
@@ -808,6 +811,31 @@ class IntentExecutionStrategy(Strategy):
                     continue
             if stash.get("batch_closing"):
                 self._cancel_batch_entries(stash)
+
+    def _plan_in_progress(self, stash) -> bool:
+        """A started plan whose owned fills are exactly the venue book: its
+        remaining entries end with the position (exit fills set batch_closing),
+        not on the derived expire_hours clock. Any close evidence, any
+        unexplained venue quantity (other plans, manual trades, exits the
+        ledger cannot attribute), or missing/stale evidence keeps the expiry."""
+        if not stash or not stash.get("batch_entry_ids") or stash.get("batch_closing"):
+            return False
+        if stash.get("position_closed_at"):
+            return False
+        try:
+            instrument_id = str(stash["instrument_id"])
+            book = "LONG" if stash.get("entry_side") == "BUY" else "SHORT"
+            owned = owned_quantity(stash.get("batch_fills") or {})
+            if owned <= 0:
+                return False
+            state = self._build_reconciled_state(instrument_id)
+            if state is None:
+                return False
+            assessment = state.assess(BookKey(self.config.account_id, instrument_id, book))
+            return (assessment.state is PositionState.KNOWN_OPEN
+                    and Decimal(str(assessment.quantity)) == owned)
+        except Exception:
+            return False
 
     def _cancel_scoped_venue_orders(self, instrument_id, ids, purpose, *, entry=False):
         if self._trading_state().upper() != "ACTIVE":
