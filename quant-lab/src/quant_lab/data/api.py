@@ -109,7 +109,7 @@ def build(fixture_dir: str | os.PathLike | None, layout: Layout, *, graph_versio
           adjudicator_fixture: str | os.PathLike | None = None, ingested_at: datetime | None = None, alias: bool = False, llm: str | None = None,
           market_lake: str | os.PathLike | None = None, market: str = "fixture",
           export_dir: str | os.PathLike | None = None, channel: int | None = None, plan_source: str = "parser",
-          edit_visible_at_last_edit: bool = False) -> dict[str, Any]:
+          edit_visible_at_last_edit: bool = False, chart_fixture: str | os.PathLike | None = None) -> dict[str, Any]:
     """端到端：归一 → 去重 → 抽取 → 行情校验 → 链接 → 生命周期 + 发布。
     仅显式 market=real 或 market_lake 启用真实行情，默认保持夹具行为。
     alias=True：把 graph_version 当别名，实际发布不可变版本 `<alias>@<input_hash[:8]>` 并把别名指过去；旧版本原样保留，不删除（T04）。"""
@@ -117,6 +117,7 @@ def build(fixture_dir: str | os.PathLike | None, layout: Layout, *, graph_versio
     from .graph import set_alias
     from .llm import RecordedClient, extraction_client
 
+    chart = extract.load_chart_fixture(chart_fixture) if chart_fixture is not None else None
     from .plan_source import MODES
     if plan_source not in MODES:
         raise ValueError(f"invalid plan_source: {plan_source}")
@@ -151,9 +152,10 @@ def build(fixture_dir: str | os.PathLike | None, layout: Layout, *, graph_versio
             allowed = frozenset({selected})
         normalize_kwargs = {"source_messages": list(read_all(source, allowed_peer_ids=allowed))}
     # 使用独立派生工作集，避免累计 harvest 湖或前一次其他老师构建混入本次图。
-    if real or export_dir is not None or allowed is not None:
+    if real or export_dir is not None or allowed is not None or chart is not None:
         scope = stable_id("build-scope", sorted(allowed) if allowed is not None else [], str(source.resolve()),
-                          *(["edit-visible"] if edit_visible_at_last_edit else []))[:16]
+                          *(["edit-visible"] if edit_visible_at_last_edit else []),
+                          *(["chart", chart["sha256"]] if chart is not None else []))[:16]
         work = layout.gold_dir.parent / "_build" / scope
         scoped = Layout(work / "bronze", work / "silver", layout.gold_dir,
                         work / "_loss", layout.quarantine_path)
@@ -167,7 +169,8 @@ def build(fixture_dir: str | os.PathLike | None, layout: Layout, *, graph_versio
     out: dict[str, Any] = {}
     out["normalize"] = normalize.run(source, layout, ingested_at=ingested_at, edit_visible_at_last_edit=edit_visible_at_last_edit, **normalize_kwargs)
     out["dedup"] = dedup.run(layout, ingested_at=ingested_at)
-    out["extract"] = extract.run(layout, llm_fixture=llm_fixture, ocr_fixture=ocr_fixture, ingested_at=ingested_at, llm=llm)
+    out["extract"] = extract.run(layout, llm_fixture=llm_fixture, ocr_fixture=ocr_fixture, ingested_at=ingested_at, llm=llm,
+                                 **({"chart_fixture": chart_fixture} if chart_fixture is not None else {}))
     if provider is None:
         out["validate"] = validate.run(layout, ingested_at=ingested_at, synthetic=True)
     else:
@@ -201,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
     providers.add_argument("--llm-fixture")
     providers.add_argument("--llm", choices=["grok"], help="显式使用本机 grok；另需 QUANT_LAB_ALLOW_LLM=1")
     ap.add_argument("--ocr-fixture")
+    ap.add_argument("--chart-fixture", help="外部 chart-read-v1 JSON；只补 v2 LLM 单个当下开仓缺失的止损/止盈")
     ap.add_argument("--adjudicator-fixture")
     ap.add_argument("--alias", action="store_true", help="graph-version 作别名：发布不可变版本 <alias>@<hash8> 并移动别名，不删旧版本")
     ap.add_argument("--loss", help="batch_id 或 latest：打印损耗表每层一行")
@@ -217,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             res = build(a.fixture, layout, graph_version=a.graph_version, llm_fixture=a.llm_fixture, ocr_fixture=a.ocr_fixture, adjudicator_fixture=a.adjudicator_fixture, alias=a.alias, llm=a.llm,
                         market_lake=a.market_lake, market=a.market, export_dir=a.export_dir, channel=a.channel, plan_source=a.plan_source,
-                        edit_visible_at_last_edit=a.edit_visible_at_last_edit)
+                        edit_visible_at_last_edit=a.edit_visible_at_last_edit, chart_fixture=a.chart_fixture)
         except (PermissionError, ValueError) as exc:
             ap.error(str(exc))
         print(json.dumps({k: {kk: vv for kk, vv in v.items() if kk not in ("paths", "inputs", "raw_hashes", "items")} for k, v in res.items()}, ensure_ascii=False, indent=2, default=str))

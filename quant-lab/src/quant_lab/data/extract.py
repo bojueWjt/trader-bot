@@ -11,8 +11,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import math
 import os
 import pathlib
@@ -750,6 +751,92 @@ def llm_extract(text: str, *, client: LLMClient, channel_name: str, message_date
     return res, None, {"usage": out.usage, "model": out.model, "response_hash": out.response_hash, "attempts": attempts}
 
 
+# ---------------------------------------------------------------- 外部图表读数（不进入 LLM 文本证据通道）
+def load_chart_fixture(path: str | os.PathLike) -> dict[str, Any]:
+    raw = pathlib.Path(path).read_bytes()
+    chart = json.loads(raw, parse_float=Decimal)
+    if not isinstance(chart, dict) or chart.get("version") != "chart-read-v1":
+        raise ValueError("invalid chart fixture version")
+    if not isinstance(chart.get("model"), str) or not chart["model"] or not isinstance(chart.get("items"), dict):
+        raise ValueError("chart fixture requires model and items")
+
+    def price(value):
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, Decimal)):
+            raise ValueError("chart prices must be JSON numbers")
+        number = Decimal(value)
+        try:
+            valid = number.is_finite() and number > 0 and number.adjusted() < 26 and number == number.quantize(Decimal("1e-12"))
+        except InvalidOperation:
+            valid = False
+        if not valid:
+            raise ValueError("unrepresentable or nonpositive chart price")
+        return number
+
+    items = {}
+    for source_id, item in chart["items"].items():
+        if not isinstance(item, dict) or not isinstance(item.get("readable"), bool):
+            raise ValueError("chart item requires readable boolean")
+        if not item["readable"]:
+            continue
+        targets = item.get("tps", [])
+        if not isinstance(targets, list) or any(value is None for value in targets):
+            raise ValueError("chart tps must be a list of prices")
+        items[source_id] = dict(stop=price(item.get("stop")), tps=[price(v) for v in targets],
+                                final_target=price(item.get("final_target")))
+    return dict(version=chart["version"], model=chart["model"], items=items, sha256=hashlib.sha256(raw).hexdigest())
+
+
+def apply_chart_fill(results: list[ParseResult], source_id: str, chart: dict[str, Any]) -> None:
+    """Fill after v2 text validation; chart numbers never claim a text span.
+
+    checks.action remains the original validated text interpretation. Canonicalization
+    and order_plan consume the filled row values and retain all their usual checks.
+    """
+    item = chart["items"].get(source_id)
+    if item is None:
+        return
+    opens = [r for r in results if r.kind == "entry_proposal" and r.checks.get("schema_version") == 2
+             and r.checks.get("op") == "open" and r.checks.get("time_ref") == "now"]
+    if len(opens) > 1:
+        for result in opens:
+            result.checks["chart_fill_skipped"] = "multi_open"
+        return
+    if not opens:
+        return
+    result = opens[0]
+    fields, conflicts = [], []
+    chart_stop = item["stop"]
+    source_stop = result.checks["action"].get("stop")
+    # A conditional stop is an existing instruction, even without a numeric price.
+    condition_stop = source_stop is not None and source_stop["kind"] == "condition"
+    if chart_stop is not None:
+        if result.stop is None and not condition_stop:
+            result.stop = chart_stop
+            fields.append("stop")
+        elif result.stop != chart_stop:
+            text_value = source_stop if condition_stop else str(result.stop)
+            conflicts.append(dict(field="stop", text=text_value, chart=str(chart_stop)))
+    chart_tps = item["tps"]
+    if not chart_tps and item["final_target"] is not None:
+        chart_tps = [item["final_target"]]
+    if chart_tps:
+        if not result.tps:
+            result.tps = [dict(level=v, fraction=None, kind="price") for v in chart_tps]
+            fields.append("tps")
+        elif [(t["kind"], t["level"]) for t in result.tps] != [("price", v) for v in chart_tps]:
+            conflicts.append(dict(field="tps", text=[dict(kind=t["kind"], level=str(t["level"])) for t in result.tps],
+                                  chart=[str(v) for v in chart_tps]))
+    if conflicts:
+        result.checks["chart_conflict"] = conflicts
+    if fields:
+        result.checks["chart_fill"] = dict(fields=fields, model=chart["model"], version=chart["version"])
+        result.notes.append("fields_from_chart")
+        # ParseResult.notes has no parquet column: persist this provenance in checks.
+        result.checks["notes"] = list(result.notes)
+
+
 # ---------------------------------------------------------------- 落盘
 def _row(base: dict[str, Any], res: ParseResult, extractor: dict[str, Any], ingested_at: datetime, *, inherited: list[str] | None = None, meta: dict[str, Any] | None = None) -> dict[str, Any]:
     entry = None
@@ -792,7 +879,8 @@ def _row(base: dict[str, Any], res: ParseResult, extractor: dict[str, Any], inge
     }
 
 
-def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClient | None = None, ocr: OcrProvider | None = None, ingested_at: datetime | None = None) -> tuple[pl.DataFrame, list[dict], dict[tuple[int, str], LayerLedger], dict[str, Any]]:
+def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClient | None = None, ocr: OcrProvider | None = None, ingested_at: datetime | None = None,
+                  chart: dict[str, Any] | None = None) -> tuple[pl.DataFrame, list[dict], dict[tuple[int, str], LayerLedger], dict[str, Any]]:
     ingested_at = ingested_at or now_utc()
     ocr = ocr or NoOcr()
     frame = mv.with_columns(pl.col("source_id").struct.field("message_id").alias("message_id"))
@@ -845,8 +933,13 @@ def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClien
             parent = max(parents, key=lambda p: (p["available_at"], p["version_no"]), default=None)
             pr, ab, meta = llm_extract(r["text"], client=client, channel_name=r["channel_name"], message_date=r["message_date"].isoformat() if r["message_date"] else None, previous_text=parent["text"] if parent else None)
             llm_ex = {"name": "llm", "version": getattr(client, "version", "?"), "model": getattr(client, "model", getattr(client, "name", "?"))}
+            if chart is not None:
+                llm_ex["version"] += ":chart:" + chart["sha256"]
             if pr is not None:
-                for result in pr if isinstance(pr, list) else [pr]:
+                results = pr if isinstance(pr, list) else [pr]
+                if chart is not None:
+                    apply_chart_fill(results, r["source_version_id"], chart)
+                for result in results:
                     lrow = _row(r, result, llm_ex, ingested_at, inherited=inherited, meta=meta)
                     rows.append(lrow)
                     led.map(r["source_version_id"], lrow["extract_id"], "split", [])
@@ -895,6 +988,11 @@ def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClien
     }
     if isinstance(client, GrokCliClient):
         summary["llm"].update(client.budget_report())
+    if chart is not None:
+        # Keep batch_id as the upstream loss-ledger lineage; build_id and extract_id
+        # distinguish chart content, including repeated standalone extract.run calls.
+        summary["build_id"] = stable_id("chart-extract", batch_id, chart["sha256"])
+        summary["chart_fixture_sha256"] = chart["sha256"]
     if client is not None and df.height:
         summary["co_error"] = co_error_report(df)
     return df, qrows, ledgers, summary
@@ -916,13 +1014,15 @@ def co_error_report(df: pl.DataFrame) -> dict[str, Any]:
     return out
 
 
-def run(layout: Layout, *, llm_fixture: str | os.PathLike | None = None, ocr_fixture: str | os.PathLike | None = None, ingested_at: datetime | None = None, llm: str | None = None) -> dict[str, Any]:
+def run(layout: Layout, *, llm_fixture: str | os.PathLike | None = None, ocr_fixture: str | os.PathLike | None = None, ingested_at: datetime | None = None, llm: str | None = None,
+        chart_fixture: str | os.PathLike | None = None) -> dict[str, Any]:
     ingested_at = ingested_at or now_utc()
+    chart = load_chart_fixture(chart_fixture) if chart_fixture is not None else None
     client = extraction_client(llm=llm, llm_fixture=llm_fixture)
     mv = pl.read_parquet(layout.message_version)
     dg = pl.read_parquet(layout.duplicate_group) if layout.duplicate_group.exists() else None
     ocr = RecordedOcr.from_file(ocr_fixture) if ocr_fixture else None
-    df, qrows, ledgers, summary = extract_frame(mv, dg, client=client, ocr=ocr, ingested_at=ingested_at)
+    df, qrows, ledgers, summary = extract_frame(mv, dg, client=client, ocr=ocr, ingested_at=ingested_at, chart=chart)
     layout.ensure()
     old = pl.read_parquet(layout.extracted_event) if layout.extracted_event.exists() else None
     write_parquet_atomic(preserve_ingested_at(df, old, "extract_id"), layout.extracted_event)

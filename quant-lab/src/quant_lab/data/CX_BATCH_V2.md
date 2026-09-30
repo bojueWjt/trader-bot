@@ -154,3 +154,12 @@ export QUANT_LAB_DATA_ROOT=$T
 .venv-g1/bin/python -m pytest tests/data -q
 .venv-g0/bin/python -m pytest tests/integration -q
 ```
+
+### 可选图表补值
+
+`python -m quant_lab.data.api --build ... --llm-fixture /external/llm.json --plan-source llm --chart-fixture /external/chart.json`
+（Python 接口：`extract.run(..., chart_fixture=path)` / `api.build(..., chart_fixture=path)`。）
+外部文件为 `{"version":"chart-read-v1","model":"模型名","items":{"source_version_id":{"readable":true,"entry":[],"stop":90,"tps":[110],"final_target":null,"note":"..."}}}`；真实读数不入仓。
+只在 v2 LLM 消息恰好一个当下 `open` 时补缺失 stop/tps，入场保持文字解析；图上无 tps 时回退 final_target。不可读或未匹配读数忽略，多开仓记 `checks.chart_fill_skipped="multi_open"`。已有文字值（含条件止损）保持不变，差异记 `checks.chart_conflict`。
+图数字在文字证据校验之后引入，以 `checks.chart_fill` 记录字段、模型和版本，`checks.notes` 持久化 `fields_from_chart`；不伪造 text span，`checks.action` 保留原始文字解释。方向、合理性和用途准入校验照常执行，合格补值进入 order_plan。
+原始文件内容 SHA-256 进入构建工作目录 scope、LLM extractor version/extract_id 和 extract 摘要的 build_id；同内容换路径保持身份，改内容改变身份。batch_id 继续表示上游损耗账谱系。不传参数时保持既有身份与输出。图文件应在构建期间保持不变；已有不可变 graph-version 需换版本或使用 `--alias`。
