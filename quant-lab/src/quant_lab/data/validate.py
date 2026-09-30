@@ -197,7 +197,8 @@ def market_check_row(c: dict[str, Any], *, t_a: datetime | None, marks: MarkProv
         return out, reasons, checks
     m = marks.mark_at(inst, t_a, max_staleness_s=MAX_STALENESS_S)
     out["mark_close_time"], out["mark_staleness_s"] = m.close_time, m.staleness_s
-    if m.price is None:
+    if m.price is None or m.price <= 0:
+        # 非正标记价是坏数据，不是价格：与取不到同样按不可用处理，不能拿它去算偏离。
         reasons.append(Reason.MARK_STALE)
         out["scale_gate"] = out["plausibility_status"] = "unavailable"
         checks["mark"] = m.reason
@@ -215,7 +216,8 @@ def market_check_row(c: dict[str, Any], *, t_a: datetime | None, marks: MarkProv
     if e and e.get("lo") is not None:
         dlo, dhi = log_deviation(e["lo"], mp), log_deviation(e["hi"], mp)
         out["delta_lo"], out["delta_hi"] = dlo, dhi
-        out["delta_near"] = min(x for x in (dlo, dhi) if x is not None)
+        near = [x for x in (dlo, dhi) if x is not None]
+        out["delta_near"] = min(near) if near else None
     ref = c["entry_ref"] if c["entry_ref"] else mp  # 市价单：SL/TP 相对 mark
     if c["stop"] is not None:
         out["delta_stop"] = log_deviation(c["stop"], ref)

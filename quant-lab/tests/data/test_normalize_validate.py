@@ -230,3 +230,22 @@ def test_a10_scale_basis_recorded(lake):
     wide, _, _ = canonicalize_row(_ex_row(entry={"lo": 60000.0, "hi": 600000.0, "kind": "zone"}, stop=59000.0, tps=[]), registry=reg)
     mk, reasons, checks = market_check_row(wide, t_a=T0, marks=marks, t_plaus=None, channel_id=1)
     assert checks["scale_basis"] == "far_end_only" and checks["scale_conflict_end"] == "entries[0].price_hi"
+
+
+def test_non_positive_mark_or_price_does_not_crash_the_scale_gate():
+    """A zero mark price is bad data, not a price: it is unavailable (MARK_STALE), never a crash in the gate."""
+    from types import SimpleNamespace
+    reg = fixture_registry()
+
+    class ZeroMarks:
+        manifest = "zero"
+
+        def mark_at(self, inst, t, max_staleness_s=None):
+            return SimpleNamespace(price=0.0, close_time=T0, staleness_s=0, reason=None)
+
+    can, _, _ = canonicalize_row(_ex_row(), registry=reg)
+    mk, reasons, _ = market_check_row(can, t_a=T0, marks=ZeroMarks(), t_plaus=None, channel_id=1)
+    assert "MARK_STALE" in reasons and mk["scale_gate"] == "unavailable"
+    zero_entry = dict(can, entry={"lo": 0.0, "hi": 0.0, "kind": "limit"})
+    mk, _, _ = market_check_row(zero_entry, t_a=T0, marks=fixture_marks(), t_plaus=None, channel_id=1)
+    assert mk["delta_near"] is None
