@@ -260,3 +260,19 @@ def test_plan_without_stop_is_counted_as_no_stop(built, monkeypatch):
     # Without a stop there is no R; it is its own reason, not a contract error.
     assert report["replay_exclusions"]["reason_counts"] == {"PLAN_NO_STOP": 1}
     assert report["replay_exclusions"]["n_replayed"] == report["replay_exclusions"]["n_decision_episodes"] - 1
+
+
+def test_missing_plan_is_not_counted_as_missing_stop(built, monkeypatch):
+    root, _ = built
+    real, state = l0.resolve_market_refs, {"n": 0}
+
+    def drop_first_plan(row, marks):
+        fixed, why = real(row, marks)
+        state["n"] += 1
+        if fixed is not None and state["n"] == 1:
+            fixed = dict(fixed, order_plan=None)
+        return fixed, why
+
+    monkeypatch.setattr(l0, "resolve_market_refs", drop_first_plan)
+    report = l0.replay(graph_version="l0-test", channel=CHANNEL, out=root / "noplan")
+    assert report["replay_exclusions"]["reason_counts"] == {"PLAN_NOT_EXECUTABLE": 1}
