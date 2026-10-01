@@ -1,4 +1,4 @@
-"""quant_lab.market.kernel_a —— 候选 A：自研永续参考实现 v0.3（ADR-G2 §4–§7、§11；M-07；review-G2-P1 S01–S05/S07/S08/S13 闭合）。
+"""quant_lab.market.kernel_a —— 候选 A：自研永续参考实现 v0.4（ADR-G2 §4–§7、§11；M-07；review-G2-P1 S01–S05/S07/S08/S13 闭合）。
 
 order_plan → 规范执行事件。单 episode 隔离账户、one_way、USDT 线性合约（multiplier 参与全部金额）。
 判定顺序（每个时刻，ADR §5.1）：
@@ -25,7 +25,7 @@ from quant_lab.market.contract import (
     entry_expiry_at, grid_points_between, request_canonical, resolve_policy, trace_hash,
 )
 
-KERNEL_VERSION = "kernel-a-v0.3"
+KERNEL_VERSION = "kernel-a-v0.4"
 ZERO = Decimal(0)
 US = dt.timedelta(microseconds=1)
 
@@ -113,6 +113,7 @@ class KernelA:
         self.mark: Decimal | None = None
         self.mark_ts: dt.datetime | None = None
         self.exit_latch = False
+        self.breakeven_done = False
         self.censor: str | None = None
         self.cov = {"mark_ok": True, "funding_ok": True, "rules_ok": True, "bars_ok": True}
         self.min_p = ZERO
@@ -401,6 +402,21 @@ class KernelA:
             for o in self.live_orders("entry"):
                 self.cancel(ts, o, "exit_latch")
 
+    def arm_breakeven(self, ts: dt.datetime) -> None:
+        # 只在首次实际止盈成交后改一次。触及未成交、仓位已平、以及后续成交都不再改价。
+        if not self.policy.breakeven_after_first_tp or self.breakeven_done:
+            return
+        if self.pos == 0 or self.entry_qty == 0:
+            return
+        sl = self.orders.get("sl-0")
+        if sl is None or not sl.live or sl.triggered:
+            return
+        # 与 entry_avg_price 同一 12 位量化：事件价格不能带超过合同的小数位。
+        avg = quantize_ratio(self.entry_cost / self.entry_qty)
+        self.breakeven_done = True
+        sl.price = avg
+        self.emit(ts, "amended", "sl-0", "sl", price=avg, qty=sl.qty)
+
     # ------------------------------------------------------------------ 账务
     def _fill_event(self, ts, o: Order, leg: str, px: Decimal, q: Decimal, fee: Decimal, bar, step) -> None:
         if not o.live:
@@ -452,14 +468,26 @@ class KernelA:
             self.close_at = ts
 
     # ------------------------------------------------------------------ 触发
+    def protective_stop(self) -> tuple[Decimal, str]:
+        # 保本之后有效止损是 sl-0 的现价，触发基准改为 mark；计划止损本身不改。
+        if self.breakeven_done:
+            sl = self.orders.get("sl-0")
+            if sl is not None and sl.price is not None:
+                return sl.price, "mark"
+        return self.plan.stop.price, self.plan.stop.trigger
+
     def stop_hit(self) -> bool:
-        if self.plan.stop.trigger != "mark" or self.mark is None or self.pos == 0:
+        if self.mark is None or self.pos == 0:
             return False
-        s = self.plan.stop.price
-        return self.mark <= s if self.sign > 0 else self.mark >= s
+        price, basis = self.protective_stop()
+        if basis != "mark":
+            return False
+        return self.mark <= price if self.sign > 0 else self.mark >= price
 
     def close_stop_hit(self, p: PricePoint) -> bool:
         """Only genuine UTC-aligned 1m bar closes; C is timestamped end minus 1µs."""
+        if self.breakeven_done:
+            return False
         stop = self.plan.stop
         if stop.trigger != "close" or self.pos == 0 or p.path_step != "C":
             return False
@@ -533,10 +561,12 @@ class KernelA:
             px = max(o.price, last) if self.sign > 0 else min(o.price, last)
             self.apply_exit_fill(ts, o, px, q, False, bar, step)
             self.set_exit_latch(ts)
+            if self.pos != 0:
+                self.protect(ts)
+            self.arm_breakeven(ts)
             if self.pos == 0:
                 self.finish_if_flat(ts)
                 return
-            self.protect(ts)
         if self.exit_latch:
             return
         # entry：价格/时间优先；post-only 穿价拒绝；钱包重检（S07）
