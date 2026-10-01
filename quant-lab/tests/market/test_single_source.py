@@ -347,11 +347,12 @@ def test_differential_lake_grid(tmp_path):
             # 文件包含半开区间两侧的行，装载必须排除。
             supplied = sorted(set(opens + [start - US, end]))
             _write_lake(root, start, end, supplied)
-            market = execution.load_market_from_lake(req, lake_root=root)
+            market = execution.load_market_from_lake(req, lake_root=root, window_before_s=0)
             present = set(opens) & set(expected)
             off_grid = set(opens) - set(expected)
             assert market.bars_complete == (present == set(expected) and not off_grid)
-            assert market.bars_quality_ok == (not off_grid)
+            assert market.bars_quality_ok
+            assert bool(market.bar_gap_times) == bool(off_grid)
             for opened in off_grid:
                 assert any("off-grid" in note and opened.isoformat() in note for note in market.quality_notes)
             for bars in (market.bars_last, market.bars_mark):
@@ -370,8 +371,8 @@ def test_differential_lake_grid(tmp_path):
         for form in ('missing', 'null'):
             root = tmp_path / f'{key}-{form}'
             _write_lake(root, start, end, _grid(start, end), f'{key}-{form}')
-            market = execution.load_market_from_lake(req, lake_root=root)
-            assert not market.bars_quality_ok and not market.bars_complete
+            market = execution.load_market_from_lake(req, lake_root=root, window_before_s=0)
+            assert market.bars_quality_ok and market.bar_gap_times and not market.bars_complete
 
 
 def test_differential_start(monkeypatch, tmp_path):
@@ -393,7 +394,7 @@ def test_differential_start(monkeypatch, tmp_path):
             for spelling in (None, start):
                 bounded = c.ExecutionRequest.model_validate({**req.model_dump(), 't_start': spelling,
                     'horizon_end': end, 'horizon_source': 'caller'})
-                actual = execution.load_market_from_lake(bounded, lake_root=root)
+                actual = execution.load_market_from_lake(bounded, lake_root=root, window_before_s=0)
                 assert actual.bars_complete
                 assert [bar.open_time for bar in actual.bars_last] == opens
             for spelling in (ABSENT, None, start - US, start, start + US):
@@ -573,7 +574,9 @@ def test_differential_lake_public_interior_bar(tmp_path, offset_us, stream):
     market = execution.load_market_from_lake(req, lake_root=tmp_path)
     result = execution.simulate(req, market=market)
     assert market.bars_complete == (offset_us == 0)
-    assert market.bars_quality_ok == (offset_us == 0)
+    assert market.bars_quality_ok
+    assert bool(market.bar_gap_times) == (offset_us != 0)
     if offset_us != 0:
-        assert not result.coverage_mask.bars_ok
+        assert result.censor_reason == "RULE_HISTORY_MISSING"
+        assert KernelA(req, market)._first_bar_gap(getattr(market, "bars_last" if stream == "klines" else "bars_mark"), end) == start + dt.timedelta(minutes=1)
         assert any(stream in note and opens[1].isoformat() in note for note in market.quality_notes)

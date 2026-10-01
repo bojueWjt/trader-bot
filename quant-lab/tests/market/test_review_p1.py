@@ -202,7 +202,7 @@ def test_s08_multiplier_scales_pnl_fees_exposure():
     req, mk = e03(plan_upd={"sizing": c.Sizing(mode="fixed_qty", qty=Decimal(1))}, market_upd={"rules": c.Rules(multiplier=Decimal(2))}, policy="fixture-tick-v1")
     ra = simulate_a(req, mk)
     rb = nb.simulate_b(req, mk)
-    assert ra.gross_pnl == Decimal(10) and ra.mfe_R == Decimal(2) and ra.fees == 0          # 限价入场 maker 0
+    assert ra.gross_pnl == Decimal(10) and ra.mfe_R == Decimal(2) and ra.fees == Decimal("0.1")          # 限价入场 maker 0
     assert rb.gross_pnl == Decimal(10)
     req2, mk2 = e03(plan_upd={"sizing": c.Sizing(mode="fixed_qty", qty=Decimal(1)),
                               "entries": [c.Entry(kind="market_ref", price_lo=Decimal(100), price_hi=Decimal(100))]},
@@ -234,7 +234,7 @@ def test_s10_classifier_exc_first_and_predicate_bound():
     rb = nb.simulate_b(FIX["E02"].request, FIX["E02"].market)
     assert nb.classify("E02", ["EXC RuntimeError: unrelated"], ra, rb) == "UNEXPLAINED"
     d = c.diff_result(FIX["E02"].expected, rb, ignore_reason=False, all_diffs=True)
-    assert nb.classify("E02", d, ra, rb) == "B_COMMAND_LATENCY"
+    assert nb.classify("E02", d, ra, rb) == "UNEXPLAINED"
     assert nb.classify("E02", ["event[0].price: expected=1 actual=2"], ra, rb) == "UNEXPLAINED"
     rb_bad = rb.model_copy(update={"mae_R": Decimal("-9")})
     assert nb.classify("E02", d, ra, rb_bad) == "UNEXPLAINED"

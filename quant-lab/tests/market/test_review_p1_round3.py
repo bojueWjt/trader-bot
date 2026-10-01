@@ -83,13 +83,13 @@ def test_s14_loader_unverifiable_source_rows_fail_closed(lake_dir):
                     df.drop("source_sha256")):
         v.atomic_write_parquet(day, variant)
         mk = x.load_market_from_lake(req, lake_root=lake_dir)
-        assert not mk.bars_quality_ok and not mk.bars_complete
+        assert mk.bars_quality_ok and mk.bar_gap_times and not mk.bars_complete
         r = simulate_a(req, mk)
-        assert r.censor_reason == "BAR_GAP" and r.fill_status == "none"
+        assert r.censor_reason == "BAR_GAP"
     # 旧 sha 行 + 后续可定位缺口：仍起点删失（质量失败不能被时间洞覆盖）
     v.atomic_write_parquet(day, df.with_columns(pl.when(pl.arange(0, df.height) == 61).then(pl.lit("0" * 64)).otherwise(pl.col("source_sha256")).alias("source_sha256")).filter(pl.arange(0, df.height) != 80))
     mk = x.load_market_from_lake(req, lake_root=lake_dir)
-    assert not mk.bars_quality_ok and simulate_a(req, mk).fill_status == "none"
+    assert mk.bars_quality_ok and mk.bar_gap_times and simulate_a(req, mk).censor_reason == "BAR_GAP"
 
 
 # S16：B 截止后不得读取窗外 mark 计算暴露

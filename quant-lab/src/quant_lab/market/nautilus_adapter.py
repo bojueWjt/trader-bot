@@ -106,6 +106,8 @@ def _simulate_b(req: ExecutionRequest, market: MarketView, policy: ExecutionPoli
         raise KernelBUnavailable("close stop trigger is unsupported by kernel B")
     if policy.breakeven_after_first_tp:
         raise KernelBUnavailable("breakeven after first take-profit is unsupported by kernel B")
+    if policy.version.startswith("base-"):
+        raise KernelBUnavailable("follower execution model is unsupported by kernel B; legacy fixture spike only")
     if policy.content_hash != req.policy_hash:
         from quant_lab.market.contract import ContractError
         raise ContractError("request.policy_hash 与当前政策内容不符，拒绝执行（S12）")

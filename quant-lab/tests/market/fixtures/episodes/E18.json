@@ -1,7 +1,7 @@
 {
  "id": "E18",
- "title": "入场即越 SL：mark 94 已低于 95，入场后同点保护重检立即触发并用剩余容量平仓",
- "derivation": "T 点 mark=94（无仓位时不触发），last=100 容量 2 → 入场 1@100；保护腿建立后 P7 重检 mark 94≤95 → 同 ts stop_triggered，取消 TP，同点剩余容量 1 平 1@100。gross=net=R=0；不得等下一 bar。",
+ "title": "入场即越 SL：同点保护重检，止损价加不利 tick",
+ "derivation": "Follower rule: stop 95 plus one adverse tick -> 94; no last-bar gap-open evidence. gross=-6; R=-1.2; slippage=1.",
  "request": {
   "episode_id": "E18",
   "graph_version": "gv-fixture",
@@ -289,7 +289,7 @@
     "order_id": "sl-0",
     "leg": "sl",
     "trigger_basis": "last",
-    "price": "100",
+    "price": "94",
     "qty": "1",
     "fee": "0",
     "reason": null,
@@ -317,10 +317,10 @@
   "filled_qty": "1",
   "fees": "0",
   "funding": "0",
-  "slippage": "0",
-  "gross_pnl": "0",
-  "net_pnl": "0",
-  "net_R": "0",
+  "slippage": "1",
+  "gross_pnl": "-6",
+  "net_pnl": "-6",
+  "net_R": "-1.2",
   "censor_reason": null,
   "coverage_mask": {
    "mark_ok": true,
@@ -330,14 +330,13 @@
    "liquidation_unmodeled": true
   },
   "entry_avg_price": "100",
-  "exit_avg_price": "100",
+  "exit_avg_price": "94",
   "position_open_at": "2024-01-01T01:00:00.000000Z",
   "position_close_at": "2024-01-01T01:00:00.000000Z",
-  "mae_R": "0",
+  "mae_R": "-1.2",
   "mfe_R": "0"
  },
  "kernels": [
-  "A",
-  "B"
+  "A"
  ]
 }

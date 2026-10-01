@@ -202,7 +202,7 @@ def test_mark_stop_keeps_existing_wick_trigger_and_sequence():
     (fill,) = [
         e for e in result.canonical_events if e.leg == "sl" and e.kind == "filled"
     ]
-    assert fill.ts == event.ts and fill.price == 80
+    assert fill.ts == event.ts and fill.price == 89
 
 
 @pytest.mark.parametrize(

@@ -76,12 +76,12 @@ def test_settlement_before_t_start_ignored_and_variable_interval_chain():
     assert [e.ts for e in ev] == [S8, S8 + dt.timedelta(hours=4)] and r.funding == Decimal("-0.6")
 
 
-def test_incomplete_schedule_censors_even_when_some_rows_present():
+def test_incomplete_window_schedule_does_not_censor_without_missing_held_settlement():
     """S02：结算表证据不完整时持仓不能得到完整标签（即使窗口内有行）：FUNDING_SCHEDULE_GAP，funding_ok=false；已入账行保留。"""
     mk = market([(S8, "0.001", 8)]).model_copy(update={"funding_schedule_complete": False})
     r = simulate_a(req(), mk)
-    assert r.censor_reason == "FUNDING_SCHEDULE_GAP" and not r.coverage_mask.funding_ok and r.net_R is None
-    assert r.fill_status == "filled" and funding_events(r) == []     # 入场后立即删失，不再撮合/结算
+    assert r.censor_reason == "LABEL_RIGHT_CENSORED" and r.coverage_mask.funding_ok and r.net_R is None
+    assert r.fill_status == "filled" and len(funding_events(r)) == 1     # 入场后立即删失，不再撮合/结算
 
 
 def test_conflicting_duplicate_settlement_key_rejected():

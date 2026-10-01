@@ -1,0 +1,29 @@
+I01-extreme: KILLED 2 failed, 39 deselected in 0.28s
+I01-zero-tick: KILLED 2 failed, 39 deselected in 0.29s
+I01-close-next-open: KILLED 1 failed, 40 deselected in 0.31s
+I01-gap: KILLED 2 failed, 39 deselected in 0.28s
+I04-entry-cross: KILLED 2 failed, 39 deselected in 0.28s
+I04-tp-cross: KILLED 2 failed, 39 deselected in 0.28s
+I04-entry-fee: KILLED 2 failed, 39 deselected in 0.28s
+I04-tp-fee: KILLED 1 failed, 40 deselected in 0.28s
+I04-gap-limit: KILLED 4 failed, 37 deselected in 0.28s
+G5a-path: KILLED 1 failed, 40 deselected in 0.28s
+I03-cap: KILLED 1 failed, 40 deselected in 0.29s
+I12-stop-boundary: KILLED 2 failed, 4 passed, 35 deselected in 0.26s
+I02-quote-boundary: KILLED 2 failed, 2 passed, 37 deselected in 0.25s
+I02-quote-sizing: KILLED 2 failed, 2 passed, 37 deselected in 0.26s
+I42-entry-tick: KILLED 2 failed, 39 deselected in 0.27s
+I42-tp-tick: KILLED 2 failed, 39 deselected in 0.31s
+I42-cascade: KILLED 1 failed, 40 deselected in 0.28s
+I46-prewindow: KILLED 1 failed, 3 deselected in 0.33s
+I43-window-mask: KILLED 1 failed, 1 passed, 39 deselected in 0.29s
+I43-gap-skip: KILLED 1 failed, 1 passed, 39 deselected in 0.29s
+I43-unfilled-boundary: KILLED 1 failed, 40 deselected in 0.23s
+I45-fill-censor: KILLED 1 failed, 1 passed, 39 deselected in 0.25s
+I45-missing-row: KILLED 1 failed, 3 deselected in 0.30s
+I45-month-manifest: KILLED 1 failed, 3 deselected in 0.42s
+I45-actual-interval: KILLED 1 failed, 40 deselected in 0.36s
+I46-zero-position: KILLED 1 failed, 40 deselected in 0.26s
+I45-switch: KILLED 1 failed, 40 deselected in 0.25s
+G1c-evaluable: KILLED 1 failed, 40 deselected in 0.29s
+G1c-reason: KILLED 1 failed, 40 deselected in 0.31s

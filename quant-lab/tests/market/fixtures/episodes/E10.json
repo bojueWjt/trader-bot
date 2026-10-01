@@ -1,7 +1,7 @@
 {
  "id": "E10",
- "title": "reduce-only 竞合：同刻 mark 94 / last 105，SL 优先只卖 1",
- "derivation": "P4 mark SL 先于 P5 last TP：stop_triggered@94，TP 取消；SL market 在同点 last=105 成交 1。净仓 0，无反向仓。gross=5，R=1；mfe=1。",
+ "title": "reduce-only 竞合：SL 优先，止损价加不利 tick",
+ "derivation": "Follower rule: stop 95 plus one adverse tick -> 94; no last-bar gap-open evidence. gross=-6; R=-1.2; slippage=1.",
  "request": {
   "episode_id": "E10",
   "graph_version": "gv-fixture",
@@ -289,7 +289,7 @@
     "order_id": "sl-0",
     "leg": "sl",
     "trigger_basis": "last",
-    "price": "105",
+    "price": "94",
     "qty": "1",
     "fee": "0",
     "reason": null,
@@ -317,10 +317,10 @@
   "filled_qty": "1",
   "fees": "0",
   "funding": "0",
-  "slippage": "0",
-  "gross_pnl": "5",
-  "net_pnl": "5",
-  "net_R": "1",
+  "slippage": "1",
+  "gross_pnl": "-6",
+  "net_pnl": "-6",
+  "net_R": "-1.2",
   "censor_reason": null,
   "coverage_mask": {
    "mark_ok": true,
@@ -330,14 +330,13 @@
    "liquidation_unmodeled": true
   },
   "entry_avg_price": "100",
-  "exit_avg_price": "105",
+  "exit_avg_price": "94",
   "position_open_at": "2024-01-01T01:00:00.000000Z",
   "position_close_at": "2024-01-01T01:01:00.000000Z",
-  "mae_R": "0",
-  "mfe_R": "1"
+  "mae_R": "-1.2",
+  "mfe_R": "0"
  },
  "kernels": [
-  "A",
-  "B"
+  "A"
  ]
 }

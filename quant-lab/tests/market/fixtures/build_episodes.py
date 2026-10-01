@@ -382,6 +382,51 @@ F["E18"] = fixture("E18", "入场即越 SL：mark 94 已低于 95，入场后同
     expected(ev, fill_status="filled", filled_qty=1, gross="0", net="0", R="0", entry_avg="100", exit_avg="100", open_at=at(T), close_at=at(T)))
 
 
+# Follower execution v0.5: independent arithmetic overrides, never engine-derived.
+for eid, px, gross, r, mae, mfe in [
+    ("E01", "94", "-6", "-1.2", "-1.2", "0"),
+    ("E02", "94", "-6", "-1.2", "-1.2", "0"),
+    ("E04b", "94", "-6", "-1.2", "-1.2", "0"),
+    ("E04c", "106", "-6", "-1.2", "-1.2", "0"),
+    ("E10", "94", "-6", "-1.2", "-1.2", "0"),
+    ("E18", "94", "-6", "-1.2", "-1.2", "0"),
+]:
+    fx = F[eid]
+    exp = fx["expected"]
+    for event in exp["canonical_events"]:
+        if event["leg"] == "sl" and event["kind"] == "filled":
+            event["price"] = px
+    exp.update(slippage="1", gross_pnl=gross, net_pnl=gross, net_R=r, exit_avg_price=px, mae_R=mae, mfe_R=mfe)
+    fx["title"] = {"E01":"mark 止损：无跳空开盘证据，止损价加不利 tick", "E02":"双流异步：mark 触发，下一 last 按止损价加不利 tick", "E04b":"同 bar 双触 long adverse：止损价加不利 tick", "E04c":"同 bar 双触 short adverse：止损价加不利 tick", "E10":"reduce-only 竞合：SL 优先，止损价加不利 tick", "E18":"入场即越 SL：同点保护重检，止损价加不利 tick"}[eid]
+    fx["derivation"] = f"Follower rule: stop {fx['request']['order_plan']['stop']['price']} plus one adverse tick -> {px}; no last-bar gap-open evidence. gross={gross}; R={r}; slippage=1."
+    fx["kernels"] = ["A"]
+fx = F["E04a"]
+for event in fx["expected"]["canonical_events"]:
+    if event["leg"] == "tp" and event["kind"] == "filled":
+        event["price"] = "105"
+fx["expected"].update(gross_pnl="5",net_pnl="5",net_R="1",exit_avg_price="105",mfe_R="1")
+fx["title"] = "同 bar 双触 long primary：静止 TP 穿越按限价 105"
+fx["derivation"] = "Resting TP crossed inside bar fills at limit 105: gross=5, R=1."
+fx["kernels"] = ["A"]
+F["E12"]["expected"]["slippage"] = "1"
+F["E12"]["derivation"] += " Follower stop 95 minus one tick = 94; slippage diagnostic=1."
+F["E12"]["kernels"] = ["A"]
+fx = F["E17"]
+for event in fx["expected"]["canonical_events"]:
+    if event["leg"] == "sl" and event["kind"] == "filled":
+        event.update(price="94", fee="0.047")
+fx["expected"].update(fees="0.0975",gross_pnl="-7",net_pnl="-7.0975",net_R="-1.4195",exit_avg_price="94",mae_R="-1.4",mfe_R="0")
+fx["title"] = "Market entry 101, stop 94: adverse tick and taker fees"
+fx["derivation"] = "Market entry 101 fee .0505; stop 95 minus one tick fills 94 fee .047. Gross=-7; fees=.0975; net=-7.0975; R=-1.4195; slippage=2."
+fx["kernels"] = ["A"]
+fx = F["E14a"]
+fx["expected"] = json.loads(json.dumps(F["E03"]["expected"]))
+# E14a has only T and T+60 observations: same event outcome and manual 100->105 arithmetic as E03.
+fx["title"] = "Off-tick long limit 100.5 rounds down to 100 and executes independently"
+fx["derivation"] = "100.5 rounds down to tick 100; fixed qty=1. Entry 100, TP105: gross=net=5, R=1."
+fx["kernels"] = ["A"]
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     for eid, fx in F.items():

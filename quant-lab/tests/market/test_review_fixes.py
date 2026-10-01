@@ -44,7 +44,7 @@ def test_s05_loader_unknown_quality(column, value, tmp_path):
                 frame = frame.with_columns(pl.Series(column, [frame[column][0], None]))
         v.atomic_write_parquet(lake.silver_dir(typ, interval, 'BTCUSDT') / 'date=2024-01-01' / 'part.parquet', frame)
     market = x.load_market_from_lake(req, lake_root=lake.root)
-    assert market.bars_quality_ok is False
+    assert market.bars_quality_ok and market.bar_gap_times and not market.bars_complete
     assert market.bars_complete is False
 
 

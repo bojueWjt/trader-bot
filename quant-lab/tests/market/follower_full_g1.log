@@ -1,0 +1,43 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0
+rootdir: /Users/balen/projects/trader-bot/quant-lab
+configfile: pyproject.toml
+plugins: Faker-40.38.0, anyio-4.15.1, requests-mock-1.12.1
+collected 608 items
+
+tests/data/test_audit.py .........                                       [  1%]
+tests/data/test_chart_fill.py .......................................... [  8%]
+........                                                                 [  9%]
+tests/data/test_close_stop_mapping.py .................................. [ 15%]
+...............                                                          [ 17%]
+tests/data/test_cx_batch.py .............................                [ 22%]
+tests/data/test_cx_regression.py ............                            [ 24%]
+tests/data/test_cx_v2.py ............................................... [ 32%]
+.............................                                            [ 37%]
+tests/data/test_dedup.py ...........                                     [ 38%]
+tests/data/test_dependency_index.py ..                                   [ 39%]
+tests/data/test_extract.py ...................                           [ 42%]
+tests/data/test_extract_long_digits.py ....                              [ 42%]
+tests/data/test_field_recovery.py ................................       [ 48%]
+tests/data/test_harvest.py ............                                  [ 50%]
+tests/data/test_harvest_account.py ..................................... [ 56%]
+...........                                                              [ 58%]
+tests/data/test_lifecycle.py ........................                    [ 62%]
+tests/data/test_linker.py ..........                                     [ 63%]
+tests/data/test_llm_grok.py ...............                              [ 66%]
+tests/data/test_market_lake_build.py ..........                          [ 67%]
+tests/data/test_normalize.py ....................                        [ 71%]
+tests/data/test_normalize_validate.py ..........                         [ 72%]
+tests/data/test_review_probes.py ....................................... [ 79%]
+...................................................                      [ 87%]
+tests/data/test_smoke.py ...................................             [ 93%]
+tests/data/test_tg_pull.py ....................................          [ 99%]
+tests/data/test_whitelist_format.py .....                                [100%]
+
+=============================== warnings summary ===============================
+tests/data/test_tg_pull.py::test_usermethods_call_nested_resolve_and_forbidden_write
+  /Users/balen/projects/trader-bot/quant-lab/.venv-g1/lib/python3.12/site-packages/telethon/utils.py:1582: UserWarning: Using async sessions support is an experimental feature
+    warnings.warn('Using async sessions support is an experimental feature')
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+================== 608 passed, 1 warning in 182.36s (0:03:02) ==================

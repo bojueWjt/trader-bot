@@ -341,7 +341,7 @@ def check_funding(df: pl.DataFrame, *, pid: str, inst: str, period: str, batch_i
     for i in range(1, df.height):
         gap = ct[i] - ct[i - 1]
         # 允许结算时刻有秒级抖动（归档 calc_time 偶有 +数秒），容差 60s
-        if abs(gap - dt.timedelta(hours=ih[i])) > dt.timedelta(seconds=60):
+        if all(abs(gap - dt.timedelta(hours=hours)) > dt.timedelta(seconds=60) for hours in (ih[i - 1], ih[i])):
             qs.append(_q(pid, f"{inst}|funding|{ct[i].isoformat()}", "", R_FUNDING, event_time=ct[i], available_at=ct[i], field_path="calc_time",
                          observed=f"gap={gap}", expected=f"funding_interval_hours={ih[i]}", raw_hash=raw_hash, shash=shash, batch_id=batch_id))
     rep.duplicates = n_dup

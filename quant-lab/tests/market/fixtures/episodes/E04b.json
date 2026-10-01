@@ -1,7 +1,7 @@
 {
  "id": "E04b",
- "title": "同 bar 双触 long adverse：O→L→H→C，L 点 mark 90 触发 SL 成交 90",
- "derivation": "同 E04a 行情，adverse(long)=O→L→H→C。L 点（T+80）mark=90≤95 触发，last=90 成交。gross=-10，R=-2；mae=-2。",
+ "title": "同 bar 双触 long adverse：止损价加不利 tick",
+ "derivation": "Follower rule: stop 95 plus one adverse tick -> 94; no last-bar gap-open evidence. gross=-6; R=-1.2; slippage=1.",
  "request": {
   "episode_id": "E04b",
   "graph_version": "gv-fixture",
@@ -297,7 +297,7 @@
     "order_id": "sl-0",
     "leg": "sl",
     "trigger_basis": "last",
-    "price": "90",
+    "price": "94",
     "qty": "1",
     "fee": "0",
     "reason": null,
@@ -325,10 +325,10 @@
   "filled_qty": "1",
   "fees": "0",
   "funding": "0",
-  "slippage": "0",
-  "gross_pnl": "-10",
-  "net_pnl": "-10",
-  "net_R": "-2",
+  "slippage": "1",
+  "gross_pnl": "-6",
+  "net_pnl": "-6",
+  "net_R": "-1.2",
   "censor_reason": null,
   "coverage_mask": {
    "mark_ok": true,
@@ -338,14 +338,13 @@
    "liquidation_unmodeled": true
   },
   "entry_avg_price": "100",
-  "exit_avg_price": "90",
+  "exit_avg_price": "94",
   "position_open_at": "2024-01-01T01:00:00.000000Z",
   "position_close_at": "2024-01-01T01:01:20.000000Z",
-  "mae_R": "-2",
+  "mae_R": "-1.2",
   "mfe_R": "0"
  },
  "kernels": [
-  "A",
-  "B"
+  "A"
  ]
 }

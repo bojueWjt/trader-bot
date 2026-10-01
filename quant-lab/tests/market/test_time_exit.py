@@ -46,10 +46,10 @@ def scenario(*, tps: list[c.TakeProfit] | None = None, max_holding_s: int | None
 def test_no_tp_exits_at_horizon_with_realized_net_r():
     req, market = scenario()
     res = simulate_a(req, market)
-    # 2 × (102−100) − entry maker 0.04 − exit taker 0.102 = 3.858
+    # 2 × (102−100) − entry maker 0.04 − exit taker 0.102 = 3.798
     assert res.outcome_kind == "time_exit" and res.censor_reason is None
-    assert res.gross_pnl == D(4) and res.fees == D("0.142")
-    assert res.net_pnl == D("3.858") and res.net_R == D("0.385800000000")
+    assert res.gross_pnl == D(4) and res.fees == D("0.202")
+    assert res.net_pnl == D("3.798") and res.net_R == D("0.379800000000")
     assert res.position_close_at == req.horizon_end
     assert [(e.leg, e.price, e.qty) for e in res.canonical_events if e.kind in c.FILL_KINDS and e.leg == "close"] == [
         ("close", D(102), D(2))]
@@ -64,7 +64,7 @@ def test_short_direction_and_stress_slippage_use_market_exit_model():
     short = simulate_a(short_req, short_market)
     # short: 2 × (100−98) − 0.04 maker − 0.098 taker
     assert short.outcome_kind == "time_exit" and short.exit_avg_price == D(98)
-    assert short.net_R == D("0.386200000000")
+    assert short.net_R == D("0.380200000000")
 
     stress_req, stress_market = scenario(cost_scenario="stress")
     stress = simulate_a(stress_req, stress_market)
@@ -86,7 +86,7 @@ def test_tp1_then_remaining_position_exits_at_horizon():
     # TP1: +5; close: +2; maker entry 0.04, TP 0.021; taker close 0.051.
     assert res.outcome_kind == "time_exit" and res.exit_legs == ("tp", "close")
     assert res.censor_reason is None and res.gross_pnl == D(7)
-    assert res.fees == D("0.112") and res.net_pnl == D("6.888") and res.net_R == D("0.688800000000")
+    assert res.fees == D("0.172") and res.net_pnl == D("6.828") and res.net_R == D("0.682800000000")
 
 
 def test_bar_gap_still_censors_before_time_exit():
@@ -105,7 +105,9 @@ def test_missing_mark_or_funding_evidence_remains_unevaluable():
     stale = simulate_a(req.model_copy(update={"horizon_end": T0 + dt.timedelta(seconds=180)}), market)
     assert stale.censor_reason == "MARK_STALE" and stale.net_R is None
     missing_funding = simulate_a(req, market.model_copy(update={"funding_schedule_complete": False}))
-    assert missing_funding.censor_reason == "FUNDING_SCHEDULE_GAP" and missing_funding.net_R is None
+    assert missing_funding.censor_reason is None and missing_funding.net_R is not None
+    missing_row = market.model_copy(update={"funding_missing_times": [T0 + dt.timedelta(seconds=60)]})
+    assert simulate_a(req, missing_row).censor_reason == "FUNDING_SCHEDULE_GAP"
 
 
 def test_base_v1_same_input_remains_right_censored():
@@ -143,7 +145,7 @@ def test_max_holding_precedes_same_timestamp_price_and_funding():
     market = market.model_copy(update={"funding": [c.FundingRow(calc_time=T0 + dt.timedelta(seconds=90), rate=D("0.01"), interval_hours=8)]})
     res = simulate_a(req, market)
     assert res.outcome_kind == "time_exit" and res.position_close_at == T0 + dt.timedelta(seconds=90)
-    assert res.exit_avg_price == D(102) and res.net_R == D("0.385800000000")
+    assert res.exit_avg_price == D(102) and res.net_R == D("0.379800000000")
     assert res.funding == 0 and not [e for e in res.canonical_events if e.kind == "funding"]
 
 

@@ -1,7 +1,7 @@
 {
  "id": "E02",
- "title": "双流异步：mark 先触发，last 后到成交",
- "derivation": "T 入场 100。T+20 只有 mark=94 → 触发 SL，无 last 不能成交（禁止回用 T 的 last=100）。T+21 last=98 → 成交 98。gross=-2，R=-0.4。mae：T+20 unrealized=(94-100)×1=-6 → -1.2；T+21 realized -2；min=-6 → mae_R=-1.2。",
+ "title": "双流异步：mark 触发，下一 last 按止损价加不利 tick",
+ "derivation": "Follower rule: stop 95 plus one adverse tick -> 94; no last-bar gap-open evidence. gross=-6; R=-1.2; slippage=1.",
  "request": {
   "episode_id": "E02",
   "graph_version": "gv-fixture",
@@ -289,7 +289,7 @@
     "order_id": "sl-0",
     "leg": "sl",
     "trigger_basis": "last",
-    "price": "98",
+    "price": "94",
     "qty": "1",
     "fee": "0",
     "reason": null,
@@ -317,10 +317,10 @@
   "filled_qty": "1",
   "fees": "0",
   "funding": "0",
-  "slippage": "0",
-  "gross_pnl": "-2",
-  "net_pnl": "-2",
-  "net_R": "-0.4",
+  "slippage": "1",
+  "gross_pnl": "-6",
+  "net_pnl": "-6",
+  "net_R": "-1.2",
   "censor_reason": null,
   "coverage_mask": {
    "mark_ok": true,
@@ -330,14 +330,13 @@
    "liquidation_unmodeled": true
   },
   "entry_avg_price": "100",
-  "exit_avg_price": "98",
+  "exit_avg_price": "94",
   "position_open_at": "2024-01-01T01:00:00.000000Z",
   "position_close_at": "2024-01-01T01:00:21.000000Z",
   "mae_R": "-1.2",
   "mfe_R": "0"
  },
  "kernels": [
-  "A",
-  "B"
+  "A"
  ]
 }

@@ -1,7 +1,7 @@
 {
  "id": "E04a",
- "title": "同 bar 双触 long primary：|O-L|=|H-O| 等距 → H 先，TP 按价点 110 成交",
- "derivation": "bar1 全 100：入场在 O 点（T）。bar2 O100/H110/L90/C100：primary 等距取 O→H→L→C，H 点（T+80）last=110≥105 → tp_triggered，成交价 max(105,110)=110（跳空改善，不是插值 105）。gross=10，R=2；mfe=2。",
+ "title": "同 bar 双触 long primary：静止 TP 穿越按限价 105",
+ "derivation": "Resting TP crossed inside bar fills at limit 105: gross=5, R=1.",
  "request": {
   "episode_id": "E04a",
   "graph_version": "gv-fixture",
@@ -282,7 +282,7 @@
     "order_id": "tp-0",
     "leg": "tp",
     "trigger_basis": "last",
-    "price": "110",
+    "price": "105",
     "qty": "1",
     "fee": "0",
     "reason": null,
@@ -326,9 +326,9 @@
   "fees": "0",
   "funding": "0",
   "slippage": "0",
-  "gross_pnl": "10",
-  "net_pnl": "10",
-  "net_R": "2",
+  "gross_pnl": "5",
+  "net_pnl": "5",
+  "net_R": "1",
   "censor_reason": null,
   "coverage_mask": {
    "mark_ok": true,
@@ -338,14 +338,13 @@
    "liquidation_unmodeled": true
   },
   "entry_avg_price": "100",
-  "exit_avg_price": "110",
+  "exit_avg_price": "105",
   "position_open_at": "2024-01-01T01:00:00.000000Z",
   "position_close_at": "2024-01-01T01:01:20.000000Z",
   "mae_R": "0",
-  "mfe_R": "2"
+  "mfe_R": "1"
  },
  "kernels": [
-  "A",
-  "B"
+  "A"
  ]
 }

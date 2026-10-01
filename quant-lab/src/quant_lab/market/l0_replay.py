@@ -76,18 +76,33 @@ MARKET_REF_SOURCE = "mark_asof_t_dec"
 
 
 def resolve_market_refs(row: dict, marks) -> tuple[dict | None, str | None]:
-    """把无价格的 market_ref 入场补成 t_dec 时的 as-of 标记价；取不到就返回原因码，由调用方计入覆盖排除。"""
+    """验证计划止损与报价，再把全部 market_ref 入场统一定仓于 t_dec 时的 as-of 标记价；取不到就返回原因码，由调用方计入覆盖排除。"""
     plan = row.get("order_plan")
     entries = (plan or {}).get("entries") or []
-    if not any(e.get("kind") == "market_ref" and e.get("price_lo") is None for e in entries):
+    has_market = any(e.get("kind") == "market_ref" for e in entries)
+    stop = plan.get("stop") if plan else None
+    if not has_market and stop is None:
         return row, None
     if row.get("t_dec") is None or row.get("instrument_id") is None:
         return None, "MARKET_REF_UNRESOLVED"
     mark = marks.mark_at(row["instrument_id"], row["t_dec"])
     if mark.price is None:
         return None, f"MARKET_REF_UNRESOLVED:{mark.reason or 'NO_MARK'}"
-    fixed = [dict(e, price_lo=mark.price, price_hi=mark.price) if e.get("kind") == "market_ref" and e.get("price_lo") is None else e
-             for e in entries]
+    if stop is not None:
+        stop_price = Decimal(str(stop["price"]))
+        side = plan.get("side", row.get("side"))
+        stale = mark.price <= stop_price if side == "long" else mark.price >= stop_price
+        if stale:
+            return None, "PLAN_STALE"
+        for entry in entries:
+            quote = entry.get("price_lo")
+            if entry.get("kind") == "market_ref" and quote is not None:
+                quote = Decimal(str(quote))
+                if abs(quote - mark.price) > Decimal("0.25") * abs(quote - stop_price):
+                    return None, "PLAN_STALE_QUOTE"
+    if not has_market:
+        return row, None
+    fixed = [dict(e, price_lo=mark.price, price_hi=mark.price) if e.get("kind") == "market_ref" else e for e in entries]
     return dict(row, order_plan=dict(plan, entries=fixed)), None
 
 
@@ -177,7 +192,7 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
         "replay_exclusions": {"n_decision_episodes": episodes.height, "n_replayed": len(requests),
                               "reason_counts": dict(sorted(replay_exclusions.items()))},
         "market_ref_entries": {"n_resolved": len(market_ref_resolved), "reference_source": MARKET_REF_SOURCE,
-                               "note": "原文只写「现价 / 附近」无价格的入场，参考价取 t_dec 时 as-of 标记价，仅用于定仓；成交由内核在 t_start 按市价撮合"},
+                               "note": "全部市价腿（含通过 0.25R 报价门的现价腿），参考价取 t_dec 时 as-of 标记价，仅用于定仓；成交由内核在 t_start 按市价撮合"},
         **summarize(table),
     }
     target = Path(out)

@@ -152,7 +152,7 @@ def test_quantize_price_tick():
 REAL = Path("data/lake/market/silver/binance/um/markPriceKlines/1m/instrument=BTCUSDT-PERP.BINANCE-UM/date=2024-01-15/part.parquet")
 
 
-@pytest.mark.skipif(not REAL.exists(), reason="真实 2024-01 分区未入湖（M-03 冒烟后可用）")
+@pytest.mark.skipif(__import__("os").environ.get("QUANT_LAB_SYNTHETIC_ONLY") == "1" or not REAL.exists(), reason="真实 2024-01 分区未入湖（M-03 冒烟后可用）")
 def test_real_partition_mark_price_at():
     m = pl.read_parquet(REAL)
     at = dt.datetime(2024, 1, 15, 12, 0, 30, tzinfo=dt.UTC)

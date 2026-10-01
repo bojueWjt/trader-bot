@@ -1,0 +1,45 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0
+rootdir: /Users/balen/projects/trader-bot/quant-lab
+configfile: pyproject.toml
+plugins: anyio-4.15.1
+collected 603 items
+
+tests/market/test_asof.py ..........s                                    [  1%]
+tests/market/test_boundary_discrimination.py ..............              [  4%]
+tests/market/test_breakeven.py ...................                       [  7%]
+tests/market/test_close_stop.py ............................             [ 11%]
+tests/market/test_constants_effective.py ........                        [ 13%]
+tests/market/test_contract.py ...................                        [ 16%]
+tests/market/test_execution_api.py .....s                                [ 17%]
+tests/market/test_follower_execution.py ................................ [ 22%]
+.........                                                                [ 24%]
+tests/market/test_force_close_net_r.py .................                 [ 27%]
+tests/market/test_funding.py ...........                                 [ 28%]
+tests/market/test_kernel_a.py .......................................... [ 35%]
+..............................                                           [ 40%]
+tests/market/test_l0_replay.py ...................                       [ 43%]
+tests/market/test_nautilus_adapter.py ......                             [ 44%]
+tests/market/test_outcome_kind.py ....................                   [ 48%]
+tests/market/test_partition_check.py .............                       [ 50%]
+tests/market/test_replay.py ..                                           [ 50%]
+tests/market/test_review_fixes.py ...................................... [ 57%]
+...........                                                              [ 58%]
+tests/market/test_review_or05_i01_i02_i04.py .....................       [ 62%]
+tests/market/test_review_p1.py .............                             [ 64%]
+tests/market/test_review_p1_round10.py ...................               [ 67%]
+tests/market/test_review_p1_round2.py .........                          [ 69%]
+tests/market/test_review_p1_round3.py .....                              [ 69%]
+tests/market/test_review_p1_round4.py ..                                 [ 70%]
+tests/market/test_single_source.py ..................................... [ 76%]
+...........                                                              [ 78%]
+tests/market/test_smoke.py ...                                           [ 78%]
+tests/market/test_time_exit.py .............                             [ 80%]
+tests/market/test_vision.py ...........                                  [ 82%]
+tests/integration/test_board_gates.py .................................. [ 88%]
+........................                                                 [ 92%]
+tests/integration/test_e2e_synthetic.py ................................ [ 97%]
+..........                                                               [ 99%]
+tests/integration/test_follower_lake.py ....                             [100%]
+
+================== 601 passed, 2 skipped in 183.16s (0:03:03) ==================

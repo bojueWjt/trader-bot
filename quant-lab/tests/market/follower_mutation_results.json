@@ -1,0 +1,292 @@
+[
+  {
+    "id": "I01-extreme",
+    "file": "market/kernel_a.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "stop_intrabar",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "2 failed, 39 deselected in 0.28s",
+    "failure": null
+  },
+  {
+    "id": "I01-zero-tick",
+    "file": "market/kernel_a.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "stop_intrabar",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "2 failed, 39 deselected in 0.29s",
+    "failure": null
+  },
+  {
+    "id": "I01-close-next-open",
+    "file": "market/kernel_a.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "close_stop_recovery",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "1 failed, 40 deselected in 0.31s",
+    "failure": null
+  },
+  {
+    "id": "I01-gap",
+    "file": "market/kernel_a.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "stop_gap",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "2 failed, 39 deselected in 0.28s",
+    "failure": null
+  },
+  {
+    "id": "I04-entry-cross",
+    "file": "market/kernel_a.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "resting_entry_cross",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "2 failed, 39 deselected in 0.28s",
+    "failure": null
+  },
+  {
+    "id": "I04-tp-cross",
+    "file": "market/kernel_a.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "resting_tp_cross",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "2 failed, 39 deselected in 0.28s",
+    "failure": null
+  },
+  {
+    "id": "I04-entry-fee",
+    "file": "market/kernel_a.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "marketable_limit",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "2 failed, 39 deselected in 0.28s",
+    "failure": null
+  },
+  {
+    "id": "I04-tp-fee",
+    "file": "market/kernel_a.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "marketable_tp",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "1 failed, 40 deselected in 0.28s",
+    "failure": null
+  },
+  {
+    "id": "I04-gap-limit",
+    "file": "market/kernel_a.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "resting_entry_gap or resting_tp_cross",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "4 failed, 37 deselected in 0.28s",
+    "failure": null
+  },
+  {
+    "id": "G5a-path",
+    "file": "market/kernel_a.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "common_path",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "1 failed, 40 deselected in 0.28s",
+    "failure": null
+  },
+  {
+    "id": "I03-cap",
+    "file": "market/kernel_a.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "ioc_market",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "1 failed, 40 deselected in 0.29s",
+    "failure": null
+  },
+  {
+    "id": "I12-stop-boundary",
+    "file": "market/l0_replay.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "plan_stale",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "2 failed, 4 passed, 35 deselected in 0.26s",
+    "failure": null
+  },
+  {
+    "id": "I02-quote-boundary",
+    "file": "market/l0_replay.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "quote_quarter",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "2 failed, 2 passed, 37 deselected in 0.25s",
+    "failure": null
+  },
+  {
+    "id": "I02-quote-sizing",
+    "file": "market/l0_replay.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "quote_quarter",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "2 failed, 2 passed, 37 deselected in 0.26s",
+    "failure": null
+  },
+  {
+    "id": "I42-entry-tick",
+    "file": "market/kernel_a.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "tick_rounding",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "2 failed, 39 deselected in 0.27s",
+    "failure": null
+  },
+  {
+    "id": "I42-tp-tick",
+    "file": "market/kernel_a.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "tick_rounding",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "2 failed, 39 deselected in 0.31s",
+    "failure": null
+  },
+  {
+    "id": "I42-cascade",
+    "file": "market/kernel_a.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "illegal_entry_leg",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "1 failed, 40 deselected in 0.28s",
+    "failure": null
+  },
+  {
+    "id": "I46-prewindow",
+    "file": "market/execution.py",
+    "tests": "tests/integration/test_follower_lake.py",
+    "selector": "preminute",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "1 failed, 3 deselected in 0.33s",
+    "failure": null
+  },
+  {
+    "id": "I43-window-mask",
+    "file": "market/kernel_a.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "bar_gap_only",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "1 failed, 1 passed, 39 deselected in 0.29s",
+    "failure": null
+  },
+  {
+    "id": "I43-gap-skip",
+    "file": "market/kernel_a.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "bar_gap_only",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "1 failed, 1 passed, 39 deselected in 0.29s",
+    "failure": null
+  },
+  {
+    "id": "I43-unfilled-boundary",
+    "file": "market/kernel_a.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "gap_at_unfilled_expiry",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "1 failed, 40 deselected in 0.23s",
+    "failure": null
+  },
+  {
+    "id": "I45-fill-censor",
+    "file": "market/kernel_a.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "funding_missing_row_checked",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "1 failed, 1 passed, 39 deselected in 0.25s",
+    "failure": null
+  },
+  {
+    "id": "I45-missing-row",
+    "file": "market/kernel_a.py",
+    "tests": "tests/integration/test_follower_lake.py",
+    "selector": "missing_settlement_row",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "1 failed, 3 deselected in 0.30s",
+    "failure": null
+  },
+  {
+    "id": "I45-month-manifest",
+    "file": "market/execution.py",
+    "tests": "tests/integration/test_follower_lake.py",
+    "selector": "preminute",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "1 failed, 3 deselected in 0.42s",
+    "failure": null
+  },
+  {
+    "id": "I45-actual-interval",
+    "file": "market/contract.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "funding_cycle_switch",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "1 failed, 40 deselected in 0.36s",
+    "failure": null
+  },
+  {
+    "id": "I46-zero-position",
+    "file": "market/kernel_a.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "funding_before_first_fill",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "1 failed, 40 deselected in 0.26s",
+    "failure": null
+  },
+  {
+    "id": "I45-switch",
+    "file": "market/partition_check.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "funding_cycle_switch",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "1 failed, 40 deselected in 0.25s",
+    "failure": null
+  },
+  {
+    "id": "G1c-evaluable",
+    "file": "market/execution.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "evaluable_and",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "1 failed, 40 deselected in 0.29s",
+    "failure": null
+  },
+  {
+    "id": "G1c-reason",
+    "file": "market/execution.py",
+    "tests": "tests/market/test_follower_execution.py",
+    "selector": "evaluable_and",
+    "exit_code": 1,
+    "killed": true,
+    "result_line": "1 failed, 40 deselected in 0.31s",
+    "failure": null
+  }
+]

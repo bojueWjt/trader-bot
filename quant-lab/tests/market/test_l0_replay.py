@@ -43,10 +43,10 @@ def assert_sample(report, table):
     overall = report["overall"]
     assert overall["n_trades"] == 2 and overall["n_filled"] == 1
     assert overall["fill_rate"] == 0.5 and overall["win_rate"] == 1.0
-    # 限价买 100、卖 110，风险预算 100 / (100-90)=10 张；两边 maker 各 0.02%。
-    assert float(table["net_R"].sum()) == pytest.approx(0.9958)
-    assert overall["mean_net_R"] == pytest.approx(0.4979)
-    assert report["cumulative_R"][-1]["cumulative_R"] == pytest.approx(0.9958)
+    # 限价买 100、卖 110，风险预算 100 / (100-90)=10 张；marketable entry taker 0.05%、静止 TP maker 0.02%。
+    assert float(table["net_R"].sum()) == pytest.approx(0.9928)
+    assert overall["mean_net_R"] == pytest.approx(0.4964)
+    assert report["cumulative_R"][-1]["cumulative_R"] == pytest.approx(0.9928)
     assert report["by"]["year"]["2024"] == overall
     assert report["by"]["side"]["long"] == overall
     assert report["by"]["instrument"][instrument_id("BTCUSDT")] == overall
@@ -276,3 +276,34 @@ def test_missing_plan_is_not_counted_as_missing_stop(built, monkeypatch):
     monkeypatch.setattr(l0, "resolve_market_refs", drop_first_plan)
     report = l0.replay(graph_version="l0-test", channel=CHANNEL, out=root / "noplan")
     assert report["replay_exclusions"]["reason_counts"] == {"PLAN_NOT_EXECUTABLE": 1}
+
+
+@pytest.mark.parametrize("reason",["PLAN_STALE","PLAN_STALE_QUOTE"])
+def test_follower_invalid_plan_counts_in_replay_exclusions_not_r(built,monkeypatch,reason):
+    root,_=built
+    original=l0.resolve_market_refs
+    calls={"n":0}
+
+    def controlled(row,marks):
+        calls["n"]+=1
+        if calls["n"]!=1:
+            return original(row,marks)
+        stop=Decimal(str(row["order_plan"]["stop"]["price"]))
+        if reason=="PLAN_STALE":
+            mark=stop
+        else:
+            mark=stop+Decimal("10")
+            row=dict(row,order_plan=dict(row["order_plan"],entries=[dict(row["order_plan"]["entries"][0],kind="market_ref",price_lo=stop+Decimal("5"),price_hi=stop+Decimal("5"),tif="IOC")]))
+        class Known:
+            def mark_at(self,*args):
+                return MarkAt(mark,None,row["t_dec"],0)
+        return original(row,Known())
+
+    monkeypatch.setattr(l0,"resolve_market_refs",controlled)
+    report=l0.replay(graph_version="l0-test",channel=CHANNEL,out=root/reason)
+    table=pl.read_parquet(root/reason/"trades.parquet")
+    assert report["replay_exclusions"]["reason_counts"]=={reason:1}
+    assert table.height==1 and report["overall"]["n_trades"]==1
+    evaluated=table.filter(pl.col("evaluable"))
+    assert evaluated.height==report["overall"]["n_evaluable"]
+    assert float(evaluated["net_R"].sum())==report["overall"]["sum_net_R"]

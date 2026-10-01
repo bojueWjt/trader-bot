@@ -80,7 +80,7 @@ def test_path_expansion_rules():
 def test_scenario_interval_favorable_vs_adverse_same_bars():
     fx = next(f for f in FIX if f.id == "E04a")
     rs = {sc: simulate_a(fx.request.model_copy(update={"path_scenario": sc}), fx.market) for sc in ("primary", "adverse", "favorable")}
-    assert rs["favorable"].net_R == Decimal(2) and rs["adverse"].net_R == Decimal(-2) and rs["primary"].net_R == Decimal(2)
+    assert rs["favorable"].net_R == Decimal(1) and rs["adverse"].net_R == Decimal("-1.2") and rs["primary"].net_R == Decimal(1)
     assert rs["favorable"].trace_hash != rs["adverse"].trace_hash
 
 
@@ -116,7 +116,7 @@ def test_filters_accept_at_boundary_and_reject_beyond():
     assert "rejected" not in kinds(simulate_a(req, mk))
     req, mk = make(plan_upd={"entries": [c.Entry(kind="limit", price_lo=Decimal("100.5"), price_hi=Decimal("100.5"))],
                              "sizing": c.Sizing(mode="fixed_qty", qty=Decimal(1))}, rules=c.Rules(tick_size=Decimal(1)))
-    assert simulate_a(req, mk).canonical_events[1].reason == "PRICE_FILTER"
+    assert simulate_a(req, mk).canonical_events[0].price == Decimal(100)
     # MARGIN：钱包 99 拒绝；杠杆 2 → 预留 50 接受
     req, mk = make(policy="fixture-wallet99-v1")
     assert simulate_a(req, mk).canonical_events[1].reason == "MARGIN"

@@ -1,7 +1,7 @@
 {
  "id": "E17",
- "title": "费用与滑点：market 买 100→101、SL market 卖 110→109，taker 0.05%",
- "derivation": "market_ref 入场参考 last=100，滑点 1 tick 买加 → 101，fee=101×0.0005=0.0505。T+60 mark=94 触发 SL，last 参考 110 卖减 → 109，fee=0.0545。gross=109-101=8；fees=0.105；slippage=1+1=2（已含在成交价里，不再从 net 扣）；net=8-0.105=7.895；R=1.579。mae：T 时 P=(100-101)=-1→-0.2；mfe：1.6。",
+ "title": "Market entry 101, stop 94: adverse tick and taker fees",
+ "derivation": "Market entry 101 fee .0505; stop 95 minus one tick fills 94 fee .047. Gross=-7; fees=.0975; net=-7.0975; R=-1.4195; slippage=2.",
  "request": {
   "episode_id": "E17",
   "graph_version": "gv-fixture",
@@ -274,9 +274,9 @@
     "order_id": "sl-0",
     "leg": "sl",
     "trigger_basis": "last",
-    "price": "109",
+    "price": "94",
     "qty": "1",
-    "fee": "0.0545",
+    "fee": "0.047",
     "reason": null,
     "bar_open_time": null,
     "path_step": "none",
@@ -300,12 +300,12 @@
   ],
   "fill_status": "filled",
   "filled_qty": "1",
-  "fees": "0.105",
+  "fees": "0.0975",
   "funding": "0",
   "slippage": "2",
-  "gross_pnl": "8",
-  "net_pnl": "7.895",
-  "net_R": "1.579",
+  "gross_pnl": "-7",
+  "net_pnl": "-7.0975",
+  "net_R": "-1.4195",
   "censor_reason": null,
   "coverage_mask": {
    "mark_ok": true,
@@ -315,14 +315,13 @@
    "liquidation_unmodeled": true
   },
   "entry_avg_price": "101",
-  "exit_avg_price": "109",
+  "exit_avg_price": "94",
   "position_open_at": "2024-01-01T01:00:00.000000Z",
   "position_close_at": "2024-01-01T01:01:00.000000Z",
-  "mae_R": "-0.2",
-  "mfe_R": "1.6"
+  "mae_R": "-1.4",
+  "mfe_R": "0"
  },
  "kernels": [
-  "A",
-  "B"
+  "A"
  ]
 }

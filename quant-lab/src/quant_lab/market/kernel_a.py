@@ -1,4 +1,4 @@
-"""quant_lab.market.kernel_a —— 候选 A：自研永续参考实现 v0.4（ADR-G2 §4–§7、§11；M-07；review-G2-P1 S01–S05/S07/S08/S13 闭合）。
+"""quant_lab.market.kernel_a —— 候选 A：自研永续参考实现 v0.5（ADR-G2 §4–§7、§11；M-07；review-G2-P1 S01–S05/S07/S08/S13 闭合）。
 
 order_plan → 规范执行事件。单 episode 隔离账户、one_way、USDT 线性合约（multiplier 参与全部金额）。
 判定顺序（每个时刻，ADR §5.1）：
@@ -6,7 +6,7 @@ order_plan → 规范执行事件。单 episode 隔离账户、one_way、USDT �
   → P3 摄入 mark/last、mark 新鲜度（有仓位或即将入场都要求 mark 可用）→ P4 mark 触发 SL → P5 last 触发 TP
   → P6 撮合（SL market → TP（当前 last 必须满足限价）→ entry 按价格/时间优先，post-only 穿价拒绝，钱包重检）
   → P7 入场后保护重检（一次）→ P8 暴露与不变量。
-分钟内部启动：bars 只展开 open_time >= t_start 的 bar；启动前最新已闭合 mark 作初始游标（不回填未来值）。
+分钟内部启动：市价从下一完整 bar 开始；marketable 限价可按已知 last 即时成交。加载启动前闭合 bar 只作 as-of 游标，不消费过去极值。
 不 import nautilus_adapter；不与候选 B 共享撮合/触发/funding helper。
 """
 from __future__ import annotations
@@ -22,10 +22,10 @@ _SRC_FILES = ("kernel_a.py", "contract.py")   # S12：构建身份含共享 cont
 from quant_lab.market.contract import (
     Bar, CanonicalEvent, CENSOR_PRIORITY, ContractError, CoverageMask, first_grid_point, ExecutionInvariantError, ExecutionPolicy, ExecutionRequest,
     ExecutionResult, MarketView, PricePoint, check_invariants, floor_step, quantize_money, quantize_ratio,
-    entry_expiry_at, grid_points_between, request_canonical, resolve_policy, trace_hash,
+    entry_expiry_at, grid_points_between, missing_funding_times, request_canonical, resolve_policy, trace_hash,
 )
 
-KERNEL_VERSION = "kernel-a-v0.4"
+KERNEL_VERSION = "kernel-a-v0.5"
 ZERO = Decimal(0)
 US = dt.timedelta(microseconds=1)
 
@@ -57,6 +57,9 @@ class Order:
     ioc_pending: bool = False
     tp_index: int = -1
     deadline: dt.datetime | None = None
+    submitted_at: dt.datetime | None = None
+    first_match: bool = True
+    close_triggered: bool = False
 
     @property
     def leaves(self) -> Decimal:
@@ -77,6 +80,7 @@ class Moment:
     horizon: bool = False
     hold_end: bool = False
     bar_gap: bool = False
+    funding_missing: bool = False
 
 
 class KernelA:
@@ -126,6 +130,7 @@ class KernelA:
         self.plan_qty = ZERO
         self.hold_end: dt.datetime | None = None
         self.all_marks: list[PricePoint] = []
+        self.path_orders = {b.open_time: [p.path_step for p in self.expand_bar(b, req.path_scenario, self.plan.side, None, self.rules.step_size)] for b in market.bars_last}
 
     # ------------------------------------------------------------------ 事件
     def emit(self, ts, kind, oid, leg, tb="none", price=None, qty=None, fee=None, reason=None, bar=None, step="none", cash_delta=None):
@@ -187,9 +192,11 @@ class KernelA:
 
     # ------------------------------------------------------------------ 时间线
     @staticmethod
-    def expand_bar(b: Bar, scenario: str, side: str, participation: Decimal | None, step: Decimal) -> list[PricePoint]:
+    def expand_bar(b: Bar, scenario: str, side: str, participation: Decimal | None, step: Decimal, order: list[str] | None = None) -> list[PricePoint]:
         o, h, l, c = b.o, b.h, b.l, b.c
-        if scenario == "primary":
+        if order is not None:
+            pass
+        elif scenario == "primary":
             order = ["O", "L", "H", "C"] if abs(o - l) < abs(h - o) else ["O", "H", "L", "C"]
         elif scenario == "adverse":
             order = ["O", "L", "H", "C"] if side == "long" else ["O", "H", "L", "C"]
@@ -205,7 +212,7 @@ class KernelA:
     def _expanded(self, bars: list[Bar], participation) -> list[PricePoint]:
         # S03：t_start 落在 bar 内部 → 从下一完整 bar 的 O 开始，不消费该分钟已发生的极值
         return [p for b in bars if b.open_time >= self.t_start
-                for p in self.expand_bar(b, self.req.path_scenario, self.plan.side, participation, self.rules.step_size)]
+                for p in self.expand_bar(b, self.req.path_scenario, self.plan.side, participation, self.rules.step_size, self.path_orders.get(b.open_time))]
 
     def timeline(self) -> list[Moment]:
         m = self.market
@@ -229,8 +236,15 @@ class KernelA:
             at(deadline).expiry = True
         # S05：bars 网格首个缺口 → 逐时 BAR_GAP（保留此前事件）；缺口不可定位（bars_complete=False 且无 bars）→ 起点删失
         gaps = [g for g in (self._first_bar_gap(m.bars_last, end), self._first_bar_gap(m.bars_mark, end)) if g is not None]
+        gaps.extend(g for g in m.bar_gap_times if self.t_start <= g < end)
         if gaps:
             at(min(gaps)).bar_gap = True          # S15：两流取最早缺口
+        funding_gaps = list(m.funding_missing_times)
+        if (m.funding or not m.funding_schedule_complete) and not funding_gaps:
+            funding_gaps = missing_funding_times(m.funding, self.t_start, end)
+        for ts in funding_gaps:
+            if self.t_start <= ts <= end:
+                at(ts).funding_missing = True
         at(end).horizon = True
         at(self.t_start)
         self.moments = moments
@@ -281,7 +295,7 @@ class KernelA:
         n = self.policy.ladder_steps
         side = "buy" if self.sign > 0 else "sell"
         if e.kind != "ladder":
-            return [e.price_lo]
+            return [self.q_tick(e.price_lo, side)]
         if n <= 1 or e.price_lo == e.price_hi:
             return [self.q_tick((e.price_lo + e.price_hi) / 2, side)]
         stepp = (e.price_hi - e.price_lo) / (n - 1)
@@ -306,21 +320,25 @@ class KernelA:
         self.plan_qty = sum(q for _, _, q in legs)          # 有效计划量 = 分配总量（S04）
         side = "buy" if self.sign > 0 else "sell"
         r = self.rules
-        reject = None
+        rejects = []
         reserve = ZERO
         for e, p, q in legs:
+            reject = None
             ref = p if p is not None else self.leg_ref_price(e)
-            if p is not None and (not self.on_tick(p) or p < r.min_price or (r.max_price is not None and p > r.max_price)):
-                reject = reject or "PRICE_FILTER"
+            if p is not None and (not self.on_tick(p) or p <= 0 or p < r.min_price or (r.max_price is not None and p > r.max_price)):
+                reject = "PRICE_FILTER"
             if q <= 0 or not self.on_step(q) or q < r.min_qty or (r.max_qty is not None and q > r.max_qty):
                 reject = reject or "LOT_SIZE"
             if ref * q * self.mult < r.min_notional:
                 reject = reject or "MIN_NOTIONAL"
-            reserve += ref * q * self.mult / self.policy.leverage + ref * q * self.mult * self.cost.taker_fee   # 含手续费预留
-        if reject is None and reserve > self.cash:
-            reject = "MARGIN"
+            if reject is None:
+                reserve += ref * q * self.mult / self.policy.leverage + ref * q * self.mult * self.cost.taker_fee
+            rejects.append(reject)
+        if reserve > self.cash:
+            rejects = [reason or "MARGIN" for reason in rejects]
         deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)
         for i, (e, p, q) in enumerate(legs):
+            reject = rejects[i]
             oid = f"entry-{i}"
             self.emit(ts, "submitted", oid, "entry", price=p, qty=q)
             if reject:
@@ -330,11 +348,11 @@ class KernelA:
             self.emit(ts, "accepted", oid, "entry")
             self.seq_counter += 1
             o = Order(oid, "entry", side, "limit" if p is not None else "market", p, q, seq=self.seq_counter, tif=e.tif,
-                      post_only=e.post_only, ioc_pending=(e.tif == "IOC"), deadline=deadline)
+                      post_only=e.post_only, ioc_pending=(e.tif == "IOC"), deadline=deadline, submitted_at=ts)
             if p is not None and e.tif != "IOC":
                 self.emit(ts, "working", oid, "entry")
             self.orders[oid] = o
-        if reject:
+        if not self.live_orders("entry"):
             self.emit(ts, "closed", "bracket-0", "close", reason="no_fill")
             self.closed = True
 
@@ -371,9 +389,13 @@ class KernelA:
                 if target <= 0:
                     continue
                 self.seq_counter += 1
-                o = Order(oid, "tp", exit_side, "limit", tp.level, target, seq=self.seq_counter, tp_index=i)
+                o = Order(oid, "tp", exit_side, "limit", self.q_tick(tp.level, "buy" if self.sign > 0 else "sell"), target, seq=self.seq_counter, tp_index=i, submitted_at=ts)
                 self.orders[oid] = o
-                self.emit(ts, "submitted", oid, "tp", price=tp.level, qty=target)
+                self.emit(ts, "submitted", oid, "tp", price=o.price, qty=target)
+                if o.price <= 0 or o.price < self.rules.min_price or (self.rules.max_price is not None and o.price > self.rules.max_price):
+                    o.status = "rejected"
+                    self.emit(ts, "rejected", oid, "tp", reason="PRICE_FILTER")
+                    continue
                 self.emit(ts, "accepted", oid, "tp")
                 self.emit(ts, "working", oid, "tp")
             elif o.live and o.qty != target:
@@ -515,6 +537,7 @@ class KernelA:
         if sl is None or not sl.live or sl.triggered:
             return
         sl.triggered = True
+        sl.close_triggered = basis == "close"
         self.emit(ts, "stop_triggered", "sl-0", "sl", tb=basis, price=self.mark if price is None else price, qty=abs(self.pos), bar=bar, step=step)
         self.set_exit_latch(ts)
         for o in self.live_orders("tp"):
@@ -525,14 +548,54 @@ class KernelA:
 
     # ------------------------------------------------------------------ 撮合
     def _exit_sl(self, ts, sl: Order, last: Decimal, take, bar, step) -> None:
+        if sl.close_triggered and step != "O":
+            return
         q = take(min(sl.leaves, abs(self.pos)))
         if q > 0:
-            px = self.market_px(last, sl.side)
-            self.slippage += abs(px - last) * q * self.mult
+            if sl.close_triggered:
+                px = self.market_px(last, sl.side)
+                ref = last
+            else:
+                ref = sl.price
+                opened = next((b.o for b in self.market.bars_last if b.open_time == bar), None)
+                gap = opened is not None and (opened < ref if self.sign > 0 else opened > ref)
+                if gap:
+                    px = opened
+                    ref = opened
+                else:
+                    px = self.market_px(ref, sl.side)
+                    if self.cost.slippage_ticks == 0 and self.cost.slippage_bps == 0:
+                        px = self.q_tick(ref - self.sign * self.rules.tick_size, "buy" if self.sign > 0 else "sell")
+            self.slippage += abs(px - ref) * q * self.mult
             self.apply_exit_fill(ts, sl, px, q, True, bar, step)
             self.finish_if_flat(ts)
 
-    def match_point(self, ts, p: PricePoint) -> None:
+    def match_tps(self, ts, last, take, bar, step) -> None:
+        """First opportunity at submission is taker; resting intrabar crosses use the limit."""
+        for o in sorted(self.live_orders("tp"), key=lambda x: x.tp_index):
+            if self.pos == 0 or not self.tp_executable(o, last):
+                o.first_match = False
+                continue
+            if not o.triggered:
+                o.triggered = True
+                self.emit(ts, "tp_triggered", o.id, "tp", tb="last", price=last, qty=o.leaves, bar=bar, step=step)
+            q = take(min(o.leaves, abs(self.pos)))
+            if q <= 0:
+                o.first_match = False
+                continue
+            taker = o.first_match and ts == o.submitted_at
+            px = last if taker or step == "O" else o.price
+            o.first_match = False
+            self.apply_exit_fill(ts, o, px, q, taker, bar, step)
+            self.set_exit_latch(ts)
+            if self.pos != 0:
+                self.protect(ts)
+            self.arm_breakeven(ts)
+            if self.pos == 0:
+                self.finish_if_flat(ts)
+                return
+
+    def match_point(self, ts, p: PricePoint, *, only_limits: bool = False) -> None:
         cap = p.capacity
         last = p.price
         bar, step = p.bar_open_time, p.path_step
@@ -551,26 +614,15 @@ class KernelA:
             self._exit_sl(ts, sl, last, take, bar, step)
             if self.closed:
                 return
-        # TP：当前 last 必须满足限价（S01：历史触及不是永久可成交条件）
-        for o in sorted(self.live_orders("tp"), key=lambda x: x.tp_index):
-            if self.pos == 0 or not self.tp_executable(o, last):
-                continue
-            q = take(min(o.leaves, abs(self.pos)))
-            if q <= 0:
-                continue
-            px = max(o.price, last) if self.sign > 0 else min(o.price, last)
-            self.apply_exit_fill(ts, o, px, q, False, bar, step)
-            self.set_exit_latch(ts)
-            if self.pos != 0:
-                self.protect(ts)
-            self.arm_breakeven(ts)
-            if self.pos == 0:
-                self.finish_if_flat(ts)
-                return
+        self.match_tps(ts, last, take, bar, step)
+        if self.closed:
+            return
         if self.exit_latch:
             return
         # entry：价格/时间优先；post-only 穿价拒绝；钱包重检（S07）
         for o in self.live_orders("entry"):
+            if only_limits and o.kind == "market":
+                continue
             if o.kind == "limit":
                 ok = last <= o.price if o.side == "buy" else last >= o.price
                 if o.post_only and not o.po_checked:
@@ -580,13 +632,16 @@ class KernelA:
                         self.emit(ts, "rejected", o.id, "entry", reason="POST_ONLY_CROSS")
                         continue
                 if not ok:
+                    o.first_match = False
                     continue
-                px = min(o.price, last) if o.side == "buy" else max(o.price, last)
-                taker = False
+                taker = o.first_match and ts == o.submitted_at
+                px = last if taker or step == "O" else o.price
+                o.first_match = False
             else:
                 px = self.market_px(last, o.side)
                 taker = True
-            q = take(min(o.leaves, self.affordable_qty(px, o.leaves)))
+            want = min(o.leaves, self.affordable_qty(px, o.leaves))
+            q = floor_step(want, self.rules.step_size) if o.kind == "market" else take(want)
             filled_now = False
             if q > 0:
                 if taker:
@@ -601,10 +656,10 @@ class KernelA:
                     self.cancel(ts, o, "ioc_remainder", with_qty=True)
             if filled_now:
                 self.protect(ts)
-                if not self.market.funding_schedule_complete:   # S02：无完整结算证据的持仓不能继续得到标签
-                    self.censor_now("FUNDING_SCHEDULE_GAP", "funding_ok")
-                    return
+
         for o in self.live_orders("entry"):
+            if only_limits and o.kind == "market":
+                continue
             if o.ioc_pending:
                 o.ioc_pending = False
                 self.cancel(ts, o, "ioc_remainder", with_qty=True)
@@ -614,6 +669,8 @@ class KernelA:
             sl = self.orders.get("sl-0")
             if sl and sl.live and self.pos != 0:
                 self._exit_sl(ts, sl, last, take, bar, step)
+        if self.pos != 0 and not self.censor:
+            self.match_tps(ts, last, take, bar, step)
 
     # ------------------------------------------------------------------ funding
     def closed_mark_at(self, ts: dt.datetime) -> PricePoint | None:
@@ -623,8 +680,6 @@ class KernelA:
 
     def time_exit(self, ts: dt.datetime, reason: str) -> None:
         """P2 到期：用终点前已知行情，先完成证据门，再市价平掉所有余仓。"""
-        if not self.market.funding_schedule_complete:
-            self.censor_now("FUNDING_SCHEDULE_GAP", "funding_ok")
         marks = [p for p in self.all_marks if p.ts < ts and
                  (p.bar_open_time is None or p.bar_open_time >= self.t_start or p.path_step == "C")]
         mark = marks[-1] if marks else None
@@ -663,6 +718,8 @@ class KernelA:
             return
         mp = self.closed_mark_at(ts)
         if mp is None or (ts - mp.ts).total_seconds() > self.policy.mark_max_staleness_s:
+            if self.pos == 0:
+                return
             self.censor_now("MARK_STALE", "mark_ok")
             return
         cash = quantize_money(-self.pos * self.mult * mp.price * row.rate)
@@ -676,7 +733,7 @@ class KernelA:
     # ------------------------------------------------------------------ 主循环
     def run(self) -> ExecutionResult:
         self.all_marks = sorted(list(self.market.mark) + [p for b in self.market.bars_mark for p in
-                                self.expand_bar(b, self.req.path_scenario, self.plan.side, None, self.rules.step_size)], key=lambda p: p.ts)
+                                self.expand_bar(b, self.req.path_scenario, self.plan.side, None, self.rules.step_size, self.path_orders.get(b.open_time))], key=lambda p: p.ts)
         r = self.rules
         if not self.market.rules_known or r.tick_size <= 0 or r.step_size <= 0:
             self.censor_now("RULE_HISTORY_MISSING", "rules_ok")
@@ -687,8 +744,6 @@ class KernelA:
         elif not self.market.bars_complete and (self._first_bar_gap(self.market.bars_last, self.req.horizon_end) is None
                                                 and self._first_bar_gap(self.market.bars_mark, self.req.horizon_end) is None):
             self.censor_now("BAR_GAP", "bars_ok")     # 缺口不可定位（缺文件）→ 起点删失
-        elif not self.market.bars_complete:
-            self.cov["bars_ok"] = False
         seed = self.closed_mark_at(self.t_start)          # 启动前最新已闭合 mark 作初始游标
         if seed is not None:
             self.mark, self.mark_ts = seed.price, seed.ts
@@ -701,6 +756,13 @@ class KernelA:
                 ts = mo.ts
                 if r.effective_to and ts >= r.effective_to:          # P0 每时刻生命周期（S05）
                     self.censor_now("SYMBOL_TIME_INVALID", "rules_ok")
+                    break
+                if mo.bar_gap and mo.expiry and self.pos == 0 and self.entry_qty == 0:
+                    for order in self.live_orders("entry"):
+                        order.status = "expired"
+                        self.emit(ts, "expired", order.id, "entry", tb="expiry", qty=order.leaves, reason="entry_ttl")
+                    self.emit(ts, "closed", "bracket-0", "close", reason="no_fill")
+                    self.closed = True
                     break
                 if mo.bar_gap:                                        # S05：逐时 bars 覆盖
                     self.censor_now("BAR_GAP", "bars_ok")
@@ -720,6 +782,9 @@ class KernelA:
                 if ts == self.t_start and not self.orders:
                     self.submit_entries(ts)
                 if self.closed:
+                    break
+                if mo.funding_missing and self.pos != 0:
+                    self.censor_now("FUNDING_SCHEDULE_GAP", "funding_ok")
                     break
                 for row in mo.funding:
                     self.settle_funding(ts, row)
@@ -753,6 +818,21 @@ class KernelA:
                     if self.mark_ts is None or (ts - self.mark_ts).total_seconds() > self.policy.mark_max_staleness_s:
                         self.censor_now("MARK_STALE", "mark_ok")
                         break
+                if ts == self.t_start and not mo.lasts and self.live_orders("entry"):
+                    known = [p for p in self.market.last if p.ts <= ts]
+                    known += [p for b in self.market.bars_last for p in self.expand_bar(b, self.req.path_scenario, self.plan.side, None, self.rules.step_size, self.path_orders.get(b.open_time))
+                              if p.ts <= ts and p.path_step == "C"]
+                    if known:
+                        point = max(known, key=lambda p: p.ts)
+                        if (ts - point.ts).total_seconds() > self.policy.mark_max_staleness_s:
+                            point = None
+                        if self.mark_ts is None or (ts - self.mark_ts).total_seconds() > self.policy.mark_max_staleness_s:
+                            self.censor_now("MARK_STALE", "mark_ok")
+                            break
+                        if point is not None:
+                            self.match_point(ts, PricePoint(ts=ts, price=point.price, capacity=point.capacity), only_limits=True)
+                        if self.closed or self.censor:
+                            break
                 if mo.marks and self.stop_hit():
                     p0 = mo.marks[-1]
                     self.trigger_stop(ts, p0.bar_open_time, p0.path_step)

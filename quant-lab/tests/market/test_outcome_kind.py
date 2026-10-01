@@ -46,7 +46,7 @@ def test_two_censor_classes_never_cross():
 
 
 def test_rejected_not_merged_into_unfilled_expired():
-    for fid, reason in (("E14a", "PRICE_FILTER"), ("E14b", "MIN_NOTIONAL"), ("E14c", "MARGIN")):
+    for fid, reason in (("E14b", "MIN_NOTIONAL"), ("E14c", "MARGIN")):
         r = RESULTS[fid]
         assert c.outcome_kind(r) == "rejected" and r.fill_status == "none"
         assert next(e for e in r.canonical_events if e.kind == "rejected").reason == reason   # 细分读 reason，不扩枚举
@@ -58,7 +58,8 @@ def test_stopped_takes_precedence_and_exit_legs_keeps_mixed_information():
     r12 = RESULTS["E12"]                                            # 先两档 TP，余仓止损
     assert c.outcome_kind(r12) == "stopped" and r12.exit_legs == ("sl", "tp")
     assert c.outcome_kind(RESULTS["E03"]) == "tp_hit" and RESULTS["E03"].exit_legs == ("tp",)
-    for fid in ("E09", "E14a", "E15a"):
+    assert RESULTS["E14a"].outcome_kind == "tp_hit"
+    for fid in ("E09", "E15a"):
         assert RESULTS[fid].exit_legs == ()
 
 

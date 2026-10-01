@@ -13,7 +13,7 @@ from quant_lab.market.kernel_a import KernelA, simulate_a
 
 EP = Path(__file__).parent / "fixtures" / "episodes"
 FIX = c.load_fixtures(EP)
-EXPECT_MATCH = {"E01", "E03", "E04b", "E04c", "E05", "E07", "E14a", "E14b", "E14c", "E15a", "E15b", "E16"}
+EXPECT_MATCH = {"E03", "E05", "E07", "E14b", "E14c", "E15a", "E15b", "E16"}
 
 
 @pytest.fixture(scope="module")
@@ -36,7 +36,8 @@ def test_b_match_set_and_all_diffs_explained(b_results):
         if not d:
             match.add(f.id)
     assert match == EXPECT_MATCH, (match - EXPECT_MATCH, EXPECT_MATCH - match)
-    assert all(v != "UNEXPLAINED" for v in codes.values()), codes
+    assert {eid for eid, code in codes.items() if code == "UNEXPLAINED"} == {"E01", "E02", "E04a", "E04b", "E04c", "E10", "E12", "E14a", "E18"}, codes
+    # New A gold must invalidate frozen legacy B explanations, never silently rewrite them.
     assert all(v in nb.EXPLANATION for v in codes.values())
 
 

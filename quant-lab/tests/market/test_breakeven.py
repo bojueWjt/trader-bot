@@ -124,8 +124,8 @@ def test_registered_breakeven_policies_keep_seven_old_hashes():
 
 
 @pytest.mark.parametrize("side,be_net,be_r,off_net,off_r", [
-    ("long", D("9.748"), D("0.243700000000"), D("-50.222"), D("-1.255550000000")),
-    ("short", D("9.752"), D("0.243800000000"), D("-50.278"), D("-1.256950000000")),
+    ("long", D("6.6295"), D("0.165737500000"), D("-53.3405"), D("-1.333512500000")),
+    ("short", D("6.6305"), D("0.165762500000"), D("-53.3995"), D("-1.334987500000")),
 ])
 def test_fee_adjusted_quarter_tp_then_breakeven_versus_original_stop(side, be_net, be_r, off_net, off_r):
     plan, lasts, marks = fee_bars(side)
@@ -134,7 +134,7 @@ def test_fee_adjusted_quarter_tp_then_breakeven_versus_original_stop(side, be_ne
     be, off = simulate_a(be_req, market), simulate_a(off_req, market)
     assert be_req.order_plan.stop.price == off_req.order_plan.stop.price == plan.stop.price
     assert be.outcome_kind == off.outcome_kind == "stopped"
-    assert be.gross_pnl == D(10) and be.fees == (D("0.252") if side == "long" else D("0.248"))
+    assert be.gross_pnl == D(7) and be.fees == (D("0.3705") if side == "long" else D("0.3695"))
     assert be.net_pnl == be_net and be.net_R == be_r == c.quantize_ratio(be.net_pnl / be_req.risk_budget)
     assert be.net_R != c.quantize_ratio(be.net_pnl / (abs(D(100) - plan.stop.price) * D(4)))
     assert off.net_pnl == off_net and off.net_R == off_r == c.quantize_ratio(off.net_pnl / off_req.risk_budget)
@@ -149,8 +149,8 @@ def test_fee_adjusted_quarter_tp_then_breakeven_versus_original_stop(side, be_ne
 
 
 @pytest.mark.parametrize("side,be_net,be_r,off_net,off_r", [
-    ("long", D("9.748"), D("0.121850000000"), D("-50.222"), D("-0.627775000000")),
-    ("short", D("9.752"), D("0.121900000000"), D("-50.278"), D("-0.628475000000")),
+    ("long", D("6.6295"), D("0.082868750000"), D("-53.3405"), D("-0.666756250000")),
+    ("short", D("6.6305"), D("0.082881250000"), D("-53.3995"), D("-0.667493750000")),
 ])
 def test_quarter_tp_r_uses_initial_stop_risk(side, be_net, be_r, off_net, off_r):
     plan, lasts, marks = fee_bars(side)
@@ -159,10 +159,10 @@ def test_quarter_tp_r_uses_initial_stop_risk(side, be_net, be_r, off_net, off_r)
     be, off = simulate_a(be_req, market), simulate_a(off_req, market)
     distance_risk = abs(D(100) - plan.stop.price) * D(4)
     assert be_req.risk_budget == off_req.risk_budget == distance_risk == D(80)
-    assert be.gross_pnl == D(10) and c.quantize_ratio(be.gross_pnl / D(80)) == D("0.125000000000")
-    assert off.gross_pnl == D(-50)
-    assert c.quantize_ratio(off.gross_pnl / D(80)) == D("-0.625000000000") == D("0.125") - D("0.75")
-    assert be.fees == (D("0.252") if side == "long" else D("0.248"))
+    assert be.gross_pnl == D(7) and c.quantize_ratio(be.gross_pnl / D(80)) == D("0.087500000000")
+    assert off.gross_pnl == D(-53)
+    assert c.quantize_ratio(off.gross_pnl / D(80)) == D("-0.662500000000") == D("0.125") - D("0.7875")
+    assert be.fees == (D("0.3705") if side == "long" else D("0.3695"))
     assert be.net_pnl == be_net and be.net_R == be_r == c.quantize_ratio(be.net_pnl / be_req.risk_budget)
     assert off.net_pnl == off_net and off.net_R == off_r == c.quantize_ratio(off.net_pnl / off_req.risk_budget)
     c.check_invariants(be_req, be, multiplier=market.rules.multiplier)
@@ -184,7 +184,7 @@ def test_partial_tp_fill_arms_breakeven_once():
     partial = [e for e in res.canonical_events if e.kind == "partial_fill" and e.leg == "tp"]
     assert partial == [partial[0]] and partial[0].qty == D(1)
     assert (D(100), D(3)) in sl_amends(res)
-    assert [e.price for e in res.canonical_events if e.kind == "filled" and e.leg == "sl"] == [D(100)]
+    assert [e.price for e in res.canonical_events if e.kind == "filled" and e.leg == "sl"] == [D(99)]
     assert res.net_R == c.quantize_ratio(res.net_pnl / D(40)) and plan.stop.price == D(80)
 
 
@@ -195,7 +195,7 @@ def test_tp_touch_without_fill_keeps_original_stop():
     assert any(e.kind == "tp_triggered" for e in res.canonical_events)
     assert not [e for e in res.canonical_events if e.leg == "tp" and e.kind in c.FILL_KINDS]
     assert all(price == D(80) for price, _ in sl_amends(res))
-    assert [e.price for e in res.canonical_events if e.kind == "filled" and e.leg == "sl"] == [D(80)]
+    assert [e.price for e in res.canonical_events if e.kind == "filled" and e.leg == "sl"] == [D(79)]
 
 
 def test_same_bar_stop_precedes_tp_and_p7_keeps_initial_stop():
@@ -215,7 +215,7 @@ def test_same_bar_stop_precedes_tp_and_p7_keeps_initial_stop():
 
     assert sig(be) == sig(off)
     assert not [e for e in be.canonical_events if e.leg == "tp" and e.kind in c.FILL_KINDS]
-    assert [e.price for e in be.canonical_events if e.kind == "filled" and e.leg == "sl"] == [D(90)]
+    assert [e.price for e in be.canonical_events if e.kind == "filled" and e.leg == "sl"] == [D(94)]
     assert plan.stop.price == D(95)
 
     def pt(second, price):
@@ -446,23 +446,19 @@ def test_public_simulate_rejects_both_breakeven_policies_before_time_exit():
         execution.simulate(req, kernel="B", market=market)
 
 
-def test_old_fixtures_keep_events_net_r_and_fixed_build_trace():
-    assert KERNEL_VERSION == "kernel-a-v0.4"
+def test_follower_fixtures_match_new_gold_and_invalidate_old_traces():
+    assert KERNEL_VERSION == "kernel-a-v0.5"
     assert kernel_build_id(False) == kernel_build_id(True)
-    assert kernel_build_id().startswith("kernel-a-v0.4+") and kernel_build_id() != OLD_BUILD
     fixtures = c.load_fixtures(Path(__file__).resolve().parent / "fixtures" / "episodes")
     assert {f.id for f in fixtures} == set(BASELINE)
+    changed = {"E01", "E02", "E04a", "E04b", "E04c", "E10", "E12", "E14a", "E17", "E18"}
     for fixture in fixtures:
         events_sha, net_r, old_trace, rc_sha = BASELINE[fixture.id]
         res = simulate_a(fixture.request, fixture.market)
-        event_bytes = c.canonical_json([e.model_dump() for e in res.canonical_events]).encode()
-        assert hashlib.sha256(event_bytes).hexdigest() == events_sha
-        assert (None if res.net_R is None else format(res.net_R, "f")) == net_r
-        policy = c.resolve_policy(fixture.request.policy_version)
-        rc = c.request_canonical(fixture.request, policy, t_start=fixture.request.resolved_t_start(policy),
-                                 market_manifest_hash=fixture.market.manifest_hash)
-        assert hashlib.sha256(c.canonical_json(rc).encode()).hexdigest() == rc_sha
-        fixed = c.trace_hash(kernel="A", kernel_version=OLD_BUILD, req_canonical=rc, events=res.canonical_events)
-        assert fixed == old_trace
+        assert c.diff_result(fixture.expected, res) == []
+        actual_sha = hashlib.sha256(c.canonical_json([e.model_dump() for e in res.canonical_events]).encode()).hexdigest()
+        if fixture.id not in changed:
+            assert actual_sha == events_sha
+            assert (None if res.net_R is None else format(res.net_R, "f")) == net_r
         assert res.trace_hash != old_trace
-        assert res.kernel_version.startswith("kernel-a-v0.4+")
+        assert res.kernel_version.startswith("kernel-a-v0.5+")

@@ -39,7 +39,7 @@ BATCH_SCHEMA: dict[str, pl.DataType] = {
     "entry_ttl_source": pl.Utf8, "fraction_source": pl.Utf8,
     "outcome_kind": pl.Utf8, "exit_legs": pl.List(pl.Utf8), "horizon_source": pl.Utf8,
     "mark_ok": pl.Boolean, "funding_ok": pl.Boolean, "rules_ok": pl.Boolean, "bars_ok": pl.Boolean, "liquidation_unmodeled": pl.Boolean,
-    "risk_budget": DEC, "canonical_events": pl.List(EVENT_STRUCT),
+    "evaluable": pl.Boolean, "risk_budget": DEC, "canonical_events": pl.List(EVENT_STRUCT),
 }
 
 
@@ -82,6 +82,11 @@ def result_row(req: ExecutionRequest, res: ExecutionResult) -> dict:
     row.update({k: getattr(res, k) for k in RESULT_SCALAR_COLS})
     row["exit_legs"] = list(res.exit_legs)
     row.update(res.coverage_mask.model_dump())
+    covered = all(row[key] is True for key in ("mark_ok", "funding_ok", "rules_ok", "bars_ok"))
+    if not covered and row["censor_reason"] is None:
+        failed = [key.upper() for key in ("mark_ok", "funding_ok", "rules_ok", "bars_ok") if row[key] is not True]
+        row["censor_reason"] = "COVERAGE_" + "_".join(failed)
+    row["evaluable"] = covered and row["censor_reason"] is None and row["net_R"] is not None
     row["risk_budget"] = req.risk_budget
     row["canonical_events"] = [e.model_dump() for e in res.canonical_events]
     return row
@@ -137,7 +142,7 @@ def simulate_batch(reqs: Iterable[ExecutionRequest], *, kernel: Literal["A", "B"
 # 从行情湖装载（P2 真实路径；M-09 提供最小实现）
 # ---------------------------------------------------------------------------
 def load_market_from_lake(req: ExecutionRequest, *, lake_root: str | Path | None = None, symbol: str | None = None,
-                          window_before_s: int = 0, snapshot_id: str | None = None) -> MarketView:
+                          window_before_s: int = 60, snapshot_id: str | None = None) -> MarketView:
     """按 request 的 instrument 与 [t_dec, horizon_end] 从 silver 装 1m last/mark bars + funding + rules（S05/S12）。
     覆盖证据：每个涉及分区的 manifest 必须存在且 check_status ∈ {ok, gap}（体检过）；quarantine severity=error 的 bar 与
     ohlc_valid=false 的 bar 视为不可用（bars_complete=False）；网格覆盖按合法且唯一的 open_time 身份核对；
@@ -158,12 +163,16 @@ def load_market_from_lake(req: ExecutionRequest, *, lake_root: str | Path | None
     # S27：启动时刻只有一个来源 —— req.resolved_t_start(policy)。此前 loader 自己用 (t_start or t_dec) 又推了一遍，
     # 省略 t_start 时漏掉 policy.latency_s，与 contract/kernel 分叉（同 S24 的"同一规则多处实现"形态）。
     from quant_lab.market.contract import resolve_policy as _rp
-    a = req.resolved_t_start(_rp(req.policy_version)) - dt.timedelta(seconds=window_before_s)
+    start = req.resolved_t_start(_rp(req.policy_version))
+    a = start - dt.timedelta(seconds=window_before_s)
+    if window_before_s > 0:
+        a = a.replace(second=0, microsecond=0)
     b = req.horizon_end
     refs: list[dict] = []
     problems: list[str] = ["unsupported: S12 versioned lake snapshot resolution; active silver only",
                            "unsupported: S02 U03 real settlement time; archive calc_time only"]
     quality_ok = [True]
+    gap_times = []
 
     def manifest_ok(data_type: str, interval: str, period: str) -> bool:
         mp = lake.manifest(partition_id(data_type, interval, sym, period))
@@ -187,49 +196,50 @@ def load_market_from_lake(req: ExecutionRequest, *, lake_root: str | Path | None
             p = sdir / f"date={d.isoformat()}" / "part.parquet"
             if p.exists():
                 df = pl.read_parquet(p).filter((pl.col("open_time") >= a) & (pl.col("open_time") < b))
-                if "gap_flag" not in df.columns or df["gap_flag"].is_null().any():
-                    complete = False
-                    quality_ok[0] = False
-                    problems.append(f"{data_type} {d} gap_flag 缺列/null（质量未知）")
-                elif df["gap_flag"].any():
-                    complete = False
-                # S05：缺列 / null（未知）/ false 一律质量失败——polars 的 .any() 会跳过 null，必须显式查 is_null
-                if ("ohlc_valid" not in df.columns or df["ohlc_valid"].is_null().any()
-                        or (~df["ohlc_valid"].fill_null(False)).any()):
-                    complete = False
-                    quality_ok[0] = False
-                    problems.append(f"{data_type} {d} ohlc_valid 缺列/null/false（质量未知或失败）")
-                # S14：逐行源版本必须等于所选 manifest 的 source_sha256；缺列/null/不符 → 不可验证，拒收（fail closed）
                 mp = lake.manifest(partition_id(data_type, "1m", sym, d.strftime("%Y-%m")))
-                want = _json.loads(mp.read_text()).get("source_sha256") if mp.exists() else None
-                if df.height and (want is None or "source_sha256" not in df.columns or df["source_sha256"].is_null().any()
-                                  or (df["source_sha256"] != want).any()):
+                metadata = _json.loads(mp.read_text()) if mp.exists() else {}
+                want = metadata.get("source_sha256")
+                verified = metadata.get("check_status") in ("ok", "gap") and want is not None
+                needed = ("gap_flag", "ohlc_valid", "source_sha256")
+                if not verified or any(key not in df.columns for key in needed):
+                    if df.height:
+                        gap_times.append(max(start, df["open_time"].min()))
                     complete = False
-                    quality_ok[0] = False
-                    problems.append(f"{data_type} {d} 行 source_sha256 缺列/null/与 manifest 不符（不可验证来源）")
+                    problems.append(f"{data_type} {d} 来源或质量证据缺失")
+                    df = df.clear()
+                else:
+                    valid = pl.col("ohlc_valid").fill_null(False) & pl.col("gap_flag").is_not_null() & (pl.col("source_sha256") == want).fill_null(False)
+                    bad = df.filter(~valid)
+                    if bad.height:
+                        complete = False
+                        gap_times.extend(bad["open_time"].to_list())
+                        problems.append(f"{data_type} {d} 不可验证/无效 bar {bad.height} 行")
+                    if df["gap_flag"].any():
+                        complete = False
+                    df = df.filter(valid)
                 for r in df.select(["open_time", "open", "high", "low", "close", "volume"]).iter_rows():
                     out.append(Bar(open_time=r[0], o=Decimal(str(r[1])), h=Decimal(str(r[2])), l=Decimal(str(r[3])), c=Decimal(str(r[4])), volume=Decimal(str(r[5]))))
             else:
-                complete = False
+                if d >= start.date():
+                    complete = False
                 problems.append(f"{data_type} {d} 无分区文件")
             d += dt.timedelta(days=1)
         for mo in sorted(months):
-            if not manifest_ok(data_type, "1m", mo):
+            if not manifest_ok(data_type, "1m", mo) and mo >= start.strftime("%Y-%m"):
                 complete = False
-                quality_ok[0] = False
         # S43：只统计窗口内合法的唯一网格点；离网行/重复行不能凑齐缺失点。
-        until = min(b, dt.datetime.now(dt.UTC))
+        until = b
         interval_s = INTERVAL_SECONDS["1m"]
-        expected = grid_points_between(a, until, interval_s)
+        expected = grid_points_between(start, until, interval_s)
         present = set()
         for bar in out:
             opened = bar.open_time
             if first_grid_point(opened, interval_s) != opened:
                 complete = False
-                quality_ok[0] = False
+                gap_times.append(opened)
                 problems.append(f"{data_type} off-grid bar open_time={opened.isoformat()} interval_s={interval_s}")
                 continue
-            if opened < until:
+            if start <= opened < until:
                 present.add(opened)
         if len(present) != expected:
             complete = False
@@ -240,26 +250,23 @@ def load_market_from_lake(req: ExecutionRequest, *, lake_root: str | Path | None
     mark, ok2 = bars("markPriceKlines")
     fdir = lake.silver_dir("fundingRate", "8h", sym)
     frows: list[FundingRow] = []
-    d = a.date()
+    d = (a - dt.timedelta(days=1)).date()
     fmonths = set()
     while d <= b.date():
         fmonths.add(d.strftime("%Y-%m"))
         p = fdir / f"date={d.isoformat()}" / "part.parquet"
         if p.exists():
             for r in pl.read_parquet(p).select(["calc_time", "funding_rate", "funding_interval_hours"]).iter_rows():
-                if a <= r[0] <= b:
+                if a - dt.timedelta(days=1) <= r[0] <= b:
                     frows.append(FundingRow(calc_time=r[0], rate=Decimal(str(r[1])), interval_hours=int(r[2])))
         d += dt.timedelta(days=1)
-    funding_ok = all(manifest_ok("fundingRate", "8h", mo) for mo in sorted(fmonths))
-    # S02：窗口内每个 8h 网格结算时刻必须有行（fundingRate 文件缺失/为空 → 缺证据，不能当 0 资金费）
-    g = a.replace(minute=0, second=0, microsecond=0)
-    g = g.replace(hour=(g.hour // 8) * 8)
-    have = {f.calc_time for f in frows}
-    while g <= b:
-        if g >= a and not any(abs((h - g).total_seconds()) <= 60 for h in have):
-            funding_ok = False
-            problems.append(f"fundingRate 缺 {g.isoformat()} 结算行")
-        g += dt.timedelta(hours=8)
+    # 月级状态只留作来源诊断，缺行按持仓实际经过的结算时刻判断。
+    for mo in sorted(fmonths):
+        manifest_ok("fundingRate", "8h", mo)
+    from quant_lab.market.contract import missing_funding_times
+    missing_funding = missing_funding_times(frows, start, b)
+    problems.extend(f"fundingRate 缺 {ts.isoformat()} 结算行" for ts in missing_funding)
+    funding_ok = not missing_funding
     rules_df = load_rules(lake, inst)
     rr = rule_at(rules_df, inst, a)
     rr_end = rule_at(rules_df, inst, b) if rules_df is not None else None
@@ -282,7 +289,7 @@ def load_market_from_lake(req: ExecutionRequest, *, lake_root: str | Path | None
                   min_notional=Decimal(rr["min_notional"]), multiplier=Decimal(rr["multiplier"]),
                   effective_from=rr["effective_from"], effective_to=rr["effective_to"]) if rules_known else Rules()
     return MarketView(manifest_id=req.market_manifest, bars_last=last, bars_mark=mark, funding=frows,
-                      funding_schedule_complete=funding_ok, rules=rules, rules_known=rules_known, bars_complete=ok1 and ok2,
+                      funding_schedule_complete=funding_ok, funding_missing_times=missing_funding, bar_gap_times=gap_times, rules=rules, rules_known=rules_known, bars_complete=ok1 and ok2,
                       bars_quality_ok=quality_ok[0], manifest_refs=refs, quality_notes=problems)
 
 

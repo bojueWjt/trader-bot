@@ -1,0 +1,263 @@
+{
+  "baseline_source": "git HEAD (read-only; before this task changes)",
+  "old": {
+    "kernel_version": "kernel-a-v0.4",
+    "kernel_build_id": "kernel-a-v0.4+eab1491f053f",
+    "policy_hashes": {
+      "fixture-zero-v1": "12ca10ebb10ef27d10873584ee42a224c44efdf99e9b55c7656e8a838c58cd1d",
+      "fixture-tick-v1": "79a818107c42ffc1aec9af8ca4beb672231adfaf4b514c8eb0b63664fbb0238f",
+      "fixture-halftp-v1": "b5b9db9aaec5d88e1574d028a0807cdd34cff3d5141d93f2390edd69ccf338c9",
+      "fixture-wallet99-v1": "982b510678f507dfec7269216e68ba24479f161624cdfebf48bc0b28d417f41f",
+      "base-v1": "12f83216444dff123f7cc6e9b4f4752449b8a678555079f033cbb9980f07d5db",
+      "base-v1-timeexit": "0e2a374b36d286f418d350f9159e34d73e4e56bf3280251df3531273450cf424",
+      "base-v1-timeexit-w14": "a36932b0e2050366342a69d47e9fd73d84aa08474f95fa2cfc51bc202e898b53",
+      "base-v1-timeexit-be1": "c608338ed32dc1738adb7cc08bd3e9b82f9809f59d672b50fb9033588c79f0d2",
+      "base-v1-timeexit-w14-be1": "8fcc23b1ebcb2a3a0f4fe65b37aad11390096e44adc823aadefb1f6c68e906cd",
+      "base-v1-timeexit-w60": "356e64c391e5e0bb93618b5c436b5c6ae9eb9fcaa82b84d3ff4c0f0f225b1108",
+      "base-v1-timeexit-w60-be1": "65f4296ba72dc0cfa0b3b71e27c61a218c5a51a13e7604c01bd63513a1f73f51"
+    },
+    "fixtures": {
+      "E01": {
+        "trace_hash": "48692e089875ec10c427b9716014f1ca8962c202e732177e34d62c3840130fe4",
+        "net_R": "-2.000000000000",
+        "events_hash": "c9b6eb9c666da4d862694fdfb8c704d7bedea1ed7c9fb0de86109017a8f4965e"
+      },
+      "E02": {
+        "trace_hash": "af9446e7c2c258721cf106473629da46e4b1e88d8d7ab074667aebcccbef9ec2",
+        "net_R": "-0.400000000000",
+        "events_hash": "c3f789f4c1992cfd5f5525d356ca6d8ebd0bb264565a20100814ea1fe4621ce4"
+      },
+      "E03": {
+        "trace_hash": "983806c239b858b73cbd7ddea0c7e00703baf5ef059b34e4b87a52aca4214f96",
+        "net_R": "1.000000000000",
+        "events_hash": "80fc8fbfd285467a6708c3168db42b85f08348e3356dfd0a49c1d268d59f4f90"
+      },
+      "E04a": {
+        "trace_hash": "d5721a915fd91311e83730e5bc096bd1266384a06818a648959ebb2cb13896a8",
+        "net_R": "2.000000000000",
+        "events_hash": "c4d964b9dea8a471a082996ca6c31c3a01595455c5b9d1c5c3fa0a058099c1b6"
+      },
+      "E04b": {
+        "trace_hash": "e4f62fd760f240917ef35158917f7fe679a887a38a18f3df02fe42ce3b4c68bc",
+        "net_R": "-2.000000000000",
+        "events_hash": "8bba1f5bdb18e7ff017436372623038f5b32cba9b678ad8f3a4a6c727ee0268e"
+      },
+      "E04c": {
+        "trace_hash": "a719521233380750abbfaa638a0944af68912350c3f678dcdba012412a0d3088",
+        "net_R": "-2.000000000000",
+        "events_hash": "44f7829e5cd9bdc445e3ecebfa3356713a91306aef9b134b8fd2c114267c6120"
+      },
+      "E05": {
+        "trace_hash": "118316dbe3fc525b02ba914d245650e28b1822fbf401d2b18e4f52d24130cfd3",
+        "net_R": "0.980000000000",
+        "events_hash": "d285feda1b39135f3bd1edb9defa46da568bd578acf8fe99057f3bd821ff8eee"
+      },
+      "E06": {
+        "trace_hash": "9eb2176b6757851cfad599a245471eb54945d33b2d82d15a4d69d157226a36c8",
+        "net_R": "1.000000000000",
+        "events_hash": "712f121d8f2a75a09eb504ee1079a9d125de3baa343658497bbfff5947e05201"
+      },
+      "E07": {
+        "trace_hash": "c445a4e67b625ed0be098489bcd6e567c5fb42257f8a9a4d85be7a35d9916cbd",
+        "net_R": "0.180000000000",
+        "events_hash": "2d081f7695805b85b9a2ed5a7e7130793874bd776694e635376cba6e9ad16322"
+      },
+      "E08": {
+        "trace_hash": "4b9577e969e5ac32991dad14fe2a285dfb3028b2d79920246f0b1effef181075",
+        "net_R": "0.500000000000",
+        "events_hash": "584b13062e24136d112ffebece390b7d69b1cd4847f7ab69746927af0649a1d6"
+      },
+      "E09": {
+        "trace_hash": "705fc1ef9db3c51e0b2382588e1f3dd2a2d4f9f781d3d42af06c92bd0958a74d",
+        "net_R": "0E-12",
+        "events_hash": "8ce23363f8bd1ffc82d4ef6c46a4332b45ca15d3c443337c155b6ddfe5e4b799"
+      },
+      "E10": {
+        "trace_hash": "e976f6ab127f2c971f42030798b1cb0865477d18cf740d0f36946dbd5f23d213",
+        "net_R": "1.000000000000",
+        "events_hash": "2a4475f5524c9134c6ba5a0a24ad6efaa675a42f63c40ec11e7d28c652621d10"
+      },
+      "E11": {
+        "trace_hash": "56c2ef361c04d81f5c4f73bc68c0a4e406a02efd7a2130188646bbc1fed1acfe",
+        "net_R": "1.200000000000",
+        "events_hash": "4aadeca953b93b86f02b13f55b82b94b9b5c709dcc5331c26af35028d064f3b3"
+      },
+      "E12": {
+        "trace_hash": "19e0782856651d9f6c770408c785197e35f14bae5382f16f1b1348c4b44494a6",
+        "net_R": "0.700000000000",
+        "events_hash": "11fd88a12a25b05a8084566d9f711ea9a6524e45739d90b0f4f33726086fd6fd"
+      },
+      "E14a": {
+        "trace_hash": "d15199adef8dda67e72d3c92bfd586db8ac9532f648a41e97d93be9be2499d28",
+        "net_R": "0E-12",
+        "events_hash": "1d1b0743df013b2599b04b9b53e72954a042433ed0b22dbe681a19900b532903"
+      },
+      "E14b": {
+        "trace_hash": "f58b884ef4efc101bbf34b28c46f53cba3d254640f11b4beabaf0ca77eee8bd7",
+        "net_R": "0E-12",
+        "events_hash": "5d486f6b5e2fff4064b00841f4eb12225f4263ff64aacf194391d67dbbf4de70"
+      },
+      "E14c": {
+        "trace_hash": "7b784ec32f597df35477b993a6542a80f46c6c1ff16d7f3df4b624449b218d6e",
+        "net_R": "0E-12",
+        "events_hash": "c0952ff4edc2f2caaca7ed4646fff9386bebfa4a81aba859168b604a94b9ddd8"
+      },
+      "E15a": {
+        "trace_hash": "0aad0c8c185a8b9715eeb892222e87fc252ed58a7bc60c0e39516c43d8b49ca2",
+        "net_R": "None",
+        "events_hash": "53e0ca8b7235c6e4263ba43988ca939156f274850d5d53ea293d745e779173f7"
+      },
+      "E15b": {
+        "trace_hash": "734e2551c912524ecce6e1d00aa1e8578575e2d1fea917366825499465edc19d",
+        "net_R": "None",
+        "events_hash": "53e0ca8b7235c6e4263ba43988ca939156f274850d5d53ea293d745e779173f7"
+      },
+      "E16": {
+        "trace_hash": "f20ddd92d792c0be8880feb56dcf5fe27d01edbea0bd1deda63e9b368b3bb31e",
+        "net_R": "None",
+        "events_hash": "3e43c7c9af114e8ac26174b5c687b25d39a9d94d4d61190a820ce506e344d766"
+      },
+      "E17": {
+        "trace_hash": "88a327eb4e9ad5e796261e563920aad7ee1d5199bedeeca14a0fa356f3712eec",
+        "net_R": "1.579000000000",
+        "events_hash": "928fe5c3c651e7c178fba52dd021b0e078c83faf88c15d570b8861711c3105e0"
+      },
+      "E18": {
+        "trace_hash": "327adda6d3156130db4c8a601e06a5a7c1213a8307105b20934f4244f7d8a6e3",
+        "net_R": "0E-12",
+        "events_hash": "6177a6d55c533e7e15afbd76f47bb8e0f38e4916d2af203d6a80b757a5266172"
+      }
+    }
+  },
+  "new": {
+    "kernel_version": "kernel-a-v0.5",
+    "kernel_build_id": "kernel-a-v0.5+7a2dbde9e403",
+    "policy_hashes": {
+      "fixture-zero-v1": "12ca10ebb10ef27d10873584ee42a224c44efdf99e9b55c7656e8a838c58cd1d",
+      "fixture-tick-v1": "79a818107c42ffc1aec9af8ca4beb672231adfaf4b514c8eb0b63664fbb0238f",
+      "fixture-halftp-v1": "b5b9db9aaec5d88e1574d028a0807cdd34cff3d5141d93f2390edd69ccf338c9",
+      "fixture-wallet99-v1": "982b510678f507dfec7269216e68ba24479f161624cdfebf48bc0b28d417f41f",
+      "base-v1": "12f83216444dff123f7cc6e9b4f4752449b8a678555079f033cbb9980f07d5db",
+      "base-v1-timeexit": "0e2a374b36d286f418d350f9159e34d73e4e56bf3280251df3531273450cf424",
+      "base-v1-timeexit-w14": "a36932b0e2050366342a69d47e9fd73d84aa08474f95fa2cfc51bc202e898b53",
+      "base-v1-timeexit-be1": "c608338ed32dc1738adb7cc08bd3e9b82f9809f59d672b50fb9033588c79f0d2",
+      "base-v1-timeexit-w14-be1": "8fcc23b1ebcb2a3a0f4fe65b37aad11390096e44adc823aadefb1f6c68e906cd",
+      "base-v1-timeexit-w60": "356e64c391e5e0bb93618b5c436b5c6ae9eb9fcaa82b84d3ff4c0f0f225b1108",
+      "base-v1-timeexit-w60-be1": "65f4296ba72dc0cfa0b3b71e27c61a218c5a51a13e7604c01bd63513a1f73f51"
+    },
+    "fixtures": {
+      "E01": {
+        "trace_hash": "90e02935c9410a1a5a10396e4227356d2edb7db2adfc2181fd6e28d63fbdc520",
+        "net_R": "-1.200000000000",
+        "events_hash": "1874e1ae807ac28b9dbe0e00bd09b967cad5cc5b3ba24f6748e66aa01649ae1d"
+      },
+      "E02": {
+        "trace_hash": "bb6903ba4d37a6aae2d333b2b2136bad92effb14443253e5afbccae1e6918107",
+        "net_R": "-1.200000000000",
+        "events_hash": "e5069fe304c6d0b4505608200e69556731050095f2a782980b39b13f2cdc8f6b"
+      },
+      "E03": {
+        "trace_hash": "a51cb20c73b64d6ac06c0cef66c6908a43402a795cf85a7313639e4141667941",
+        "net_R": "1.000000000000",
+        "events_hash": "80fc8fbfd285467a6708c3168db42b85f08348e3356dfd0a49c1d268d59f4f90"
+      },
+      "E04a": {
+        "trace_hash": "ca22db88754e09a944b331011487b14d4923d71dabacaabdc54522265fd42f8b",
+        "net_R": "1.000000000000",
+        "events_hash": "cd500d41d250282cb2b9cc2abe81825c5651bc027563efb5b204162abba54265"
+      },
+      "E04b": {
+        "trace_hash": "8a51da0c2ec434cbc61d9a315d7c2dd69b266567f7ea59c34c4b882b832b8a42",
+        "net_R": "-1.200000000000",
+        "events_hash": "99c21fa4c2b13a4b069b7cc15b864ca9f2cdf27bde4a1775dd01d19ea47725a1"
+      },
+      "E04c": {
+        "trace_hash": "9956c78b8c3e716275be8cde2df578dc367ec98cb329c8b95521130479cc30ae",
+        "net_R": "-1.200000000000",
+        "events_hash": "633cf94e84067d7c47e4cb3a2109119607949aaedcfa2e303dbe08a94b75f59d"
+      },
+      "E05": {
+        "trace_hash": "b1a1766fa164f795d53d2072bf8e9853e71b683b95d5c182a5ec63de1e681651",
+        "net_R": "0.980000000000",
+        "events_hash": "d285feda1b39135f3bd1edb9defa46da568bd578acf8fe99057f3bd821ff8eee"
+      },
+      "E06": {
+        "trace_hash": "82fa48f13fffa530306da50d4bf2ed1ada5f0d38e1b70c525eea9d34d255bdfd",
+        "net_R": "1.000000000000",
+        "events_hash": "712f121d8f2a75a09eb504ee1079a9d125de3baa343658497bbfff5947e05201"
+      },
+      "E07": {
+        "trace_hash": "02b97377f45092a2eae859a3d98b76e4682fde558068d0e32c95db41fd7c4866",
+        "net_R": "0.180000000000",
+        "events_hash": "2d081f7695805b85b9a2ed5a7e7130793874bd776694e635376cba6e9ad16322"
+      },
+      "E08": {
+        "trace_hash": "5c78b2700b87fb7d7ecb25776e209a06320dabed0490e526c670b6362400eb0a",
+        "net_R": "0.500000000000",
+        "events_hash": "584b13062e24136d112ffebece390b7d69b1cd4847f7ab69746927af0649a1d6"
+      },
+      "E09": {
+        "trace_hash": "d214a8bb30e13a3fd15f6fc0c7684b71631b4a46aeb90c52cd3639559a7b875e",
+        "net_R": "0E-12",
+        "events_hash": "8ce23363f8bd1ffc82d4ef6c46a4332b45ca15d3c443337c155b6ddfe5e4b799"
+      },
+      "E10": {
+        "trace_hash": "79f8dfb4dec939fac507fb5c241f88c3552d0e72626ff62830110b4a783ef460",
+        "net_R": "-1.200000000000",
+        "events_hash": "1874e1ae807ac28b9dbe0e00bd09b967cad5cc5b3ba24f6748e66aa01649ae1d"
+      },
+      "E11": {
+        "trace_hash": "0a3555fc6f72e11e76936ddac0e3fa05dc4cb3cf86e4686b88a8e84c1e7813c3",
+        "net_R": "1.200000000000",
+        "events_hash": "4aadeca953b93b86f02b13f55b82b94b9b5c709dcc5331c26af35028d064f3b3"
+      },
+      "E12": {
+        "trace_hash": "1548610847003afd46a14e436fe41fad61010b214fe1a295c3c6c8262c286e2b",
+        "net_R": "0.700000000000",
+        "events_hash": "11fd88a12a25b05a8084566d9f711ea9a6524e45739d90b0f4f33726086fd6fd"
+      },
+      "E14a": {
+        "trace_hash": "8ce47e2d7619258181d6c154b302bcafd79c37f2f6771a788272d496aff50b30",
+        "net_R": "1.000000000000",
+        "events_hash": "80fc8fbfd285467a6708c3168db42b85f08348e3356dfd0a49c1d268d59f4f90"
+      },
+      "E14b": {
+        "trace_hash": "8fba5e4f8309523e5d6712d74ea0cd6c1d9ce750b7c23860af1c2f9d998f9963",
+        "net_R": "0E-12",
+        "events_hash": "5d486f6b5e2fff4064b00841f4eb12225f4263ff64aacf194391d67dbbf4de70"
+      },
+      "E14c": {
+        "trace_hash": "946f2100af800967d1f82658c62c24ea56b9bf7046dc53f60246ab99ad53a498",
+        "net_R": "0E-12",
+        "events_hash": "c0952ff4edc2f2caaca7ed4646fff9386bebfa4a81aba859168b604a94b9ddd8"
+      },
+      "E15a": {
+        "trace_hash": "2b0ec7db7dbed5245ae7818eaf4b8cf708b64dadb8ebc4ff9d9554d467be8fd4",
+        "net_R": "None",
+        "events_hash": "53e0ca8b7235c6e4263ba43988ca939156f274850d5d53ea293d745e779173f7"
+      },
+      "E15b": {
+        "trace_hash": "17e0df8f050956fab7896234f9f8002938b052d6102ec3536102b1def6962025",
+        "net_R": "None",
+        "events_hash": "53e0ca8b7235c6e4263ba43988ca939156f274850d5d53ea293d745e779173f7"
+      },
+      "E16": {
+        "trace_hash": "3c2b17225ca8530e84efc7142340655e8bb19b6f89a9e0f5f90f8ae535c0e64d",
+        "net_R": "None",
+        "events_hash": "3e43c7c9af114e8ac26174b5c687b25d39a9d94d4d61190a820ce506e344d766"
+      },
+      "E17": {
+        "trace_hash": "a9c6941e01d61dcd9c1084ace0f7ad73daf19d1d5d3dcda81455327c29da212a",
+        "net_R": "-1.419500000000",
+        "events_hash": "c5a591eb0a1c2b1e90178f6278bd278d5616eca2c94345a3e8c1dbf44b5f4495"
+      },
+      "E18": {
+        "trace_hash": "a45674312168fcbc623900d47ff392cdf98fb8b2e3623fdc46b57390c4ddffaf",
+        "net_R": "-1.200000000000",
+        "events_hash": "9060bc48151a66fb1fa31c104084f8d55f3dfa88beadbf15defa77867056eaf0"
+      }
+    }
+  },
+  "unchanged_policy_hashes": true,
+  "trace_changed": 22
+}

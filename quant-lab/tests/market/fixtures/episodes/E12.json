@@ -1,7 +1,7 @@
 {
  "id": "E12",
  "title": "多档止盈：105×0.5、110×0.25，余 1 止损 94，SL 数量 4→2→1",
- "derivation": "qty=4。tp-0=floor(4×0.5)=2，tp-1=floor(4×0.25)=1，余 1 只由 SL 覆盖。T+60 平 2@105 → SL amended 2；T+120 平 1@110 → SL amended 1；T+180 mark/last 94 止损 1。gross=10+10-6=14；exit_avg=(210+110+94)/4=103.5；budget 20 → R=0.7；mfe：T+120 realized 20 → 1；mae 0。",
+ "derivation": "qty=4。tp-0=floor(4×0.5)=2，tp-1=floor(4×0.25)=1，余 1 只由 SL 覆盖。T+60 平 2@105 → SL amended 2；T+120 平 1@110 → SL amended 1；T+180 mark/last 94 止损 1。gross=10+10-6=14；exit_avg=(210+110+94)/4=103.5；budget 20 → R=0.7；mfe：T+120 realized 20 → 1；mae 0。 Follower stop 95 minus one tick = 94; slippage diagnostic=1.",
  "request": {
   "episode_id": "E12",
   "graph_version": "gv-fixture",
@@ -469,7 +469,7 @@
   "filled_qty": "4",
   "fees": "0",
   "funding": "0",
-  "slippage": "0",
+  "slippage": "1",
   "gross_pnl": "14",
   "net_pnl": "14",
   "net_R": "0.7",
@@ -489,7 +489,6 @@
   "mfe_R": "1"
  },
  "kernels": [
-  "A",
-  "B"
+  "A"
  ]
 }

@@ -8,7 +8,8 @@
 - 首次 entry fill 后同 ts 建保护腿 sl-0（conditional，qty=仓位）与 tp-i（reduce-only limit，qty=floor_step(cum_entry×fraction)）；
   后续 entry fill → amended。
 - SL 默认按 mark 触发；close SL 按 UTC 周期末的 1m last 收盘严格越界触发，下一 last 成交。默认：stop_triggered(trigger_basis=mark, price=mark)，同 ts 取消未成交 entry 与 TP，成交在下一合法 last 价点
-  （filled, leg=sl, trigger_basis=last）。TP 只按 last：tp_triggered(trigger_basis=last) → filled/partial_fill（价格取限价与 last 的更优者）。
+  （filled, leg=sl, trigger_basis=last）。mark 止损按止损价加固定不利成本滑点（零滑点用 1 tick），last bar 开盘越过则按开盘；close 止损仍下一 bar 开盘成交。
+  市价入场不受分钟容量限制；静止限价保留容量规则。TP 只按 last：tp_triggered(trigger_basis=last) → filled/partial_fill（静止单穿越按限价、跳空开盘按开盘；下单即可成交按当时价格与 taker 费）。
 - funding：kind=funding, leg=funding, trigger_basis=funding, price=结算 mark, qty=结算前有符号仓位, cash_delta=-qty×price×rate（C05 扩展列）。
 - 仓位归零：剩余兄弟腿 cancelled → closed（每 bracket 一次）。未成交到期：expired → closed(reason=no_fill)。
 - 观察窗或持仓上限结束仍有仓：旧策略无 closed，censor_reason=LABEL_RIGHT_CENSORED，net_pnl/net_R=null；
@@ -1015,7 +1016,7 @@ class Bar(_Model):
 class FundingRow(_Model):
     calc_time: dt.datetime
     rate: Decimal
-    interval_hours: int
+    interval_hours: int = Field(gt=0)
 
     @field_validator("calc_time")
     @classmethod
@@ -1036,11 +1037,50 @@ class Rules(_Model):
     effective_to: dt.datetime | None = None
 
 
+def missing_funding_times(rows: list[FundingRow], start: dt.datetime, end: dt.datetime) -> list[dt.datetime]:
+    """推断实际结算表的缺行；切换边界允许前后任一周期，容差 60 秒。
+
+    无周期证据时沿用 8h。历史行给出窗口起点周期，末行周期延续至窗口末尾。
+    """
+    ordered = sorted(rows, key=lambda row: row.calc_time)
+    missing = []
+    if not ordered:
+        hours = 8
+        cursor = start.replace(hour=(start.hour // hours) * hours, minute=0, second=0, microsecond=0)
+        while cursor <= end:
+            if cursor >= start:
+                missing.append(cursor)
+            cursor += dt.timedelta(hours=hours)
+        return missing
+    first = ordered[0]
+    cursor = first.calc_time - dt.timedelta(hours=first.interval_hours)
+    while cursor >= start:
+        if cursor <= end:
+            missing.append(cursor)
+        cursor -= dt.timedelta(hours=first.interval_hours)
+    for prev, row in zip(ordered, ordered[1:]):
+        gap = row.calc_time - prev.calc_time
+        if any(abs(gap - dt.timedelta(hours=h)) <= dt.timedelta(seconds=60) for h in (prev.interval_hours, row.interval_hours)):
+            continue
+        cursor = prev.calc_time + dt.timedelta(hours=prev.interval_hours)
+        while cursor < row.calc_time - dt.timedelta(seconds=60):
+            if start <= cursor <= end:
+                missing.append(cursor)
+            cursor += dt.timedelta(hours=prev.interval_hours)
+    last = ordered[-1]
+    cursor = last.calc_time + dt.timedelta(hours=last.interval_hours)
+    while cursor <= end:
+        if cursor >= start:
+            missing.append(cursor)
+        cursor += dt.timedelta(hours=last.interval_hours)
+    return sorted(set(missing))
+
+
 class MarketView(_Model):
     """一次 simulate 的行情输入：显式价点或 bars。
 
-    bars_complete 是来源证据，不替代内核的网格身份检查；离网 bar 可保留，
-    但消费结果必须报告 BAR_GAP / bars_ok=False。funding 不适用 bar 网格规则。
+    bars_complete 是窗口诊断，不剔除缺口前已结束的交易；不替代内核的网格身份检查；离网 bar 可保留，
+    但消费结果必须报告 BAR_GAP / bars_ok=False。funding 按实际持仓结算时刻及行内周期检查。
     """
     manifest_id: str
     last: list[PricePoint] = []
@@ -1048,7 +1088,9 @@ class MarketView(_Model):
     bars_last: list[Bar] = []
     bars_mark: list[Bar] = []
     funding: list[FundingRow] = []
-    funding_schedule_complete: bool = True   # 覆盖证据：结算表在观察窗内完整
+    funding_schedule_complete: bool = True   # 诊断摘要；仅实际持仓结算缺行才删失
+    funding_missing_times: list[dt.datetime] = []
+    bar_gap_times: list[dt.datetime] = []
     rules: Rules = Rules()
     rules_known: bool = True
     bars_complete: bool = True              # 网格完整（缺 bar 可定位 → 内核逐时 BAR_GAP）

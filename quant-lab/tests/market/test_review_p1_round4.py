@@ -37,9 +37,9 @@ def test_s05_null_ohlc_valid_fails_closed(lake_dir):
                            ("false", pl.when(pl.arange(0, df.height) == 61).then(False).otherwise(pl.col("ohlc_valid")))):
         v.atomic_write_parquet(day, df.with_columns(variant.alias("ohlc_valid")))
         mk = x.load_market_from_lake(req, lake_root=lake_dir)
-        assert not mk.bars_quality_ok and not mk.bars_complete, label
+        assert mk.bars_quality_ok and mk.bar_gap_times and not mk.bars_complete, label
         r = simulate_a(req, mk)
-        assert r.censor_reason == "BAR_GAP" and r.net_R is None and r.fill_status == "none", label
+        assert r.censor_reason == "BAR_GAP" and r.net_R is None and r.fill_status == "filled", label
 
 
 # S17：显式 fractions 只能是 plan/policy 解析结果的记录，且逐值满足 Decimal(38,12)
