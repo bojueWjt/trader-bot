@@ -270,7 +270,8 @@ def inherited_prices(action):
         else:
             atoms.extend((f"entry.levels[{i}].price", level["price"]) for i, level in enumerate(entry["levels"]))
     stop = action["stop"]
-    if stop and stop["kind"] == "price":
+    # A quoted close-stop level ("日线收盘跌破7.09") omits units the same way a price stop does.
+    if stop and stop["kind"] in ("price", "condition") and stop.get("price") is not None:
         atoms.append(("stop.price", stop["price"]))
     atoms.extend((f"tps[{i}].value", tp["value"]) for i, tp in enumerate(action["tps"]) if tp["kind"] == "price")
     anchors, bare = [], []

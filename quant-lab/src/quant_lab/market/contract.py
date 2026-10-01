@@ -7,7 +7,7 @@
 - t_start = t_dec + policy.latency_s；入场腿在 t_start 发 submitted/accepted(/working)。
 - 首次 entry fill 后同 ts 建保护腿 sl-0（conditional，qty=仓位）与 tp-i（reduce-only limit，qty=floor_step(cum_entry×fraction)）；
   后续 entry fill → amended。
-- SL 只按 mark 触发：stop_triggered(trigger_basis=mark, price=mark)，同 ts 取消未成交 entry 与 TP，成交在下一合法 last 价点
+- SL 默认按 mark 触发；close SL 按 UTC 周期末的 1m last 收盘严格越界触发，下一 last 成交。默认：stop_triggered(trigger_basis=mark, price=mark)，同 ts 取消未成交 entry 与 TP，成交在下一合法 last 价点
   （filled, leg=sl, trigger_basis=last）。TP 只按 last：tp_triggered(trigger_basis=last) → filled/partial_fill（价格取限价与 last 的更优者）。
 - funding：kind=funding, leg=funding, trigger_basis=funding, price=结算 mark, qty=结算前有符号仓位, cash_delta=-qty×price×rate（C05 扩展列）。
 - 仓位归零：剩余兄弟腿 cancelled → closed（每 bracket 一次）。未成交到期：expired → closed(reason=no_fill)。
@@ -36,7 +36,7 @@ PathScenario = Literal["primary", "adverse", "favorable"]
 EventKind = Literal["submitted", "accepted", "rejected", "working", "partial_fill", "filled", "cancelled", "expired",
                     "stop_triggered", "tp_triggered", "funding", "closed", "amended"]
 Leg = Literal["entry", "sl", "tp", "close", "funding"]
-TriggerBasis = Literal["mark", "last", "funding", "expiry", "none"]
+TriggerBasis = Literal["close", "mark", "last", "funding", "expiry", "none"]
 PathStep = Literal["O", "H", "L", "C", "none"]
 FillStatus = Literal["none", "partial", "filled"]
 # A15 七值加可选到期平仓；旧策略映射保持不变。
@@ -135,7 +135,16 @@ class Entry(_Model):
 
 class Stop(_Model):
     price: Decimal
-    trigger: Literal["mark"] = "mark"
+    trigger: Literal["mark", "close"] = "mark"
+    timeframe: Literal["15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w"] | None = None
+
+    @model_validator(mode="after")
+    def _trigger_timeframe(self):
+        if self.trigger == "close" and self.timeframe is None:
+            raise ContractError("close stop requires timeframe")
+        if self.trigger == "mark" and self.timeframe is not None:
+            raise ContractError("mark stop must not have timeframe")
+        return self
 
 
 class TakeProfit(_Model):
@@ -821,8 +830,8 @@ def check_invariants(req: ExecutionRequest, res: ExecutionResult, *, multiplier:
                     check_decimal(value, f"event[{e.seq}].{field}", positive=False)
                 except ContractError as exc:
                     raise ExecutionInvariantError(str(exc)) from exc
-        if e.trigger_basis == "mark" and e.kind != "stop_triggered":
-            raise ExecutionInvariantError(f"trigger_basis=mark 只允许 stop_triggered @seq={e.seq}")
+        if e.trigger_basis in ("mark", "close") and e.kind != "stop_triggered":
+            raise ExecutionInvariantError(f"trigger_basis={e.trigger_basis} 只允许 stop_triggered @seq={e.seq}")
         if e.kind == "tp_triggered" and e.trigger_basis != "last":
             raise ExecutionInvariantError(f"tp_triggered 必须 trigger_basis=last @seq={e.seq}")
         if e.kind == "funding" and (e.leg != "funding" or e.cash_delta is None or e.price is None or e.qty is None):

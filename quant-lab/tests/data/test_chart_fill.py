@@ -1,5 +1,6 @@
 """Invented readings only; all data artifacts are temporary."""
 from copy import deepcopy
+from decimal import Decimal
 import json
 import polars as pl
 import pytest
@@ -130,10 +131,13 @@ def test_chart_entry_fill_and_conditional_stop_is_preserved(tmp_path):
                           chart_changes=dict(entry=[62500], stop=61050, tps=[65000]))
     row = llm_row(cp)
     checks = json.loads(row['checks'])
-    assert row['entry'] == dict(kind='limit', lo=62500, hi=62500) and row['stop'] is None
+    assert row['entry'] == dict(kind='limit', lo=62500, hi=62500) and row['stop'] == Decimal(61000)
     assert checks['chart_fill']['fields'] == ['entry', 'tps']
     assert checks['action']['stop'] == stop
-    assert not json.loads(row['eligibility_by_estimand'])['execution']
+    assert checks['stop_trigger'] == dict(basis='close', timeframe='1d', condition=stop['condition'])
+    assert json.loads(row['eligibility_by_estimand'])['execution']
+    plan = lifecycle._order_plan(row, row['stop'], row['tps'], None)
+    assert plan['stop'] == dict(price=Decimal(61000), trigger='close', timeframe='1d')
 
 
 def test_v1_and_wrong_source_unchanged(tmp_path):

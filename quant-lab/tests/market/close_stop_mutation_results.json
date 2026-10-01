@@ -1,0 +1,570 @@
+{
+  "method": "isolated source-copy mutation; fresh subprocess and import-origin assertion",
+  "results": [
+    {
+      "rule": "close-semantics",
+      "module": "data/close_stop.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_unmapped_conditions_remain_unsupported",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_unmapped_conditions_remain_unsupported[\\u65e5\\u7ebf\\u8dcc\\u78342.630-price1]",
+        "1 failed, 11 passed in 0.31s"
+      ]
+    },
+    {
+      "rule": "price-required",
+      "module": "data/close_stop.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_unmapped_conditions_remain_unsupported",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_unmapped_conditions_remain_unsupported[daily close below 2.630-None]",
+        "1 failed, 11 passed in 0.27s"
+      ]
+    },
+    {
+      "rule": "finite-price",
+      "module": "data/close_stop.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_unmapped_conditions_remain_unsupported",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_unmapped_conditions_remain_unsupported[daily close below 2.630-price7]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_unmapped_conditions_remain_unsupported[daily close below 2.630-price8]",
+        "2 failed, 10 passed in 0.35s"
+      ]
+    },
+    {
+      "rule": "positive-price",
+      "module": "data/close_stop.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_unmapped_conditions_remain_unsupported",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_unmapped_conditions_remain_unsupported[daily close below 2.630-price9]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_unmapped_conditions_remain_unsupported[daily close below 2.630-price10]",
+        "2 failed, 10 passed in 0.58s"
+      ]
+    },
+    {
+      "rule": "unique-period",
+      "module": "data/close_stop.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_unmapped_conditions_remain_unsupported",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_unmapped_conditions_remain_unsupported[H4 or daily close below 2.630-price2]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_unmapped_conditions_remain_unsupported[\\u65e5\\u7ebf\\u548c\\u5468\\u7ebf\\u6536\\u76d8\\u4f4e\\u4e8e2.630-price3]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_unmapped_conditions_remain_unsupported[12h and 4H close below 2.630-price6]",
+        "3 failed, 9 passed in 0.52s"
+      ]
+    },
+    {
+      "rule": "canonical-level",
+      "module": "data/validate.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_v2_canonical_and_lifecycle_preserve_condition_over_chart",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_v2_canonical_and_lifecycle_preserve_condition_over_chart",
+        "1 failed in 0.33s"
+      ]
+    },
+    {
+      "rule": "canonical-metadata",
+      "module": "data/validate.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_v2_canonical_and_lifecycle_preserve_condition_over_chart",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_v2_canonical_and_lifecycle_preserve_condition_over_chart",
+        "1 failed in 0.38s"
+      ]
+    },
+    {
+      "rule": "canonical-eligibility",
+      "module": "data/validate.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_v2_canonical_and_lifecycle_preserve_condition_over_chart",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_v2_canonical_and_lifecycle_preserve_condition_over_chart",
+        "1 failed in 0.27s"
+      ]
+    },
+    {
+      "rule": "canonical-chart-no-fallback",
+      "module": "data/validate.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_v2_unsupported_does_not_fall_back_to_chart",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_v2_unsupported_does_not_fall_back_to_chart[\\u8dcc\\u7834\\u9888\\u7ebf\\u5c31\\u8d70-None]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_v2_unsupported_does_not_fall_back_to_chart[\\u8dcc\\u783490-90]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_v2_unsupported_does_not_fall_back_to_chart[\\u6536\\u76d8\\u4f4e\\u4e8e90-90]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_v2_unsupported_does_not_fall_back_to_chart[\\u65e5\\u7ebf\\u6536\\u76d8\\u4f4e\\u4e8e90-None]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_v2_unsupported_does_not_fall_back_to_chart[H4\\u548c\\u65e5\\u7ebf\\u6536\\u76d8\\u4f4e\\u4e8e90-90]",
+        "5 failed in 0.35s"
+      ]
+    },
+    {
+      "rule": "lifecycle-close-plan",
+      "module": "data/lifecycle.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_v2_canonical_and_lifecycle_preserve_condition_over_chart",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_v2_canonical_and_lifecycle_preserve_condition_over_chart",
+        "1 failed in 0.28s"
+      ]
+    },
+    {
+      "rule": "lifecycle-chart-no-fallback",
+      "module": "data/lifecycle.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_v2_unsupported_does_not_fall_back_to_chart",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_v2_unsupported_does_not_fall_back_to_chart[\\u8dcc\\u7834\\u9888\\u7ebf\\u5c31\\u8d70-None]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_v2_unsupported_does_not_fall_back_to_chart[\\u8dcc\\u783490-90]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_v2_unsupported_does_not_fall_back_to_chart[\\u6536\\u76d8\\u4f4e\\u4e8e90-90]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_v2_unsupported_does_not_fall_back_to_chart[\\u65e5\\u7ebf\\u6536\\u76d8\\u4f4e\\u4e8e90-None]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_v2_unsupported_does_not_fall_back_to_chart[H4\\u548c\\u65e5\\u7ebf\\u6536\\u76d8\\u4f4e\\u4e8e90-90]",
+        "5 failed in 0.29s"
+      ]
+    },
+    {
+      "rule": "close-timeframe-required",
+      "module": "market/contract.py",
+      "test": "tests/market/test_close_stop.py::test_stop_timeframe_contract_rejects_invalid_combinations",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_stop_timeframe_contract_rejects_invalid_combinations[kwargs0]",
+        "1 failed, 2 passed in 0.12s"
+      ]
+    },
+    {
+      "rule": "mark-timeframe-forbidden",
+      "module": "market/contract.py",
+      "test": "tests/market/test_close_stop.py::test_stop_timeframe_contract_rejects_invalid_combinations",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_stop_timeframe_contract_rejects_invalid_combinations[kwargs1]",
+        "1 failed, 2 passed in 0.09s"
+      ]
+    },
+    {
+      "rule": "timeframe-enum",
+      "module": "market/contract.py",
+      "test": "tests/market/test_close_stop.py::test_stop_timeframe_contract_rejects_invalid_combinations",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_stop_timeframe_contract_rejects_invalid_combinations[kwargs2]",
+        "1 failed, 2 passed in 0.14s"
+      ]
+    },
+    {
+      "rule": "event-close-only-stop",
+      "module": "market/contract.py",
+      "test": "tests/market/test_close_stop.py::test_close_basis_is_only_allowed_on_stop_event",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_close_basis_is_only_allowed_on_stop_event",
+        "1 failed in 0.16s"
+      ]
+    },
+    {
+      "rule": "no-mark-fallback",
+      "module": "market/kernel_a.py",
+      "test": "tests/market/test_close_stop.py::test_wicks_and_equal_close_do_not_stop",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_wicks_and_equal_close_do_not_stop[long-100]",
+        "FAILED tests/market/test_close_stop.py::test_wicks_and_equal_close_do_not_stop[short-100]",
+        "FAILED tests/market/test_close_stop.py::test_wicks_and_equal_close_do_not_stop[long-90]",
+        "FAILED tests/market/test_close_stop.py::test_wicks_and_equal_close_do_not_stop[short-110]",
+        "4 failed in 0.17s"
+      ]
+    },
+    {
+      "rule": "entry-required",
+      "module": "market/kernel_a.py",
+      "test": "tests/market/test_close_stop.py::test_close_hit_requires_position_and_exact_one_minute_evidence",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_close_hit_requires_position_and_exact_one_minute_evidence",
+        "1 failed in 0.17s"
+      ]
+    },
+    {
+      "rule": "only-close-point",
+      "module": "market/kernel_a.py",
+      "test": "tests/market/test_close_stop.py::test_close_hit_requires_position_and_exact_one_minute_evidence",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_close_hit_requires_position_and_exact_one_minute_evidence",
+        "1 failed in 0.18s"
+      ]
+    },
+    {
+      "rule": "closed-timestamp",
+      "module": "market/kernel_a.py",
+      "test": "tests/market/test_close_stop.py::test_close_hit_requires_position_and_exact_one_minute_evidence",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_close_hit_requires_position_and_exact_one_minute_evidence",
+        "1 failed in 0.14s"
+      ]
+    },
+    {
+      "rule": "one-minute-bars",
+      "module": "market/kernel_a.py",
+      "test": "tests/market/test_close_stop.py::test_close_hit_requires_position_and_exact_one_minute_evidence",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_close_hit_requires_position_and_exact_one_minute_evidence",
+        "1 failed in 0.15s"
+      ]
+    },
+    {
+      "rule": "bar-evidence",
+      "module": "market/kernel_a.py",
+      "test": "tests/market/test_close_stop.py::test_explicit_c_label_is_not_bar_close_evidence",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_explicit_c_label_is_not_bar_close_evidence",
+        "1 failed in 0.18s"
+      ]
+    },
+    {
+      "rule": "weekly-monday",
+      "module": "market/kernel_a.py",
+      "test": "tests/market/test_close_stop.py::test_four_hour_and_week_are_utc_aligned",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_four_hour_and_week_are_utc_aligned",
+        "1 failed in 0.23s"
+      ]
+    },
+    {
+      "rule": "utc-origin",
+      "module": "market/kernel_a.py",
+      "test": "tests/market/test_close_stop.py::test_all_utc_periods_and_week_monday",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_all_utc_periods_and_week_monday[2h-120]",
+        "FAILED tests/market/test_close_stop.py::test_all_utc_periods_and_week_monday[4h-240]",
+        "FAILED tests/market/test_close_stop.py::test_all_utc_periods_and_week_monday[6h-360]",
+        "FAILED tests/market/test_close_stop.py::test_all_utc_periods_and_week_monday[12h-720]",
+        "FAILED tests/market/test_close_stop.py::test_all_utc_periods_and_week_monday[1d-0]",
+        "5 failed, 4 passed in 0.21s"
+      ]
+    },
+    {
+      "rule": "period-boundary",
+      "module": "market/kernel_a.py",
+      "test": "tests/market/test_close_stop.py::test_all_utc_periods_and_week_monday",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_all_utc_periods_and_week_monday[15m-15]",
+        "FAILED tests/market/test_close_stop.py::test_all_utc_periods_and_week_monday[30m-30]",
+        "FAILED tests/market/test_close_stop.py::test_all_utc_periods_and_week_monday[1h-60]",
+        "FAILED tests/market/test_close_stop.py::test_all_utc_periods_and_week_monday[2h-120]",
+        "FAILED tests/market/test_close_stop.py::test_all_utc_periods_and_week_monday[4h-240]",
+        "FAILED tests/market/test_close_stop.py::test_all_utc_periods_and_week_monday[6h-360]",
+        "FAILED tests/market/test_close_stop.py::test_all_utc_periods_and_week_monday[12h-720]",
+        "FAILED tests/market/test_close_stop.py::test_all_utc_periods_and_week_monday[1d-0]",
+        "FAILED tests/market/test_close_stop.py::test_all_utc_periods_and_week_monday[1w-0]",
+        "9 failed in 0.25s"
+      ]
+    },
+    {
+      "rule": "strict-long",
+      "module": "market/kernel_a.py",
+      "test": "tests/market/test_close_stop.py::test_wicks_and_equal_close_do_not_stop",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_wicks_and_equal_close_do_not_stop[long-90]",
+        "1 failed, 3 passed in 0.14s"
+      ]
+    },
+    {
+      "rule": "strict-short",
+      "module": "market/kernel_a.py",
+      "test": "tests/market/test_close_stop.py::test_wicks_and_equal_close_do_not_stop",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_wicks_and_equal_close_do_not_stop[short-110]",
+        "1 failed, 3 passed in 0.17s"
+      ]
+    },
+    {
+      "rule": "long-direction",
+      "module": "market/kernel_a.py",
+      "test": "tests/market/test_close_stop.py::test_daily_close_strict_direction_next_last_and_r",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_daily_close_strict_direction_next_last_and_r[long-80]",
+        "1 failed, 1 passed in 0.14s"
+      ]
+    },
+    {
+      "rule": "short-direction",
+      "module": "market/kernel_a.py",
+      "test": "tests/market/test_close_stop.py::test_daily_close_strict_direction_next_last_and_r",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_daily_close_strict_direction_next_last_and_r[short-120]",
+        "1 failed, 1 passed in 0.15s"
+      ]
+    },
+    {
+      "rule": "next-last-fill",
+      "module": "market/kernel_a.py",
+      "test": "tests/market/test_close_stop.py::test_daily_close_strict_direction_next_last_and_r",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_daily_close_strict_direction_next_last_and_r[long-80]",
+        "FAILED tests/market/test_close_stop.py::test_daily_close_strict_direction_next_last_and_r[short-120]",
+        "2 failed in 0.42s"
+      ]
+    },
+    {
+      "rule": "trigger-price-last",
+      "module": "market/kernel_a.py",
+      "test": "tests/market/test_close_stop.py::test_daily_close_strict_direction_next_last_and_r",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_daily_close_strict_direction_next_last_and_r[long-80]",
+        "FAILED tests/market/test_close_stop.py::test_daily_close_strict_direction_next_last_and_r[short-120]",
+        "2 failed in 0.41s"
+      ]
+    },
+    {
+      "rule": "trigger-basis-close",
+      "module": "market/kernel_a.py",
+      "test": "tests/market/test_close_stop.py::test_daily_close_strict_direction_next_last_and_r",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_daily_close_strict_direction_next_last_and_r[long-80]",
+        "FAILED tests/market/test_close_stop.py::test_daily_close_strict_direction_next_last_and_r[short-120]",
+        "2 failed in 0.51s"
+      ]
+    },
+    {
+      "rule": "pending-entry-cancel",
+      "module": "market/kernel_a.py",
+      "test": "tests/market/test_close_stop.py::test_close_trigger_cancels_pending_entry_and_tp",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_close_trigger_cancels_pending_entry_and_tp",
+        "1 failed in 0.23s"
+      ]
+    },
+    {
+      "rule": "pending-tp-cancel",
+      "module": "market/kernel_a.py",
+      "test": "tests/market/test_close_stop.py::test_close_trigger_cancels_pending_entry_and_tp",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_close_trigger_cancels_pending_entry_and_tp",
+        "1 failed in 0.38s"
+      ]
+    },
+    {
+      "rule": "b-reject",
+      "module": "market/nautilus_adapter.py",
+      "test": "tests/market/test_close_stop.py::test_b_explicitly_rejects_close",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_b_explicitly_rejects_close - Fai...",
+        "1 failed in 4.45s"
+      ]
+    },
+    {
+      "rule": "persisted-timeframe",
+      "module": "data/lifecycle.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_persisted_graph_through_l0_request_and_execution",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_persisted_graph_through_l0_request_and_execution",
+        "1 failed in 4.40s"
+      ]
+    },
+    {
+      "rule": "validate-version",
+      "module": "data/validate.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_canonical_and_graph_rules_invalidate_previous_artifacts",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_canonical_and_graph_rules_invalidate_previous_artifacts",
+        "1 failed in 4.11s"
+      ]
+    },
+    {
+      "rule": "lifecycle-version",
+      "module": "data/lifecycle.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_canonical_and_graph_rules_invalidate_previous_artifacts",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_canonical_and_graph_rules_invalidate_previous_artifacts",
+        "1 failed in 1.04s"
+      ]
+    },
+    {
+      "rule": "kernel-version",
+      "module": "market/kernel_a.py",
+      "test": "tests/market/test_close_stop.py::test_kernel_build_identity_changes_from_pre_close_rules",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/market/test_close_stop.py::test_kernel_build_identity_changes_from_pre_close_rules",
+        "1 failed in 0.17s"
+      ]
+    },
+    {
+      "rule": "parser-period-15m",
+      "module": "data/close_stop.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[15m close below 2.630-15m]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[15\\u5206\\u949f\\u6536\\u76d8\\u4f4e\\u4e8e2.630-15m]",
+        "2 failed, 24 passed in 0.43s"
+      ]
+    },
+    {
+      "rule": "parser-period-30m",
+      "module": "data/close_stop.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[30m close below 2.630-30m]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[\\u4e09\\u5341\\u5206\\u949f\\u6536\\u76d8\\u4f4e\\u4e8e2.630-30m]",
+        "2 failed, 24 passed in 0.35s"
+      ]
+    },
+    {
+      "rule": "parser-period-1h",
+      "module": "data/close_stop.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[H1 close below 2.630-1h]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[1\\u5c0f\\u65f6\\u6536\\u7ebf\\u4f4e\\u4e8e2.630-1h]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[\\u5c0f\\u65f6\\u7ebf\\u6536\\u76d8\\u4f4e\\u4e8e2.630-1h]",
+        "3 failed, 23 passed in 0.46s"
+      ]
+    },
+    {
+      "rule": "parser-period-2h",
+      "module": "data/close_stop.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[2h close below 2.630-2h]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[\\u4e24\\u5c0f\\u65f6\\u6536\\u76d8\\u4f4e\\u4e8e2.630-2h]",
+        "2 failed, 24 passed in 0.31s"
+      ]
+    },
+    {
+      "rule": "parser-period-4h",
+      "module": "data/close_stop.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[SL: H4 close above 1.25-4h]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[4H\\u6536\\u7ebf\\u4f4e\\u4e8e2.630-4h]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[4\\u5c0f\\u65f6\\u6536\\u76d8\\u4f4e\\u4e8e2.630-4h]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[\\u56db\\u5c0f\\u65f6\\u6536\\u76d8\\u4f4e\\u4e8e2.630-4h]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[H4 / 4H close below 2.630-4h]",
+        "5 failed, 21 passed in 0.29s"
+      ]
+    },
+    {
+      "rule": "parser-period-6h",
+      "module": "data/close_stop.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[6h close below 2.630-6h]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[\\u516d\\u5c0f\\u65f6\\u6536\\u76d8\\u4f4e\\u4e8e2.630-6h]",
+        "2 failed, 24 passed in 0.29s"
+      ]
+    },
+    {
+      "rule": "parser-period-12h",
+      "module": "data/close_stop.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[12h close below 2.630-12h]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[\\u5341\\u4e8c\\u5c0f\\u65f6\\u6536\\u76d8\\u4f4e\\u4e8e2.630-12h]",
+        "2 failed, 24 passed in 0.34s"
+      ]
+    },
+    {
+      "rule": "parser-period-1d",
+      "module": "data/close_stop.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[\\u65e5\\u7ebf\\u6536\\u76d8\\u4f4e\\u4e8e2.630-1d]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[D close below 2.630-1d]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[1D closing below 2.630-1d]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[\\u65e5K\\u6536\\u4e8e2.630\\u4e0b\\u65b9-1d]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[daily close below 2.630-1d]",
+        "5 failed, 21 passed in 0.33s"
+      ]
+    },
+    {
+      "rule": "parser-period-1w",
+      "module": "data/close_stop.py",
+      "test": "tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes",
+      "exit_code": 1,
+      "killed": true,
+      "summary": [
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[\\u5468\\u7ebf\\u6536\\u76d8\\u4f4e\\u4e8e2.630-1w]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[W close below 2.630-1w]",
+        "FAILED tests/data/test_close_stop_mapping.py::test_parse_known_close_timeframes[weekly close above 2.630-1w]",
+        "3 failed, 23 passed in 0.31s"
+      ]
+    }
+  ],
+  "working_sources_unchanged": true
+}

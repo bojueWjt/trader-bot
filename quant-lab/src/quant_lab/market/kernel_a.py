@@ -1,4 +1,4 @@
-"""quant_lab.market.kernel_a —— 候选 A：自研永续参考实现 v0.2（ADR-G2 §4–§7、§11；M-07；review-G2-P1 S01–S05/S07/S08/S13 闭合）。
+"""quant_lab.market.kernel_a —— 候选 A：自研永续参考实现 v0.3（ADR-G2 §4–§7、§11；M-07；review-G2-P1 S01–S05/S07/S08/S13 闭合）。
 
 order_plan → 规范执行事件。单 episode 隔离账户、one_way、USDT 线性合约（multiplier 参与全部金额）。
 判定顺序（每个时刻，ADR §5.1）：
@@ -25,7 +25,7 @@ from quant_lab.market.contract import (
     entry_expiry_at, grid_points_between, request_canonical, resolve_policy, trace_hash,
 )
 
-KERNEL_VERSION = "kernel-a-v0.2"
+KERNEL_VERSION = "kernel-a-v0.3"
 ZERO = Decimal(0)
 US = dt.timedelta(microseconds=1)
 
@@ -84,6 +84,9 @@ class KernelA:
         self.req = req
         self.plan = req.order_plan
         self.market = market
+        self.close_bars = set()
+        if self.plan.stop.trigger == "close":
+            self.close_bars = {(b.open_time, b.c) for b in market.bars_last if b.interval_s == 60}
         self.policy = policy or resolve_policy(req.policy_version)
         if policy is None and self.policy.content_hash != req.policy_hash:
             raise ContractError("request.policy_hash 与当前政策内容不符，拒绝执行（S12）")
@@ -450,17 +453,41 @@ class KernelA:
 
     # ------------------------------------------------------------------ 触发
     def stop_hit(self) -> bool:
-        if self.mark is None or self.pos == 0:
+        if self.plan.stop.trigger != "mark" or self.mark is None or self.pos == 0:
             return False
         s = self.plan.stop.price
         return self.mark <= s if self.sign > 0 else self.mark >= s
 
-    def trigger_stop(self, ts, bar=None, step="none") -> None:
+    def close_stop_hit(self, p: PricePoint) -> bool:
+        """Only genuine UTC-aligned 1m bar closes; C is timestamped end minus 1µs."""
+        stop = self.plan.stop
+        if stop.trigger != "close" or self.pos == 0 or p.path_step != "C":
+            return False
+        opened = p.bar_open_time
+        if opened is None:
+            return False
+        end = opened + dt.timedelta(minutes=1)
+        if p.ts != end - US:
+            return False
+        # Explicit price points, even C-labelled, are not bar-close evidence.
+        if (opened, p.price) not in self.close_bars:
+            return False
+        if stop.timeframe == "1w":
+            aligned = end.weekday() == 0 and end.hour == 0 and end.minute == 0
+        else:
+            seconds = {"15m": 900, "30m": 1800, "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "12h": 43200, "1d": 86400}
+            epoch = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
+            aligned = (end - epoch).total_seconds() % seconds[stop.timeframe] == 0
+        if not aligned:
+            return False
+        return p.price < stop.price if self.sign > 0 else p.price > stop.price
+
+    def trigger_stop(self, ts, bar=None, step="none", *, basis="mark", price=None) -> None:
         sl = self.orders.get("sl-0")
         if sl is None or not sl.live or sl.triggered:
             return
         sl.triggered = True
-        self.emit(ts, "stop_triggered", "sl-0", "sl", tb="mark", price=self.mark, qty=abs(self.pos), bar=bar, step=step)
+        self.emit(ts, "stop_triggered", "sl-0", "sl", tb=basis, price=self.mark if price is None else price, qty=abs(self.pos), bar=bar, step=step)
         self.set_exit_latch(ts)
         for o in self.live_orders("tp"):
             self.cancel(ts, o, "sl_triggered")
@@ -699,6 +726,7 @@ class KernelA:
                 if mo.marks and self.stop_hit():
                     p0 = mo.marks[-1]
                     self.trigger_stop(ts, p0.bar_open_time, p0.path_step)
+                close_point = None
                 for p in mo.lasts:
                     if self.pos != 0:
                         for o in sorted(self.live_orders("tp"), key=lambda x: x.tp_index):
@@ -706,10 +734,14 @@ class KernelA:
                                 o.triggered = True
                                 self.emit(ts, "tp_triggered", o.id, "tp", tb="last", price=p.price, qty=o.leaves, bar=p.bar_open_time, step=p.path_step)
                     self.match_point(ts, p)
+                    if self.close_stop_hit(p):
+                        close_point = p
                     if self.moment_list[i - 1] is not mo or len(self.moment_list) != len(self.moments):
                         pass
                     if self.closed or self.censor:
                         break
+                if close_point is not None and self.pos != 0 and not self.closed:
+                    self.trigger_stop(ts, close_point.bar_open_time, close_point.path_step, basis="close", price=close_point.price)
                 if self.hold_end is not None and self.pos != 0:
                     # 同刻开仓且 hold_end 刚插入：重新定位游标到 hold_end 之前
                     self.moment_list = [self.moments[k] for k in sorted(self.moments)]

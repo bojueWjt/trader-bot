@@ -22,8 +22,9 @@ import polars as pl
 from .lake import D12, q12, LayerLedger, Layout, append_quarantine, cum_prev, loss_row_from_ledger, mapping_rows, now_utc, preserve_ingested_at, quarantine_row, schema_hash, stable_id, write_loss, write_mapping, write_parquet_atomic
 from .market_stub import InstrumentRegistry, MarkProvider, PlausibilityCalibration, fixture_marks, fixture_registry, log_deviation
 from .reasons import Reason
+from .close_stop import parse_close_stop
 
-RULE_VERSION = "tg45-validate-v0.5"
+RULE_VERSION = "tg45-validate-v0.6"
 LN3 = math.log(3.0)
 MAX_STALENESS_S = 120
 SIGNAL_KINDS = {"entry_proposal", "amend", "add", "stop_move", "tp_ladder", "reduce", "close_claimed", "entry_claimed", "cancel", "expire", "correction", "delete_notice"}
@@ -118,8 +119,16 @@ def canonicalize_row(r: dict[str, Any], *, registry: InstrumentRegistry) -> tupl
                 percent_ref = None
         source_stop = action.get("stop")
         if source_stop and source_stop["kind"] == "condition":
-            mapping_issues.append({"field": "stop", "reason": "condition_not_supported_by_order_plan"})
-            stop = None
+            atom = source_stop.get("price")
+            inherited = {u["field"]: Decimal(u["factor"]) for u in source_checks.get("unit_inherited", [])}
+            level = Decimal(atom["value"]) * inherited.get("stop.price", 1) if atom is not None else None
+            close_stop = parse_close_stop(source_stop.get("condition"), level)
+            if close_stop is None:
+                mapping_issues.append({"field": "stop", "reason": "condition_not_supported_by_order_plan"})
+                stop = None
+            else:
+                stop = close_stop["level"]
+                checks["stop_trigger"] = {"basis": "close", "timeframe": close_stop["timeframe"], "condition": source_stop["condition"]}
         # An unpriced CMP leg is priced from the as-of mark at t_dec in replay (same rule as lifecycle._order_plan); only an unpriced limit is a gap.
         if source_entry and source_entry["kind"] == "ladder" and any(a.get("price") is None and a.get("kind") != "market_ref" for a in source_entry["levels"]):
             mapping_issues.append({"field": "entry", "reason": "incomplete_ladder"})

@@ -29,7 +29,7 @@ from .lake import D12, LayerLedger, Layout, append_quarantine, cum_prev, loss_ro
 from .llm import SCHEMA_NAME_EXTRACT, Abstention, GrokCliClient, LLMClient, NoOcr, OcrProvider, RecordedClient, RecordedOcr, build_extract_prompt, call_with_retry, extraction_client, gate, validate_evidence
 from .reasons import Reason
 
-RULE_VERSION = "tg3-extract-v0.7"  # Action-local unit inheritance and chart entry/TP mapping
+RULE_VERSION = "tg3-extract-v0.8"  # Unit inheritance also covers quoted close-stop levels
 PARSER_VERSION = "parser-v0.5"
 
 KINDS = (

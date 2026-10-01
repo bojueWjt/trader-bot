@@ -28,8 +28,9 @@ from . import validate as _validate
 from .graph import DEFAULT_PROCESSING_DELAY_S, closure_available_at, dependency_index, plan_dependencies, decision_visible, is_tombstoned, publish_manifest, read_manifest, snapshot_hash, t_dec_of
 from .lake import D12, LayerLedger, Layout, append_quarantine, cum_prev, loss_row_from_ledger, mapping_rows, now_utc, preserve_ingested_at, quarantine_row, schema_hash, stable_id, write_loss, write_mapping, write_parquet_atomic
 from .reasons import Reason
+from .close_stop import parse_close_stop
 
-RULE_VERSION = "tg-lifecycle-v0.5"  # r4: causal copy-family audit stratum and immutable formal audit evidence.
+RULE_VERSION = "tg-lifecycle-v0.6"  # Close-stop mapping participates in frozen graph identity.
 HORIZON_S = 7 * 24 * 3600
 
 P_STATES = ("none", "active", "cancelled", "expired")
@@ -88,7 +89,7 @@ def weakest(grades: list[str]) -> str:
 ORDER_PLAN_SCHEMA = pl.Struct({  # 契约 §9.10.1 A8：进 hash/build_request 的数值一律 Decimal(38,12)
     "instrument_id": pl.String, "side": pl.String,
     "entries": pl.List(pl.Struct({"kind": pl.String, "price_lo": D12, "price_hi": D12, "fraction": D12, "tif": pl.String, "post_only": pl.Boolean})),
-    "stop": pl.Struct({"price": D12, "trigger": pl.String}),
+    "stop": pl.Struct({"price": D12, "trigger": pl.String, "timeframe": pl.String}),
     "tps": pl.List(pl.Struct({"level": D12, "fraction": D12})),
     "sizing": pl.Struct({"mode": pl.String, "qty": D12}),
     "expiry": pl.Struct({"entry_ttl_s": pl.Int64, "max_holding_s": pl.Int64}),
@@ -179,7 +180,10 @@ def _order_plan(root: dict[str, Any], stop: float | None, tps: list[dict], expir
         entries = [{"kind": "ladder", "price_lo": e["lo"], "price_hi": e["hi"], "fraction": None, "tif": "GTC", "post_only": False}]
     else:
         entries = [{"kind": "limit", "price_lo": e["lo"], "price_hi": e["hi"], "fraction": None, "tif": "GTC", "post_only": False}]
+    stop_plan = {"price": stop, "trigger": "mark"} if stop is not None else None
     checks = json.loads(root.get("checks") or "{}")
+    # checks.action keeps the quoted values; a price whose unit was inherited (cx_v2.inherited_prices) is rescaled here.
+    factor = {u["field"]: Decimal(u["factor"]) for u in checks.get("unit_inherited", [])}
     if checks.get("schema_version") == 2:
         action = checks.get("action", {})
         source_entry = action.get("entry")
@@ -187,8 +191,6 @@ def _order_plan(root: dict[str, Any], stop: float | None, tps: list[dict], expir
             # An unpriced CMP leg is filled from the as-of mark at t_dec (l0_replay); an unpriced limit is not guessable.
             if any(level.get("price") is None and level.get("kind") != "market_ref" for level in source_entry["levels"]):
                 return None
-            # checks.action keeps the quoted values; a leg whose unit was inherited (cx_v2.inherited_prices) is rescaled here.
-            factor = {u["field"]: Decimal(u["factor"]) for u in checks.get("unit_inherited", [])}
             entries = []
             for i, level in enumerate(source_entry["levels"]):
                 price = Decimal(level["price"]["value"]) * factor.get(f"entry.levels[{i}].price", 1) if level.get("price") is not None else None
@@ -196,10 +198,16 @@ def _order_plan(root: dict[str, Any], stop: float | None, tps: list[dict], expir
                 entries.append(dict(kind=level["kind"], price_lo=price, price_hi=price,
                                     fraction=Decimal(fraction["value"]) / 100 if fraction else None,
                                     tif="IOC" if level["kind"] == "market_ref" else "GTC", post_only=False))
-        if action.get("stop") and action["stop"]["kind"] == "condition":
-            stop = None
+        source_stop = action.get("stop")
+        if source_stop and source_stop["kind"] == "condition":
+            atom = source_stop.get("price")
+            level = Decimal(atom["value"]) * factor.get("stop.price", 1) if atom is not None else None
+            close_stop = parse_close_stop(source_stop.get("condition"), level)
+            stop_plan = None
+            if close_stop is not None:
+                stop_plan = {"price": close_stop["level"], "trigger": "close", "timeframe": close_stop["timeframe"]}
     return {"instrument_id": root["instrument_id"], "side": root["side"], "entries": entries,
-            "stop": {"price": stop, "trigger": "mark"} if stop is not None else None,
+            "stop": stop_plan,
             "tps": [{"level": t["level"], "fraction": t.get("fraction")} for t in tps],
             "sizing": {"mode": "risk_budget", "qty": None}, "expiry": {"entry_ttl_s": int(expires_after_s) if expires_after_s else None, "max_holding_s": None}, "reduce_only_exit": True}
 

@@ -157,19 +157,24 @@ def test_multiaction_time_refs_only_now_open_decision_and_default_parser(tmp_pat
     assert plan_source.select_plans(cp).equals(plan_source.select_plans(cp, 'parser'))
 
 
-def test_condition_and_percent_mapping_no_guessed_basis(tmp_path):
+def test_condition_and_percent_mapping_no_guessed_basis(tmp_path, monkeypatch):
+    from quant_lab.data.market_stub import SyntheticMarks, instrument_id_for
+    # Keep this invented 100/90 signal within the independent scale gate.
+    monkeypatch.setattr(validate, "fixture_marks", lambda: SyntheticMarks({instrument_id_for("BTC"): [(T0, 100)]}))
     text = '仿写 BTC 现价100做多；日线收盘低于90才止损；目标10%、20%。'
     stop = dict(kind='condition', price=number(90), condition='日线收盘低于90才止损')
     tps = [dict(kind='percent', value=number(v, f'{v}%')) for v in (10, 20)]
     _, _, ex, cp, _ = v2_lake(tmp_path, [action(stop=stop, tps=tps)], text)
     row = cp.filter(pl.col('extractor_name') == 'llm').row(0, named=True)
     assert [t['level'] for t in row['tps']] == [Decimal(110), Decimal(120)]
-    assert row['stop'] is None
+    assert row['stop'] == Decimal(90)
     checks = json.loads(row['checks'])
-    assert checks['mapping_issues'] == [dict(field='stop', reason='condition_not_supported_by_order_plan')]
-    assert not json.loads(row['eligibility_by_estimand'])['execution']
+    assert 'mapping_issues' not in checks
+    assert checks['stop_trigger'] == dict(basis='close', timeframe='1d', condition=stop['condition'])
+    assert json.loads(row['eligibility_by_estimand'])['execution']
     plan = lifecycle._order_plan(row, row['stop'], row['tps'], None)
-    assert plan['stop'] is None and plan['tps'][0]['level'] == 110
+    assert plan['stop'] == dict(price=Decimal(90), trigger='close', timeframe='1d')
+    assert plan['tps'][0]['level'] == 110
     assert checks['action']['stop']['condition'] == stop['condition']
 
 
@@ -358,7 +363,10 @@ def test_unit_inheritance_scales_all_price_paths_not_percent_or_fraction(literal
         tps=[dict(kind='percent', value=number(10, '10%'))])), text)[0][0]
     assert row.entries == [62500, 63000]
     assert row.tps[0]['level'] == 10 and row.stop is None
-    assert row.checks['unit_inherited'] == [dict(field='entry.levels[1].price', quote=bare, factor=factor)]
+    expected = [dict(field='entry.levels[1].price', quote=bare, factor=factor)]
+    if factor == '10000':  # The quoted close-stop level inherits 万 as well (60000 sits next to 62500); 6k would not.
+        expected.append(dict(field='stop.price', quote='6', factor=factor))
+    assert row.checks['unit_inherited'] == expected
     assert row.checks['action']['entry']['levels'][1]['fraction']['value'] == '50'
 
 
@@ -414,3 +422,19 @@ def test_inherited_ladder_leg_reaches_the_order_plan(tmp_path):
     assert row['scale_gate'] == 'ok' and json.loads(row['eligibility_by_estimand'])['execution']
     plan = lifecycle._order_plan(row, row['stop'], row['tps'], None)
     assert [(e['kind'], e['price_lo']) for e in plan['entries']] == [('market_ref', Decimal(62500)), ('limit', Decimal(62000))]
+
+
+def test_inherited_close_stop_level_reaches_the_order_plan(tmp_path):
+    # "日线收盘跌破6.1" next to "6.25万" means 61000; without inheritance the close stop would fail the scale gate.
+    text = '仿写 BTC 做多；入场6.25万；日线收盘跌破6.1止损；止盈6.5万。'
+    original = action(entry=dict(kind='limit', price=number(62500, '6.25万'), lo=None, hi=None, levels=[]),
+                      stop=dict(kind='condition', price=number('6.1'), condition='日线收盘跌破6.1止损'),
+                      tps=[dict(kind='price', value=number(65000, '6.5万'))])
+    _, _, _, cp, _ = v2_lake(tmp_path, [original], text)
+    row = cp.filter(pl.col('extractor_name') == 'llm').row(0, named=True)
+    checks = json.loads(row['checks'])
+    assert checks['unit_inherited'] == [dict(field='stop.price', quote='6.1', factor='10000')]
+    assert row['stop'] == Decimal(61000) and checks['stop_trigger']['timeframe'] == '1d'
+    assert row['scale_gate'] == 'ok' and json.loads(row['eligibility_by_estimand'])['execution']
+    plan = lifecycle._order_plan(row, row['stop'], row['tps'], None)
+    assert plan['stop'] == {'price': Decimal(61000), 'trigger': 'close', 'timeframe': '1d'}

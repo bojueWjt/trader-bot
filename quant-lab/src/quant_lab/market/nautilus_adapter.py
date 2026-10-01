@@ -102,6 +102,8 @@ def simulate_b(req: ExecutionRequest, market: MarketView, policy: ExecutionPolic
 
 
 def _simulate_b(req: ExecutionRequest, market: MarketView, policy: ExecutionPolicy) -> ExecutionResult:
+    if req.order_plan.stop.trigger == "close":
+        raise KernelBUnavailable("close stop trigger is unsupported by kernel B")
     if policy.content_hash != req.policy_hash:
         from quant_lab.market.contract import ContractError
         raise ContractError("request.policy_hash 与当前政策内容不符，拒绝执行（S12）")
