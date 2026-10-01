@@ -173,3 +173,11 @@ def test_kernel_build_id_tracks_source_for_every_policy():
         h.update((Path(kernel_a.__file__).parent / name).read_bytes())
     assert res.kernel_version.endswith(h.hexdigest()[:12]) and res.kernel_version.startswith(kernel_a.KERNEL_VERSION)
     assert kernel_a.kernel_build_id(False) == kernel_a.kernel_build_id(True)
+
+
+def test_fourteen_day_sensitivity_differs_only_in_horizon():
+    from quant_lab.market.contract import resolve_policy
+    base, long = resolve_policy("base-v1-timeexit"), resolve_policy("base-v1-timeexit-14d")
+    assert long.research_horizon_s == 14 * 86400 and long.time_exit_at_horizon
+    assert long.model_dump(exclude={"version", "research_horizon_s"}) == base.model_dump(exclude={"version", "research_horizon_s"})
+    assert long.content_hash != base.content_hash

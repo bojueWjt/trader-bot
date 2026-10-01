@@ -6,7 +6,8 @@
 #                                                      模块以 quant_lab.market / quant_lab.research 开头时用 .venv-g2，其余用 .venv-g1
 #   scripts/hackintosh.sh get <远端路径> <本地路径>      取回文件
 #   scripts/hackintosh.sh put <本地路径> <远端路径>      上传文件
-#   scripts/hackintosh.sh sync                         把本仓库 quant-lab 的代码同步到黑苹果（不含 data、venv）
+#   scripts/hackintosh.sh sync                         把本仓库 quant-lab 的代码与测试同步到黑苹果（不含 data、venv）
+#   scripts/hackintosh.sh test [pytest 参数...]         同步后在黑苹果跑测试（不占本机）；无参数跑 data+integration（g1）与 market（g2）全套
 #
 # 黑苹果：数据根 /Volumes/G/quant-lab-data，代码 ~/quant-lab。真实聊天记录只在那台机器上，不要拉回本仓库。
 set -euo pipefail
@@ -38,7 +39,16 @@ case "$cmd" in
   sync)
     rsync -a --delete -e "ssh ${SSH_OPTS[*]}" --exclude '.venv-g*' --exclude '/data/' --exclude '__pycache__' \
       --exclude '.pytest_cache' --exclude 'taskList.lock' \
-      "$REPO/src" "$REPO/requirements" "$REPO/pyproject.toml" "$REPO/scripts" "$REPO/contracts" "$HOST:quant-lab/" ;;
+      "$REPO/src" "$REPO/requirements" "$REPO/pyproject.toml" "$REPO/scripts" "$REPO/contracts" "$REPO/tests" "$HOST:quant-lab/" ;;
+  test)
+    "$0" sync
+    if [ $# -eq 0 ]; then
+      ssh "${SSH_OPTS[@]}" "$HOST" "cd ~/quant-lab && .venv-g1/bin/python -m pytest tests/data tests/integration -q -p no:cacheprovider 2>&1 | tail -3; .venv-g2/bin/python -m pytest tests/market -q -p no:cacheprovider 2>&1 | tail -3"
+    else
+      venv=".venv-g1"; case "$1" in tests/market*|tests/research*) venv=".venv-g2" ;; esac
+      args=""; for a in "$@"; do args+=" $(printf '%q' "$a")"; done
+      ssh "${SSH_OPTS[@]}" "$HOST" "cd ~/quant-lab && $venv/bin/python -m pytest -p no:cacheprovider$args"
+    fi ;;
   *)
     sed -n '2,12p' "$0"; exit 2 ;;
 esac
