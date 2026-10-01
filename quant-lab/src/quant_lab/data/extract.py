@@ -29,7 +29,7 @@ from .lake import D12, LayerLedger, Layout, append_quarantine, cum_prev, loss_ro
 from .llm import SCHEMA_NAME_EXTRACT, Abstention, GrokCliClient, LLMClient, NoOcr, OcrProvider, RecordedClient, RecordedOcr, build_extract_prompt, call_with_retry, extraction_client, gate, validate_evidence
 from .reasons import Reason
 
-RULE_VERSION = "tg3-extract-v0.6"  # W01/W02: LLM numeric evidence Decimal end-to-end
+RULE_VERSION = "tg3-extract-v0.7"  # Action-local unit inheritance and chart entry/TP mapping
 PARSER_VERSION = "parser-v0.5"
 
 KINDS = (
@@ -783,7 +783,10 @@ def load_chart_fixture(path: str | os.PathLike) -> dict[str, Any]:
         targets = item.get("tps", [])
         if not isinstance(targets, list) or any(value is None for value in targets):
             raise ValueError("chart tps must be a list of prices")
-        items[source_id] = dict(stop=price(item.get("stop")), tps=[price(v) for v in targets],
+        entries = item.get("entry", [])
+        if not isinstance(entries, list) or any(value is None for value in entries):
+            raise ValueError("chart entry must be a list of prices")
+        items[source_id] = dict(entry=[price(v) for v in entries], stop=price(item.get("stop")), tps=[price(v) for v in targets],
                                 final_target=price(item.get("final_target")))
     return dict(version=chart["version"], model=chart["model"], items=items, sha256=hashlib.sha256(raw).hexdigest())
 
@@ -807,6 +810,23 @@ def apply_chart_fill(results: list[ParseResult], source_id: str, chart: dict[str
         return
     result = opens[0]
     fields, conflicts = [], []
+    chart_entry = sorted(item.get("entry", []))
+    if chart_entry:
+        if result.entry is None and result.entry_mode != "market_ref":
+            kind = "limit" if len(chart_entry) == 1 else "zone"
+            if len(chart_entry) >= 3:
+                kind = "ladder"
+                result.entries = chart_entry
+            result.entry = dict(kind=kind, lo=chart_entry[0], hi=chart_entry[-1])
+            fields.append("entry")
+        else:
+            text_entry = list(result.entries)
+            if not text_entry and result.entry:
+                text_entry = [result.entry["lo"]]
+                if result.entry["hi"] != result.entry["lo"]:
+                    text_entry.append(result.entry["hi"])
+            if sorted(text_entry) != chart_entry:
+                conflicts.append(dict(field="entry", text=[str(v) for v in text_entry], chart=[str(v) for v in chart_entry]))
     chart_stop = item["stop"]
     source_stop = result.checks["action"].get("stop")
     # A conditional stop is an existing instruction, even without a numeric price.
@@ -821,8 +841,12 @@ def apply_chart_fill(results: list[ParseResult], source_id: str, chart: dict[str
     chart_tps = item["tps"]
     if not chart_tps and item["final_target"] is not None:
         chart_tps = [item["final_target"]]
+    replaced_percent_tps = []
     if chart_tps:
-        if not result.tps:
+        all_percent = bool(result.tps) and all(t["kind"] == "pct" for t in result.tps)
+        if not result.tps or all_percent:
+            if all_percent:
+                replaced_percent_tps = [str(t["level"]) for t in result.tps]
             result.tps = [dict(level=v, fraction=None, kind="price") for v in chart_tps]
             fields.append("tps")
         elif [(t["kind"], t["level"]) for t in result.tps] != [("price", v) for v in chart_tps]:
@@ -832,6 +856,8 @@ def apply_chart_fill(results: list[ParseResult], source_id: str, chart: dict[str
         result.checks["chart_conflict"] = conflicts
     if fields:
         result.checks["chart_fill"] = dict(fields=fields, model=chart["model"], version=chart["version"])
+        if replaced_percent_tps:
+            result.checks["chart_fill"]["replaced_percent_tps"] = replaced_percent_tps
         result.notes.append("fields_from_chart")
         # ParseResult.notes has no parquet column: persist this provenance in checks.
         result.checks["notes"] = list(result.notes)
@@ -933,6 +959,7 @@ def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClien
             parent = max(parents, key=lambda p: (p["available_at"], p["version_no"]), default=None)
             pr, ab, meta = llm_extract(r["text"], client=client, channel_name=r["channel_name"], message_date=r["message_date"].isoformat() if r["message_date"] else None, previous_text=parent["text"] if parent else None)
             llm_ex = {"name": "llm", "version": getattr(client, "version", "?"), "model": getattr(client, "model", getattr(client, "name", "?"))}
+            llm_ex["version"] += ":mapping:" + RULE_VERSION
             if chart is not None:
                 llm_ex["version"] += ":chart:" + chart["sha256"]
             if pr is not None:
@@ -991,7 +1018,7 @@ def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClien
     if chart is not None:
         # Keep batch_id as the upstream loss-ledger lineage; build_id and extract_id
         # distinguish chart content, including repeated standalone extract.run calls.
-        summary["build_id"] = stable_id("chart-extract", batch_id, chart["sha256"])
+        summary["build_id"] = stable_id("chart-extract", batch_id, RULE_VERSION, chart["sha256"])
         summary["chart_fixture_sha256"] = chart["sha256"]
     if client is not None and df.height:
         summary["co_error"] = co_error_report(df)

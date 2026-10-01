@@ -258,6 +258,53 @@ def validate_response(payload, text):
                 field_evidence_failed=rejected, whole_message_discarded=int(discarded)))
 
 
+def inherited_prices(action):
+    """Infer omitted units only from validated price atoms in this action."""
+    atoms = []
+    entry = action["entry"]
+    if entry:
+        if entry["kind"] in ("market_ref", "limit"):
+            atoms.append(("entry.price", entry["price"]))
+        elif entry["kind"] == "zone":
+            atoms.extend(("entry." + key, entry[key]) for key in ("lo", "hi"))
+        else:
+            atoms.extend((f"entry.levels[{i}].price", level["price"]) for i, level in enumerate(entry["levels"]))
+    stop = action["stop"]
+    if stop and stop["kind"] == "price":
+        atoms.append(("stop.price", stop["price"]))
+    atoms.extend((f"tps[{i}].value", tp["value"]) for i, tp in enumerate(action["tps"]) if tp["kind"] == "price")
+    anchors, bare = [], []
+    for field, atom in atoms:
+        if atom is None:
+            continue
+        number = Decimal(atom["value"])
+        quote = atom["quote"]
+        norm, _ = normalized(quote)
+        matches = list(NUMBER.finditer(norm))
+        units = {_scale(m["unit"]) for m in matches if m["unit"]}
+        literals = [Decimal(re.sub(r"[,\s]", "", m["num"])) for m in matches if not m["pct"]]
+        # tokens also supplies the left end of an explicitly suffixed range.
+        proved = any(v == number and not pct for v, _, _, pct in tokens(quote))
+        factors = {factor for factor in units if proved and any(number == literal * factor for literal in literals)}
+        if factors:
+            anchors.extend((number, factor) for factor in factors)
+        elif not units and number in literals:
+            bare.append((field, atom, number))
+    factors = {factor for _, factor in anchors}
+    if len(factors) != 1:
+        return {}, []
+    factor = factors.pop()
+    lower = min(number for number, _ in anchors) / 2
+    upper = max(number for number, _ in anchors) * 2
+    values, records = {}, []
+    for field, atom, literal in bare:
+        scaled = literal * factor
+        if lower <= scaled <= upper:
+            values[field] = scaled
+            records.append(dict(field=field, quote=atom["quote"], factor=str(factor)))
+    return values, records
+
+
 def parse_actions(payload, text):
     from .extract import ParseResult, canonical_symbol
     clean = validate_response(payload, text)
@@ -275,28 +322,33 @@ def parse_actions(payload, text):
                           field_issues=action["field_issues"], batch_stats=clean["stats"])
         res.spans = action["spans"]
         entry = action["entry"]
-        def value(atom):
-            return Decimal(atom["value"]) if atom is not None else None
+        inherited, records = inherited_prices(action)
+        if records:
+            res.checks["unit_inherited"] = records
+        def value(atom, field):
+            if atom is None:
+                return None
+            return inherited.get(field, Decimal(atom["value"]))
         if entry:
             k = entry["kind"]
             if k in ("market_ref", "limit") and entry["price"]:
-                price = value(entry["price"])
+                price = value(entry["price"], "entry.price")
                 res.entry = dict(kind=k, lo=price, hi=price)
             elif k == "market_ref":
                 # Numberless CMP: priced from the as-of mark at t_dec in replay, like the rule parser's 现价.
                 res.notes.append("market_ref")
             elif k == "zone" and entry["lo"] and entry["hi"]:
-                res.entry = dict(kind=k, lo=value(entry["lo"]), hi=value(entry["hi"]))
+                res.entry = dict(kind=k, lo=value(entry["lo"], "entry.lo"), hi=value(entry["hi"], "entry.hi"))
             elif k == "ladder":
-                res.entries = [value(p["price"]) for p in entry["levels"] if p["price"]]
+                res.entries = [value(p["price"], f"entry.levels[{i}].price") for i, p in enumerate(entry["levels"]) if p["price"]]
                 if res.entries:
                     res.entry = dict(kind=k, lo=min(res.entries), hi=max(res.entries))
                 elif entry["levels"] and all(p["kind"] == "market_ref" for p in entry["levels"]):
                     res.notes.append("market_ref")
         stop = action["stop"]
         if stop and stop["kind"] == "price":
-            res.stop = value(stop["price"])
-        res.tps = [dict(kind="pct" if t["kind"] == "percent" else "price", level=value(t["value"]), fraction=None) for t in action["tps"]]
+            res.stop = value(stop["price"], "stop.price")
+        res.tps = [dict(kind="pct" if t["kind"] == "percent" else "price", level=value(t["value"], f"tps[{i}].value"), fraction=None) for i, t in enumerate(action["tps"])]
         rows.append(res)
     # Empty actions is a successful non-action classification, distinct from abstention.
     if not rows:

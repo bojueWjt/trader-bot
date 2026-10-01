@@ -187,9 +187,11 @@ def _order_plan(root: dict[str, Any], stop: float | None, tps: list[dict], expir
             # An unpriced CMP leg is filled from the as-of mark at t_dec (l0_replay); an unpriced limit is not guessable.
             if any(level.get("price") is None and level.get("kind") != "market_ref" for level in source_entry["levels"]):
                 return None
+            # checks.action keeps the quoted values; a leg whose unit was inherited (cx_v2.inherited_prices) is rescaled here.
+            factor = {u["field"]: Decimal(u["factor"]) for u in checks.get("unit_inherited", [])}
             entries = []
-            for level in source_entry["levels"]:
-                price = Decimal(level["price"]["value"]) if level.get("price") is not None else None
+            for i, level in enumerate(source_entry["levels"]):
+                price = Decimal(level["price"]["value"]) * factor.get(f"entry.levels[{i}].price", 1) if level.get("price") is not None else None
                 fraction = level.get("fraction")
                 entries.append(dict(kind=level["kind"], price_lo=price, price_hi=price,
                                     fraction=Decimal(fraction["value"]) / 100 if fraction else None,

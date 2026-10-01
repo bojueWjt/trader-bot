@@ -317,3 +317,100 @@ def test_chinese_comma_and_u_suffix_do_not_hide_prices(text, quote, value, perce
 def test_grouping_guard_still_blocks_partial_tokens(text, quote, value):
     with pytest.raises(ValueError):
         v2.exact_number(dict(value=value, quote=quote), text)
+
+
+def unit_zone_action():
+    text = '仿写 BTC 做多；入场6.24-6.26万；止损6.1；止盈6.4、6.5。'
+    entry = dict(kind='zone', price=None, lo=number(62400, '6.24-6.26万'),
+                 hi=number(62600, '6.24-6.26万'), levels=[])
+    return text, action(entry=entry, stop=dict(kind='price', price=number('6.1'), condition=None),
+                        tps=[dict(kind='price', value=number(v)) for v in ('6.4', '6.5')])
+
+
+def test_action_unit_inheritance_preserves_evidence_and_executes(tmp_path):
+    text, original = unit_zone_action()
+    rows, stats = v2.parse_actions(envelope(original), text)
+    row = rows[0]
+    assert row.stop == 61000 and [t['level'] for t in row.tps] == [64000, 65000]
+    assert row.checks['unit_inherited'] == [
+        dict(field='stop.price', quote='6.1', factor='10000'),
+        dict(field='tps[0].value', quote='6.4', factor='10000'),
+        dict(field='tps[1].value', quote='6.5', factor='10000')]
+    assert row.checks['action']['stop']['price'] == original['stop']['price']
+    assert row.checks['action']['tps'] == original['tps']
+    assert stats['field_evidence_failed'] == 0
+    _, _, _, cp, _ = v2_lake(tmp_path, [original], text)
+    canonical = cp.filter(pl.col('extractor_name') == 'llm').row(0, named=True)
+    assert canonical['scale_gate'] == 'ok'
+    assert json.loads(canonical['eligibility_by_estimand'])['execution']
+
+
+@pytest.mark.parametrize('literal,scaled,factor', [('6.25万', 62500, '10000'), ('6.25w', 62500, '10000'),
+                                                 ('6.25W', 62500, '10000'), ('62.5k', 62500, '1000'), ('62.5K', 62500, '1000')])
+def test_unit_inheritance_scales_all_price_paths_not_percent_or_fraction(literal, scaled, factor):
+    bare = '6.3' if factor == '10000' else '63'
+    text = f'仿写 BTC 做多；分批{literal}、{bare}各50%；目标10%；日线收盘低于6才止损。'
+    entry = dict(kind='ladder', price=None, lo=None, hi=None, levels=[
+        dict(kind='market_ref', price=number(scaled, literal), fraction=number(50, '50%')),
+        dict(kind='limit', price=number(bare), fraction=number(50, '50%'))])
+    stop = dict(kind='condition', price=number(6), condition='日线收盘低于6才止损')
+    row = v2.parse_actions(envelope(action(entry=entry, stop=stop,
+        tps=[dict(kind='percent', value=number(10, '10%'))])), text)[0][0]
+    assert row.entries == [62500, 63000]
+    assert row.tps[0]['level'] == 10 and row.stop is None
+    assert row.checks['unit_inherited'] == [dict(field='entry.levels[1].price', quote=bare, factor=factor)]
+    assert row.checks['action']['entry']['levels'][1]['fraction']['value'] == '50'
+
+
+@pytest.mark.parametrize('entry_literal,entry_value,stop_literal,stop_value,tp_literal,tp_value', [
+    ('6.25万', 62500, '61k', 61000, '6.4', '6.4'),  # Different explicit factors.
+    ('6.25万', 62500, '2', 2, '20', 20),  # Outside both bounds.
+    ('2.5k', 2500, '2400', 2400, '2600', 2600),  # Already full ETH prices.
+    ('6.25', '6.25', '6.1', '6.1', '6.4', '6.4'),  # No anchor.
+])
+def test_unit_inheritance_requires_one_factor_and_nearby_scaled_value(entry_literal, entry_value, stop_literal, stop_value, tp_literal, tp_value):
+    text = f'仿写 入场{entry_literal}；止损{stop_literal}；止盈{tp_literal}。'
+    original = action(entry=dict(kind='limit', price=number(entry_value, entry_literal), lo=None, hi=None, levels=[]),
+                      stop=dict(kind='price', price=number(stop_value, stop_literal), condition=None),
+                      tps=[dict(kind='price', value=number(tp_value, tp_literal))])
+    row = v2.parse_actions(envelope(original), text)[0][0]
+    assert row.stop == Decimal(str(stop_value)) and row.tps[0]['level'] == Decimal(str(tp_value))
+    assert 'unit_inherited' not in row.checks
+
+
+def test_unit_inheritance_is_action_local_and_updates_entry_atoms():
+    text = '仿写 BTC 入场6.25；止损6.1；目标6.4万。另 ETH 入场2.5；止损2.4。'
+    first = action(entry=dict(kind='limit', price=number('6.25'), lo=None, hi=None, levels=[]),
+                   stop=dict(kind='price', price=number('6.1'), condition=None),
+                   tps=[dict(kind='price', value=number(64000, '6.4万'))])
+    second = action(symbol_raw='ETH', entry=dict(kind='limit', price=number('2.5'), lo=None, hi=None, levels=[]),
+                    stop=dict(kind='price', price=number('2.4'), condition=None), tps=[])
+    rows, _ = v2.parse_actions(envelope(first, second), text)
+    assert rows[0].entry['lo'] == 62500 and rows[0].stop == 61000
+    assert rows[1].entry['lo'] == Decimal('2.5') and rows[1].stop == Decimal('2.4')
+    assert 'unit_inherited' not in rows[1].checks
+    first['entry'] = dict(kind='zone', price=None, lo=number('6.1'), hi=number('6.25'), levels=[])
+    row = v2.parse_actions(envelope(first), text)[0][0]
+    assert row.entry == dict(kind='zone', lo=61000, hi=62500)
+
+
+def test_unit_inheritance_mutation_is_killed(tmp_path, monkeypatch):
+    test_action_unit_inheritance_preserves_evidence_and_executes(tmp_path / 'good')
+    monkeypatch.setattr(v2, 'inherited_prices', lambda action: ({}, []))
+    with pytest.raises(AssertionError):
+        test_action_unit_inheritance_preserves_evidence_and_executes(tmp_path / 'mutant')
+
+
+def test_inherited_ladder_leg_reaches_the_order_plan(tmp_path):
+    # The order plan rebuilds ladder legs from checks.action, which keeps the quoted value; the inherited unit must survive that.
+    text = '仿写 BTC 做多；CMP 6.25万 和 6.2 各一半；止损6.1万；止盈6.5万。'
+    entry = dict(kind='ladder', price=None, lo=None, hi=None, levels=[
+        dict(kind='market_ref', price=number(62500, '6.25万'), fraction=None), dict(kind='limit', price=number('6.2'), fraction=None)])
+    original = action(entry=entry, stop=dict(kind='price', price=number(61000, '6.1万'), condition=None),
+                      tps=[dict(kind='price', value=number(65000, '6.5万'))])
+    _, _, _, cp, _ = v2_lake(tmp_path, [original], text)
+    row = cp.filter(pl.col('extractor_name') == 'llm').row(0, named=True)
+    assert json.loads(row['checks'])['unit_inherited'] == [dict(field='entry.levels[1].price', quote='6.2', factor='10000')]
+    assert row['scale_gate'] == 'ok' and json.loads(row['eligibility_by_estimand'])['execution']
+    plan = lifecycle._order_plan(row, row['stop'], row['tps'], None)
+    assert [(e['kind'], e['price_lo']) for e in plan['entries']] == [('market_ref', Decimal(62500)), ('limit', Decimal(62000))]
