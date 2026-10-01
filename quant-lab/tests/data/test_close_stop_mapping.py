@@ -279,6 +279,11 @@ def test_persisted_graph_through_l0_request_and_execution(tmp_path, monkeypatch)
         seen.append(request)
         return market
 
+    # Replay now requires an as-of mark even for a quoted CMP (independent market task).
+    # Supply the same synthetic mark used by canonical validation; assertions stay unchanged.
+    from quant_lab.data.market_lake import LakeMarket
+    synthetic_marks = SyntheticMarks({instrument_id_for("BTC"): [(T0, 100)]})
+    monkeypatch.setattr(LakeMarket, "mark_at", lambda self, inst, at: synthetic_marks.mark_at(inst, at))
     monkeypatch.setattr(l0, "load_market_from_lake", synthetic_market)
     report = l0.replay(
         graph_version="invented-close",

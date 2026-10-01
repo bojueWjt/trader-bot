@@ -137,7 +137,9 @@ def test_build_asof_uses_known_close_not_current_bar(tmp_path, monkeypatch):
     result = api.build(None, layout, graph_version="asof", market="real", channel=CHANNEL)
     plans = pl.read_parquet(result["validate"]["paths"]["canonical_plan"]).sort("available_at")
     assert plans["mark_price"][0] == Decimal(100)
-    assert api.load_episodes("asof").height == 1
+    assert api.load_episodes("asof").height == 2  # Unique omitted-unit recovery keeps the later plan.
+    repaired = [json.loads(c) for c in plans["checks"] if "unit_rescaled" in json.loads(c)]
+    assert repaired and all(c["unit_rescaled"] == {"factor": "10", "basis": "mark"} for c in repaired)
     monkeypatch.setattr(FrameMarks, "mark_at", mutant(FrameMarks.mark_at, '< pl.lit(at)', '<= pl.lit(at)'))
     monkeypatch.setattr(asof, "last_closed_bar", mutant(asof.last_closed_bar, '< pl.lit(at)', '<= pl.lit(at)'))
     changed = api.build(None, layout, graph_version="asof-mutant", market="real", channel=CHANNEL)

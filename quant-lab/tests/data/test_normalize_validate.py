@@ -50,7 +50,7 @@ def test_canonicalize_direction_and_tp_order():
     can, reasons, checks = canonicalize_row(_ex_row(stop=61000.0), registry=reg)  # long 的 SL 在入场上方
     assert not can["direction_ok"] and "INTENT_AMBIGUOUS" in reasons and can["stop"] == 61000.0  # 只标不改
     can, _, checks = canonicalize_row(_ex_row(tps=[{"level": 5.0, "fraction": None, "kind": "pct"}]), registry=reg)
-    assert math.isclose(can["tps"][0]["level"], 60150.0 * 1.05) and checks["tp_pct_converted"] == 1
+    assert can["tps"] == [] and checks["tps_dropped_percent"]
     can, reasons, checks = canonicalize_row(_ex_row(time_grade="H1"), registry=reg)
     assert "EDIT_ORIGINAL_UNAVAILABLE" in reasons and checks["eligibility"]["original_entry"] is False
 
@@ -60,8 +60,8 @@ def test_scale_gate_ln3():
     reg = fixture_registry()
     can, _, _ = canonicalize_row(_ex_row(entry={"lo": 747.0, "hi": 747.0, "kind": "limit"}, stop=727.0, tps=[]), registry=reg)
     mk, reasons, checks = market_check_row(can, t_a=T0, marks=marks, t_plaus=None, channel_id=1)
-    assert mk["scale_gate"] == "conflict" and "UNIT_SCALE_CONFLICT" in reasons and mk["delta_near"] > math.log(3)
-    assert can["entry"]["lo"] == 747.0  # 不自动乘除
+    assert mk["scale_gate"] == "ok" and "UNIT_SCALE_CONFLICT" not in reasons
+    assert can["entry"]["lo"] == 74700 and checks["unit_rescaled"]["factor"] == "100"
     can, _, _ = canonicalize_row(_ex_row(), registry=reg)
     mk, reasons, _ = market_check_row(can, t_a=T0, marks=marks, t_plaus=None, channel_id=1)
     assert mk["scale_gate"] == "ok" and mk["delta_near"] < 0.01 and "UNIT_SCALE_CONFLICT" not in reasons
@@ -215,16 +215,16 @@ def test_a10_scale_basis_recorded(lake):
     layout, _ = lake
     cp = pl.read_parquet(layout.canonical_plan)
     conf = cp.filter(pl.col("scale_gate") == "conflict")
-    assert conf.height >= 1
+    assert conf.height == 0  # Former omitted-unit conflicts are repaired.
     for r in conf.iter_rows(named=True):
         assert json.loads(r["checks"]).get("scale_basis") in ("far_end_only", "near_end_only", "both_ends") or json.loads(r["checks"]).get("scale_conflict_field") in ("stop", "tps")
     q = read_quarantine(layout.quarantine_path).filter(pl.col("all_reason_codes").list.contains("UNIT_SCALE_CONFLICT"))
-    assert q.height >= 1 and all(json.loads(v).get("basis") in (None, "far_end_only", "near_end_only", "both_ends") for v in q["observed_value_ref"])
+    assert q.height == 0 and all(json.loads(v).get("basis") in (None, "far_end_only", "near_end_only", "both_ends") for v in q["observed_value_ref"])
     loss5 = pl.read_parquet(layout.loss(_["batch_id"] if isinstance(_, dict) else lake[1]["batch_id"])).filter(pl.col("layer") == 5)
     keys = set()
     for d in loss5["primary_reason_dist"]:
         keys |= set(json.loads(d))
-    assert any(k.startswith("UNIT_SCALE_CONFLICT") for k in keys)
+    assert not any(k.startswith("UNIT_SCALE_CONFLICT") for k in keys)
     # 远端触门用例：basis=far_end_only
     reg, marks = fixture_registry(), fixture_marks()
     wide, _, _ = canonicalize_row(_ex_row(entry={"lo": 60000.0, "hi": 600000.0, "kind": "zone"}, stop=59000.0, tps=[]), registry=reg)

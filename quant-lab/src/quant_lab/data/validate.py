@@ -1,11 +1,11 @@
 """层 4 规范化 + 层 5 行情校验（合并稿 C.2 Telegram 4/5；ADR-G1 §2.3）。
 
-层 4（canonicalize）：品种当时身份（InstrumentRegistry，按 t_a）、方向/价格/档位（TP 按方向排序；SL/TP 方向一致性只标不改）、
+层 4（canonicalize）：品种当时身份（InstrumentRegistry，按 t_a）、方向/价格/档位（TP 按方向排序；止损方向冲突隔离、异常止盈按档过滤）、
 百分比 TP 转价（有入场参考才转，记 checks）、H1 版本原始入场隔离（EDIT_ORIGINAL_UNAVAILABLE，eligibility original_entry=false）。
 层 5（market_check）：t_a = 字段闭包 available_at；m = 最后一根已闭合 1m mark（陈旧 >120s → MARK_STALE，拒价格校验）；
-δ = |ln(p/m)| 区间两端分别记、取最近端为告警指标；数量级门 δ ≥ ln3 → UNIT_SCALE_CONFLICT（致命，不自动乘除）；
+δ = |ln(p/m)| 区间两端分别记、取最近端为告警指标；数量级门 δ ≥ ln3 → UNIT_SCALE_CONFLICT（入场/止损致命；唯一十进制因子可整体换算）；
 合理性带 δ > T_plaus（每频道×订单类型冻结 p99，无校准 → insufficient，不猜阈值）→ ENTRY_MARK_DEVIATION（一般，待复核）；
-SL/TP 相对入场参考的数量级门同样适用。只标异常不改价。
+止损相对入场参考过量纲门，异常止盈仅丢该档；推断与换算记录 checks。
 输出 silver/canonical_plan.parquet：每条 extracted_event 一行（plan_id 确定性）。
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ from .market_stub import InstrumentRegistry, MarkProvider, PlausibilityCalibrati
 from .reasons import Reason
 from .close_stop import parse_close_stop
 
-RULE_VERSION = "tg45-validate-v0.6"
+RULE_VERSION = "tg45-validate-v0.7"
 LN3 = math.log(3.0)
 MAX_STALENESS_S = 120
 SIGNAL_KINDS = {"entry_proposal", "amend", "add", "stop_move", "tp_ladder", "reduce", "close_claimed", "entry_claimed", "cancel", "expire", "correction", "delete_notice"}
@@ -85,11 +85,15 @@ def order_kind(entry: dict | None) -> str:
 
 
 def canonicalize_row(r: dict[str, Any], *, registry: InstrumentRegistry) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    """层 4：返回 (规范字段, reason_codes, checks)。不改价、不补缺。"""
+    """层 4：字段级过滤与可审计的方向推断；返回规范字段、拒因和 checks。"""
     reasons: list[str] = []
     checks: dict[str, Any] = {}
     t_a = r["available_at"]
-    inst, status = registry.resolve(r["symbol_raw"], t_a)
+    from .extract import canonical_symbol
+    symbol = canonical_symbol(r["symbol_raw"])
+    inst, status = registry.resolve(symbol, t_a)
+    if status == "mapped" and symbol != r["symbol_raw"]:
+        checks["symbol_alias"] = {"raw": r["symbol_raw"], "code": symbol}
     if status == "invalid_time":
         reasons.append(Reason.SYMBOL_TIME_INVALID)
     checks["instrument"] = status
@@ -135,38 +139,75 @@ def canonicalize_row(r: dict[str, Any], *, registry: InstrumentRegistry) -> tupl
         converted_tps = []
         for t in tps:
             if t["kind"] == "pct" and (percent_ref is None or side not in ("long", "short")):
-                mapping_issues.append({"field": "tps", "reason": "percent_requires_unambiguous_entry_and_side"})
+                checks.setdefault("tps_dropped_percent", []).append({"level": str(t["level"]), "reason": "unambiguous_entry_required"})
             else:
                 converted_tps.append(t)
         tps = converted_tps
-    # 百分比 TP → 价（只有入场参考时；记 checks）
-    conv = 0
+    bounds = entries or ([entry["lo"], entry["hi"]] if entry else [])
+    lo, hi = (min(bounds), max(bounds)) if bounds else (None, None)
+    price_tps = [t["level"] for t in tps if t["kind"] == "price" and t["level"] is not None]
+    if side not in ("long", "short") and lo is not None and stop is not None and price_tps:
+        if stop < lo and all(t > hi for t in price_tps):
+            side = "long"
+        elif stop > hi and all(t < lo for t in price_tps):
+            side = "short"
+        if side in ("long", "short"):
+            checks["side_inferred"] = side
+    if entry and entry["kind"] == "ladder" and stop is not None and side in ("long", "short"):
+        invalid = [p for p in entries if (p <= stop if side == "long" else p >= stop)]
+        if invalid:
+            checks["entries_dropped_direction"] = [{"price": str(p), "reason": "beyond_stop"} for p in invalid]
+    source_levels = source_checks.get("action", {}).get("entry") or {}
+    levels = source_levels.get("levels", [])
+    fractions = [level.get("fraction") for level in levels]
+    if fractions and all(f is not None for f in fractions):
+        total = sum(Decimal(f["value"]) for f in fractions)
+        if total > 0 and total != 100:
+            checks["fractions_normalized"] = {"total": str(total / 100), "basis": "retained_entries"}
+    # Relative targets need one quoted execution price, never a zone or ladder average.
+    kept = []
     for t in tps:
-        if t.get("kind") == "pct" and entry_ref and side in ("long", "short"):
+        if t["kind"] == "pct":
+            if percent_ref is None or (entry and entry["kind"] in ("zone", "ladder")) or side not in ("long", "short"):
+                checks.setdefault("tps_dropped_percent", []).append({"level": str(t["level"]), "reason": "unambiguous_entry_required"})
+                continue
             pct = t["level"] / 100
-            t["level"] = entry_ref * (1 + pct) if side == "long" else entry_ref * (1 - pct)
+            t["level"] = percent_ref * (1 + pct) if side == "long" else percent_ref * (1 - pct)
             t["kind"] = "price"
-            conv += 1
-    if conv:
-        checks["tp_pct_converted"] = conv
-    # 档位按方向排序（long 升序 / short 降序）；方向一致性只标不改
+            checks["tp_pct_converted"] = checks.get("tp_pct_converted", 0) + 1
+        kept.append(t)
+    tps = kept
     direction_ok = True
+    if lo is not None and side in ("long", "short"):
+        if stop is not None:
+            # A crossing discrete ladder can retain its valid entry legs in _order_plan.
+            boundary = hi if entry and entry["kind"] == "ladder" else lo
+            if side == "short":
+                boundary = lo if entry and entry["kind"] == "ladder" else hi
+            ok = stop < boundary if side == "long" else stop > boundary
+            checks["sl_direction"] = ok
+            direction_ok = ok
+        tp_lo, tp_hi = lo, hi
+        if entry and entry["kind"] == "ladder" and stop is not None:
+            retained = [p for p in bounds if (p > stop if side == "long" else p < stop)]
+            if retained:
+                tp_lo, tp_hi = min(retained), max(retained)
+        kept = []
+        for t in tps:
+            ok = t["level"] > tp_hi if side == "long" else t["level"] < tp_lo
+            if ok:
+                kept.append(t)
+            else:
+                checks.setdefault("tps_dropped_direction", []).append({"level": str(t["level"]), "reason": "wrong_entry_side"})
+        checks["tp_direction"] = len(kept) == len(tps)
+        tps = kept
     if side == "long":
         tps.sort(key=lambda t: t["level"])
     elif side == "short":
         tps.sort(key=lambda t: -t["level"])
-    if entry_ref and side in ("long", "short"):
-        if stop is not None:
-            ok = stop < entry_ref if side == "long" else stop > entry_ref
-            checks["sl_direction"] = ok
-            direction_ok &= ok
-        if tps:
-            ok = all(t["level"] > entry_ref for t in tps) if side == "long" else all(t["level"] < entry_ref for t in tps)
-            checks["tp_direction"] = ok
-            direction_ok &= ok
     if not direction_ok:
         reasons.append(Reason.INTENT_AMBIGUOUS)
-        checks["direction_conflict"] = True  # 方向错=致命类语义（契约 §4），用途准入见下
+        checks["direction_conflict"] = True
     # H1：仅最终编辑版可见 → 原始入场隔离
     elig = {"original_entry": True, "price_check": True, "execution": True, "description": True}
     if r["time_grade"] == "H1" and r["kind"] in ("entry_proposal", "amend"):
@@ -175,7 +216,7 @@ def canonicalize_row(r: dict[str, Any], *, registry: InstrumentRegistry) -> tupl
     if r["time_grade"] in ("U", "H2"):
         elig["execution"] = False
         elig["price_check"] = False
-    if status != "mapped" or not direction_ok:
+    if status != "mapped" or not direction_ok or side not in ("long", "short"):
         elig["execution"] = False
     if r.get("entry_mode") == "unknown" and r["kind"] == "entry_proposal":
         elig["execution"] = False  # 入场方式无原文依据：不猜市价（S06）
@@ -194,7 +235,7 @@ def canonicalize_row(r: dict[str, Any], *, registry: InstrumentRegistry) -> tupl
 
 
 def market_check_row(c: dict[str, Any], *, t_a: datetime | None, marks: MarkProvider, t_plaus: PlausibilityCalibration | dict | None, channel_id: int) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    """层 5：数量级门 / 合理性带 / MARK_STALE。只标不改。数量级门对区间两端逐一检查（A04：任一端 ≥ ln3 即冲突）。"""
+    """层 5：数量级门 / 唯一单位恢复 / 按档过滤 / MARK_STALE。数量级门对区间两端逐一检查（A04：任一端 ≥ ln3 即冲突）。"""
     reasons: list[str] = []
     out: dict[str, Any] = {"mark_price": None, "mark_close_time": None, "mark_staleness_s": None, "delta_lo": None, "delta_hi": None, "delta_near": None,
                            "delta_stop": None, "scale_gate": "n/a", "plausibility_status": "n/a", "t_plaus": None, "calibration_version": None, "market_manifest": marks.manifest}
@@ -222,6 +263,33 @@ def market_check_row(c: dict[str, Any], *, t_a: datetime | None, marks: MarkProv
         if evidence.height:
             mark_available = max(mark_available, evidence["available_at"].max())
     checks["dependencies"].append({"ref": f"mark:{marks.manifest}:{inst}:{m.close_time.isoformat()}", "purpose": "price_check", "available_at": mark_available.isoformat(), "close_time": m.close_time.isoformat(), "latency_s": latency.total_seconds()})
+    prices = list(c["entries"] or [])
+    if c["entry"]:
+        prices.extend([c["entry"]["lo"], c["entry"]["hi"]])
+    if c["stop"] is not None:
+        prices.append(c["stop"])
+    targets = [t["level"] for t in c["tps"] if t["kind"] == "price"]
+    # Same-action inherited units were applied before this gate; never supersede them.
+    if prices and any(log_deviation(p, mp) is None or log_deviation(p, mp) >= LN3 for p in prices):
+        candidates = []
+        if not c.get("unit_inherited"):
+            for k in range(-4, 5):
+                if k == 0:
+                    continue
+                factor = Decimal(10) ** k
+                if all(p > 0 and log_deviation(p * factor, mp) < LN3 for p in prices + targets):
+                    candidates.append(factor)
+        if len(candidates) == 1:
+            factor = candidates[0]
+            if c["entry"]:
+                c["entry"] = {**c["entry"], "lo": c["entry"]["lo"] * factor, "hi": c["entry"]["hi"] * factor}
+            c["entries"] = [p * factor for p in c["entries"]]
+            if c["entry_ref"] is not None:
+                c["entry_ref"] *= factor
+            if c["stop"] is not None:
+                c["stop"] *= factor
+            c["tps"] = [{**t, "level": t["level"] * factor} for t in c["tps"]]
+            checks["unit_rescaled"] = {"factor": str(factor), "basis": "mark"}
     e = c["entry"]
     if e and e.get("lo") is not None:
         dlo, dhi = log_deviation(e["lo"], mp), log_deviation(e["hi"], mp)
@@ -244,12 +312,17 @@ def market_check_row(c: dict[str, Any], *, t_a: datetime | None, marks: MarkProv
     if out["delta_stop"] is not None and out["delta_stop"] >= LN3:
         conflict = True
         checks.setdefault("scale_conflict_field", "stop")
+    if any(log_deviation(p, mp) is None or log_deviation(p, mp) >= LN3 for p in c["entries"]):
+        conflict = True
+        checks.setdefault("scale_conflict_field", "entry")
+    kept = []
     for t in c["tps"]:
         d = log_deviation(t["level"], ref)
-        if d is not None and d >= LN3:
-            conflict = True
-            checks.setdefault("scale_conflict_field", "tps")
-            break
+        if d is None or d >= LN3:
+            checks.setdefault("tps_dropped_scale", []).append({"level": str(t["level"]), "reason": "outside_ln3"})
+        else:
+            kept.append(t)
+    c["tps"] = kept
     out["scale_gate"] = "conflict" if conflict else "ok"
     if conflict:
         reasons.append(Reason.UNIT_SCALE_CONFLICT)
@@ -282,9 +355,36 @@ def validate_frame(ex: pl.DataFrame, mv: pl.DataFrame, *, registry: InstrumentRe
     for r in frame.iter_rows(named=True):
         if r["kind"] not in SIGNAL_KINDS:
             continue
+        source = json.loads(r.get("checks") or "{}")
+        if source.get("gauls_template"):
+            from .extract import canonical_symbol, gauls_second_entry
+            inst, status = registry.resolve(canonical_symbol(r["symbol_raw"]), r["available_at"])
+            if status == "mapped":
+                mark = marks.mark_at(inst, r["available_at"], max_staleness_s=MAX_STALENESS_S)
+                repair = gauls_second_entry(source["gauls_template"], Decimal(str(mark.price)) if mark.price else None)
+                if repair:
+                    # The CMP leg stays unpriced; the mark supplies only a repair bound.
+                    r["entry"] = {"kind": "ladder", "lo": repair["price"], "hi": repair["price"]}
+                    r["entries"] = [repair["price"]]
+                    r["stop"] = repair["stop"]
+                    r["tps"] = [t for t in r["tps"] if t["level"] != Decimal(repair["raw"])]
+                    source["gauls_second_entry"] = {k: str(v) for k, v in repair.items() if k != "span"}
+                    source["gauls_second_entry"]["basis"] = "mark"
+                    from copy import deepcopy
+                    source["action_original"] = deepcopy(source.get("action", {}))
+                    action = source.setdefault("action", {})
+                    action["entry"] = {"kind": "ladder", "levels": [
+                        {"kind": "market_ref", "price": None, "fraction": None},
+                        {"kind": "limit", "price": {"value": str(repair["price"])}, "fraction": None}]}
+                    action["stop"] = {"kind": "price", "price": {"value": str(repair["stop"])} }
+                    source["schema_version"] = 2
+                    source.setdefault("time_ref", "now")
+                    r["checks"] = json.dumps(source, ensure_ascii=False)
         can, reasons4, checks = canonicalize_row(r, registry=registry)
         checks.update(json.loads(r.get("checks") or "{}"))
+        can["unit_inherited"] = checks.get("unit_inherited", [])
         mk, reasons5, checks5 = market_check_row(can, t_a=r["available_at"], marks=marks, t_plaus=t_plaus, channel_id=r["channel_id"])
+        can.pop("unit_inherited", None)
         inherited = [c for c in (r["reason_codes"] or []) if c != Reason.NOT_SIGNAL]  # 层 1/3 拒因跨层携带（S07）
         reasons = sorted(set(reasons4 + reasons5 + inherited))
         elig = checks.pop("eligibility")

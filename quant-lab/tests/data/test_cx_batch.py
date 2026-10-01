@@ -293,7 +293,7 @@ def test_plan_sources_linking_disagreements_default_and_mutants(tmp_path, monkey
     default, parser = graph(cp, mv, ex), graph(cp, mv, ex, "parser")
     assert default[0].equals(parser[0]) and default[1].equals(parser[1])
     def invariant():
-        for mode, stop, source in [("parser", 90, "parser"), ("llm", 88, "llm"), ("reconciled", 88, "llm")]:
+        for mode, stop, source in [("parser", 90000, "parser"), ("llm", 88, "llm"), ("reconciled", 88, "llm")]:
             episodes, events, _, _, report = graph(cp, mv, ex, mode)
             ep = episodes.filter(pl.col("root_source_version_id") == "s0").row(0, named=True)
             assert ep["order_plan"]["stop"]["price"] == stop

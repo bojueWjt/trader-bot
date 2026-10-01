@@ -29,8 +29,8 @@ from .lake import D12, LayerLedger, Layout, append_quarantine, cum_prev, loss_ro
 from .llm import SCHEMA_NAME_EXTRACT, Abstention, GrokCliClient, LLMClient, NoOcr, OcrProvider, RecordedClient, RecordedOcr, build_extract_prompt, call_with_retry, extraction_client, gate, validate_evidence
 from .reasons import Reason
 
-RULE_VERSION = "tg3-extract-v0.8"  # Unit inheritance also covers quoted close-stop levels
-PARSER_VERSION = "parser-v0.5"
+RULE_VERSION = "tg3-extract-v0.9"  # Unit inheritance also covers quoted close-stop levels
+PARSER_VERSION = "parser-v0.6"
 
 KINDS = (
     "entry_proposal", "amend", "cancel", "expire", "entry_claimed", "add", "reduce", "stop_move", "tp_ladder", "close_claimed",
@@ -123,6 +123,7 @@ def find_numbers(text: str, lo: int = 0, hi: int | None = None) -> list[Num]:
 # ---------------------------------------------------------------- 词典
 SYMBOL_ALIASES: dict[str, str] = {
     "比特币": "BTC", "比特幣": "BTC", "大饼": "BTC", "大餅": "BTC", "饼": "BTC", "以太幣": "ETH", "以太坊": "ETH", "以太": "ETH", "姨太": "ETH", "索拉": "SOL", "谷歌": "GOOGL",
+    "GOLD": "XAU", "SILVER": "XAG", "闪迪": "SNDK", "川普": "TRUMP", "狗币": "DOGE", "狗狗币": "DOGE", "DOGE狗币": "DOGE", "ETHEREUM": "ETH", "SOLANA": "SOL", "莱特币": "LTC", "寿司": "SUSHI", "寿司SUSHI": "SUSHI",
     "美光": "MU", "原油": "CL", "美油": "CL", "布伦特": "BZ", "黄金": "XAU", "白银": "XAG",
 }
 _QUOTE_SUFFIX_RE = re.compile(r"(?:[/\-_]?USDT(?:\.P)?|\.P|PERP)$")
@@ -133,6 +134,11 @@ def canonical_symbol(raw: str | None) -> str | None:
     if raw is None:
         return None
     s = unicodedata.normalize("NFKC", raw).strip()
+    code = re.search(r"\(([A-Za-z][A-Za-z0-9]*(?:/USDT)?)\)", s)
+    if code:
+        s = code.group(1)
+    if s.upper() in SYMBOL_ALIASES:
+        return SYMBOL_ALIASES[s.upper()]
     if s in SYMBOL_ALIASES:
         return SYMBOL_ALIASES[s]
     s = s.upper().lstrip("#$").strip()
@@ -239,6 +245,9 @@ def _not_pct(text: str, n: Num) -> bool:
 
 
 def detect_symbol(text: str, *, anchor: int | None = None) -> tuple[str | None, tuple[int, int] | None]:
+    bracket = re.search(r"[\u4e00-\u9fffA-Za-z]+[（(]([A-Za-z][A-Za-z0-9]*(?:/USDT)?)[）)]", text)
+    if bracket:
+        return canonical_symbol(bracket.group(1)), bracket.span(1)
     cands: list[tuple[int, str, int, int]] = []  # (priority, sym, start, end)
     for m in SYMBOL_TOKEN_RE.finditer(text):
         sym = m.group(1)
@@ -259,7 +268,29 @@ def detect_symbol(text: str, *, anchor: int | None = None) -> tuple[str | None, 
     else:
         cands.sort(key=lambda c: (c[0], c[2]))
     _, sym, a, b = cands[0]
-    return sym, (a, b)
+    return canonical_symbol(sym), (a, b)
+
+
+def gauls_second_entry(text: str, cmp_price: Decimal | None = None):
+    """Repair only the explicit CMP-and-entry template, using its real stop as evidence."""
+    match = re.search(r"入场\s*[:：]\s*CMP\s*(\d+(?:\.\d+)?)?\s*和\s*(?:(止损价|目标价位)\s*[:：]?\s*)?(\d+(?:\.\d+)?)", text, re.I)
+    if not match:
+        return None
+    stops = list(re.finditer(r"止损(?:价)?\s*[:：]\s*(\d+(?:\.\d+)?)", text[match.end():]))
+    if len(stops) != 1:
+        return None
+    if match[1] is None and cmp_price is None:
+        return None
+    cmp = Decimal(match[1]) if match[1] else cmp_price
+    raw, stop = Decimal(match[3]), Decimal(stops[0][1])
+    lo, hi = sorted((cmp, stop))
+    candidates = [(raw, Decimal(1))] if lo < raw < hi else []
+    if not candidates and '.' not in match[3] and cmp < 1 and stop < 1:
+        candidates = [(raw * Decimal(10) ** -k, Decimal(10) ** -k) for k in range(1, 9) if lo < raw * Decimal(10) ** -k < hi]
+    if len(candidates) != 1:
+        return None
+    price, factor = candidates[0]
+    return {"cmp": cmp, "price": price, "stop": stop, "raw": str(raw), "factor": str(factor), "label": match[2], "span": match.span(3)}
 
 
 SIDE_VERB_LONG_RE = re.compile(r"试一个多|进个多|进一个多|开多|做个多|做多|买入区域|购买策略|多单(?=.{0,3}(计划|策略|建仓|入场))")
@@ -511,6 +542,21 @@ def parse_message(text: str) -> ParseResult:
     if sym_span:
         res.span("symbol_raw", *sym_span)
 
+    if re.search(r"入场\s*[:：]\s*CMP\s*和", text, re.I):
+        res.checks["gauls_template"] = text
+    repair = gauls_second_entry(text)
+    if repair:
+        res.entry = {"kind": "ladder", "lo": min(repair["cmp"], repair["price"]), "hi": max(repair["cmp"], repair["price"])}
+        res.entries = [repair["cmp"], repair["price"]]
+        res.stop = repair["stop"]
+        res.tps = [t for t in res.tps if t["level"] != Decimal(repair["raw"])]
+        res.checks["gauls_second_entry"] = {k: str(v) for k, v in repair.items() if k != "span"}
+        res.checks.update(schema_version=2, time_ref="now", action={
+            "entry": {"kind": "ladder", "levels": [
+                {"kind": "market_ref", "price": {"value": str(repair["cmp"])}, "fraction": None},
+                {"kind": "limit", "price": {"value": str(repair["price"])}, "fraction": None}]},
+            "stop": {"kind": "price", "price": {"value": str(repair["stop"])}}})
+        res.span("entries", *repair["span"])
     # ---- 分类
     has_entry = res.entry is not None
     if re.search(r"撤回上一条(?:断言)?|上一条作废", text):

@@ -307,7 +307,7 @@ def inherited_prices(action):
 
 
 def parse_actions(payload, text):
-    from .extract import ParseResult, canonical_symbol
+    from .extract import ParseResult, canonical_symbol, gauls_second_entry
     clean = validate_response(payload, text)
     rows = []
     kinds = dict(open="entry_proposal", add="add", reduce="reduce", take_profit="reduce", stop_loss_hit="close_claimed",
@@ -350,6 +350,20 @@ def parse_actions(payload, text):
         if stop and stop["kind"] == "price":
             res.stop = value(stop["price"], "stop.price")
         res.tps = [dict(kind="pct" if t["kind"] == "percent" else "price", level=value(t["value"], f"tps[{i}].value"), fraction=None) for i, t in enumerate(action["tps"])]
+        if len(clean["actions"]) == 1 and re.search(r"入场\s*[:：]\s*CMP\s*和", text, re.I):
+            res.checks["gauls_template"] = text
+        repair = gauls_second_entry(text)
+        if repair and action["op"] == "open" and len(clean["actions"]) == 1:
+            res.entry = dict(kind="ladder", lo=min(repair["cmp"], repair["price"]), hi=max(repair["cmp"], repair["price"]))
+            res.entries = [repair["cmp"], repair["price"]]
+            res.stop = repair["stop"]
+            res.tps = [t for t in res.tps if t["level"] != Decimal(repair["raw"])]
+            res.checks["gauls_second_entry"] = {k: str(v) for k, v in repair.items() if k != "span"}
+            res.checks["action_original"] = deepcopy(action)
+            action["entry"] = dict(kind="ladder", price=None, lo=None, hi=None, levels=[
+                dict(kind="market_ref", price=dict(value=str(repair["cmp"])), fraction=None),
+                dict(kind="limit", price=dict(value=str(repair["price"])), fraction=None)])
+            action["stop"] = dict(kind="price", price=dict(value=str(repair["stop"])), condition=None)
         rows.append(res)
     # Empty actions is a successful non-action classification, distinct from abstention.
     if not rows:

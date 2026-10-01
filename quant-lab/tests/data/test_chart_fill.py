@@ -46,22 +46,22 @@ def llm_row(df):
 def assert_filled(tmp_path):
     _, mv, ex, cp, _ = build(tmp_path, [action(stop=None, tps=[])], text='仿写 BTC 现价100做多。')
     row = llm_row(cp)
-    assert row['stop'] == 91
-    assert [t['level'] for t in row['tps']] == [111, 121]
+    assert row['stop'] == 91000
+    assert [t['level'] for t in row['tps']] == [111000, 121000]
     checks = json.loads(row['checks'])
     assert checks['chart_fill'] == dict(fields=['stop', 'tps'], model='synthetic-vision', version='chart-read-v1')
     assert 'fields_from_chart' in checks['notes']
     assert checks['sl_direction'] and checks['tp_direction']
     assert not any(i['reason'].startswith('evidence_rejected') for i in checks['field_issues'])
     assert checks['action']['stop'] is None
-    assert row['entry']['lo'] == 100
+    assert row['entry']['lo'] == 100000
     edges, adj, _ = linker.build_candidates(cp, mv, ex, plan_source='llm', ingested_at=T0)
     episodes, *_ = lifecycle.build_graph(cp, mv, edges, adj, None, graph_version='chart-test',
                                          plan_source='llm', extracted_event=ex, ingested_at=T0)
     plans = [p for p in episodes['order_plan'] if p is not None]
     assert len(plans) == 1
-    assert plans[0]['stop']['price'] == 91
-    assert [t['level'] for t in plans[0]['tps']] == [111, 121]
+    assert plans[0]['stop']['price'] == 91000
+    assert [t['level'] for t in plans[0]['tps']] == [111000, 121000]
     parser = ex.filter(pl.col('extractor').struct.field('name') == 'parser').row(0, named=True)
     assert parser['stop'] is None and parser['tps'] == []
 
@@ -73,8 +73,8 @@ def test_single_open_chart_fields_reach_order_plan(tmp_path):
 def assert_text_wins(tmp_path):
     _, _, _, cp, _ = build(tmp_path, [action()])
     row = llm_row(cp)
-    assert row['stop'] == 90
-    assert [t['level'] for t in row['tps']] == [110]
+    assert row['stop'] == 90000
+    assert [t['level'] for t in row['tps']] == [110000]
     checks = json.loads(row['checks'])
     assert checks['chart_conflict'] == [dict(field='stop', text='90', chart='91'),
         dict(field='tps', text=[dict(kind='price', level='110')], chart=['111', '121'])]
@@ -118,7 +118,7 @@ def test_final_target_and_one_now_among_other_actions(tmp_path):
                action(time_ref='conditional', stop=None, tps=[]), action(op='add', stop=None, tps=[])]
     _, _, _, cp, _ = build(tmp_path, actions, chart_changes=dict(tps=[], final_target=125))
     rows = cp.filter(pl.col('extractor_name') == 'llm').sort('branch_index').to_dicts()
-    assert rows[0]['tps'][0]['level'] == 125
+    assert rows[0]['tps'][0]['level'] == 125000
     for row in rows[1:]:
         assert row['stop'] is None and row['tps'] == []
         assert 'chart_fill' not in json.loads(row['checks'])
@@ -311,7 +311,7 @@ def test_market_ref_entry_is_not_filled(tmp_path, with_price):
 def test_text_entry_only_records_chart_conflict(tmp_path):
     _, _, _, cp, _ = build(tmp_path, [action()], chart_changes=dict(entry=[99, 101], stop=90, tps=[110]))
     row = llm_row(cp)
-    assert row['entry'] == dict(kind='market_ref', lo=100, hi=100)
+    assert row['entry'] == dict(kind='market_ref', lo=100000, hi=100000)
     checks = json.loads(row['checks'])
     assert checks['chart_conflict'] == [dict(field='entry', text=['100'], chart=['99', '101'])]
     assert 'chart_fill' not in checks

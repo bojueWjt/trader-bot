@@ -30,7 +30,7 @@ from .lake import D12, LayerLedger, Layout, append_quarantine, cum_prev, loss_ro
 from .reasons import Reason
 from .close_stop import parse_close_stop
 
-RULE_VERSION = "tg-lifecycle-v0.6"  # Close-stop mapping participates in frozen graph identity.
+RULE_VERSION = "tg-lifecycle-v0.7"  # Close-stop mapping participates in frozen graph identity.
 HORIZON_S = 7 * 24 * 3600
 
 P_STATES = ("none", "active", "cancelled", "expired")
@@ -183,6 +183,7 @@ def _order_plan(root: dict[str, Any], stop: float | None, tps: list[dict], expir
     stop_plan = {"price": stop, "trigger": "mark"} if stop is not None else None
     checks = json.loads(root.get("checks") or "{}")
     # checks.action keeps the quoted values; a price whose unit was inherited (cx_v2.inherited_prices) is rescaled here.
+    rescale = Decimal(str(checks.get("unit_rescaled", {}).get("factor", 1)))
     factor = {u["field"]: Decimal(u["factor"]) for u in checks.get("unit_inherited", [])}
     if checks.get("schema_version") == 2:
         action = checks.get("action", {})
@@ -194,6 +195,8 @@ def _order_plan(root: dict[str, Any], stop: float | None, tps: list[dict], expir
             entries = []
             for i, level in enumerate(source_entry["levels"]):
                 price = Decimal(level["price"]["value"]) * factor.get(f"entry.levels[{i}].price", 1) if level.get("price") is not None else None
+                if price is not None:
+                    price *= rescale
                 fraction = level.get("fraction")
                 entries.append(dict(kind=level["kind"], price_lo=price, price_hi=price,
                                     fraction=Decimal(fraction["value"]) / 100 if fraction else None,
@@ -202,10 +205,46 @@ def _order_plan(root: dict[str, Any], stop: float | None, tps: list[dict], expir
         if source_stop and source_stop["kind"] == "condition":
             atom = source_stop.get("price")
             level = Decimal(atom["value"]) * factor.get("stop.price", 1) if atom is not None else None
+            if level is not None:
+                level *= rescale
             close_stop = parse_close_stop(source_stop.get("condition"), level)
             stop_plan = None
             if close_stop is not None:
                 stop_plan = {"price": close_stop["level"], "trigger": "close", "timeframe": close_stop["timeframe"]}
+    dropped = []
+    if stop_plan is not None:
+        kept = []
+        for leg in entries:
+            price = leg["price_lo"] if root["side"] == "long" else leg["price_hi"]
+            ok = price is None or (price > stop_plan["price"] if root["side"] == "long" else price < stop_plan["price"])
+            if ok:
+                kept.append(leg)
+            else:
+                dropped.append({"price": str(price), "reason": "beyond_stop"})
+        entries = kept
+    if not entries:
+        return None
+    if dropped:
+        checks["entries_dropped_direction"] = dropped
+    fractions = [leg["fraction"] for leg in entries]
+    if all(f is not None for f in fractions) and sum(fractions) > 0 and sum(fractions) != 1:
+        total = sum(fractions)
+        for leg in entries:
+            leg["fraction"] /= total
+        entries[-1]["fraction"] = Decimal(1) - sum(leg["fraction"] for leg in entries[:-1])
+        checks["fractions_normalized"] = {"total": str(total), "basis": "retained_entries"}
+    priced = [leg["price_hi"] if root["side"] == "long" else leg["price_lo"] for leg in entries if leg["price_lo"] is not None]
+    if priced:
+        edge = max(priced) if root["side"] == "long" else min(priced)
+        kept = []
+        for tp in tps:
+            ok = tp["level"] > edge if root["side"] == "long" else tp["level"] < edge
+            if ok:
+                kept.append(tp)
+            else:
+                checks.setdefault("tps_dropped_direction", []).append({"level": str(tp["level"]), "reason": "wrong_entry_side"})
+        tps = kept
+    root["checks"] = json.dumps(checks, ensure_ascii=False, sort_keys=True)
     return {"instrument_id": root["instrument_id"], "side": root["side"], "entries": entries,
             "stop": stop_plan,
             "tps": [{"level": t["level"], "fraction": t.get("fraction")} for t in tps],

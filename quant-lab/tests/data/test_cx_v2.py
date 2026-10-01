@@ -187,15 +187,16 @@ def test_percent_short_mixed_ladder_fractions_and_ambiguous_basis(tmp_path):
         stop=dict(kind='price', price=number(120), condition=None), tps=[dict(kind='percent', value=number(10, '10%'))])], text)
     row = cp.filter(pl.col('extractor_name') == 'llm').row(0, named=True)
     assert row['tps'] == []
-    assert row['entry_ref'] == Decimal(100)  # Existing direction checks still use their reference.
-    assert any(i['reason'] == 'percent_requires_unambiguous_entry_and_side' for i in json.loads(row['checks'])['mapping_issues'])
+    assert row['entry_ref'] == Decimal(100000)  # Unique mark-based unit restoration.
+    assert json.loads(row['checks'])['tps_dropped_percent']
+    assert json.loads(row['eligibility_by_estimand'])['execution']
     plan = lifecycle._order_plan(row, row['stop'], row['tps'], None)
     assert [e['kind'] for e in plan['entries']] == ['market_ref', 'limit']
     assert [e['fraction'] for e in plan['entries']] == [Decimal('.5')] * 2
     # Single known entry makes the short percent target unambiguous.
     _, _, _, single, _ = v2_lake(tmp_path / 'single', [action(side='short', stop=dict(kind='price', price=number(120), condition=None),
                                                          tps=[dict(kind='percent', value=number(10, '10%'))])], text)
-    assert single.filter(pl.col('extractor_name') == 'llm')['tps'][0][0]['level'] == 90
+    assert single.filter(pl.col('extractor_name') == 'llm')['tps'][0][0]['level'] == 90000
 
 
 def test_reconciled_matches_actions_without_suppressing_other_symbol(tmp_path):
