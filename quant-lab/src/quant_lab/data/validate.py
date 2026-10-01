@@ -120,7 +120,8 @@ def canonicalize_row(r: dict[str, Any], *, registry: InstrumentRegistry) -> tupl
         if source_stop and source_stop["kind"] == "condition":
             mapping_issues.append({"field": "stop", "reason": "condition_not_supported_by_order_plan"})
             stop = None
-        if source_entry and source_entry["kind"] == "ladder" and any(a.get("price") is None for a in source_entry["levels"]):
+        # An unpriced CMP leg is priced from the as-of mark at t_dec in replay (same rule as lifecycle._order_plan); only an unpriced limit is a gap.
+        if source_entry and source_entry["kind"] == "ladder" and any(a.get("price") is None and a.get("kind") != "market_ref" for a in source_entry["levels"]):
             mapping_issues.append({"field": "entry", "reason": "incomplete_ladder"})
         converted_tps = []
         for t in tps:

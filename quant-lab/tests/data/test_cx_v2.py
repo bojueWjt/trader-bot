@@ -248,20 +248,28 @@ def test_zero_percent_is_a_proved_value_not_missing():
 
 
 def test_cmp_legs_and_raw_symbols_reach_an_executable_plan(tmp_path):
-    text = '仿写 $BTC/USDT CMP 和挂单 95 做多；止损 90。'
+    # Prices sit near the synthetic BTC mark so the scale gate does not mask the ladder rule.
+    text = '仿写 $BTC/USDT CMP 和挂单 61000 做多；止损 60000。'
     entry = dict(kind='ladder', price=None, lo=None, hi=None, levels=[
-        dict(kind='market_ref', price=None, fraction=None), dict(kind='limit', price=number(95), fraction=None)])
-    _, _, _, cp, _ = v2_lake(tmp_path, [action(symbol_raw='$BTC/USDT', entry=entry, tps=[])], text)
+        dict(kind='market_ref', price=None, fraction=None), dict(kind='limit', price=number(61000), fraction=None)])
+    stop = dict(kind='price', price=number(60000), condition=None)
+    _, _, _, cp, _ = v2_lake(tmp_path, [action(symbol_raw='$BTC/USDT', entry=entry, stop=stop, tps=[])], text)
     row = cp.filter(pl.col('extractor_name') == 'llm').row(0, named=True)
     assert row['symbol_raw'] == 'BTC' and row['instrument_id'] is not None
     plan = lifecycle._order_plan(row, row['stop'], row['tps'], None)
     # The CMP leg is priced from the as-of mark at t_dec in replay; the limit leg keeps its quoted price.
-    assert [(e['kind'], e['price_lo']) for e in plan['entries']] == [('market_ref', None), ('limit', Decimal(95))]
+    assert [(e['kind'], e['price_lo']) for e in plan['entries']] == [('market_ref', None), ('limit', Decimal(61000))]
+    assert row['scale_gate'] == 'ok'
+    # A plan is only executable if the canonical layer agrees: an unpriced CMP leg is not an incomplete ladder.
+    assert 'mapping_issues' not in json.loads(row['checks'])
+    assert json.loads(row['eligibility_by_estimand'])['execution']
     # An unpriced limit leg is still not guessable.
     entry['levels'][1]['price'] = None
-    _, _, _, gap, _ = v2_lake(tmp_path / 'gap', [action(entry=entry, tps=[])], text)
+    _, _, _, gap, _ = v2_lake(tmp_path / 'gap', [action(entry=entry, stop=stop, tps=[])], text)
     gap_row = gap.filter(pl.col('extractor_name') == 'llm').row(0, named=True)
     assert lifecycle._order_plan(gap_row, gap_row['stop'], gap_row['tps'], None) is None
+    assert json.loads(gap_row['checks'])['mapping_issues'] == [dict(field='entry', reason='incomplete_ladder')]
+    assert not json.loads(gap_row['eligibility_by_estimand'])['execution']
 
 
 def test_numberless_cmp_open_is_a_market_entry_not_a_missing_one(tmp_path):
