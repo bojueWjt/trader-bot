@@ -395,6 +395,12 @@ POLICIES["base-v1-timeexit-be1"] = POLICIES["base-v1-timeexit"].model_copy(
     update={"version": "base-v1-timeexit-be1", "breakeven_after_first_tp": True})
 POLICIES["base-v1-timeexit-w14-be1"] = POLICIES["base-v1-timeexit-w14"].model_copy(
     update={"version": "base-v1-timeexit-w14-be1", "breakeven_after_first_tp": True})
+# 拿到止盈或止损为止：波段单常要数周才走完（如 Titan TAO 2026-09-03 第 18 天才到止盈2/3）。观察窗 = 入场 1 天 + 持仓 59 天，
+# 本策略的安全上限相应放到 60 天（上限按策略设置，旧策略不变）。
+POLICIES["base-v1-timeexit-w60"] = POLICIES["base-v1-timeexit"].model_copy(
+    update={"version": "base-v1-timeexit-w60", "research_horizon_s": 59 * 86400, "max_horizon_s": 60 * 86400})
+POLICIES["base-v1-timeexit-w60-be1"] = POLICIES["base-v1-timeexit-be1"].model_copy(
+    update={"version": "base-v1-timeexit-w60-be1", "research_horizon_s": 59 * 86400, "max_horizon_s": 60 * 86400})
 
 
 POLICY_HASH_REGISTRY = Path(__file__).with_name("policy_hashes.json")   # S12：version→hash 跨修订登记（改内容必须改版本名并更新登记）

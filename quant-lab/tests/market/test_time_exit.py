@@ -188,3 +188,17 @@ def test_w14_sensitivity_builds_requests_within_the_safety_cap():
                               policy_version=pol.version, policy_hash=pol.content_hash, risk_budget=D(10), market_manifest="synthetic")
         windows[pol.version] = req.horizon_end - T0
     assert windows == {"base-v1-timeexit": dt.timedelta(days=6), "base-v1-timeexit-w14": dt.timedelta(days=14)}
+
+
+
+def test_w60_policies_hold_until_done_within_their_own_cap():
+    plan = c.OrderPlan(instrument_id="BTCUSDT-PERP.BINANCE-UM", side="long", entries=[c.Entry(kind="limit", price_lo=D(100), price_hi=D(100))],
+                       stop=c.Stop(price=D(95)), tps=[], sizing=c.Sizing(mode="risk_budget"), expiry=c.Expiry(entry_ttl_s=None))
+    for version, be in (("base-v1-timeexit-w60", False), ("base-v1-timeexit-w60-be1", True)):
+        pol = c.resolve_policy(version)
+        assert pol.max_horizon_s == 60 * 86400 and pol.time_exit_at_horizon and pol.breakeven_after_first_tp is be
+        req = c.build_request({"order_plan": plan, "episode_id": "w", "graph_version": "g", "decision_snapshot_hash": "d", "t_dec": T0},
+                              policy_version=version, policy_hash=pol.content_hash, risk_budget=D(10), market_manifest="synthetic")
+        assert req.horizon_end - T0 == dt.timedelta(days=60)
+    # Other policies keep the 14-day safety cap.
+    assert c.resolve_policy("base-v1-timeexit-w14").max_horizon_s == 14 * 86400
