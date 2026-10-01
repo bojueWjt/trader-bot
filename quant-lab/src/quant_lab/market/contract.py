@@ -383,9 +383,10 @@ POLICIES: dict[str, ExecutionPolicy] = {
 }
 POLICIES["base-v1-timeexit"] = POLICIES["base-v1"].model_copy(
     update={"version": "base-v1-timeexit", "time_exit_at_horizon": True})
-# 敏感性：与 base-v1-timeexit 只差研究期（14 天），给中线信号的到期平仓留足时间。
-POLICIES["base-v1-timeexit-14d"] = POLICIES["base-v1-timeexit"].model_copy(
-    update={"version": "base-v1-timeexit-14d", "research_horizon_s": 14 * 86400})
+# 敏感性：与 base-v1-timeexit 只差研究期，给中线信号的到期平仓留足时间。观察窗 = 入场等待 1 天 + 持仓 13 天
+# = max_horizon_s 安全上限 14 天（持仓 14 天会让每单超限被拒）。
+POLICIES["base-v1-timeexit-w14"] = POLICIES["base-v1-timeexit"].model_copy(
+    update={"version": "base-v1-timeexit-w14", "research_horizon_s": 13 * 86400})
 
 
 POLICY_HASH_REGISTRY = Path(__file__).with_name("policy_hashes.json")   # S12：version→hash 跨修订登记（改内容必须改版本名并更新登记）

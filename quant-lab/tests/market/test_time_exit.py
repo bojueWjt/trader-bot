@@ -175,9 +175,16 @@ def test_kernel_build_id_tracks_source_for_every_policy():
     assert kernel_a.kernel_build_id(False) == kernel_a.kernel_build_id(True)
 
 
-def test_fourteen_day_sensitivity_differs_only_in_horizon():
-    from quant_lab.market.contract import resolve_policy
-    base, long = resolve_policy("base-v1-timeexit"), resolve_policy("base-v1-timeexit-14d")
-    assert long.research_horizon_s == 14 * 86400 and long.time_exit_at_horizon
+
+def test_w14_sensitivity_builds_requests_within_the_safety_cap():
+    # Without a caller horizon the window is derived from the policy: entry TTL 1 day + 13 days held = the 14-day cap.
+    base, long = c.resolve_policy("base-v1-timeexit"), c.resolve_policy("base-v1-timeexit-w14")
     assert long.model_dump(exclude={"version", "research_horizon_s"}) == base.model_dump(exclude={"version", "research_horizon_s"})
-    assert long.content_hash != base.content_hash
+    plan = c.OrderPlan(instrument_id="BTCUSDT-PERP.BINANCE-UM", side="long", entries=[c.Entry(kind="limit", price_lo=D(100), price_hi=D(100))],
+                       stop=c.Stop(price=D(95)), tps=[], sizing=c.Sizing(mode="risk_budget"), expiry=c.Expiry(entry_ttl_s=None))
+    windows = {}
+    for pol in (base, long):
+        req = c.build_request({"order_plan": plan, "episode_id": "w", "graph_version": "g", "decision_snapshot_hash": "d", "t_dec": T0},
+                              policy_version=pol.version, policy_hash=pol.content_hash, risk_budget=D(10), market_manifest="synthetic")
+        windows[pol.version] = req.horizon_end - T0
+    assert windows == {"base-v1-timeexit": dt.timedelta(days=6), "base-v1-timeexit-w14": dt.timedelta(days=14)}
