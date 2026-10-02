@@ -17,7 +17,7 @@ import re
 
 from quant_lab.market.contract import ContractError, D, RATIO_QUANTUM
 
-PROFILE_VERSION = "trader-v3-live-v2"   # v2: SL/TP 0.1% only with fuzzy wording, like entries
+PROFILE_VERSION = "trader-v3-live-v3"   # v2: SL/TP 0.1% only with fuzzy wording; v3: wording attached to the price itself, no label needed
 SOURCES = [
     "hermes-profile/skills/trading/v3-trader/SKILL.md:19",
     "hermes-profile/skills/trading/v3-trader/SKILL.md:27",
@@ -39,8 +39,20 @@ _ENTRY = re.compile(r"入场|进场|开多|开空|做多|做空|多单|空单|(?
 _STOP = re.compile(r"止损|停损|失效|(?<!\w)(?:sl|stop)(?!\w)", re.I)
 _TP = re.compile(r"止盈|目标|(?<!\w)(?:tp|target)\d*(?!\w)", re.I)
 # 让点只看措辞（用户约定）：入场、止损、止盈的点位带这些字才让 0.1%；精确点位原值执行。
-_FUZZY = re.compile(r"附近|左右|大约|(?<![合预条签公解履邀])约(?![定束会翰])")
-_BREAKOUT = re.compile(r"略破|小幅突破|稍微超过|小幅跌破|小幅涨破|一点")
+_FUZZY = re.compile(r"附近|左右|大约|(?<![合预条签公解履邀])约(?![定束会翰]|\s*\d+(?:\.\d+)?\s*%)")
+_BREAKOUT = re.compile(r"略破|小幅突破|稍微超过|小幅跌破|小幅涨破|稍微跌破|稍微涨破")   # 「一点」太常见，只认挂在止损价后面的
+# 不靠标签的写法（「现价:58800附近」「等106660附近多」「约$114,150」「2810-2830附近」「875附近」=87500）：
+# 模糊词直接挂在价格数字上。一组价格 = 一个或多个用区间/并列连接的数字（可带 $、千分位、万/k）；百分数不算价格。
+_NUM = r"\d+(?:,\d{3})*(?:\.\d+)?"
+_UNIT = r"(?:万|千|[kKwW](?![A-Za-z]))"
+_GROUP = re.compile(rf"(?<![A-Za-z0-9_.]){_NUM}\s*{_UNIT}?(?:\s*(?:-|–|—|~|～|到|至|、|，|和|及|/)\s*\$?\s*{_NUM}\s*{_UNIT}?)*(?![A-Za-z0-9_.%])")
+_SCALES = (1, 100, 1000, 10000)   # 写法简写：875→87500、123→123000、6.9万→69000
+_CURRENCY = r"(?:美元|美金|USDT|USD|刀|块|点(?!位)|\$|U(?![A-Za-z]))"
+_LEVEL_NOUN = r"(?:支撑|阻力|压力|区域|区间|位置|价位|点位|一线|关口|大关)"
+_NEAR_AFTER = re.compile(rf"\s*{_CURRENCY}?\s*[)）]?\s*{_LEVEL_NOUN}?\s*(?:附近|左右|上下|一带)")
+_NEAR_BEFORE = re.compile(r"(?:大约|大概|(?<![合预条签公解履邀])约)\s*(?:在|为|是)?\s*\$?\s*$")
+_BREAK_BEFORE = re.compile(r"(?:略破|小幅突破|稍微超过|小幅跌破|小幅涨破|稍微跌破|稍微涨破)\s*\$?\s*$")
+_BREAK_AFTER = re.compile(rf"\s*{_UNIT}?\s*{_CURRENCY}?\s*一点")
 
 
 def _sentences(text: str) -> list[tuple[int, str]]:
@@ -56,6 +68,10 @@ def _sentences(text: str) -> list[tuple[int, str]]:
         for sentence in re.split(r"[;；。!?！？]", line):
             labels = list(_ROLE.finditer(sentence))
             start, role = 0, None
+            if labels and labels[0].start() > 0:
+                # Text before the first label is its own clause: 「52340附近多（止损51200）」 must not make the stop fuzzy.
+                clauses.append((line_no, sentence[:labels[0].start()]))
+                start = labels[0].start()
             for match in labels:
                 if _ENTRY.fullmatch(match.group()):
                     current = "entry"
@@ -72,50 +88,99 @@ def _sentences(text: str) -> list[tuple[int, str]]:
     return clauses
 
 
+def _mentions(clause: str) -> list[tuple[set, bool, bool]]:
+    """Price groups in a clause: candidate values and whether approx / breakout wording sits on the number."""
+    out = []
+    for m in _GROUP.finditer(clause):
+        raw = [D(x.replace(",", "")) for x in re.findall(_NUM, m.group())]
+        before = clause[:m.start()]
+        out.append(({v * k for v in raw for k in _SCALES},
+                     bool(_NEAR_AFTER.match(clause, m.end()) or _NEAR_BEFORE.search(before)),
+                     bool(_BREAK_BEFORE.search(before) or _BREAK_AFTER.match(clause, m.end()))))
+    return out
+
+
 def wording_flags(plan: dict, text: str | None) -> dict:
     """Price-anchored, line-based matching; missing/ambiguous evidence stays exact.
 
-    Only clauses with the plan's prices and an explicit role qualify. A bare
-    number or prose elsewhere in the root message cannot enable fuzzy treatment.
+    A labelled clause (入场/止损/止盈…) holding the level decides it; two such
+    clauses are ambiguous and stay exact. Without a labelled clause, the fuzzy
+    word must sit on the price itself somewhere in the message (「现价:58800附近」).
+    Lines naming another symbol, and openings on the other side, never count.
     """
-    clauses = _sentences(text or "")
-    lines = (text or "").splitlines()
+    text = text or ""
+    lines = text.splitlines()
     symbol = plan["instrument_id"].split("-", 1)[0]
     base_symbol = re.sub(r"(?:USDT|USDC|BUSD)$", "", symbol)
-    prices = {D(e[key]) for e in plan["entries"] for key in ("price_lo", "price_hi")}
-    stop = D(plan["stop"]["price"])
-    targets = [D(tp["level"]) for tp in plan.get("tps", [])]
-    entry_candidates, stop_candidates = [], []
-    target_candidates = [[] for _ in targets]
-    for line_no, clause in clauses:
-        # Explicit symbols on the same line must identify this opening. Labels
-        # are not symbols; an unrelated ETH opening at BTC's price is no evidence.
-        tokens = set(re.findall(r"(?<![A-Za-z0-9])[A-Z][A-Z0-9]{1,14}(?![A-Za-z0-9])", lines[line_no - 1]))
+    long = plan["side"] == "long"
+    opposite = r"开空|做空|空单|\bshort\b" if long else r"开多|做多|多单|\blong\b"
+    same = r"开多|做多|多单|\blong\b" if long else r"开空|做空|空单|\bshort\b"
+
+    def symbol_ok(line):
+        # Labels are not symbols; an unrelated ETH opening at BTC's price is no evidence.
+        tokens = set(re.findall(r"(?<![A-Za-z0-9])[A-Z][A-Z0-9]{1,14}(?![A-Za-z0-9])", line))
         tokens = {t for t in tokens if not re.fullmatch(r"(?:SL|TP|TARGET)\d*|ENTRY|STOP|LONG|SHORT|USDT|USDC", t)}
-        if tokens and not tokens.issubset({symbol, base_symbol}):
+        return not tokens or tokens.issubset({symbol, base_symbol})
+
+    def side_ok(line):
+        # Label-free lines say the side with a bare 多/空 (「附近多」「附近空」); the opposite one disqualifies the line.
+        against = re.search(opposite, line, re.I) or ("空" if long else "多") in line
+        along = re.search(same, line, re.I) or ("多" if long else "空") in line
+        return not (against and not along)
+
+    clauses = []
+    for line_no, clause in _sentences(text):
+        if not symbol_ok(lines[line_no - 1]):
             continue
-        raw = {D(m.group().replace(",", "")) for m in _NUMBER.finditer(clause)}
-        # Plans carry scaled prices ("6.14-6.19万" -> 61400/61900); every plan price must still match one written number.
-        numbers = raw | {n * 1000 for n in raw} | {n * 10000 for n in raw}
-        if _ENTRY.search(clause) and prices.issubset(numbers):
-            opposite = r"开空|做空|空单|\bshort\b" if plan["side"] == "long" else r"开多|做多|多单|\blong\b"
-            if not re.search(opposite, clause, re.I):
-                entry_candidates.append((line_no, bool(_FUZZY.search(clause))))
-        if _STOP.search(clause) and stop in numbers:
-            stop_candidates.append((line_no, bool(_BREAKOUT.search(clause)), bool(_FUZZY.search(clause))))
-        if _TP.search(clause) and not _ENTRY.search(clause) and not _STOP.search(clause):
-            for found, level in zip(target_candidates, targets):
-                if level in numbers:
-                    found.append(bool(_FUZZY.search(clause)))
-    entry = entry_candidates[0] if len(entry_candidates) == 1 else None
-    sl = stop_candidates[0] if len(stop_candidates) == 1 else None
+        role = "entry" if _ENTRY.search(clause) else "stop" if _STOP.search(clause) else "tp" if _TP.search(clause) else None
+        numbers = {D(m.group().replace(",", "")) * k for m in _NUMBER.finditer(clause) for k in _SCALES}
+        clauses.append({"line": line_no, "text": clause, "role": role, "numbers": numbers, "mentions": _mentions(clause),
+                        "side_ok": not re.search(opposite, clause, re.I), "line_side_ok": side_ok(lines[line_no - 1])})
+
+    def level(prices: set, role: str) -> tuple[bool, bool, int | None]:
+        """(fuzzy, breakout, line) for one level written as these prices."""
+        labelled = [c for c in clauses if c["role"] == role and prices <= c["numbers"] and (role != "entry" or c["side_ok"])]
+        if len(labelled) > 1:
+            return False, False, None
+        if labelled:
+            c = labelled[0]
+            # Only wording on this number counts: a run-on clause may carry another price's 附近,
+            # and one target clause may list several levels.
+            fuzzy = any(prices & values and near for values, near, _ in c["mentions"])
+            breakout = role == "stop" and (bool(_BREAKOUT.search(c["text"]))
+                                           or any(prices & values and broke for values, _, broke in c["mentions"]))
+            return fuzzy or breakout, breakout, c["line"] if fuzzy or breakout else None
+        pool = [(c["line"], m) for c in clauses if role != "entry" or c["line_side_ok"] for m in c["mentions"]]
+        hits = [[(line, m) for line, m in pool if price in m[0]] for price in prices]
+        fuzzy = bool(hits) and all(any(m[1] for _, m in found) for found in hits)
+        breakout = role == "stop" and bool(hits) and all(any(m[2] for _, m in found) for found in hits)
+        line = next((line for found in hits for line, m in found if m[1] or m[2]), None)
+        return fuzzy or breakout, breakout, line if fuzzy or breakout else None
+
+    legs = [{D(e["price_lo"]), D(e["price_hi"] if e.get("price_hi") is not None else e["price_lo"])} for e in plan["entries"]]
+    together = [c for c in clauses if c["role"] == "entry" and set().union(*legs) <= c["numbers"] and c["side_ok"]]
+    entry_line = None
+    if len(together) == 1:
+        # One opening clause holds every leg (「入场100和110附近」「入场：6.85-6.9附近」): its wording applies to all.
+        fuzzy, _, entry_line = level(set().union(*legs), "entry")
+        entry_legs = [fuzzy] * len(legs)
+    elif together:
+        entry_legs = [False] * len(legs)
+    else:
+        entry_legs = []
+        for prices in legs:
+            fuzzy, _, line = level(prices, "entry")
+            entry_legs.append(fuzzy)
+            entry_line = entry_line or line
+    stop_fuzzy, stop_breakout, stop_line = level({D(plan["stop"]["price"])}, "stop")
     return {
-        "entry_fuzzy": entry is not None and entry[1],
-        "stop_fuzzy": sl is not None and (sl[1] or sl[2]),
-        "stop_breakout": sl is not None and sl[1],
-        "tp_fuzzy": [len(found) == 1 and found[0] for found in target_candidates],
-        "entry_line": entry[0] if entry is not None else None,
-        "stop_line": sl[0] if sl is not None else None,
+        "entry_fuzzy": any(entry_legs),
+        "entry_legs_fuzzy": entry_legs,
+        "stop_fuzzy": stop_fuzzy,
+        "stop_breakout": stop_breakout,
+        "tp_fuzzy": [level({D(tp["level"])}, "tp")[0] for tp in plan.get("tps", [])],
+        "entry_line": entry_line if any(entry_legs) else (together[0]["line"] if len(together) == 1 else None),
+        "stop_line": stop_line,
     }
 
 
@@ -177,13 +242,12 @@ def apply_live_profile(plan: dict, text: str | None, tick_size: Decimal, *, enab
         tp["level"] = snapped(price, upward=not long)
 
     entries, allocation = [], []
-    factor = Decimal(1)
-    if flags["entry_fuzzy"]:
-        factor = Decimal("1.001") if long else Decimal("0.999")
-    for entry in plan["entries"]:
+    for entry, fuzzy in zip(plan["entries"], flags["entry_legs_fuzzy"]):
         if entry["kind"] == "market_ref":
             entries.append(deepcopy(entry))
             continue
+        # 每档入场看自己的措辞：「现价3680附近…补仓3740」只让第一档。
+        factor = (Decimal("1.001") if long else Decimal("0.999")) if fuzzy else Decimal(1)
         lo, hi = D(entry["price_lo"]) * factor, D(entry["price_hi"]) * factor
         if entry["kind"] == "ladder":
             near, far = (hi, lo) if long else (lo, hi)
@@ -192,11 +256,11 @@ def apply_live_profile(plan: dict, text: str | None, tick_size: Decimal, *, enab
                 entries.append(dict(entry, kind="limit", price_lo=price, price_hi=price))
                 allocation.append({"tranche": name, "price": price, "risk_share": risk_share})
             counts["zone_ladder"] += 1
-            counts["entry_concession"] += 3 if flags["entry_fuzzy"] else 0
+            counts["entry_concession"] += 3 if fuzzy else 0
         else:
             price = snapped(lo, upward=long)
             entries.append(dict(entry, price_lo=price, price_hi=price))
-            counts["entry_concession"] += int(flags["entry_fuzzy"])
+            counts["entry_concession"] += int(fuzzy)
 
     # One zone is the supported production shape; mixed zones need a separate
     # allocation contract and must not silently blend risk and quantity shares.
