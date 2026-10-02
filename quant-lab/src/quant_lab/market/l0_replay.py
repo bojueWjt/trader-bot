@@ -1,7 +1,7 @@
 """单老师 L0 描述性重放，放在 market：只编排 G1→G2，不改变 G3 研究代码摘要。
 
 python -m quant_lab.market.l0_replay --graph-version GV --channel ID --out DIR
-行情缺省 DATA_ROOT/lake/market；不联网、不解释原文、不改执行契约或补行情/规则。
+行情缺省 DATA_ROOT/lake/market；不联网、不补行情/规则。live 策略只按根原文措辞变换执行计划副本。
 G2 仍要求已体检分区（manifest.check_status）及 instrument_rules 历史规则；缺失会计入覆盖排除。
 """
 from __future__ import annotations
@@ -14,12 +14,15 @@ from pathlib import Path
 
 import polars as pl
 
-from quant_lab.data.api import load_episodes
+from quant_lab.data.api import load_episodes, load_message_texts
 from quant_lab.data.graph import resolve_alias
 from quant_lab.data.lake import Layout, write_parquet_atomic
 from quant_lab.data.sources import canonical_peer_id
-from quant_lab.market.contract import EVIDENCE_CENSORS, ContractError, build_request, resolve_policy
+from quant_lab.market.contract import EVIDENCE_CENSORS, ContractError, build_request, canonical_json, resolve_policy
 from quant_lab.market.execution import load_market_from_lake, simulate_batch
+from quant_lab.market.live_profile import PROFILE_VERSION, RULES, SOURCES, apply_live_profile
+from quant_lab.market.partition_check import load_rules, rule_at
+from quant_lab.market.vision import LakePaths
 
 
 def _covered(row: dict) -> bool:
@@ -115,6 +118,21 @@ def resolve_market_refs(row: dict, marks) -> tuple[dict | None, str | None]:
     return dict(row, order_plan=dict(plan, entries=fixed)), None
 
 
+def prepare_execution(row: dict, *, policy, text: str | None = None, tick_size: Decimal | None = None) -> tuple[dict, dict | None]:
+    """Apply the optional profile before build_request, preserving the source row."""
+    if not policy.live_execution_profile:
+        return row, None
+    if tick_size is None:
+        audit = {"profile": PROFILE_VERSION, "status": "rules_unresolved", "rule_counts": dict.fromkeys(RULES, 0),
+                 "source_version_id": row.get("root_source_version_id"), "root_text_resolved": text is not None,
+                 "execution_plan": row["order_plan"]}
+        return row, audit
+    plan, audit = apply_live_profile(row["order_plan"], text, tick_size)
+    audit["source_version_id"] = row.get("root_source_version_id")
+    audit["root_text_resolved"] = text is not None
+    return dict(row, order_plan=plan), audit
+
+
 def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: str | Path | None = None,
            policy_version: str = "base-v1", risk_budget: Decimal = Decimal("100")) -> dict:
     layout = Layout.from_root(None)
@@ -145,6 +163,10 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
     from quant_lab.data.market_lake import LakeMarket
     marks = LakeMarket(lake)
     requests, replay_exclusions, market_ref_resolved, stale_quote_limits = [], Counter(), [], []
+    live_records, rule_cache = {}, {}
+    root_texts = {}
+    if policy.live_execution_profile:
+        root_texts = load_message_texts(episodes["root_source_version_id"].to_list())
     for row in episodes.iter_rows(named=True):
         fixed, why = resolve_market_refs(row, marks)
         if fixed is None:
@@ -163,9 +185,26 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
             replay_exclusions["PLAN_NO_STOP"] += 1
             continue
         try:
-            requests.append(build_request(fixed, policy_version=policy.version, policy_hash=policy.content_hash,
+            execution_row, audit = fixed, None
+            if policy.live_execution_profile:
+                inst = fixed["instrument_id"]
+                if inst not in rule_cache:
+                    rule_cache[inst] = load_rules(LakePaths(lake), inst)
+                # Live variants have latency_s=0. Use only rules known at the
+                # decision, just as market_ref uses the decision's as-of mark.
+                rule = rule_at(rule_cache[inst], inst, fixed["t_dec"])
+                tick = None
+                if rule is not None and rule.get("status") == "TRADING" and rule.get("tick_size") is not None:
+                    value = Decimal(str(rule["tick_size"]))
+                    if value.is_finite() and value > 0:
+                        tick = value
+                execution_row, audit = prepare_execution(fixed, policy=policy,
+                    text=root_texts.get(row["root_source_version_id"]), tick_size=tick)
+            requests.append(build_request(execution_row, policy_version=policy.version, policy_hash=policy.content_hash,
                                           risk_budget=risk_budget, market_manifest="l0-active-silver",
                                           cost_scenario="base", path_scenario="primary"))
+            if audit is not None:
+                live_records[row["episode_id"]] = audit
         except (ContractError, ValueError) as exc:   # 单笔计划不合契约：记原因码继续，不让整批中断
             replay_exclusions[f"PLAN_CONTRACT_INVALID:{type(exc).__name__}"] += 1
     market_hashes = {}
@@ -185,6 +224,9 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
         pl.col("episode_id").is_in(market_ref_resolved).alias("market_ref_resolved"),   # 参考价由 t_dec as-of 标记价补出
         pl.col("episode_id").is_in(stale_quote_limits).alias("stale_quote_as_limit"),   # 过时现价改为报价处限价挂单
     ).sort(["t_dec", "episode_id"])
+    if policy.live_execution_profile:
+        table = table.with_columns(pl.Series("live_execution_json",
+            [canonical_json(live_records[eid]) for eid in table["episode_id"]], dtype=pl.String))
     report = {
         "claim_status": "descriptive_only", "graph_version": graph_version, "channel": channel,
         "kernel": "A", "policy_version": policy.version, "policy_hash": policy.content_hash,
@@ -208,6 +250,16 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
                                "note": "全部市价腿（含通过 0.25R 报价门的现价腿），参考价取 t_dec 时 as-of 标记价，仅用于定仓；成交由内核在 t_start 按市价撮合"},
         **summarize(table),
     }
+    if policy.live_execution_profile:
+        report["live_execution_profile"] = {
+            "profile": PROFILE_VERSION, "sources": SOURCES,
+            "n_applied": sum(a["status"] == "applied" for a in live_records.values()),
+            "n_rules_unresolved": sum(a["status"] == "rules_unresolved" for a in live_records.values()),
+            "n_root_text_unresolved": sum(a.get("root_text_resolved") is False for a in live_records.values()),
+            "rule_counts": {rule: sum(a["rule_counts"][rule] for a in live_records.values()) for rule in RULES},
+            "count_units": "成功构造请求：入场/止盈按腿，止损按计划，zone/双明确点位按组，tick 按改变的价格",
+            "allocation": "zone: qty ∝ risk_share / stop_distance；双明确点位: qty ∝ 1 / price；总风险和 lot 取整沿用内核 A",
+        }
     target = Path(out)
     target.mkdir(parents=True, exist_ok=True)
     write_parquet_atomic(table, target / "trades.parquet")
@@ -222,6 +274,9 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
     # 只输出由数值、身份与原因码组成的白名单字段，禁止拷贝消息原文。
     for key in ("overall", "by", "g1_exclusions", "censor_counts", "coverage_failure_counts", "cumulative_R"):
         lines.extend(["", f"### {key}", "", "```json", json.dumps(report[key], ensure_ascii=False, indent=2), "```"])
+    if policy.live_execution_profile:
+        lines.extend(["", "### live_execution_profile", "", "```json",
+                      json.dumps(report["live_execution_profile"], ensure_ascii=False, indent=2), "```"])
     (target / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return report
 

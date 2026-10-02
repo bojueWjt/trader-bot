@@ -1,0 +1,75 @@
+{
+  "baseline": "git show HEAD:quant-lab/src/quant_lab/market/l0_replay.py",
+  "files": {
+    "base-v1": {
+      "trades.parquet": {
+        "byte_identical": true,
+        "sha256": "9b22d34524726768c6f180e12673a865ba1ca4caa16e90f1750f8d47ac01b93d"
+      },
+      "summary.json": {
+        "byte_identical": true,
+        "sha256": "5ee357f3d3a17b3388f2d01f402670a8a82f81421fd4a079829b61133f36ed03"
+      },
+      "summary.md": {
+        "byte_identical": true,
+        "sha256": "9d7b6d604a99b235787cfcc28f79940d52ad0414e89393d801c6650a0b323c65"
+      }
+    },
+    "base-v1-timeexit": {
+      "trades.parquet": {
+        "byte_identical": true,
+        "sha256": "57b849a130a1311a2cafa7f339d342c9febaf71a5460175c17294b7b447bcc04"
+      },
+      "summary.json": {
+        "byte_identical": true,
+        "sha256": "9c86252bf451f9ef71ab99191e540e2b3c9d0374b5772baa495438933cdf1111"
+      },
+      "summary.md": {
+        "byte_identical": true,
+        "sha256": "9558eb6d97d6b9c7e5a54eb5ba55bb11028c36f4aa85e692325314717ba3861d"
+      }
+    },
+    "base-v1-timeexit-be1": {
+      "trades.parquet": {
+        "byte_identical": true,
+        "sha256": "d3abe9d308f21c00572418afddfc3c1b7a135eea86757a59fb97336dc1bf12d9"
+      },
+      "summary.json": {
+        "byte_identical": true,
+        "sha256": "cd0af88ffa1ee0a16ab7650d1697782ca24bb409af59a476bf3212eeab1e05ff"
+      },
+      "summary.md": {
+        "byte_identical": true,
+        "sha256": "be4fdf06f2fd7ea95048cd22bac324dd551b397775007dd0a3c7a105bc74e756"
+      }
+    },
+    "base-v1-timeexit-w60": {
+      "trades.parquet": {
+        "byte_identical": true,
+        "sha256": "bcd5a3f7903eb4bfb522a87098633c12cc74b4351e7d3c159edeeab599bad0d5"
+      },
+      "summary.json": {
+        "byte_identical": true,
+        "sha256": "dd072408c9b0f21342b0892f19402aa29155e4045dc3b9ee2757ade3ed428374"
+      },
+      "summary.md": {
+        "byte_identical": true,
+        "sha256": "ef9d0eb20958c92a9912a3feaa932f7e34760aa204e902bb6ad2b3b9d27b92af"
+      }
+    },
+    "base-v1-timeexit-w60-be1": {
+      "trades.parquet": {
+        "byte_identical": true,
+        "sha256": "92979fbcb5491ea7c3fc9d4e1d4f55a9307dc7aa5cdec24415ddfa5a8f58721c"
+      },
+      "summary.json": {
+        "byte_identical": true,
+        "sha256": "c6895e00ec9792327fb45422b6d159b0fa1177d5ad168250c12d9846afc8df77"
+      },
+      "summary.md": {
+        "byte_identical": true,
+        "sha256": "d747e4fafbc49ac6c4bba58d091437038e8f7012b0907d939f10f07a30ef7c5e"
+      }
+    }
+  }
+}

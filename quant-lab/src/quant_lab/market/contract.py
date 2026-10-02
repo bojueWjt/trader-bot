@@ -15,6 +15,7 @@
 - 观察窗或持仓上限结束仍有仓：旧策略无 closed，censor_reason=LABEL_RIGHT_CENSORED，net_pnl/net_R=null；
   仅 base-v1-timeexit 在行情完整时按市价平余仓，closed(reason=time_exit)，net_pnl/net_R 为已实现值。
 - breakeven_after_first_tp 为 false 时不进入政策内容；为 true 时，首次实际止盈成交且余仓非零，把存活 sl-0 改到当前均价并只按 mark 触发一次。计划止损与 risk_budget 分母不变。
+- live_execution_profile 为 false 时不进入政策内容。为 true 时，L0 在构造请求前按 trader-v3 实盘口径改执行计划；内核撮合与定量公式不变。
 """
 from __future__ import annotations
 
@@ -340,6 +341,7 @@ class ExecutionPolicy(_Model):
     # 底层排除默认值；model_dump 仅为启用策略显式写出 true，保留旧策略字节内容。
     time_exit_at_horizon: bool = Field(default=False, exclude=True)
     breakeven_after_first_tp: bool = Field(default=False, exclude=True)
+    live_execution_profile: bool = Field(default=False, exclude=True)
 
     def model_dump(self, *args, **kwargs):
         payload = super().model_dump(*args, **kwargs)
@@ -347,6 +349,8 @@ class ExecutionPolicy(_Model):
             payload["time_exit_at_horizon"] = True
         if self.breakeven_after_first_tp:
             payload["breakeven_after_first_tp"] = True
+        if self.live_execution_profile:
+            payload["live_execution_profile"] = True
         return payload
 
     @field_validator("latency_s")
@@ -402,6 +406,15 @@ POLICIES["base-v1-timeexit-w60"] = POLICIES["base-v1-timeexit"].model_copy(
     update={"version": "base-v1-timeexit-w60", "research_horizon_s": 59 * 86400, "max_horizon_s": 60 * 86400})
 POLICIES["base-v1-timeexit-w60-be1"] = POLICIES["base-v1-timeexit-be1"].model_copy(
     update={"version": "base-v1-timeexit-w60-be1", "research_horizon_s": 59 * 86400, "max_horizon_s": 60 * 86400})
+# 与上面对应策略只差版本名和 live_execution_profile。false 不进 dump，故旧哈希不变。
+POLICIES["base-v1-timeexit-live"] = POLICIES["base-v1-timeexit"].model_copy(
+    update={"version": "base-v1-timeexit-live", "live_execution_profile": True})
+POLICIES["base-v1-timeexit-be1-live"] = POLICIES["base-v1-timeexit-be1"].model_copy(
+    update={"version": "base-v1-timeexit-be1-live", "live_execution_profile": True})
+POLICIES["base-v1-timeexit-w60-live"] = POLICIES["base-v1-timeexit-w60"].model_copy(
+    update={"version": "base-v1-timeexit-w60-live", "live_execution_profile": True})
+POLICIES["base-v1-timeexit-w60-be1-live"] = POLICIES["base-v1-timeexit-w60-be1"].model_copy(
+    update={"version": "base-v1-timeexit-w60-be1-live", "live_execution_profile": True})
 
 
 POLICY_HASH_REGISTRY = Path(__file__).with_name("policy_hashes.json")   # S12：version→hash 跨修订登记（改内容必须改版本名并更新登记）
