@@ -17,7 +17,7 @@ import re
 
 from quant_lab.market.contract import ContractError, D, RATIO_QUANTUM
 
-PROFILE_VERSION = "trader-v3-live-v1"
+PROFILE_VERSION = "trader-v3-live-v2"   # v2: SL/TP 0.1% only with fuzzy wording, like entries
 SOURCES = [
     "hermes-profile/skills/trading/v3-trader/SKILL.md:19",
     "hermes-profile/skills/trading/v3-trader/SKILL.md:27",
@@ -34,11 +34,13 @@ ZONE_TRANCHES = (
 RULES = ("entry_concession", "stop_breakout", "stop_widening", "take_profit_concession",
          "zone_ladder", "equal_notional_pair", "tick_rounding")
 _NUMBER = re.compile(r"(?<![A-Za-z0-9_.])\d+(?:,\d{3})*(?:\.\d+)?(?![A-Za-z0-9_.])")
-_ROLE = re.compile(r"入场|进场|开多|开空|做多|做空|多单|空单|止损|停损|失效|止盈|目标|(?<!\w)(?:entry|sl|stop|tp|target)(?!\w)", re.I)
+_ROLE = re.compile(r"入场|进场|开多|开空|做多|做空|多单|空单|止损|停损|失效|止盈|目标|(?<!\w)(?:entry|sl|stop|tp\d*|target\d*)(?!\w)", re.I)
 _ENTRY = re.compile(r"入场|进场|开多|开空|做多|做空|多单|空单|(?<!\w)entry(?!\w)", re.I)
 _STOP = re.compile(r"止损|停损|失效|(?<!\w)(?:sl|stop)(?!\w)", re.I)
-_ENTRY_FUZZY = re.compile(r"附近|左右|大约|(?<![合预条签公解履邀])约(?![定束会翰])")
-_STOP_FUZZY = re.compile(r"略破|小幅突破|稍微超过|小幅跌破|小幅涨破|一点")
+_TP = re.compile(r"止盈|目标|(?<!\w)(?:tp|target)\d*(?!\w)", re.I)
+# 让点只看措辞（用户约定）：入场、止损、止盈的点位带这些字才让 0.1%；精确点位原值执行。
+_FUZZY = re.compile(r"附近|左右|大约|(?<![合预条签公解履邀])约(?![定束会翰])")
+_BREAKOUT = re.compile(r"略破|小幅突破|稍微超过|小幅跌破|小幅涨破|一点")
 
 
 def _sentences(text: str) -> list[tuple[int, str]]:
@@ -46,6 +48,7 @@ def _sentences(text: str) -> list[tuple[int, str]]:
 
     Adjacent entry labels belong to one opening clause. Separate entry clauses
     with the same prices are ambiguous and deliberately do not get a concession.
+    Every target label starts its own clause ("TP1 130 TP2 140附近").
     No original text is returned in the audit.
     """
     clauses = []
@@ -60,7 +63,7 @@ def _sentences(text: str) -> list[tuple[int, str]]:
                     current = "stop"
                 else:
                     current = "tp"
-                if role is not None and current != role:
+                if role is not None and (current != role or current == "tp"):
                     clauses.append((line_no, sentence[start:match.start()]))
                     start = match.start()
                 role = current
@@ -81,12 +84,14 @@ def wording_flags(plan: dict, text: str | None) -> dict:
     base_symbol = re.sub(r"(?:USDT|USDC|BUSD)$", "", symbol)
     prices = {D(e[key]) for e in plan["entries"] for key in ("price_lo", "price_hi")}
     stop = D(plan["stop"]["price"])
+    targets = [D(tp["level"]) for tp in plan.get("tps", [])]
     entry_candidates, stop_candidates = [], []
+    target_candidates = [[] for _ in targets]
     for line_no, clause in clauses:
         # Explicit symbols on the same line must identify this opening. Labels
         # are not symbols; an unrelated ETH opening at BTC's price is no evidence.
         tokens = set(re.findall(r"(?<![A-Za-z0-9])[A-Z][A-Z0-9]{1,14}(?![A-Za-z0-9])", lines[line_no - 1]))
-        tokens -= {"SL", "TP", "ENTRY", "STOP", "TARGET", "LONG", "SHORT", "USDT", "USDC"}
+        tokens = {t for t in tokens if not re.fullmatch(r"(?:SL|TP|TARGET)\d*|ENTRY|STOP|LONG|SHORT|USDT|USDC", t)}
         if tokens and not tokens.issubset({symbol, base_symbol}):
             continue
         raw = {D(m.group().replace(",", "")) for m in _NUMBER.finditer(clause)}
@@ -95,14 +100,20 @@ def wording_flags(plan: dict, text: str | None) -> dict:
         if _ENTRY.search(clause) and prices.issubset(numbers):
             opposite = r"开空|做空|空单|\bshort\b" if plan["side"] == "long" else r"开多|做多|多单|\blong\b"
             if not re.search(opposite, clause, re.I):
-                entry_candidates.append((line_no, bool(_ENTRY_FUZZY.search(clause))))
+                entry_candidates.append((line_no, bool(_FUZZY.search(clause))))
         if _STOP.search(clause) and stop in numbers:
-            stop_candidates.append((line_no, bool(_STOP_FUZZY.search(clause))))
+            stop_candidates.append((line_no, bool(_BREAKOUT.search(clause)), bool(_FUZZY.search(clause))))
+        if _TP.search(clause) and not _ENTRY.search(clause) and not _STOP.search(clause):
+            for found, level in zip(target_candidates, targets):
+                if level in numbers:
+                    found.append(bool(_FUZZY.search(clause)))
     entry = entry_candidates[0] if len(entry_candidates) == 1 else None
     sl = stop_candidates[0] if len(stop_candidates) == 1 else None
     return {
         "entry_fuzzy": entry is not None and entry[1],
-        "stop_fuzzy": sl is not None and sl[1],
+        "stop_fuzzy": sl is not None and (sl[1] or sl[2]),
+        "stop_breakout": sl is not None and sl[1],
+        "tp_fuzzy": [len(found) == 1 and found[0] for found in target_candidates],
         "entry_line": entry[0] if entry is not None else None,
         "stop_line": sl[0] if sl is not None else None,
     }
@@ -151,16 +162,19 @@ def apply_live_profile(plan: dict, text: str | None, tick_size: Decimal, *, enab
         return value
 
     stop = D(plan["stop"]["price"])
-    if flags["stop_fuzzy"]:
+    if flags["stop_breakout"]:
         stop *= Decimal("0.997") if long else Decimal("1.003")
         counts["stop_breakout"] = 1
-    stop *= Decimal("0.999") if long else Decimal("1.001")
+    if flags["stop_fuzzy"]:
+        stop *= Decimal("0.999") if long else Decimal("1.001")
+        counts["stop_widening"] = 1
     out["stop"]["price"] = snapped(stop, upward=not long)
-    counts["stop_widening"] = 1
-    for tp in out.get("tps", []):
-        price = D(tp["level"]) * (Decimal("0.999") if long else Decimal("1.001"))
+    for tp, fuzzy in zip(out.get("tps", []), flags["tp_fuzzy"]):
+        price = D(tp["level"])
+        if fuzzy:
+            price = D(tp["level"]) * (Decimal("0.999") if long else Decimal("1.001"))
+            counts["take_profit_concession"] += 1
         tp["level"] = snapped(price, upward=not long)
-        counts["take_profit_concession"] += 1
 
     entries, allocation = [], []
     factor = Decimal(1)

@@ -32,7 +32,7 @@
 | 引用 | 核对结果 |
 | --- | --- |
 | `hermes-profile/skills/trading/v3-trader/SKILL.md:19` | 模糊 zone/点位加 entry-offset；精确点位不让利；zone 风险份额 55/30/15 |
-| `hermes-profile/skills/trading/v3-trader/SKILL.md:27` | 模糊突破 0.3%；入场 0.1%；止损再次外扩 0.1%；TP 向成交方向 0.1%；按有利成交/避免早触发方向取 tick |
+| `hermes-profile/skills/trading/v3-trader/SKILL.md:27` | 模糊突破 0.3%；入场 0.1%；止损再次外扩 0.1%；TP 向成交方向 0.1%；按有利成交/避免早触发方向取 tick。v2（10-02 用户确认）：止损、止盈的 0.1% 与入场一样只在该点位带「附近/左右/大约/约」或突破措辞时生效，精确点位原值执行 |
 | `hermes-profile/skills/trading/v3-trader/SKILL.md:34` | 双明确点位共享总风险预算、等名义金额 |
 | `hermes-profile/skills/trading/v3-trader/scripts/v3_trade.py:475` | Decimal 入场偏移，多上移/空下移；market 无可平移的挂单价格 |
 | `services/control-plane/api/read_api.py:547` | 近端 `t1_near`: 深度 0%，风险 55% |
@@ -55,8 +55,8 @@
 | --- | --- | --- |
 | 入场仅模糊让利、多空方向 | `test_entry_concession_only_for_fuzzy_wording`、`test_fuzzy_pair_moves_both_entry_legs` | 去掉让利、反转方向、精确点位也平移均检出 |
 | 句子/点位定位 | `test_unresolved_or_unrelated_wording_is_exact`、`test_one_line_roles_do_not_leak_and_line_numbers_are_audited`、`test_opposite_opening_does_not_enable_entry_concession` | 去掉价格锚、忽略歧义、忽略品种均检出 |
-| 止损 0.3% 后再 0.1% | `test_stop_breakout_then_widening` | 去掉突破、突破反向、去掉放宽、放宽反向均检出 |
-| 止盈 0.1% | `test_take_profit_concession` | 去掉让利、反转方向均检出 |
+| 止损 0.3% 后再 0.1%；「附近」只放宽 0.1%；精确不动 | `test_stop_breakout_then_widening` | 去掉突破、突破反向、去掉放宽、放宽反向、精确也放宽均检出 |
+| 止盈 0.1%（仅模糊措辞，每档看自己的句子） | `test_take_profit_concession`、`test_each_target_uses_its_own_wording` | 去掉让利、反转方向、精确也让利均检出 |
 | tick 定向取整 | `test_tick_rounding_toward_fill_and_later_stop` | 反转取整方向检出 |
 | zone 深度/顺序/风险换算 | `test_zone_depth_order_and_risk_shares` | 深度 85% 改为 100%、近深风险交换、风险份额直接当数量份额均检出 |
 | 双点等名义 | `test_explicit_pair_equal_notional` | 改为等数量检出 |
@@ -94,6 +94,6 @@ G2 全套没有被记为通过。首轮 22 个失败由临时 cwd 缺少相对�
 - 市价没有可平移的挂单价格，保持 market_ref 的 as-of 定仓与内核市价成交；过时报价转限价规则保持。close 止损周期、已有 be1、TTL、TP 比例、固定数量与总体风险预算语义保持。
 - tick 方向按用户本次明确要求及 SKILL 第 9 条：多单入场 ceil，空单入场 floor；多单 SL/TP floor，空单 SL/TP ceil。已提交节点的通用函数却是 HALF_UP，因此不能宣称与该通用函数逐 tick 完全相同。
 - 分档位置与风险/名义相对分配与提交版本一致；数量保留内核 A 现有“总量先 floor_step、各腿再 floor_step”的规则，可能与生产逐档取整有一个或数个 lot 的差异。生产的 max_notional 共同缩放、窄区间/已穿透门禁与追价行为未增加到本次 plan 变换；现有 wallet/杠杆/成交模型保留。
-- 只接受能明确匹配根原文开仓/止损句的措辞。跨行无角色、多个同价候选、品种或方向冲突、缺根原文保持精确；可能漏掉需要人工语义理解的模糊表达。混合多 zone 计划拒绝并按既有计划契约错误计数，不默猜分配。超过双明确点位的计划保留既有比例语义。
+- 只接受能明确匹配根原文开仓/止损/止盈句的措辞。跨行无角色、多个同价候选、品种或方向冲突、缺根原文保持精确；可能漏掉需要人工语义理解的模糊表达。混合多 zone 计划拒绝并按既有计划契约错误计数，不默猜分配。超过双明确点位的计划保留既有比例语义。
 - 价格外移后保护点位冲突或 tick 取到非正数时按契约排除，不自动更改目标或吞掉错误。历史 tick 缺失保留 RULE_HISTORY_MISSING。
 - 字节对照的边界是同一构建下旧/新 L0。跨完整 HEAD 的 contract 源码改变会按既有 kernel_build_id 改变构建身份/trace_hash；没有冻结或绕过这项来源身份规则。

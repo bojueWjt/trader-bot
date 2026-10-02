@@ -90,7 +90,10 @@ def test_four_live_policies_construct_and_run_kernel_a(base, side, shape):
     source["order_plan"]["tps"][0]["fraction"] = D("0.5")
     before = deepcopy(source)
     policy = c.resolve_policy(base + "-live")
-    fixed, audit = l0.prepare_execution(source, policy=policy, tick_size=D("0.0001"))
+    stop = source["order_plan"]["stop"]["price"]
+    exact, _ = l0.prepare_execution(source, policy=policy, tick_size=D("0.0001"))
+    assert exact["order_plan"]["stop"]["price"] == stop   # 精确止损不让点
+    fixed, audit = l0.prepare_execution(source, policy=policy, text=f"止损{stop}附近", tick_size=D("0.0001"))
     req = request(fixed, policy.version)
     res = simulate(req, market=market(side))
     assert res.kernel == "A" and res.censor_reason is None and res.filled_qty > 0
@@ -157,8 +160,9 @@ def test_l0_live_audit_and_summary_use_root_version_without_changing_source(buil
     assert table["entries"][0][0]["price_lo"] == D(100) and table["stop"][0] == D(90)
     profile = report["live_execution_profile"]
     assert profile["n_applied"] == 2 and profile["n_root_text_unresolved"] == 1
-    assert profile["rule_counts"] == {"entry_concession": 1, "stop_breakout": 1, "stop_widening": 2,
-        "take_profit_concession": 2, "zone_ladder": 0, "equal_notional_pair": 0, "tick_rounding": 3}
+    # 只有带措辞的那一单让点：入场附近、止损略破（外扩+放宽）；精确的「目标110」和无原文的那单原值执行。
+    assert profile["rule_counts"] == {"entry_concession": 1, "stop_breakout": 1, "stop_widening": 1,
+        "take_profit_concession": 0, "zone_ladder": 0, "equal_notional_pair": 0, "tick_rounding": 1}
     assert captured[0].order_plan.entries[0].price_lo == D("100.1")
     for path in ("summary.json", "summary.md"):
         content = (root / "live" / path).read_text()

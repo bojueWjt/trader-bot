@@ -35,25 +35,34 @@ def test_entry_concession_only_for_fuzzy_wording(side, entry, expected, word):
     assert canonical_json(source) == saved
 
 
-@pytest.mark.parametrize("side,base,exact,fuzzy", [("long", "80", "79.920", "79.680240"),
-                                                    ("short", "120", "120.120", "120.480360")])
+@pytest.mark.parametrize("side,base,near,breakout", [("long", "80", "79.920", "79.680240"),
+                                                     ("short", "120", "120.120", "120.480360")])
 @pytest.mark.parametrize("word", ["略破", "小幅突破", "稍微超过", "小幅跌破", "小幅涨破", "一点"])
-def test_stop_breakout_then_widening(side, base, exact, fuzzy, word):
+def test_stop_breakout_then_widening(side, base, near, breakout, word):
     source = plan(side)
     out, audit = apply_live_profile(source, f"止损{word}{base}", D("0.000001"))
-    assert out["stop"]["price"] == D(fuzzy)
-    assert audit["rule_counts"]["stop_breakout"] == 1
+    assert out["stop"]["price"] == D(breakout)
+    assert audit["rule_counts"]["stop_breakout"] == 1 and audit["rule_counts"]["stop_widening"] == 1
+    approx, audit = apply_live_profile(source, f"止损{base}附近", D("0.000001"))
+    assert approx["stop"]["price"] == D(near)
+    assert audit["rule_counts"]["stop_breakout"] == 0 and audit["rule_counts"]["stop_widening"] == 1
+    # 让点只在措辞模糊时生效：精确止损原值执行。
     precise, audit = apply_live_profile(source, f"止损{base}", D("0.000001"))
-    assert precise["stop"]["price"] == D(exact)
-    assert audit["rule_counts"]["stop_breakout"] == 0
-    assert audit["rule_counts"]["stop_widening"] == 1
+    assert precise["stop"]["price"] == D(base)
+    assert audit["rule_counts"]["stop_breakout"] == 0 and audit["rule_counts"]["stop_widening"] == 0
 
 
 @pytest.mark.parametrize("side,expected", [("long", "129.870"), ("short", "70.070")])
 def test_take_profit_concession(side, expected):
-    out, audit = apply_live_profile(plan(side), None, D("0.001"))
+    source = plan(side)
+    level = source["tps"][0]["level"]
+    out, audit = apply_live_profile(source, f"目标{level}附近", D("0.001"))
     assert out["tps"][0]["level"] == D(expected)
     assert audit["rule_counts"]["take_profit_concession"] == 1
+    entry = source["entries"][0]["price_lo"]
+    for text in (None, f"目标{level}", f"入场{entry}附近\n目标{level}"):
+        exact, audit = apply_live_profile(source, text, D("0.001"))
+        assert exact["tps"][0]["level"] == level and audit["rule_counts"]["take_profit_concession"] == 0
     empty = plan(side)
     empty["tps"] = []
     out, audit = apply_live_profile(empty, None, D("0.001"))
@@ -64,7 +73,9 @@ def test_take_profit_concession(side, expected):
                                                ("short", "89.75", "120.25", "70.25")])
 def test_tick_rounding_toward_fill_and_later_stop(side, entry, stop, tp):
     source = plan(side)
-    out, audit = apply_live_profile(source, f"入场{source['entries'][0]['price_lo']}附近", D("0.25"))
+    text = (f"入场{source['entries'][0]['price_lo']}附近 止损{source['stop']['price']}附近 "
+            f"目标{source['tps'][0]['level']}附近")
+    out, audit = apply_live_profile(source, text, D("0.25"))
     assert out["entries"][0]["price_lo"] == D(entry)
     assert out["stop"]["price"] == D(stop)
     assert out["tps"][0]["level"] == D(tp)
@@ -123,7 +134,8 @@ def test_unresolved_or_unrelated_wording_is_exact(text):
 def test_one_line_roles_do_not_leak_and_line_numbers_are_audited():
     text = "私密哨兵\nBTC 做多 入场100 止损略破80 目标130附近"
     flags = wording_flags(plan(), text)
-    assert flags == {"entry_fuzzy": False, "stop_fuzzy": True, "entry_line": 2, "stop_line": 2}
+    assert flags == {"entry_fuzzy": False, "stop_fuzzy": True, "stop_breakout": True, "tp_fuzzy": [True],
+                     "entry_line": 2, "stop_line": 2}
     _, audit = apply_live_profile(plan(), text, D("0.01"))
     assert "私密哨兵" not in canonical_json(audit) and "附近" not in canonical_json(audit)
 
@@ -191,3 +203,13 @@ def test_wan_written_prices_still_match_their_clause():
     p["stop"]["price"] = D("72500")
     flags = wording_flags(p, "仿写\n方向：做多\n入场：7.31-7.36万附近\n止损：小幅跌破7.25一点。")
     assert flags["entry_fuzzy"] is True and flags["stop_fuzzy"] is True
+
+
+def test_each_target_uses_its_own_wording():
+    source = plan()
+    source["tps"] = [{"level": D("130"), "fraction": None}, {"level": D("140"), "fraction": None}]
+    for text in ("入场100\n止损80\nTP1 130 TP2 140附近", "入场100\n止损80\n目标130\n目标140左右"):
+        out, audit = apply_live_profile(source, text, D("0.001"))
+        assert [tp["level"] for tp in out["tps"]] == [D("130"), D("139.860")]
+        assert audit["rule_counts"]["take_profit_concession"] == 1
+        assert out["stop"]["price"] == D("80") and out["entries"][0]["price_lo"] == D("100")
