@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable
 import json
 import os
 import pathlib
@@ -86,6 +87,25 @@ def load_episode_events_description(graph_version: str) -> pl.DataFrame:
     ev = pl.read_parquet(layout.episode_event(graph_version))
     stale = stale_episodes(layout, graph_version)
     return ev.filter(~pl.col("episode_id").is_in(list(stale))) if stale else ev
+
+
+def load_message_texts(source_version_ids: Iterable[str]) -> dict[str, str]:
+    """Read exact requested bronze versions, never the latest version of a message.
+
+    Missing/null or conflicting duplicate text is unresolved, not guessed. This
+    read-only accessor changes no extraction or decision-graph semantics.
+    """
+    ids = {value for value in source_version_ids if value is not None}
+    path = _layout().message_version
+    if not ids or not path.exists():
+        return {}
+    rows = pl.scan_parquet(path).filter(pl.col("source_version_id").is_in(sorted(ids))).select(
+        "source_version_id", "text").collect()
+    candidates: dict[str, set[str | None]] = {}
+    for version, text in rows.iter_rows():
+        candidates.setdefault(version, set()).add(text)
+    return {version: next(iter(texts)) for version, texts in candidates.items()
+            if len(texts) == 1 and None not in texts}
 
 
 def loss_table(batch_id: str) -> pl.DataFrame:
@@ -239,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-__all__ = ["load_episodes", "load_episode_events", "load_episode_events_description", "loss_table", "quarantine", "build"]
+__all__ = ["load_episodes", "load_episode_events", "load_episode_events_description", "load_message_texts", "loss_table", "quarantine", "build"]
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -15,6 +15,11 @@ channel/open-status strata, total N (not N per channel). No labels are gold.
 
 Only `run` invokes Codex. All other commands are offline. Raw attempts can
 contain private messages; keep the batch directory outside the repository.
+
+`followup-v1` prompts are accepted only as a pure batch: they use followup
+rules, schema and that row's candidates. A file that mixes them with v1/v2
+is rejected. v2 prompt text, hash, RULES, output schema and wire shape stay
+unchanged.
 """
 from __future__ import annotations
 
@@ -157,8 +162,28 @@ def abstain(note):
 NUMBER = re.compile(r"(?<![0-9A-Za-z_.,])[+\-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![0-9A-Za-z_万]|[.,]\d)")
 
 
-def quote_response(item, text):
-    """Strict provider validation then exact Decimal/token match; no span guessing."""
+def quote_response(item, text, *, candidates=None, expected_schema=None):
+    """Strict provider validation then exact Decimal/token match; no span guessing.
+    When the caller knows the input schema, a response from another schema is not stored."""
+    from . import followup
+    if expected_schema == followup.SCHEMA_NAME:
+        if not isinstance(item, dict) or item.get("schema_version") != followup.SCHEMA_NAME:
+            return abstain("response_schema_mismatch")
+    elif expected_schema is not None and isinstance(item, dict) and item.get("schema_version") == followup.SCHEMA_NAME:
+        return abstain("response_schema_mismatch")
+    if isinstance(item, dict) and item.get("schema_version") == "followup-v1":
+        try:
+            if isinstance(candidates, dict):
+                roots = candidates.get("root_ids") or []
+                prices = candidates.get("entry_prices") or []
+            else:
+                roots = candidates or []
+                prices = []
+            symbols = candidates.get("symbols") or {} if isinstance(candidates, dict) else {}
+            checked = followup.validate_response(item, text, candidate_root_ids=list(roots), entry_prices=list(prices), candidate_symbols=symbols)
+            return {"response": checked}
+        except (ValueError, TypeError, KeyError):
+            return abstain("invalid_followup_envelope")
     if "actions" in item or item.get("schema_version") == 2:
         try:
             return {"response": cx_v2.validate_response(item, text)}
@@ -236,6 +261,11 @@ def wire_message(row):
     """What the model sees for one message. v2 rows share one system prompt (sent once as instructions),
     and their user JSON already carries text/channel/date/previous_text, so the per-row copies are dropped.
     The record key still hashes the full system+user pair, so nothing about identity changes."""
+    from . import followup
+    if row.get("schema_name") == followup.SCHEMA_NAME and row.get("system") == followup.RULES:
+        user = json.loads(row["user"])
+        user.pop("schema_version", None)
+        return {"key": row["key"], "schema_name": row["schema_name"], **user}
     if row.get("schema_name") != cx_v2.SCHEMA_NAME or row.get("system") != BATCH_RULES:
         return row
     user = json.loads(row["user"])
@@ -243,8 +273,26 @@ def wire_message(row):
     return {"key": row["key"], "schema_name": row["schema_name"], **user}
 
 
+def _schema_rules(batch):
+    from . import followup
+    names = {row.get("schema_name") for row in batch}
+    if names == {followup.SCHEMA_NAME}:
+        return batch[0]["system"]
+    if followup.SCHEMA_NAME in names:
+        raise ValueError("mixed_schema")
+    return BATCH_RULES
+
+
+def _followup_contexts(batch):
+    from . import followup
+    if not batch or any(row.get("schema_name") != followup.SCHEMA_NAME for row in batch):
+        return {}
+    return {row["key"]: followup.candidates_from_user(row["user"]) for row in batch}
+
+
 def _run_batch(batch, directory, executable, batch_id, retries, timeout, backoff=0, model="gpt-6-astra"):
-    prompt = dumps({"instructions": BATCH_RULES, "messages": [wire_message(r) for r in batch]})
+    rules = _schema_rules(batch)
+    prompt = dumps({"instructions": rules, "messages": [wire_message(r) for r in batch]})
     schema_path = directory / "schema.json"
     attempts = []
     for attempt in range(retries + 1):
@@ -267,7 +315,13 @@ def _run_batch(batch, directory, executable, batch_id, retries, timeout, backoff
             if len(keys) != len(batch) or set(keys) != {p["key"] for p in batch}:
                 raise ValueError("missing_duplicate_or_unknown_keys")
             texts = {p["key"]: p["text"] for p in batch}
-            results = [{"key": i["key"], **quote_response(i, texts[i["key"]])} for i in items]
+            contexts = _followup_contexts(batch)
+            row_schemas = {row["key"]: row.get("schema_name") for row in batch}
+            results = []
+            for item in items:
+                own = contexts.get(item["key"]) if contexts else None
+                row_schema = row_schemas.get(item["key"])
+                results.append({"key": item["key"], **quote_response(item, texts[item["key"]], candidates=own, expected_schema=row_schema)})
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout or b""
             stderr = exc.stderr or b""
@@ -307,6 +361,7 @@ def length_batches(rows, batch_size=20, max_chars=12000):
 def run_batches(prompts: Path, directory: Path, *, executable=None, batch_size=20, max_chars=12000, concurrency=3, retries=2, timeout=600, backoff=0, model="gpt-6-astra"):
     import fcntl
     from .llm import record_key, SCHEMA_NAME_EXTRACT
+    from . import followup
     if batch_size < 1 or max_chars < 1 or concurrency < 1 or retries < 0 or not math.isfinite(timeout) or timeout <= 0 or backoff < 0:
         raise ValueError("invalid runner limits")
     directory = Path(directory).resolve()
@@ -317,12 +372,21 @@ def run_batches(prompts: Path, directory: Path, *, executable=None, batch_size=2
     with (directory / ".lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         inputs = {}
+        allowed = (SCHEMA_NAME_EXTRACT, cx_v2.SCHEMA_NAME, followup.SCHEMA_NAME)
         for row in read_jsonl(prompts):
-            if row["schema_name"] not in (SCHEMA_NAME_EXTRACT, cx_v2.SCHEMA_NAME) or row["key"] != record_key(row["system"], row["user"], row["schema_name"]):
+            if row["schema_name"] not in allowed or row["key"] != record_key(row["system"], row["user"], row["schema_name"]):
                 raise ValueError("prompt_key_mismatch")
-            if json.loads(row["user"])["text"] != row["text"]:
+            if row["schema_name"] == followup.SCHEMA_NAME and row.get("system") != followup.RULES:
+                raise ValueError("followup_prompt_mismatch")
+            user = json.loads(row["user"])
+            if user["text"] != row["text"]:
                 raise ValueError("prompt_text_mismatch")
+            if row["schema_name"] == followup.SCHEMA_NAME and [item["root_message_id"] for item in user.get("context") or []] != list(user.get("candidate_root_ids") or []):
+                raise ValueError("followup_context_mismatch")
             inputs.setdefault(row["key"], row)
+        schemas = {row["schema_name"] for row in inputs.values()}
+        if followup.SCHEMA_NAME in schemas and len(schemas) > 1:
+            raise ValueError("mixed_schema")
         response_path = directory / "responses.jsonl"
         # Atomic per-batch files are the journal. Rebuild the public JSONL after a crash.
         journal = directory / "completed"
@@ -341,10 +405,13 @@ def run_batches(prompts: Path, directory: Path, *, executable=None, batch_size=2
                     completed[row["key"]] = row
         if any(completed[k].get("response", {}).get("schema_version") != 2 for k in inputs.keys() & completed.keys() if inputs[k]["schema_name"] == cx_v2.SCHEMA_NAME and "response" in completed[k]):
             raise ValueError("stale_v1_journal_use_new_output_dir")
+        if any(completed[k].get("response", {}).get("schema_version") != followup.SCHEMA_NAME for k in inputs.keys() & completed.keys() if inputs[k]["schema_name"] == followup.SCHEMA_NAME and "response" in completed[k]):
+            raise ValueError("stale_followup_journal_use_new_output_dir")
         # Transport failures carry no model judgement, so a restart asks again.
         pending = [r for k, r in inputs.items() if k not in completed or _transport_failed(completed[k])]
         _atomic_text(response_path, "".join(dumps(completed[k]) + "\n" for k in sorted(completed)))
-        write_json(directory / "schema.json", output_schema())
+        schema_doc = followup.output_schema() if schemas == {followup.SCHEMA_NAME} else output_schema()
+        write_json(directory / "schema.json", schema_doc)
         started = time.monotonic()
         attempts = []
         invocation = uuid.uuid4().hex
@@ -393,7 +460,16 @@ def import_responses(responses: Path, output: Path):
         if key in items and items[key] != record:
             raise ValueError("conflicting_duplicate_key")
         items[key] = record
-    version = "cx-batch-v2" if any(r.get("response", {}).get("schema_version") == 2 for r in items.values()) else "cx-batch-v1"
+    versions = [r.get("response", {}).get("schema_version") for r in items.values() if "response" in r]
+    from . import followup
+    if any(version == followup.SCHEMA_NAME for version in versions) and any(version != followup.SCHEMA_NAME for version in versions):
+        raise ValueError("mixed_schema")
+    if versions and all(version == followup.SCHEMA_NAME for version in versions):
+        version = followup.SCHEMA_NAME
+    elif any(version == 2 for version in versions):
+        version = "cx-batch-v2"
+    else:
+        version = "cx-batch-v1"
     write_json(output, {"version": version, "model": "gpt-6-astra", "items": items})
     return {"imported": len(items), "abstained": sum("abstain" in r for r in items.values())}
 
