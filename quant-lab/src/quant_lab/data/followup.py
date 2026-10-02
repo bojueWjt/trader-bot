@@ -1054,6 +1054,18 @@ def _map_episode(channel_id, root_message_id, episodes):
     return None, "episode_not_found"
 
 
+def _netted_episodes(channel_id, root_message_id, episodes):
+    """One message can root several episodes (two entry legs, spot + futures). When they all trade the same
+    known instrument and side they are one one-way position, so an instruction applies to each of them."""
+    matches = [ep for ep in episodes if _stored_int(ep.get("channel_id")) == channel_id and _stored_int(ep.get("root_message_id")) == root_message_id]
+    keys = {(ep.get("instrument_id"), ep.get("side")) for ep in matches}
+    if len(matches) > 1 and len(keys) == 1:
+        instrument, side = next(iter(keys))
+        if instrument is not None and side in ("long", "short"):
+            return [ep["episode_id"] for ep in matches]
+    return []
+
+
 def _fraction_value(pct):
     if pct is None:
         return None
@@ -1085,30 +1097,37 @@ def _instruction_rows(prompt, instructions, episodes, graph_version):
         price = None if instruction["stop"]["price"] is None else Decimal(instruction["stop"]["price"]["value"])
         episode_id, ambiguity = _map_episode(prompt["channel_id"], instruction["target_message_id"], episodes)
         evidence = _evidence(instruction)
-        uncertain = instruction["uncertain"] or ambiguity is not None
-        rows.append({
-            "instruction_id": stable_id(RULE_VERSION, graph_version, prompt["source_version_id"], ordinal,
-                                        instruction["target_message_id"], instruction["target_symbol"], instruction["action"],
-                                        pct, fraction, price, instruction["stop"]["to_entry"], evidence, uncertain),
-            "channel_id": prompt["channel_id"],
-            "channel_name": prompt["channel_name"],
-            "message_id": prompt["message_id"],
-            "source_version_id": prompt["source_version_id"],
-            "available_at": prompt["available_at"],
-            "target_message_id": instruction["target_message_id"],
-            "episode_id": episode_id,
-            "episode_ambiguity": ambiguity,
-            "target_symbol": instruction["target_symbol"],
-            "action": instruction["action"],
-            "fraction_pct": pct,
-            "fraction": fraction,
-            "stop_price": price,
-            "to_entry": instruction["stop"]["to_entry"],
-            "evidence": evidence,
-            "uncertain": uncertain,
-            "graph_version": graph_version,
-            "rule_version": RULE_VERSION,
-        })
+        targets = [(episode_id, ambiguity)]
+        if ambiguity == "ambiguous_root_episode":
+            netted = _netted_episodes(prompt["channel_id"], instruction["target_message_id"], episodes)
+            if netted:
+                targets = [(episode, None) for episode in netted]
+        for episode_id, ambiguity in targets:
+            uncertain = instruction["uncertain"] or ambiguity is not None
+            rows.append({
+                "instruction_id": stable_id(RULE_VERSION, graph_version, prompt["source_version_id"], ordinal,
+                                            instruction["target_message_id"], instruction["target_symbol"], instruction["action"],
+                                            pct, fraction, price, instruction["stop"]["to_entry"], evidence, uncertain,
+                                            *([episode_id] if len(targets) > 1 else [])),
+                "channel_id": prompt["channel_id"],
+                "channel_name": prompt["channel_name"],
+                "message_id": prompt["message_id"],
+                "source_version_id": prompt["source_version_id"],
+                "available_at": prompt["available_at"],
+                "target_message_id": instruction["target_message_id"],
+                "episode_id": episode_id,
+                "episode_ambiguity": ambiguity,
+                "target_symbol": instruction["target_symbol"],
+                "action": instruction["action"],
+                "fraction_pct": pct,
+                "fraction": fraction,
+                "stop_price": price,
+                "to_entry": instruction["stop"]["to_entry"],
+                "evidence": evidence,
+                "uncertain": uncertain,
+                "graph_version": graph_version,
+                "rule_version": RULE_VERSION,
+            })
     return rows
 
 

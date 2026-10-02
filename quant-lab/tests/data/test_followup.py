@@ -1294,3 +1294,19 @@ pathlib.Path(args[args.index("-o") + 1]).write_text(json.dumps({{"items": items}
 ''')
     script.chmod(0o700)
     return script, capture
+
+
+def test_same_instrument_episodes_of_one_message_share_an_instruction():
+    # Two entry legs of one post are one one-way position: the instruction applies to both episodes.
+    prompt = {"channel_id": CHANNEL, "channel_name": "仿写", "message_id": 10, "source_version_id": "a", "available_at": T}
+    checked = followup.validate_response(envelope(instruction(3, "close_all", "全部走了")), "全部走了", candidate_root_ids=[3])["instructions"]
+    legs = [dict(episode("e3a", 3), instrument_id="BTCUSDT-PERP.BINANCE-UM", side="long"),
+            dict(episode("e3b", 3), instrument_id="BTCUSDT-PERP.BINANCE-UM", side="long")]
+    rows = followup._instruction_rows(prompt, checked, legs, "g")
+    assert sorted(row["episode_id"] for row in rows) == ["e3a", "e3b"]
+    assert all(row["episode_ambiguity"] is None and row["uncertain"] is False for row in rows)
+    assert len({row["instruction_id"] for row in rows}) == 2
+    # Different sides (or unknown instrument) stay ambiguous.
+    mixed = [legs[0], dict(legs[1], side="short")]
+    rows = followup._instruction_rows(prompt, checked, mixed, "g")
+    assert len(rows) == 1 and rows[0]["episode_ambiguity"] == "ambiguous_root_episode" and rows[0]["uncertain"] is True
