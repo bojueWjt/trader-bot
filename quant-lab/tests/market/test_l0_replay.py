@@ -278,7 +278,7 @@ def test_missing_plan_is_not_counted_as_missing_stop(built, monkeypatch):
     assert report["replay_exclusions"]["reason_counts"] == {"PLAN_NOT_EXECUTABLE": 1}
 
 
-@pytest.mark.parametrize("reason",["PLAN_STALE","PLAN_STALE_QUOTE"])
+@pytest.mark.parametrize("reason",["PLAN_STALE"])
 def test_follower_invalid_plan_counts_in_replay_exclusions_not_r(built,monkeypatch,reason):
     root,_=built
     original=l0.resolve_market_refs
@@ -307,3 +307,34 @@ def test_follower_invalid_plan_counts_in_replay_exclusions_not_r(built,monkeypat
     evaluated=table.filter(pl.col("evaluable"))
     assert evaluated.height==report["overall"]["n_evaluable"]
     assert float(evaluated["net_R"].sum())==report["overall"]["sum_net_R"]
+
+
+def test_stale_quote_is_replayed_as_a_resting_limit(built, monkeypatch):
+    root, _ = built
+    original = l0.resolve_market_refs
+    calls = {"n": 0}
+
+    def controlled(row, marks):
+        calls["n"] += 1
+        if calls["n"] != 1:
+            return original(row, marks)
+        stop = Decimal(str(row["order_plan"]["stop"]["price"]))
+        sign = 1 if row["side"] == "long" else -1
+        quote = stop + sign * Decimal("5")
+        mark = stop + sign * Decimal("10")      # moved 5 away from a 5-wide plan: far beyond the 0.25R gate, not past the stop
+        row = dict(row, order_plan=dict(row["order_plan"], entries=[dict(row["order_plan"]["entries"][0], kind="market_ref",
+                                                                        price_lo=quote, price_hi=quote, tif="IOC")]))
+
+        class Known:
+            def mark_at(self, *args):
+                return MarkAt(mark, None, row["t_dec"], 0)
+        return original(row, Known())
+
+    monkeypatch.setattr(l0, "resolve_market_refs", controlled)
+    report = l0.replay(graph_version="l0-test", channel=CHANNEL, out=root / "stale-quote")
+    table = pl.read_parquet(root / "stale-quote" / "trades.parquet")
+    assert "PLAN_STALE_QUOTE" not in report["replay_exclusions"]["reason_counts"]
+    assert report["market_ref_entries"]["n_stale_quote_as_limit"] == 1
+    assert table["stale_quote_as_limit"].sum() == 1
+    leg = table.filter(pl.col("stale_quote_as_limit"))["entries"][0][0]
+    assert leg["kind"] == "limit" and leg["price_lo"] == leg["price_hi"]

@@ -94,12 +94,21 @@ def resolve_market_refs(row: dict, marks) -> tuple[dict | None, str | None]:
         stale = mark.price <= stop_price if side == "long" else mark.price >= stop_price
         if stale:
             return None, "PLAN_STALE"
+        # A quoted CMP that is stale by more than 0.25R becomes a resting limit at the quote: a follower who sees the price
+        # has moved places the order at the teacher's level and is filled only if the market comes back within the entry TTL
+        # (or at once, as taker, when the limit is already marketable).
+        stale_quote = []
         for entry in entries:
             quote = entry.get("price_lo")
             if entry.get("kind") == "market_ref" and quote is not None:
                 quote = Decimal(str(quote))
                 if abs(quote - mark.price) > Decimal("0.25") * abs(quote - stop_price):
-                    return None, "PLAN_STALE_QUOTE"
+                    stale_quote.append(id(entry))
+        if stale_quote:
+            entries = [dict(e, kind="limit", price_hi=e["price_lo"], tif="GTC", post_only=False) if id(e) in stale_quote else e for e in entries]
+            has_market = any(e.get("kind") == "market_ref" for e in entries)
+            row = dict(row, order_plan=dict(plan, entries=entries), stale_quote_as_limit=True)
+            plan = row["order_plan"]
     if not has_market:
         return row, None
     fixed = [dict(e, price_lo=mark.price, price_hi=mark.price) if e.get("kind") == "market_ref" else e for e in entries]
@@ -135,7 +144,7 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
             coverage_excluded += 1
     from quant_lab.data.market_lake import LakeMarket
     marks = LakeMarket(lake)
-    requests, replay_exclusions, market_ref_resolved = [], Counter(), []
+    requests, replay_exclusions, market_ref_resolved, stale_quote_limits = [], Counter(), [], []
     for row in episodes.iter_rows(named=True):
         fixed, why = resolve_market_refs(row, marks)
         if fixed is None:
@@ -143,6 +152,8 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
             continue
         if fixed is not row:
             market_ref_resolved.append(row["episode_id"])
+        if fixed.get("stale_quote_as_limit"):
+            stale_quote_limits.append(row["episode_id"])
         if fixed.get("order_plan") is None:
             # 决策时刻已定但凑不成计划（方向或品种缺失等）：与"没有止损"分开计，否则会把解析缺口算成老师没给止损。
             replay_exclusions["PLAN_NOT_EXECUTABLE"] += 1
@@ -172,6 +183,7 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
         pl.col("order_plan").struct.field("tps").alias("targets"),
     ).drop("order_plan", "canonical_events").with_columns(
         pl.col("episode_id").is_in(market_ref_resolved).alias("market_ref_resolved"),   # 参考价由 t_dec as-of 标记价补出
+        pl.col("episode_id").is_in(stale_quote_limits).alias("stale_quote_as_limit"),   # 过时现价改为报价处限价挂单
     ).sort(["t_dec", "episode_id"])
     report = {
         "claim_status": "descriptive_only", "graph_version": graph_version, "channel": channel,
@@ -192,6 +204,7 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
         "replay_exclusions": {"n_decision_episodes": episodes.height, "n_replayed": len(requests),
                               "reason_counts": dict(sorted(replay_exclusions.items()))},
         "market_ref_entries": {"n_resolved": len(market_ref_resolved), "reference_source": MARKET_REF_SOURCE,
+                               "n_stale_quote_as_limit": len(stale_quote_limits),
                                "note": "全部市价腿（含通过 0.25R 报价门的现价腿），参考价取 t_dec 时 as-of 标记价，仅用于定仓；成交由内核在 t_start 按市价撮合"},
         **summarize(table),
     }

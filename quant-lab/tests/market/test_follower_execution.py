@@ -151,12 +151,16 @@ def test_plan_stale_includes_equal_stop(side,mark):
     assert l0.resolve_market_refs(row(side),Marks(mark)) == (None,"PLAN_STALE")
 
 
-@pytest.mark.parametrize("mark,reason",[("102.5",None),("102.50001","PLAN_STALE_QUOTE"),("97.5",None),("97.49999","PLAN_STALE_QUOTE")])
-def test_quote_quarter_r_boundary_and_mark_sizing(mark,reason):
+@pytest.mark.parametrize("mark,stale",[("102.5",False),("102.50001",True),("97.5",False),("97.49999",True)])
+def test_quote_quarter_r_boundary_and_mark_sizing(mark,stale):
     fixed, why = l0.resolve_market_refs(row(),Marks(mark))
-    assert why == reason
-    if reason is None:
-        assert fixed["order_plan"]["entries"][0]["price_lo"] == D(mark)
+    assert why is None
+    leg = fixed["order_plan"]["entries"][0]
+    if stale:
+        # A stale quote is not dropped: the follower rests a limit at the teacher's price.
+        assert fixed["stale_quote_as_limit"] and (leg["kind"], leg["price_lo"], leg["price_hi"], leg["tif"]) == ("limit", 100, 100, "GTC")
+    else:
+        assert not fixed.get("stale_quote_as_limit") and leg["kind"] == "market_ref" and leg["price_lo"] == D(mark)
 
 
 def test_unpriced_market_and_limit_share_stale_gate():
