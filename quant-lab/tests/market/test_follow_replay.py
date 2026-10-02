@@ -42,6 +42,16 @@ def test_filter_counts_strict_visibility_uncertainty_ambiguity_episode_channel_g
     assert report["n_reduce_fraction_defaulted"] == 1
 
 
+def test_table_built_for_another_graph_is_a_batch_error():
+    # An unresolved alias ("x-v7" instead of "x-v7@hash") once discarded a whole channel silently.
+    with pytest.raises(c.ContractError, match="graph_version"):
+        attach([action(graph_version="synthetic-alias"), action("close_all", 170, graph_version="synthetic-alias")])
+    _, report = attach([action(graph_version="synthetic-alias"), action("close_all", 170)])
+    assert report["discard_reason_counts"] == {"graph_version_mismatch": 1} and report["n_adopted"] == 1
+    _, report = attach([action(channel_id=CHANNEL - 1, graph_version="other")])
+    assert report["discard_reason_counts"] == {"channel_mismatch": 1}
+
+
 def test_equal_times_order_by_message_and_instruction_id_independent_of_parquet_order():
     rows = [action("close_all", message_id=9, instruction_id="z"),
             action("move_stop", to_entry=True, message_id=8, instruction_id="b"),

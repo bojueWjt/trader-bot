@@ -204,6 +204,12 @@ def attach_management(requests: list[ExecutionRequest], rows: list[dict], *, pol
         adopted_kinds[kind] += 1
         if kind == "reduce" and action.fraction is None:
             defaulted += 1
+    in_channel = len(rows) - discarded["channel_mismatch"]
+    if in_channel and discarded["graph_version_mismatch"] == in_channel:
+        # 本频道整表都是别的图（常见是建表时别名没解析）：逐行丢光等于没跟单，整批报错。
+        found = sorted({str(row.get("graph_version")) for row in rows
+                        if row.get("channel_id", row.get("channel")) == channel})
+        raise ContractError(f"followup actions built for graph_version {found[:3]}, replay is {graph_version}")
     attached = []
     for req in requests:
         ordered = sorted(grouped[req.episode_id], key=lambda pair: (pair[0].at, pair[0].source_message_id, pair[1]))
