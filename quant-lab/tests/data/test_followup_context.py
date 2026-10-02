@@ -382,7 +382,8 @@ def test_runner_passes_context_and_rejects_candidate_outside_id_and_mutation():
 
 
 NEW_RULE_SENTENCES = (
-    "规则版本：followup-v2；schema 仍为 followup-v1。",
+    "规则版本：followup-v3；schema 仍为 followup-v1。",
+    "原文写明只走部分（「一部分」「一点」「小止盈」「先走点」「留底仓」「剩下拿着」）时不是全平：action=reduce，fraction_pct=null（没写比例不补）。",
     "conversation 是同频道发布前最近 8 条消息，远到近，每条最多 300 字；只用于指向，不作数字证据。",
     "context 是 21 天内最近 12 条开仓，加上当前 text 或 conversation 点名币种在 60 天内最近一条开仓，总数最多 20。",
     "币种与别名统一按归一 symbol 匹配，例如以太/eth=ETH、大饼/饼=BTC。当前指令的点名优先于前文；当前未点名时只用最近一条明确点名的前文，不跨多个币种猜接续关系。",
@@ -408,12 +409,12 @@ def test_new_prompt_rules_and_removal_mutations(sentence):
 def test_rule_version_is_in_record_key_and_old_recording_misses(tmp_path):
     prompt = prompt_for([opening("a", 1, 2, "ETH")], "仿写以太止盈")
     user = json.loads(prompt["user"])
-    assert followup.RULE_VERSION == "followup-v2"
+    assert followup.RULE_VERSION == "followup-v3"
     assert user["rule_version"] == followup.RULE_VERSION
     assert user["schema_version"] == "followup-v1"
     # Hold all data/schema constant: changing the rule marker alone invalidates replay.
-    old_user = {**user, "rule_version": "followup-v1"}
-    old_system = prompt["system"].replace("规则版本：followup-v2", "规则版本：followup-v1")
+    old_user = {**user, "rule_version": "followup-v2"}
+    old_system = prompt["system"].replace("规则版本：followup-v3", "规则版本：followup-v2")
     old_key = record_key(old_system, followup._dumps_user(old_user), followup.SCHEMA_NAME)
     assert old_key != prompt["key"]
     recorded = tmp_path / "old.json"
@@ -442,7 +443,7 @@ def test_contextual_replay_recovers_target_and_revalidates_numeric_quotes(tmp_pa
     assert report["matched"] == 1 and report["instructions"] == 1 and report["rejected"] == 1
     row = pl.read_parquet(layout.silver_dir / "followup_action.parquet").row(0, named=True)
     assert row["target_message_id"] == 1 and row["episode_id"] == "e1" and row["uncertain"] is False
-    assert row["to_entry"] is True and row["stop_price"] is None and row["rule_version"] == "followup-v2"
+    assert row["to_entry"] is True and row["stop_price"] is None and row["rule_version"] == "followup-v3"
 
 
 def assert_numeric_source_is_current():
@@ -476,3 +477,19 @@ def test_undefined_collective_scope_mutation():
     assert_undefined_scope()
     with pytest.raises(AssertionError):
         restored("_target_scope", mutant(followup._target_scope, 'bool(UNDEFINED_SCOPE_RE.search(scope))', 'False'), assert_undefined_scope)
+
+
+def test_model_coin_counts_only_when_written_nearby():
+    opens = [opening("tao", 1, 1, "TAO", "long"), opening("btc", 2, 2, "BTC", "short")]
+    # "tao240" and "BTCUSDT" are written forms of the coin; the model's choice is accepted.
+    for text, symbol, target in (("仿写tao240 很舒服，可以止盈一点", "TAO", 1), ("仿写BTCUSDT 穿过 91,005 T2止盈", "BTC", 2)):
+        draft = instruction(None, "close_all", text, symbol=symbol, uncertain=True)
+        assert_target(validate(prompt_for(opens, text), draft), target, False)
+    # A coin the model names but nobody wrote stays uncertain; link-like tokens are not coins.
+    text = "仿写别着急了，走一半随缘 https://app.binance.com/square"
+    chatter = [message(f"c{i}", 900 + i, T - timedelta(minutes=10 - i), "仿写今天行情一般") for i in range(3)]
+    draft = instruction(None, "close_all", text, symbol="TAO", uncertain=True)
+    assert_target(validate(prompt_for(opens, text, chatter), draft), None, True)
+    # Named only in a recent post that names this coin alone: accepted.
+    alone = chatter[:2] + [message("c9", 909, T - timedelta(minutes=1), "仿写 tao 这里加了点")]
+    assert_target(validate(prompt_for(opens, text, alone), draft), 1, False)
