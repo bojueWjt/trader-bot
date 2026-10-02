@@ -170,6 +170,15 @@ def test_l0_live_audit_and_summary_use_root_version_without_changing_source(buil
         assert "SKILL.md:27" in content
 
 
+def test_live_without_any_root_text_is_a_batch_error(built, monkeypatch):
+    root, _ = built
+    monkeypatch.setattr(l0, "load_message_texts", lambda ids: {})
+    with pytest.raises(c.ContractError, match="no root message text"):
+        l0.replay(graph_version="l0-test", channel=CHANNEL, out=root / "live-empty", policy_version=BASES[0] + "-live")
+    assert not (root / "live-empty").exists()
+    l0.replay(graph_version="l0-test", channel=CHANNEL, out=root / "off-empty", policy_version=BASES[0])
+
+
 def test_l0_off_has_no_new_columns_or_source_reads(built, monkeypatch):
     root, _ = built
 
@@ -184,8 +193,10 @@ def test_l0_off_has_no_new_columns_or_source_reads(built, monkeypatch):
     assert "live_execution_json" not in pl.read_parquet(root / "off" / "trades.parquet").columns
 
 
-def test_missing_tick_keeps_kernel_rule_censor_and_empty_live_output(built):
+def test_missing_tick_keeps_kernel_rule_censor_and_empty_live_output(built, monkeypatch):
     root, lake = built
+    # Root texts are present (synthetic); this test is about the missing tick, not missing text.
+    monkeypatch.setattr(l0, "load_message_texts", lambda ids: {value: "入场100" for value in ids})
     rules_path(lake, "BTCUSDT-PERP.BINANCE-UM").unlink()
     report = l0.replay(graph_version="l0-test", channel=CHANNEL, out=root / "missing", policy_version=BASES[0] + "-live")
     assert report["censor_counts"] == {"RULE_HISTORY_MISSING": 2}

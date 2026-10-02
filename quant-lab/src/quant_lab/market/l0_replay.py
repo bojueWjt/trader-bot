@@ -300,7 +300,12 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
     live_records, rule_cache = {}, {}
     root_texts = {}
     if policy.live_execution_profile:
-        root_texts = load_message_texts(episodes["root_source_version_id"].to_list())
+        root_ids = [value for value in episodes["root_source_version_id"].to_list() if value is not None]
+        root_texts = load_message_texts(root_ids)
+        if root_ids and not root_texts:
+            # 一条原文都读不到 = 数据根缺 bronze（构建常把它留在 _build/<hash>），不是「老师都写精确价」；
+            # 静默按无原文跑会让让点口径一次都不让（10-02 所有 live 结果因此作废）。
+            raise ContractError(f"live profile read no root message text; expected bronze at {layout.message_version}")
     for row in episodes.iter_rows(named=True):
         request, audit, why, resolved, stale = prepare_episode_request(
             row, marks=marks, lake=lake, policy=policy, risk_budget=risk_budget,
