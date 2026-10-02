@@ -31,7 +31,7 @@ ENTRY_MARKERS = ("成本", "保本", "入场价")
 # ENTRY_MARKERS 仍单独用于「数字止损其实是入场价」的反向检查，不随这里放宽。
 TO_ENTRY_WORDS = re.compile(
     r"报本|入场点|入场位|入场区|入场水平|进场价|进场点|进场位|开仓价|开仓点|开仓位|盈亏平衡|收支平衡|无风险"
-    r"|(?<![A-Za-z])(?:BE|B/E|[Bb]reak[- ]?[Ee]ven)(?![A-Za-z])"
+    r"|(?<![A-Za-z])(?:B[Ee]|B/E|[Bb]reak[- ]?[Ee]ven)(?![A-Za-z])"
     r"|(?:移至|移到|移动到|调整至|调整到|调至|设在|设置在|设于|拉到|拉至|提到|提至|放到|放在)\s*(?:入场|进场|开仓|入口|条目)(?!时)")
 FRACTION_ACTIONS = frozenset({"reduce", "add"})
 CLOSED_PLANS = frozenset({"cancelled", "expired"})
@@ -780,7 +780,8 @@ def _clean_stop(stop, text, action, evidence):
         except (ValueError, TypeError, InvalidOperation) as exc:
             return None, "bad_price:" + str(exc)
     if to_entry:
-        if not _proves_entry(quote) or proved is not None:
+        # 规则只看本条 evidence_quote 与 stop.quote：模型常把「止损移到入场点」放在证据句、止损引文留空。
+        if not (_proves_entry(quote) or _proves_entry(evidence)) or proved is not None:
             return None, "to_entry_unproved"
     elif _local_entry_price(action, to_entry, quote, evidence):
         return None, "entry_price_instead_of_to_entry"

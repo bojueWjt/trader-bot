@@ -1328,6 +1328,11 @@ def test_to_entry_still_needs_entry_wording_and_numbers_stay_numbers():
     moved = validate_one("止损移至入场", instruction(1, "move_stop", "止损移至入场",
                                                   stop_obj=stop(to_entry=True, quote="止损移至入场")))
     assert moved["stop"]["to_entry"] is True
+    in_evidence = validate_one("锁定20%利润，并将止损移到入场点", instruction(
+        1, "move_stop", "并将止损移到入场点", stop_obj=stop(to_entry=True, quote="")))
+    assert in_evidence["stop"]["to_entry"] is True
+    assert validate_one("在 Be 区域设置止损", instruction(1, "move_stop", "在 Be 区域设置止损", stop_obj=stop(
+        to_entry=True, quote="在 Be 区域设置止损")))["stop"]["to_entry"] is True
     # The reverse guard (numeric stop that is really the entry price) keeps the original narrow words.
     numeric = "止损移至入场点下方 90"
     kept = validate_one(numeric, instruction(1, "move_stop", numeric, stop_obj=stop((90, "90"), quote="90")))
