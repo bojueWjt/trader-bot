@@ -369,7 +369,9 @@ async function detailPage() {
       $('detail-title').textContent = `${data.trade.instrument} · ${data.trade.side === 'long' ? '做多' : '做空'} · ${time(data.trade.t_dec)}`;
       $('range').textContent = `${time(data.bars.start)} → ${time(data.bars.end)} · 当前 ${data.bars.interval}`;
       $('consistency').className = data.consistency.ok ? '' : 'bad';
-      $('consistency').textContent = data.consistency.ok ? `复算一致 · ${data.consistency.actual}` : `复算不一致 · 回测记录 ${data.consistency.expected} · 当前复算 ${data.consistency.actual} · 成交事件已隐藏。请核对图、行情与策略版本。`;
+      $('consistency').textContent = data.consistency.ok
+        ? (data.consistency.expected === data.consistency.actual ? `复算一致 · ${data.consistency.actual}` : `${data.consistency.label} · 回测 ${data.consistency.expected_kernel} → 复算 ${data.consistency.actual_kernel}，成交与盈亏逐项相同`)
+        : `复算不一致 · 回测记录 ${data.consistency.expected} · 当前复算 ${data.consistency.actual} · 成交事件已隐藏。请核对图、行情与策略版本。`;
       $('cards').replaceChildren();
       const values = [['net_R',data.trade.net_R],['费用',data.trade.fees],['资金费',data.trade.funding],['滑点',data.trade.slippage],['MAE (R)',data.trade.mae_R],['MFE (R)',data.trade.mfe_R],['入场均价',data.trade.entry_avg_price],['出场均价',data.trade.exit_avg_price],['老师指令执行',data.trade.n_teacher_actions_executed]];
       values.forEach(([label,value]) => { const card = el('div',undefined,'card'); card.append(el('span',label),el('strong',number(value))); $('cards').append(card); });
