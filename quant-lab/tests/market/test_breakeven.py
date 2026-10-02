@@ -447,7 +447,7 @@ def test_public_simulate_rejects_both_breakeven_policies_before_time_exit():
 
 
 def test_follower_fixtures_match_new_gold_and_invalidate_old_traces():
-    assert KERNEL_VERSION == "kernel-a-v0.5"
+    assert KERNEL_VERSION == "kernel-a-v0.6"
     assert kernel_build_id(False) == kernel_build_id(True)
     fixtures = c.load_fixtures(Path(__file__).resolve().parent / "fixtures" / "episodes")
     assert {f.id for f in fixtures} == set(BASELINE)
@@ -461,4 +461,4 @@ def test_follower_fixtures_match_new_gold_and_invalidate_old_traces():
             assert actual_sha == events_sha
             assert (None if res.net_R is None else format(res.net_R, "f")) == net_r
         assert res.trace_hash != old_trace
-        assert res.kernel_version.startswith("kernel-a-v0.5+")
+        assert res.kernel_version.startswith("kernel-a-v0.6+")

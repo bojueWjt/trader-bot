@@ -102,6 +102,8 @@ def simulate_b(req: ExecutionRequest, market: MarketView, policy: ExecutionPolic
 
 
 def _simulate_b(req: ExecutionRequest, market: MarketView, policy: ExecutionPolicy) -> ExecutionResult:
+    if policy.follow_teacher:
+        raise KernelBUnavailable("follow_teacher management is unsupported by kernel B")
     if req.order_plan.stop.trigger == "close":
         raise KernelBUnavailable("close stop trigger is unsupported by kernel B")
     if policy.breakeven_after_first_tp:

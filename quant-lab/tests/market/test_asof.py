@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import datetime as dt
-from decimal import Decimal
 from pathlib import Path
+from decimal import Decimal
 
 import polars as pl
 import pytest
@@ -149,10 +149,21 @@ def test_quantize_price_tick():
     assert asof.quantize_price(Decimal("42123.37"), None) == Decimal("42123.37")
 
 
+def test_synthetic_partition_mark_price_at(synthetic_archive_lake):
+    _, mark_path = synthetic_archive_lake
+    m = pl.read_parquet(mark_path)
+    at = dt.datetime(2024, 1, 15, 12, 0, 30, tzinfo=dt.UTC)
+    d = asof.mark_bar_at(m, at, "BTCUSDT-PERP.BINANCE-UM")
+    assert d.reason is None and d.close_time == dt.datetime(2024, 1, 15, 12, 0, tzinfo=dt.UTC) and d.staleness_s == 30.0
+    ref = m.filter(pl.col("open_time") == dt.datetime(2024, 1, 15, 11, 59, tzinfo=dt.UTC))["close"][0]
+    assert d.price == Decimal(str(ref))
+
+
+# 真实分区存在时再核对一次真实币安数据格式（与上面的合成用例并存）。
 REAL = Path("data/lake/market/silver/binance/um/markPriceKlines/1m/instrument=BTCUSDT-PERP.BINANCE-UM/date=2024-01-15/part.parquet")
 
 
-@pytest.mark.skipif(__import__("os").environ.get("QUANT_LAB_SYNTHETIC_ONLY") == "1" or not REAL.exists(), reason="真实 2024-01 分区未入湖（M-03 冒烟后可用）")
+@pytest.mark.skipif(not REAL.exists(), reason="真实 2024-01 分区未入湖（M-03 冒烟后可用）")
 def test_real_partition_mark_price_at():
     m = pl.read_parquet(REAL)
     at = dt.datetime(2024, 1, 15, 12, 0, 30, tzinfo=dt.UTC)

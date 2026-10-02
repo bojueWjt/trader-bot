@@ -1,7 +1,7 @@
 """A24 静态门：调用方集合严格登记、全树禁止已知内联重写。
 
 由 tests/market/test_single_source.py 调用；检查实现位于生产树，以支持删除真实门的源码突变。
-FOREIGN_HITS 仅冻结 G3 既有两处，不授予修改 research/ 的权限。
+FOREIGN_HITS 冻结非 market 的既有命中，不授予修改 data/research 的权限。
 AST 禁令针对已知语法族，不声称能识别任意语义等价的混淆写法。
 """
 from __future__ import annotations
@@ -29,6 +29,7 @@ ALLOWED_CALLERS: dict[str, set[str]] = {
         "market/contract.py:ExecutionRequest._chk",
         "market/contract.py:ExecutionRequest.resolved_t_start",
         "market/contract.py:build_request",
+        "market/l0_replay.py:attach_management",
     },
     # 观察窗长度的唯一表达（S24/S25 同族）
     "derived_window_s": {
@@ -153,10 +154,12 @@ FORBIDDEN_HOMES: dict[str, set[str]] = {
     "P4_t_start_or_t_dec": set(),
     "P5_inline_entry_ttl": {"market/contract.py:derived_window_s", "market/contract.py:entry_expiry_at"},
 }
-# 非 G2 所有权的既有命中（冻结；新增会红，由 G2 转报 G3 而不是直接改 research/）
+# 非 G2 所有权的既有命中（冻结；新增会红，不直接改 data/research）。
 FOREIGN_HITS: set[tuple[str, str]] = {
     ("P5_inline_entry_ttl", "research/api.py:build_inputs_from_synthetic"),
     ("P3_duration_div", "research/maxt.py:calendar_blocks"),
+    # G1 followup 的可见会话分钟距离；不是市场观察窗/网格的重写。
+    ("P3_duration_div", "data/followup.py:visible_conversation"),
 }
 PATTERN_WHY = {
     "P8_inline_force_close": "余仓 mark 减 entry_avg_price 估值只能由 force_close_net_R 表达",
@@ -319,7 +322,8 @@ ALLOWED_CALL_COUNTS = {"force_close_net_R": {},  # G3 尚未接入；夹具不�
  'check_policy_hash_consistency': {'market/execution.py:simulate_batch': 1},
  'derived_t_start': {'market/contract.py:ExecutionRequest._chk': 1,
                      'market/contract.py:ExecutionRequest.resolved_t_start': 1,
-                     'market/contract.py:build_request': 1},
+                     'market/contract.py:build_request': 1,
+                     'market/l0_replay.py:attach_management': 1},
  'derived_window_s': {'market/contract.py:ExecutionRequest._chk': 1,
                       'market/contract.py:build_request': 1},
  'entry_expiry_at': {'market/kernel_a.py:KernelA.submit_entries': 1,

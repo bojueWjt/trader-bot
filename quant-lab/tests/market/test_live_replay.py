@@ -61,7 +61,8 @@ def test_old_hashes_and_disabled_policy_bytes_are_pinned():
         explicit = policy.model_copy(update={"live_execution_profile": False})
         assert c.canonical_json(policy.model_dump()) == c.canonical_json(explicit.model_dump())
         assert "live_execution_profile" not in policy.model_dump()
-    assert set(registry) == set(LEGACY_HASHES) | {v + "-live" for v in BASES}
+    follow_bases = ("base-v1-timeexit", "base-v1-timeexit-live", "base-v1-timeexit-w60", "base-v1-timeexit-w60-live")
+    assert set(registry) == set(LEGACY_HASHES) | {v + "-live" for v in BASES} | {v + "-follow" for v in follow_bases}
     for base in BASES:
         live = c.resolve_policy(base + "-live")
         body = live.model_dump()

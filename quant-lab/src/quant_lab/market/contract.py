@@ -27,7 +27,7 @@ from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from quant_lab.market import EXECUTION_CONTRACT_VERSION
 
@@ -37,7 +37,9 @@ TIF = Literal["GTC", "GTD", "IOC"]
 CostScenario = Literal["base", "stress"]
 PathScenario = Literal["primary", "adverse", "favorable"]
 EventKind = Literal["submitted", "accepted", "rejected", "working", "partial_fill", "filled", "cancelled", "expired",
-                    "stop_triggered", "tp_triggered", "funding", "closed", "amended"]
+                    "stop_triggered", "tp_triggered", "funding", "closed", "amended", "management"]
+ManagementKind = Literal["close_all", "reduce", "move_stop", "cancel_pending", "add"]
+MANAGEMENT_KINDS = ("close_all", "reduce", "move_stop", "cancel_pending", "add")
 Leg = Literal["entry", "sl", "tp", "close", "funding"]
 TriggerBasis = Literal["close", "mark", "last", "funding", "expiry", "none"]
 PathStep = Literal["O", "H", "L", "C", "none"]
@@ -61,7 +63,7 @@ DF_DECIMAL = (38, 12)
 P2_UNSUPPORTED = {
     "S02": {"status": "unsupported", "capability": "real_settlement_time_U03_and_engine_balance", "owner": "G0 settlement contract + G2 P2"},
     "S06": {"status": "unsupported", "capability": "bronze_depth_replay_and_multi_source_versions", "owner": "G1 lake + G2 P2"},
-    "S07": {"status": "unsupported", "capability": "management_commands_E13_C01_and_reservation_lifecycle", "owner": "G0 C01 + G2 P2"},
+    "S07": {"status": "unsupported", "capability": "live_management_commands_E13_C01_and_reservation_lifecycle", "owner": "G0 C01 + G2 P2"},
     "S12": {"status": "unsupported", "capability": "versioned_lake_snapshot_resolution", "owner": "G1 lake + G0 identity contract"},
 }
 
@@ -342,6 +344,7 @@ class ExecutionPolicy(_Model):
     time_exit_at_horizon: bool = Field(default=False, exclude=True)
     breakeven_after_first_tp: bool = Field(default=False, exclude=True)
     live_execution_profile: bool = Field(default=False, exclude=True)
+    follow_teacher: bool = Field(default=False, exclude=True)
 
     def model_dump(self, *args, **kwargs):
         payload = super().model_dump(*args, **kwargs)
@@ -351,6 +354,8 @@ class ExecutionPolicy(_Model):
             payload["breakeven_after_first_tp"] = True
         if self.live_execution_profile:
             payload["live_execution_profile"] = True
+        if self.follow_teacher:
+            payload["follow_teacher"] = True
         return payload
 
     @field_validator("latency_s")
@@ -415,6 +420,9 @@ POLICIES["base-v1-timeexit-w60-live"] = POLICIES["base-v1-timeexit-w60"].model_c
     update={"version": "base-v1-timeexit-w60-live", "live_execution_profile": True})
 POLICIES["base-v1-timeexit-w60-be1-live"] = POLICIES["base-v1-timeexit-w60-be1"].model_copy(
     update={"version": "base-v1-timeexit-w60-be1-live", "live_execution_profile": True})
+for _base in ("base-v1-timeexit", "base-v1-timeexit-live", "base-v1-timeexit-w60", "base-v1-timeexit-w60-live"):
+    POLICIES[_base + "-follow"] = POLICIES[_base].model_copy(
+        update={"version": _base + "-follow", "follow_teacher": True})
 
 
 POLICY_HASH_REGISTRY = Path(__file__).with_name("policy_hashes.json")   # S12：version→hash 跨修订登记（改内容必须改版本名并更新登记）
@@ -449,6 +457,38 @@ def resolve_policy(version: str) -> ExecutionPolicy:
 # ---------------------------------------------------------------------------
 # ExecutionRequest（契约 §3 + R6）
 # ---------------------------------------------------------------------------
+class ManagementAction(_Model):
+    """at is execution time (available_at + policy latency), never message event_time."""
+    at: dt.datetime
+    kind: ManagementKind
+    fraction: Decimal | None = None
+    stop_price: Decimal | None = None
+    to_entry: bool = False
+    source_message_id: int
+
+    @field_validator("at")
+    @classmethod
+    def _tz(cls, value):
+        return _utc(value)
+
+    @model_validator(mode="after")
+    def _chk(self):
+        if self.fraction is not None:
+            check_decimal(self.fraction, "management.fraction", positive=False)
+            if self.kind not in ("reduce", "add") or self.fraction < 0:
+                raise ContractError("management fraction only belongs to reduce/add and must be >= 0")
+            if self.kind == "reduce" and self.fraction > 1:
+                raise ContractError("management reduce fraction must be <= 1")
+        if self.stop_price is not None:
+            check_decimal(self.stop_price, "management.stop_price")
+        if self.kind == "move_stop":
+            if self.stop_price is None and not self.to_entry:
+                raise ContractError("management move_stop requires stop_price or to_entry")
+        elif self.stop_price is not None or self.to_entry:
+            raise ContractError("management stop fields only belong to move_stop")
+        return self
+
+
 class ExecutionRequest(_Model):
     episode_id: str
     graph_version: str
@@ -470,6 +510,14 @@ class ExecutionRequest(_Model):
     entry_fractions: tuple[Decimal, ...] | None = None    # §5.10 B8：解析后的入场分配（显式，进 trace_hash）
     tp_fractions: tuple[Decimal, ...] | None = None
     horizon_source: Literal["policy", "caller"] = "policy"   # §5.13 B11 诊断列：观察窗是推导值还是调用方自选
+    management: list[ManagementAction] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        payload = handler(self)
+        if not self.management:
+            payload.pop("management", None)
+        return payload
 
     @model_validator(mode="before")
     @classmethod
@@ -565,6 +613,13 @@ class ExecutionRequest(_Model):
             raise ContractError("entry_fractions 必须为正且和为 1")
         if self.tp_fractions and (sum(self.tp_fractions) > 1 or any(f <= 0 for f in self.tp_fractions)):
             raise ContractError("tp_fractions 必须为正且和 <= 1")
+        previous = exp_t_start
+        for action in self.management:
+            if action.at < previous or action.at >= self.horizon_end:
+                raise ContractError("management must be ordered within [t_start, horizon_end)")
+            if action.at <= exp_t_start:
+                raise ContractError("management available_at must be strictly after t_dec")
+            previous = action.at
         return self
 
     def resolved_t_start(self, policy: ExecutionPolicy) -> dt.datetime:
@@ -574,6 +629,7 @@ class ExecutionRequest(_Model):
 def build_request(
     episode_row: dict, *, policy_version: str, policy_hash: str, risk_budget: Decimal, cost_scenario: CostScenario = "base",
     path_scenario: PathScenario = "primary", market_manifest: str, seed: int = 0, horizon_end: dt.datetime | None = None,
+    management: list[ManagementAction] | None = None,
 ) -> ExecutionRequest:
     """research-schema §9.4 裁定 A3：G1 episode 行（order_plan / t_dec / decision_snapshot_hash / episode_id / graph_version）
     + 调用方给的钱与场景 → ExecutionRequest。只补齐执行侧字段并校验，不重新解释原文。
@@ -597,7 +653,7 @@ def build_request(
         decision_snapshot_hash=str(episode_row["decision_snapshot_hash"]), t_dec=t_dec, order_plan=plan,
         policy_version=policy_version, policy_hash=policy_hash, risk_budget=D(risk_budget), cost_scenario=cost_scenario,
         path_scenario=path_scenario, market_manifest=market_manifest, seed=seed, horizon_end=horizon_end, entry_ttl_s=ttl,
-        horizon_source=horizon_source,
+        horizon_source=horizon_source, management=[] if management is None else management,
     )
 
 
@@ -674,12 +730,40 @@ class ExecutionResult(_Model):
     def exit_legs(self) -> tuple[str, ...]:
         return exit_legs(self)
 
+    @property
+    def management_stats(self) -> dict:
+        return management_stats(self.canonical_events)
+
     @field_validator("censor_reason")
     @classmethod
     def _cr(cls, v):
         if v is not None and v not in CENSOR_REASONS:
             raise ContractError(f"未知 censor_reason {v}")
         return v
+
+
+def management_stats(events) -> dict:
+    """Diagnostics derived from the canonical stream; no new default result bytes."""
+    stats = {"n_processed": 0, "n_executed": 0, "last_kind": None,
+             "kind_counts": dict.fromkeys(MANAGEMENT_KINDS, 0), "ignored_counts": {},
+             "n_reduce_fraction_defaulted": 0}
+    for event in events:
+        row = event.model_dump() if isinstance(event, CanonicalEvent) else event
+        if row["kind"] != "management":
+            continue
+        audit = json.loads(row["reason"])
+        kind, status = audit["kind"], audit["status"]
+        stats["n_processed"] += 1
+        stats["kind_counts"][kind] += 1
+        if kind == "reduce" and audit["fraction_defaulted"]:
+            stats["n_reduce_fraction_defaulted"] += 1
+        if status == "executed":
+            stats["n_executed"] += 1
+            stats["last_kind"] = kind
+        else:
+            ignored = stats["ignored_counts"]
+            ignored[status] = ignored.get(status, 0) + 1
+    return stats
 
 
 @dataclass(frozen=True)

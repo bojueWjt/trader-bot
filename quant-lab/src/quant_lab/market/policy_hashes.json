@@ -15,5 +15,9 @@
  "base-v1-timeexit-live": "efab83a7ba0ce8328f2f9d630e9ad3deca463500de46cf716f4aa0bc9550ab15",
  "base-v1-timeexit-be1-live": "14550de27f1bc8aaad7cefcaa6fbbd4aa6df4c590e8a14564b6e0cd816f58149",
  "base-v1-timeexit-w60-live": "d48750ea90156b6ff6894356f6e32a7934c1331702790cb5057486b629fdb390",
- "base-v1-timeexit-w60-be1-live": "a04bd8a7f81fa237bd5cc09118a36526e2ef92856d821e8fcb427346281bec14"
+ "base-v1-timeexit-w60-be1-live": "a04bd8a7f81fa237bd5cc09118a36526e2ef92856d821e8fcb427346281bec14",
+ "base-v1-timeexit-follow": "c3d67b1574f29ae338c7f4736b09e7d87651c9c00d85fddbd1992b265924eeac",
+ "base-v1-timeexit-live-follow": "caf17563082ad3bbdf8ba8aed680ce0da0e8d71f3e27a873b3d100b5e3a33ce2",
+ "base-v1-timeexit-w60-follow": "51bb2d2e479eb0141fe91ce241a9b0f4daf4e3a736c894c2273860293124c376",
+ "base-v1-timeexit-w60-live-follow": "1fecbd45e6ad5e75a0c6d1e26fc9c2adb393288bb0cbca18ad36dadc064a3cfd"
 }

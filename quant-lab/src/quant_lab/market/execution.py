@@ -46,6 +46,11 @@ BATCH_SCHEMA: dict[str, pl.DataType] = {
 def simulate(req: ExecutionRequest, *, kernel: Literal["A", "B"] = "A", market: MarketView | None = None,
              resolver: MarketResolver | None = None) -> ExecutionResult:
     """契约 §3：simulate(req, kernel="A"|"B")。行情由 market 或 resolver(req) 提供。"""
+    if kernel == "B":
+        from quant_lab.market.contract import resolve_policy
+        from quant_lab.market.nautilus_adapter import KernelBUnavailable
+        if resolve_policy(req.policy_version).follow_teacher:
+            raise KernelBUnavailable("follow_teacher management is unsupported by kernel B")
     if market is None:
         if resolver is None:
             raise ContractError("simulate 需要 market 或 resolver（按 market_manifest 装载行情）")

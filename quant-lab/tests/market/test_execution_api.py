@@ -141,11 +141,35 @@ def test_g3_evaluate_consumes_frozen_contract_output():
         evaluate(ast, opp, features=feats, rule=lambda d: pl.Series([True] * d.height), execution=wrong, fold_id="f0", attempt_id="a-wrong")
 
 
+# ---------------- 行情湖装载（临时合成分区，无跳过开关） ----------------
+def test_load_market_from_lake_and_simulate_synthetic_bars(synthetic_archive_lake):
+    lake_root, _ = synthetic_archive_lake
+    t_dec = dt.datetime(2024, 1, 15, 12, 0, tzinfo=dt.UTC)
+    plan = c.OrderPlan(instrument_id="BTCUSDT-PERP.BINANCE-UM", side="long",
+                       entries=[c.Entry(kind="market_ref", price_lo=Decimal(42000), price_hi=Decimal(42000))],
+                       stop=c.Stop(price=Decimal(41000)), tps=[c.TakeProfit(level=Decimal(43000), fraction=Decimal(1))],
+                       sizing=c.Sizing(mode="fixed_qty", qty=Decimal("0.01")), expiry=c.Expiry(entry_ttl_s=600))
+    req = c.ExecutionRequest(episode_id="synthetic-lake-1", graph_version="g", decision_snapshot_hash="h", t_dec=t_dec, order_plan=plan,
+                             policy_version="base-v1", policy_hash=c.resolve_policy("base-v1").content_hash, risk_budget=Decimal(10),
+                             market_manifest="lake-2024-01", horizon_end=t_dec + dt.timedelta(hours=6), horizon_source="caller")
+    mk = x.load_market_from_lake(req, lake_root=lake_root)
+    # 360 bars in [t_start, horizon_end) plus the bar containing t_start (I46: as-of mark at t_start); fills still start at t_start.
+    assert mk.rules_known and mk.bars_complete and len(mk.bars_last) == 361 and len(mk.bars_mark) == 361 and mk.rules.tick_size == Decimal("0.1")
+    assert mk.bars_last[0].open_time == t_dec - dt.timedelta(minutes=1)
+    r = x.simulate(req, market=mk)
+    assert r.fill_status == "filled" and r.canonical_events[0].kind == "submitted"
+    fills = [e for e in r.canonical_events if e.kind in ("filled", "partial_fill")]
+    assert fills and (fills[0].price / Decimal("0.1")) % 1 == 0                    # 成交价落在 tick 网格
+    assert r.fees > 0 and (r.censor_reason in (None, "LABEL_RIGHT_CENSORED"))
+    df = x.simulate_batch([req], resolver=lambda rq: x.load_market_from_lake(rq, lake_root=lake_root))
+    assert df.height == 1 and df["trace_hash"][0] == r.trace_hash
+
+
 # ---------------- 行情湖装载（真实分区存在时） ----------------
 REAL = Path("data/lake/market/silver/binance/um/klines/1m/instrument=BTCUSDT-PERP.BINANCE-UM/date=2024-01-15/part.parquet")
 
 
-@pytest.mark.skipif(__import__("os").environ.get("QUANT_LAB_SYNTHETIC_ONLY") == "1" or not REAL.exists(), reason="真实 2024-01 分区未入湖")
+@pytest.mark.skipif(not REAL.exists(), reason="真实 2024-01 分区未入湖")
 def test_load_market_from_lake_and_simulate_real_bars():
     t_dec = dt.datetime(2024, 1, 15, 12, 0, tzinfo=dt.UTC)
     plan = c.OrderPlan(instrument_id="BTCUSDT-PERP.BINANCE-UM", side="long",

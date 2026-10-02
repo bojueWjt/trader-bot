@@ -1,9 +1,9 @@
-"""quant_lab.market.kernel_a —— 候选 A：自研永续参考实现 v0.5（ADR-G2 §4–§7、§11；M-07；review-G2-P1 S01–S05/S07/S08/S13 闭合）。
+"""quant_lab.market.kernel_a —— 候选 A：自研永续参考实现 v0.6（ADR-G2 §4–§7、§11；M-07；review-G2-P1 S01–S05/S07/S08/S13 闭合）。
 
 order_plan → 规范执行事件。单 episode 隔离账户、one_way、USDT 线性合约（multiplier 参与全部金额）。
 判定顺序（每个时刻，ADR §5.1）：
   P0 规则/覆盖（每时刻查生命周期）→ P1 funding（以 q(t−)，结算 mark = calc_time 前最后**已闭合** mark）→ P2 到期/持仓上限
-  → P3 摄入 mark/last、mark 新鲜度（有仓位或即将入场都要求 mark 可用）→ P4 mark 触发 SL → P5 last 触发 TP
+  → P3 摄入 mark/last、mark 新鲜度（有仓位或即将入场都要求 mark 可用）→ 老师指令 → P4 mark 触发 SL → P5 last 触发 TP
   → P6 撮合（SL market → TP（当前 last 必须满足限价）→ entry 按价格/时间优先，post-only 穿价拒绝，钱包重检）
   → P7 入场后保护重检（一次）→ P8 暴露与不变量。
 分钟内部启动：市价从下一完整 bar 开始；marketable 限价可按已知 last 即时成交。加载启动前闭合 bar 只作 as-of 游标，不消费过去极值。
@@ -22,10 +22,10 @@ _SRC_FILES = ("kernel_a.py", "contract.py")   # S12：构建身份含共享 cont
 from quant_lab.market.contract import (
     Bar, CanonicalEvent, CENSOR_PRIORITY, ContractError, CoverageMask, first_grid_point, ExecutionInvariantError, ExecutionPolicy, ExecutionRequest,
     ExecutionResult, MarketView, PricePoint, check_invariants, floor_step, quantize_money, quantize_ratio,
-    entry_expiry_at, grid_points_between, missing_funding_times, request_canonical, resolve_policy, trace_hash,
+    ManagementAction, canonical_json, entry_expiry_at, grid_points_between, missing_funding_times, request_canonical, resolve_policy, trace_hash,
 )
 
-KERNEL_VERSION = "kernel-a-v0.5"
+KERNEL_VERSION = "kernel-a-v0.6"
 ZERO = Decimal(0)
 US = dt.timedelta(microseconds=1)
 
@@ -81,6 +81,7 @@ class Moment:
     hold_end: bool = False
     bar_gap: bool = False
     funding_missing: bool = False
+    management: list[tuple[int, ManagementAction]] = field(default_factory=list)
 
 
 class KernelA:
@@ -118,6 +119,10 @@ class KernelA:
         self.mark_ts: dt.datetime | None = None
         self.exit_latch = False
         self.breakeven_done = False
+        self.teacher_stop = False
+        self.stop_override: Decimal | None = None
+        self.stop_to_entry = False
+        self.last_point: PricePoint | None = None
         self.censor: str | None = None
         self.cov = {"mark_ok": True, "funding_ok": True, "rules_ok": True, "bars_ok": True}
         self.min_p = ZERO
@@ -231,6 +236,9 @@ class KernelA:
         for f in m.funding:
             if self.t_start <= f.calc_time <= end:
                 at(f.calc_time).funding.append(f)
+        if self.policy.follow_teacher:
+            for index, action in enumerate(self.req.management):
+                at(action.at).management.append((index, action))
         deadline = entry_expiry_at(self.t_start, self.req.entry_ttl_s)
         if deadline <= end:
             at(deadline).expiry = True
@@ -372,13 +380,20 @@ class KernelA:
         absq = abs(self.pos)
         exit_side = "sell" if self.sign > 0 else "buy"
         sl = self.orders.get("sl-0")
+        if self.stop_to_entry:
+            self.stop_override = quantize_ratio(self.entry_cost / self.entry_qty)
         if sl is None:
             self.seq_counter += 1
-            sl = Order("sl-0", "sl", exit_side, "stop_market", self.plan.stop.price, absq, seq=self.seq_counter)
+            price = self.plan.stop.price if self.stop_override is None else self.stop_override
+            sl = Order("sl-0", "sl", exit_side, "stop_market", price, absq, seq=self.seq_counter)
             self.orders["sl-0"] = sl
             self.emit(ts, "submitted", "sl-0", "sl", price=sl.price, qty=absq)
             self.emit(ts, "accepted", "sl-0", "sl")
             self.emit(ts, "working", "sl-0", "sl")
+        elif self.stop_to_entry and sl.live and sl.price != self.stop_override:
+            sl.price = self.stop_override
+            sl.qty = absq + sl.filled
+            self.emit(ts, "amended", "sl-0", "sl", price=sl.price, qty=sl.qty)
         elif sl.live and sl.qty != absq + sl.filled:
             sl.qty = absq + sl.filled
             self.emit(ts, "amended", "sl-0", "sl", price=sl.price, qty=sl.qty)
@@ -491,11 +506,12 @@ class KernelA:
 
     # ------------------------------------------------------------------ 触发
     def protective_stop(self) -> tuple[Decimal, str]:
-        # 保本之后有效止损是 sl-0 的现价，触发基准改为 mark；计划止损本身不改。
-        if self.breakeven_done:
+        # 老师移价保留原 trigger/timeframe；BE1 仍按原策略改成 mark。计划止损不改。
+        if self.breakeven_done or self.teacher_stop:
             sl = self.orders.get("sl-0")
             if sl is not None and sl.price is not None:
-                return sl.price, "mark"
+                basis = "mark" if self.breakeven_done else self.plan.stop.trigger
+                return sl.price, basis
         return self.plan.stop.price, self.plan.stop.trigger
 
     def stop_hit(self) -> bool:
@@ -530,7 +546,8 @@ class KernelA:
             aligned = (end - epoch).total_seconds() % seconds[stop.timeframe] == 0
         if not aligned:
             return False
-        return p.price < stop.price if self.sign > 0 else p.price > stop.price
+        price, _ = self.protective_stop()
+        return p.price < price if self.sign > 0 else p.price > price
 
     def trigger_stop(self, ts, bar=None, step="none", *, basis="mark", price=None) -> None:
         sl = self.orders.get("sl-0")
@@ -678,6 +695,100 @@ class KernelA:
         cands = [p for p in self.all_marks if p.ts <= ts and p.path_step in ("none", "C")]
         return cands[-1] if cands else None
 
+    # ---------------------------------------------------------- 老师管理指令
+    def management_audit(self, ts, index, action, status, *, price=None, qty=None) -> None:
+        """One control event per processed action; lifecycle/fills keep existing kinds.
+
+        reason is canonical JSON (kind/status/provenance/default audit). The new
+        management kind has no order lifecycle effect and adds no event fields.
+        """
+        reason = canonical_json({"kind": action.kind, "status": status,
+                                 "source_message_id": action.source_message_id,
+                                 "fraction": action.fraction, "to_entry": action.to_entry,
+                                 "fraction_defaulted": action.kind == "reduce" and action.fraction is None})
+        leg = "sl" if action.kind == "move_stop" else "close"
+        self.emit(ts, "management", f"management-{index}", leg, price=price, qty=qty, reason=reason)
+
+    def management_quote(self, ts) -> PricePoint | None:
+        point = self.last_point
+        if self.mark_ts is None or (ts - self.mark_ts).total_seconds() > self.policy.mark_max_staleness_s:
+            self.censor_now("MARK_STALE", "mark_ok")
+        if point is None or (ts - point.ts).total_seconds() > self.policy.mark_max_staleness_s:
+            self.censor_now("BAR_GAP", "bars_ok")
+        return None if self.censor is not None else point
+
+    def teacher_market_exit(self, ts, index, qty, point) -> None:
+        self.set_exit_latch(ts)
+        side = "sell" if self.sign > 0 else "buy"
+        order = Order(f"teacher-close-{index}", "close", side, "market", None, qty)
+        self.orders[order.id] = order
+        self.emit(ts, "submitted", order.id, "close", qty=qty)
+        self.emit(ts, "accepted", order.id, "close")
+        self.emit(ts, "working", order.id, "close")
+        px = self.market_px(point.price, side)
+        self.slippage += abs(px - point.price) * qty * self.mult
+        self.apply_exit_fill(ts, order, px, qty, True, point.bar_open_time, point.path_step)
+        if self.pos != 0:
+            self.protect(ts)
+        self.finish_if_flat(ts, reason="teacher_close")
+
+    def manage(self, ts, index: int, action: ManagementAction) -> None:
+        kind = action.kind
+        if kind == "add":
+            self.management_audit(ts, index, action, "ignored_add")
+            return
+        if kind == "reduce" and self.pos == 0:
+            self.management_audit(ts, index, action, "ignored_no_position")
+            return
+        if kind in ("close_all", "cancel_pending") and self.pos == 0:
+            self.management_audit(ts, index, action, "executed")
+            for entry in self.live_orders("entry"):
+                self.cancel(ts, entry, "teacher_cancel")
+            self.emit(ts, "closed", "bracket-0", "close", reason="no_fill")
+            self.closed = True
+            return
+        if kind == "cancel_pending":
+            self.management_audit(ts, index, action, "executed")
+            for entry in self.live_orders("entry"):
+                self.cancel(ts, entry, "teacher_cancel")
+            return
+        if kind == "move_stop":
+            if self.pos != 0 and self.management_quote(ts) is None:
+                self.management_audit(ts, index, action, "unavailable_market")
+                return
+            self.teacher_stop = True
+            self.stop_to_entry = action.to_entry and self.pos == 0
+            price = action.stop_price
+            if action.to_entry:
+                price = None if self.pos == 0 else quantize_ratio(self.entry_cost / self.entry_qty)
+            self.stop_override = price
+            self.management_audit(ts, index, action, "executed", price=price)
+            sl = self.orders.get("sl-0")
+            if sl is not None and sl.live and not sl.triggered:
+                sl.price = price
+                self.emit(ts, "amended", sl.id, "sl", price=price, qty=sl.qty)
+            crossed = self.pos != 0 and price is not None and self.mark is not None
+            if crossed:
+                crossed = self.mark <= price if self.sign > 0 else self.mark >= price
+            if crossed:
+                self.trigger_stop(ts)
+            return
+        # Market orders are unbounded by resting-limit bar capacity, like entry/time_exit.
+        fraction = Decimal("0.5") if action.fraction is None else action.fraction
+        qty = abs(self.pos) if kind == "close_all" else floor_step(abs(self.pos) * fraction, self.rules.step_size)
+        if qty == 0:
+            self.management_audit(ts, index, action, "ignored_zero_quantity")
+            return
+        point = self.management_quote(ts)
+        if point is None:
+            self.management_audit(ts, index, action, "unavailable_market")
+            return
+        self.management_audit(ts, index, action, "executed", qty=qty)
+        if kind == "close_all":
+            for tp in self.live_orders("tp"):
+                self.cancel(ts, tp, "teacher_close")
+        self.teacher_market_exit(ts, index, qty, point)
+
     def time_exit(self, ts: dt.datetime, reason: str) -> None:
         """P2 到期：用终点前已知行情，先完成证据门，再市价平掉所有余仓。"""
         marks = [p for p in self.all_marks if p.ts < ts and
@@ -747,6 +858,12 @@ class KernelA:
         seed = self.closed_mark_at(self.t_start)          # 启动前最新已闭合 mark 作初始游标
         if seed is not None:
             self.mark, self.mark_ts = seed.price, seed.ts
+        if self.policy.follow_teacher and self.req.management:
+            known = [p for p in self.market.last if p.ts <= self.t_start]
+            known += [p for b in self.market.bars_last for p in self.expand_bar(
+                b, self.req.path_scenario, self.plan.side, None, self.rules.step_size, self.path_orders.get(b.open_time))
+                if p.path_step == "C" and p.ts <= self.t_start]
+            self.last_point = max(known, key=lambda p: p.ts) if known else None
         if self.censor is None:
             self.moment_list = self.timeline()
             i = 0
@@ -814,6 +931,14 @@ class KernelA:
                     break
                 for p in mo.marks:
                     self.mark, self.mark_ts = p.price, p.ts
+                if mo.lasts:
+                    self.last_point = mo.lasts[-1]
+                for index, action in mo.management:
+                    self.manage(ts, index, action)
+                    if self.closed or self.censor:
+                        break
+                if self.closed or self.censor:
+                    break
                 if mo.lasts and (self.pos != 0 or self.live_orders("entry")):   # S05：入场前也要 mark 可用
                     if self.mark_ts is None or (ts - self.mark_ts).total_seconds() > self.policy.mark_max_staleness_s:
                         self.censor_now("MARK_STALE", "mark_ok")
