@@ -75,7 +75,8 @@ if [ "$status" -ne 0 ]; then
   status=0; health || status=$?
   if [ "$status" -eq 2 ]; then exit 2; fi
   if [ "$status" -ne 0 ]; then
-    nohup nice -n 19 "$py" -m quant_lab.viz --config "$config" --bind 127.0.0.1 --port "$port" >>"$log" 2>&1 </dev/null &
+    # 交互服务不降优先级：批量回放占满 CPU 时详情页仍要能打开；空闲时不占 CPU。
+    nohup "$py" -m quant_lab.viz --config "$config" --bind 127.0.0.1 --port "$port" >>"$log" 2>&1 </dev/null &
     pid=$!
     ready=false
     for attempt in {1..30}; do

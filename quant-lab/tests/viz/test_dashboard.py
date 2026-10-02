@@ -111,6 +111,31 @@ def test_trace_mismatch_is_explicit_and_events_hidden(dashboard, synthetic):
         summary_path.touch()
 
 
+@pytest.mark.parametrize("same_result", [True, False])
+def test_older_kernel_with_identical_result_is_accepted_but_labelled(dashboard, synthetic, same_result):
+    path = synthetic["reports"] / "l0-v7" / "demo" / "trades.parquet"
+    original = path.read_bytes()
+    summary_path = path.with_name("summary.json")
+    eid = synthetic["episode"]["episode_id"]
+    try:
+        hit = pl.col("episode_id") == eid
+        frame = pl.read_parquet(path).with_columns(
+            pl.when(hit).then(pl.lit("0" * 64)).otherwise(pl.col("trace_hash")).alias("trace_hash"),
+            pl.when(hit).then(pl.lit("kernel-a-v0.5+synthetic")).otherwise(pl.col("kernel_version")).alias("kernel_version"))
+        if not same_result:
+            frame = frame.with_columns(pl.when(hit).then(pl.lit("unfilled")).otherwise(pl.col("outcome_kind")).alias("outcome_kind"))
+        frame.write_parquet(path)
+        summary_path.touch()
+        detail = dashboard.detail("demo", "base", eid)
+        assert detail["consistency"]["ok"] is same_result
+        assert detail["consistency"]["label"] == ("结果一致（内核版本不同）" if same_result else "复算不一致")
+        assert detail["consistency"]["expected_kernel"] == "kernel-a-v0.5+synthetic"
+        assert bool(detail["events"]) is same_result
+    finally:
+        path.write_bytes(original)
+        summary_path.touch()
+
+
 def test_timeline_order_and_unused_instruction_data(dashboard, synthetic):
     detail = dashboard.detail("demo", "follow", synthetic["episode"]["episode_id"])
     dated = [item["time"] for item in detail["timeline"] if item["time"] is not None]

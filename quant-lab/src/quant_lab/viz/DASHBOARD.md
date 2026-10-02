@@ -28,7 +28,7 @@
 研究机的 `quant-lab/` 下：
 
 ```bash
-nice -n 19 .venv-g2/bin/python -m quant_lab.viz \
+.venv-g2/bin/python -m quant_lab.viz \
   --config /synthetic/research/dashboard.json --port 8765
 ```
 
@@ -41,7 +41,7 @@ scripts/hackintosh.sh dash
 scripts/hackintosh.sh dash /synthetic/research/dashboard.json 8876 8765
 ```
 
-`dash` 沿用 `JUMP/HOST/SSH_OPTS` 和公钥认证；检查 `/api/health` 的服务身份及配置路径+内容摘要，已有匹配服务则复用。未运行时在研究机 `~/quant-lab` 用 `nohup nice -n 19` 启动，日志为数据根 `dashboard-<远端端口>.log`。就绪后以 `ssh -f -N -L 127.0.0.1:本地端口:127.0.0.1:远端端口` 打开隧道，打印访问 URL。代码部署需先通过现有 `sync` 流程；`dash` 不同步代码、不上传配置。
+`dash` 沿用 `JUMP/HOST/SSH_OPTS` 和公钥认证；检查 `/api/health` 的服务身份及配置路径+内容摘要，已有匹配服务则复用。未运行时在研究机 `~/quant-lab` 用 `nohup` 以正常优先级启动（交互服务，批量回放占满 CPU 时仍要能打开），日志为数据根 `dashboard-<远端端口>.log`。就绪后以 `ssh -f -N -L 127.0.0.1:本地端口:127.0.0.1:远端端口` 打开隧道，打印访问 URL。代码部署需先通过现有 `sync` 流程；`dash` 不同步代码、不上传配置。
 
 配置不符或端口被其他服务占用时启动失败；选择其他远端端口或手动停止明确识别的旧看板进程后重试。本地端口已占用会由 `ExitOnForwardFailure` 拒绝。隧道在后台持续运行；用本机进程列表找到对应 `ssh -f -N -L ...` 后停止该进程即可关闭。研究机服务用进程列表按 `quant_lab.viz --config ... --port ...` 精确识别后停止。修改配置或服务代码后需重启看板。
 
@@ -60,6 +60,7 @@ scripts/hackintosh.sh dash /synthetic/research/dashboard.json 8876 8765
 | 空 | 5天（API key `base`） |
 | -be1 | 保本 |
 | -w14 | 14天 |
+| -w14-be1 | 14天+保本 |
 | -live | 让点 |
 | -be1-live | 让点+保本 |
 | -follow | 跟指令 |
@@ -75,13 +76,13 @@ scripts/hackintosh.sh dash /synthetic/research/dashboard.json 8876 8765
 
 共享 `l0_replay.prepare_episode_request()` 按原顺序执行参考价补全／过时报价限价化、live profile、历史 tick 规则、`build_request`，使用 summary 中的策略版本和风险预算。follow 口径再读取 summary 的 `follow_teacher.path`，调用原 `attach_management`。随后原 `load_market_from_lake` + `simulate_batch(kernel="A")` 得到 canonical events。策略哈希与登记不一致、根不可执行或输入改变时拒绝复算。
 
-只有复算 `trace_hash` 与该口径交易行完全一致才返回和展示成交事件。否则显示「复算不一致」，保留回测行的数据卡片与原文，隐藏 canonical events；不将当前新模拟伪装成历史成交。指令“采用”是请求构造结果，“执行结果”来自 canonical management 事件；采用但未处理可能是仓位已结束。不跟指令的口径标 `policy_disabled`。`uncertain`、`episode_ambiguity`、超窗和其他丢弃原因单独展示；归属未确定但窗口内提及同币种的指令作为上下文展示，不因此采用。
+只有复算 `trace_hash` 与该口径交易行完全一致才返回和展示成交事件；例外是内核版本不同（如 v0.5 批量结果、v0.6 复算）而成交、价格、时间、费用、R、覆盖标记等全部结果字段逐一相同，此时标「结果一致（内核版本不同）」并展示事件。否则显示「复算不一致」，保留回测行的数据卡片与原文，隐藏 canonical events；不将当前新模拟伪装成历史成交。指令“采用”是请求构造结果，“执行结果”来自 canonical management 事件；采用但未处理可能是仓位已结束。不跟指令的口径标 `policy_disabled`。`uncertain`、`episode_ambiguity`、超窗和其他丢弃原因单独展示；归属未确定但窗口内提及同币种的指令作为上下文展示，不因此采用。
 
 消息按精确 source version 展示版本号、reply_to、发布时间、available_at、解析结果和关联图事件；默认以可用时间排序，缺失时回退事件／发布时间，完全未知的置末。同一时刻消息先于模拟事件，模拟事件按 seq 排序。窗口内同币种消息由解析品种与正文代号／已有中文别名匹配；正文匹配只用于查看上下文。
 
 K线范围为 `t_dec - 1天` 至 `horizon_end + 1天`。服务端读取 lake 的 `klines/markPriceKlines` 1m silver 分区并聚合为 5m/15m/1h/4h；默认选择最细且不超过约 1600 根的周期。缺失分钟不补齐，不完整聚合返回 `partial=true`。执行仍用原体检和覆盖规则的 1m loader，图形聚合不参与回测。图上标记落在所属或最近可用 K线，事件线保留精确模拟时刻、价格、数量与占累计入场成交量的比例。
 
-详情复算缓存仅写 `<reports>/_dash_cache/`。文件名为 `(口径, 频道, episode_id, 历史 trace_hash)` 的 SHA-256；JSON 内保存该身份、输入指纹和模拟结果。每次读取检查源图、消息、解析、follow 文件、相关市场分区／规则／manifest 和代码的路径+mtime_ns+大小指纹；变更即重新模拟。缓存不保存消息原文。缓存写入原子替换；reports 不可写时退回无缓存计算。禁止通过客户端指定缓存路径。服务内串行化数据请求，防止并发重复复算和过量占用研究机 CPU。
+详情复算缓存仅写 `<reports>/_dash_cache/`。文件名为 `(口径, 频道, episode_id, 历史 trace_hash)` 的 SHA-256；JSON 内保存该身份、输入指纹和模拟结果。每次读取检查源图、消息、解析、follow 文件、本单窗口（t_dec 前 2 天至观察窗后 1 天）内该品种的 1m/资金费日分区与月 manifest、品种规则和代码的路径+mtime_ns+大小指纹；变更即重新模拟。不遍历整个行情湖（外接盘上逐文件 stat 会让一次详情等十几分钟）。缓存不保存消息原文。缓存写入原子替换；reports 不可写时退回无缓存计算。禁止通过客户端指定缓存路径。服务内串行化数据请求，防止并发重复复算和过量占用研究机 CPU。
 
 ## GET 接口
 

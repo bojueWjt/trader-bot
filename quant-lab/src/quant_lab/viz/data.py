@@ -20,16 +20,21 @@ from quant_lab.data.graph import resolve_alias
 from quant_lab.data.lake import Layout
 from quant_lab.data.market_lake import LakeMarket
 from quant_lab.market.contract import FILL_KINDS, resolve_policy
-from quant_lab.market.execution import load_market_from_lake, simulate_batch
+from quant_lab.market.execution import BATCH_SCHEMA, load_market_from_lake, simulate_batch
 from quant_lab.market.l0_replay import attach_management, load_followup_actions, prepare_episode_request
-from quant_lab.market.vision import LakePaths, symbol_of
+from quant_lab.market.partition_check import rules_path
+from quant_lab.market.vision import LakePaths, partition_id, symbol_of
 
-VARIANTS = {"": "5天", "-be1": "保本", "-w14": "14天", "-live": "让点",
+VARIANTS = {"": "5天", "-be1": "保本", "-w14": "14天", "-w14-be1": "14天+保本", "-live": "让点",
             "-be1-live": "让点+保本", "-follow": "跟指令", "-live-follow": "让点+跟指令",
             "-w60": "60天", "-w60-be1": "60天+保本"}
 INTERVALS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14400}
 SAFE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 UTC = dt.timezone.utc
+
+
+# Everything the kernel reports about the trade except its identity stamps.
+RESULT_FIELDS = tuple(key for key in BATCH_SCHEMA if key not in ("trace_hash", "kernel_version", "canonical_events"))
 
 
 def json_value(value):
@@ -291,11 +296,18 @@ class Dashboard:
         paths.update((layout.gold_dir / "_manifest").glob("*.json"))
         paths.update(Path(__file__).parents[1].joinpath("market").glob("*.py"))
         paths.update(Path(__file__).parent.glob("*.py"))
-        # Cache revalidation includes mutable market partitions, manifests and rules.
-        paths.update(lake.rglob("*.json"))
+        # Cache revalidation covers this request's market inputs only: the daily partitions and monthly
+        # manifests the loader reads (window padded on both sides) and the instrument rules. Walking the
+        # whole lake (every symbol and day on the external disk) made one detail view take many minutes.
+        lake_paths, symbol = LakePaths(lake), symbol_of(req.order_plan.instrument_id)
+        first, last = (req.t_dec - dt.timedelta(days=2)).date(), (req.horizon_end + dt.timedelta(days=1)).date()
+        days = [first + dt.timedelta(days=i) for i in range((last - first).days + 1)]
+        months = sorted({day.strftime("%Y-%m") for day in days})
         for kind, interval in (("klines", "1m"), ("markPriceKlines", "1m"), ("fundingRate", "8h")):
-            paths.update(LakePaths(lake).silver_dir(kind, interval, symbol_of(req.order_plan.instrument_id)).rglob("*.parquet"))
-        paths.update(lake.rglob("*rules*.parquet"))
+            folder = lake_paths.silver_dir(kind, interval, symbol)
+            paths.update(folder / f"date={day.isoformat()}" / "part.parquet" for day in days)
+            paths.update(lake_paths.manifest(partition_id(kind, interval, symbol, month)) for month in months)
+        paths.add(rules_path(lake_paths, req.order_plan.instrument_id))
         stamps = []
         for path in sorted(paths):
             if path.is_file():
@@ -417,7 +429,14 @@ class Dashboard:
             raise LookupError("未知K线周期")
         channel, summary, trade, episode, req, audit, lake, follow_path, follow_rows = self.context(key, variant, episode_id)
         result = self.replay_one(key, variant, trade, channel, req, lake, follow_path)
-        consistent = result["trace_hash"] == trade["trace_hash"]
+        same_trace = result["trace_hash"] == trade["trace_hash"]
+        # A newer kernel stamps a different trace hash even when nothing about the trade changed (v0.5→v0.6
+        # added management actions, byte-identical when none apply). Accept that only if every result field
+        # matches and the kernel version is what differs; anything else stays a visible mismatch.
+        same_result = (json.loads(dumps({k: trade.get(k) for k in RESULT_FIELDS}))
+                       == json.loads(dumps({k: result.get(k) for k in RESULT_FIELDS})))
+        consistent = same_trace or (same_result and result.get("kernel_version") != trade.get("kernel_version"))
+        label = "复算一致" if same_trace else "结果一致（内核版本不同）" if consistent else "复算不一致"
         events = result["canonical_events"] if consistent else []
         # Cache dates are strings; normalize before sorting and deriving segmented price lines.
         for event in events:
@@ -441,7 +460,8 @@ class Dashboard:
             segments.append({"start": at, "end": req.horizon_end, "price": price})
         return {"channel": {"key": key, "name": channel["name"]}, "variant": variant, "episode_id": episode_id,
                 "trade": trade, "plan": plan, "live_audit": audit, "horizon_end": req.horizon_end,
-                "consistency": {"ok": consistent, "label": "复算一致" if consistent else "复算不一致",
-                                "expected": trade["trace_hash"], "actual": result["trace_hash"]},
+                "consistency": {"ok": consistent, "label": label,
+                                "expected": trade["trace_hash"], "actual": result["trace_hash"],
+                                "expected_kernel": trade.get("kernel_version"), "actual_kernel": result.get("kernel_version")},
                 "events": events, "timeline": mixed_timeline(messages, events), "stop_segments": segments,
                 "bars": read_bars(lake, req.order_plan.instrument_id, start, end, interval)}
