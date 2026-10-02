@@ -180,7 +180,8 @@ def quote_response(item, text, *, candidates=None, expected_schema=None):
                 roots = candidates or []
                 prices = []
             symbols = candidates.get("symbols") or {} if isinstance(candidates, dict) else {}
-            checked = followup.validate_response(item, text, candidate_root_ids=list(roots), entry_prices=list(prices), candidate_symbols=symbols)
+            checked = followup.validate_response(item, text, candidate_root_ids=list(roots), entry_prices=list(prices), candidate_symbols=symbols,
+                                                  target_context=candidates if isinstance(candidates, dict) and "context" in candidates else None)
             return {"response": checked}
         except (ValueError, TypeError, KeyError):
             return abstain("invalid_followup_envelope")

@@ -486,9 +486,9 @@ def test_window_twelve_reply_asof_channel_and_terminal_mutants():
 
     window_only(followup._in_window)
     with pytest.raises(AssertionError):
-        window_only(mutant(followup._in_window, "timedelta(days=21)", "timedelta(days=22)"))
+        window_only(mutant(followup._in_window, "days=21", "days=22"))
     with pytest.raises(AssertionError):
-        window_only(mutant(followup._in_window, "timedelta(days=21)", "timedelta(days=20)"))
+        window_only(mutant(followup._in_window, "days=21", "days=20"))
 
     def limit(fn):
         found = [row["root_message_id"] for row in fn(events, episodes, episode_events, august_moment())]
@@ -714,7 +714,7 @@ def test_export_fake_run_import_build_maps_decimal_and_misses(tmp_path, monkeypa
     assert none_row["fraction"] is None and none_row["target_message_id"] is None and none_row["uncertain"] is True
     ambiguous = frame.filter(pl.col("source_version_id") == "b-close").row(0, named=True)
     assert ambiguous["episode_id"] is None and ambiguous["episode_ambiguity"] == "ambiguous_root_episode"
-    assert ambiguous["target_message_id"] == 3 and ambiguous["graph_version"] == gv and ambiguous["rule_version"] == "followup-v1"
+    assert ambiguous["target_message_id"] == 3 and ambiguous["graph_version"] == gv and ambiguous["rule_version"] == "followup-v2"
     assert ambiguous["uncertain"] is True
     assert built["none_actions"] >= 1 and built["episode_ambiguous"] >= 1
     prior = [row for row in built["rejects"] if row.get("stage") == "prior_validation" and row["source_version_id"] == "a-half"]
@@ -1124,7 +1124,7 @@ def test_unknown_clock_now_messages_stay_candidates(tmp_path):
     with pytest.raises(AssertionError):
         retained(mutant(
             followup.plan_prompts_from_tables,
-            "        if unknown_clock:\n            context = []\n            roots = []\n            reply_text = None",
+            "        if unknown_clock:\n            context = []\n            roots = []\n            reply_text = None\n            conversation = []",
             "        if unknown_clock:\n            continue",
         ))
 
