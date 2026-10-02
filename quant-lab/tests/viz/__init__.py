@@ -1,0 +1,1 @@
+"""Synthetic dashboard acceptance tests."""

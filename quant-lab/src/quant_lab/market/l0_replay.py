@@ -222,6 +222,48 @@ def attach_management(requests: list[ExecutionRequest], rows: list[dict], *, pol
                       "n_reduce_fraction_defaulted": defaulted}
 
 
+def prepare_episode_request(row: dict, *, marks, lake: Path, policy, risk_budget: Decimal,
+                            text: str | None = None, rule_cache: dict | None = None
+                            ) -> tuple[ExecutionRequest | None, dict | None, str | None, bool, bool]:
+    """Shared L0 single-episode construction; return request, audit, exclusion, resolution flags.
+
+    Management is attached separately by attach_management, exactly as in replay.
+    Source rows and policy identities remain unchanged.
+    """
+    fixed, why = resolve_market_refs(row, marks)
+    if fixed is None:
+        return None, None, why, False, False
+    resolved = fixed is not row
+    stale = bool(fixed.get("stale_quote_as_limit"))
+    if fixed.get("order_plan") is None:
+        return None, None, "PLAN_NOT_EXECUTABLE", resolved, stale
+    if fixed["order_plan"].get("stop") is None:
+        return None, None, "PLAN_NO_STOP", resolved, stale
+    rule_cache = {} if rule_cache is None else rule_cache
+    try:
+        execution_row, audit = fixed, None
+        if policy.live_execution_profile:
+            inst = fixed["instrument_id"]
+            if inst not in rule_cache:
+                rule_cache[inst] = load_rules(LakePaths(lake), inst)
+            # Live variants have latency_s=0. Use only rules known at the
+            # decision, just as market_ref uses the decision's as-of mark.
+            rule = rule_at(rule_cache[inst], inst, fixed["t_dec"])
+            tick = None
+            if rule is not None and rule.get("status") == "TRADING" and rule.get("tick_size") is not None:
+                value = Decimal(str(rule["tick_size"]))
+                if value.is_finite() and value > 0:
+                    tick = value
+            execution_row, audit = prepare_execution(fixed, policy=policy,
+                text=text, tick_size=tick)
+        request = build_request(execution_row, policy_version=policy.version, policy_hash=policy.content_hash,
+                                risk_budget=risk_budget, market_manifest="l0-active-silver",
+                                cost_scenario="base", path_scenario="primary")
+        return request, audit, None, resolved, stale
+    except (ContractError, ValueError) as exc:
+        return None, None, f"PLAN_CONTRACT_INVALID:{type(exc).__name__}", resolved, stale
+
+
 def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: str | Path | None = None,
            policy_version: str = "base-v1", risk_budget: Decimal = Decimal("100"),
            followup_actions: str | Path | None = None) -> dict:
@@ -260,45 +302,19 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
     if policy.live_execution_profile:
         root_texts = load_message_texts(episodes["root_source_version_id"].to_list())
     for row in episodes.iter_rows(named=True):
-        fixed, why = resolve_market_refs(row, marks)
-        if fixed is None:
+        request, audit, why, resolved, stale = prepare_episode_request(
+            row, marks=marks, lake=lake, policy=policy, risk_budget=risk_budget,
+            text=root_texts.get(row["root_source_version_id"]), rule_cache=rule_cache)
+        if resolved:
+            market_ref_resolved.append(row["episode_id"])
+        if stale:
+            stale_quote_limits.append(row["episode_id"])
+        if request is None:
             replay_exclusions[why] += 1
             continue
-        if fixed is not row:
-            market_ref_resolved.append(row["episode_id"])
-        if fixed.get("stale_quote_as_limit"):
-            stale_quote_limits.append(row["episode_id"])
-        if fixed.get("order_plan") is None:
-            # 决策时刻已定但凑不成计划（方向或品种缺失等）：与"没有止损"分开计，否则会把解析缺口算成老师没给止损。
-            replay_exclusions["PLAN_NOT_EXECUTABLE"] += 1
-            continue
-        if fixed["order_plan"].get("stop") is None:
-            # 按风险预算定仓要止损距离；原文没给止损的计划无法折成 R，单独计数，不混进契约错误。
-            replay_exclusions["PLAN_NO_STOP"] += 1
-            continue
-        try:
-            execution_row, audit = fixed, None
-            if policy.live_execution_profile:
-                inst = fixed["instrument_id"]
-                if inst not in rule_cache:
-                    rule_cache[inst] = load_rules(LakePaths(lake), inst)
-                # Live variants have latency_s=0. Use only rules known at the
-                # decision, just as market_ref uses the decision's as-of mark.
-                rule = rule_at(rule_cache[inst], inst, fixed["t_dec"])
-                tick = None
-                if rule is not None and rule.get("status") == "TRADING" and rule.get("tick_size") is not None:
-                    value = Decimal(str(rule["tick_size"]))
-                    if value.is_finite() and value > 0:
-                        tick = value
-                execution_row, audit = prepare_execution(fixed, policy=policy,
-                    text=root_texts.get(row["root_source_version_id"]), tick_size=tick)
-            requests.append(build_request(execution_row, policy_version=policy.version, policy_hash=policy.content_hash,
-                                          risk_budget=risk_budget, market_manifest="l0-active-silver",
-                                          cost_scenario="base", path_scenario="primary"))
-            if audit is not None:
-                live_records[row["episode_id"]] = audit
-        except (ContractError, ValueError) as exc:   # 单笔计划不合契约：记原因码继续，不让整批中断
-            replay_exclusions[f"PLAN_CONTRACT_INVALID:{type(exc).__name__}"] += 1
+        requests.append(request)
+        if audit is not None:
+            live_records[row["episode_id"]] = audit
     market_hashes = {}
     followup_report = None
     if policy.follow_teacher:

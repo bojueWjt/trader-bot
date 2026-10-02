@@ -1,0 +1,14 @@
+{
+  "reports": "/synthetic/research/reports",
+  "tag": "v7",
+  "market_lake": "/synthetic/research/lake/market",
+  "channels": [
+    {
+      "key": "demo",
+      "name": "合成老师",
+      "channel_id": -1001234567890,
+      "data_root": "/synthetic/channels/demo",
+      "graph_version": "demo-v1"
+    }
+  ]
+}

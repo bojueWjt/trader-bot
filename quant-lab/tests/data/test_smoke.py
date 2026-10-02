@@ -99,9 +99,12 @@ def test_api_signatures_match_contract():
     from quant_lab.data import api
 
     sig = inspect.signature(api.load_episodes)
-    assert list(sig.parameters) == ["graph_version", "decision_graph"]
+    assert list(sig.parameters) == ["graph_version", "decision_graph", "layout"]
     assert sig.parameters["decision_graph"].kind is inspect.Parameter.KEYWORD_ONLY and sig.parameters["decision_graph"].default is True
-    assert list(inspect.signature(api.load_episode_events).parameters) == ["graph_version"]
+    assert sig.parameters["layout"].kind is inspect.Parameter.KEYWORD_ONLY and sig.parameters["layout"].default is None
+    events_sig = inspect.signature(api.load_episode_events)
+    assert list(events_sig.parameters) == ["graph_version", "layout"]
+    assert events_sig.parameters["layout"].kind is inspect.Parameter.KEYWORD_ONLY and events_sig.parameters["layout"].default is None
     assert list(inspect.signature(api.loss_table).parameters) == ["batch_id"]
     qs = inspect.signature(api.quarantine)
     assert list(qs.parameters) == ["flow", "status"] and qs.parameters["flow"].default is inspect.Parameter.empty and qs.parameters["status"].kind is inspect.Parameter.KEYWORD_ONLY

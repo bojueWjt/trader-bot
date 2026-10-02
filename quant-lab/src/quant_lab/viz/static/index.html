@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>回测看板 · quant-lab</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <header><a href="/" class="brand">quant-lab <span>回测看板</span></a><span class="readonly">只读 · 描述性研究</span></header>
+  <main>
+    <nav id="breadcrumbs" aria-label="导航"></nav>
+    <div id="error" role="alert" hidden></div>
+    <div id="loading" role="status">正在读取研究数据…</div>
+    <section id="home" hidden>
+      <h1>频道与口径</h1>
+      <p class="muted">仅统计已成交、未删失且行情／资金费／规则证据完整的单笔。区间按 UTC 决策日期聚类；累计 R 为信号累加。</p>
+      <div id="summary-table" class="table-wrap"></div>
+      <div id="curves" class="grid"></div>
+    </section>
+    <section id="channel" hidden>
+      <h1 id="channel-title"></h1>
+      <div id="filters" class="toolbar">
+        <label>查看口径<select id="list-variant"></select></label>
+        <label><input type="checkbox" id="filled-only">只看成交</label>
+        <label><input type="checkbox" id="teacher-only">只看有老师指令</label>
+        <label>币种<select id="symbol-filter"></select></label>
+        <label>月份<select id="month-filter"></select></label>
+        <label>排序<select id="sort"><option value="new">时间 ↓</option><option value="old">时间 ↑</option><option value="r-high">所选口径 R ↓</option><option value="r-low">所选口径 R ↑</option></select></label>
+      </div>
+      <p id="trade-count" class="muted"></p>
+      <div id="trade-list" class="table-wrap"></div>
+    </section>
+    <section id="detail" hidden>
+      <h1 id="detail-title"></h1>
+      <div class="toolbar"><label>回测口径<select id="detail-variant"></select></label><label>K线周期<select id="interval"><option value="auto">自动</option><option value="5m">5 分钟</option><option value="15m">15 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label><span id="range" class="muted"></span></div>
+      <div id="consistency" role="status"></div>
+      <div id="cards" class="cards"></div>
+      <div class="detail-grid">
+        <div class="panel chart-panel"><div id="chart" aria-label="价格K线"></div><p id="chart-note" class="muted">蓝色：入场区间 · 红色：分段止损 · 绿色：止盈 · 灰色：标记价。点击右侧事件定位。</p><div id="marker-legend"></div></div>
+        <aside class="panel"><h2>事件线</h2><p class="muted">按版本可用时间与模拟时间混排，未知时间置末。原文按纯文本显示。</p><div id="timeline"></div></aside>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

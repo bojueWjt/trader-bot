@@ -7,7 +7,7 @@
   描述图事件另用 `load_episode_events_description(graph_version)`（签名不改契约函数）。
 - `loss_table(batch_id)`（`latest` 便利入口会在结果里带实际 batch_id）、`quarantine(flow, *, status=None)`。
 - 读前校验发布 manifest（存在、published、文件 hash 一致、未 tombstone）；缺/不符/撤销一律拒读（S11）。
-- 湖根目录只由 QUANT_LAB_DATA_ROOT 决定（契约 §9.1）。
+- 湖根目录默认由 QUANT_LAB_DATA_ROOT 决定；只读访问可显式传入 Layout。
 """
 from __future__ import annotations
 
@@ -33,8 +33,8 @@ def _layout() -> Layout:
     return Layout.from_root(None)
 
 
-def load_episodes(graph_version: str, *, decision_graph: bool = True) -> pl.DataFrame:
-    layout = _layout()
+def load_episodes(graph_version: str, *, decision_graph: bool = True, layout: Layout | None = None) -> pl.DataFrame:
+    layout = _layout() if layout is None else layout
     graph_version = resolve_alias(layout, graph_version)
     verify_manifest(layout, graph_version)
     df = pl.read_parquet(layout.episode(graph_version))
@@ -63,8 +63,8 @@ def load_episodes(graph_version: str, *, decision_graph: bool = True) -> pl.Data
     return d
 
 
-def load_episode_events(graph_version: str) -> pl.DataFrame:
-    layout = _layout()
+def load_episode_events(graph_version: str, *, layout: Layout | None = None) -> pl.DataFrame:
+    layout = _layout() if layout is None else layout
     graph_version = resolve_alias(layout, graph_version)
     verify_manifest(layout, graph_version)
     ev = pl.read_parquet(layout.episode_event(graph_version))
@@ -80,8 +80,8 @@ def load_episode_events(graph_version: str) -> pl.DataFrame:
     return visible.drop("t_dec")
 
 
-def load_episode_events_description(graph_version: str) -> pl.DataFrame:
-    layout = _layout()
+def load_episode_events_description(graph_version: str, *, layout: Layout | None = None) -> pl.DataFrame:
+    layout = _layout() if layout is None else layout
     graph_version = resolve_alias(layout, graph_version)
     verify_manifest(layout, graph_version)
     ev = pl.read_parquet(layout.episode_event(graph_version))
@@ -89,14 +89,15 @@ def load_episode_events_description(graph_version: str) -> pl.DataFrame:
     return ev.filter(~pl.col("episode_id").is_in(list(stale))) if stale else ev
 
 
-def load_message_texts(source_version_ids: Iterable[str]) -> dict[str, str]:
+def load_message_texts(source_version_ids: Iterable[str], *, layout: Layout | None = None) -> dict[str, str]:
     """Read exact requested bronze versions, never the latest version of a message.
 
     Missing/null or conflicting duplicate text is unresolved, not guessed. This
     read-only accessor changes no extraction or decision-graph semantics.
     """
     ids = {value for value in source_version_ids if value is not None}
-    path = _layout().message_version
+    layout = _layout() if layout is None else layout
+    path = layout.message_version
     if not ids or not path.exists():
         return {}
     rows = pl.scan_parquet(path).filter(pl.col("source_version_id").is_in(sorted(ids))).select(
