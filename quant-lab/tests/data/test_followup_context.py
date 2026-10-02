@@ -235,7 +235,8 @@ def test_population_percentage_is_not_position_fraction_and_mutation():
 
 
 def test_missing_time_or_direction_conflict_never_selects_recent():
-    prompt = prompt_for([opening("a", 1, 2, "ETH"), opening("b", 2, 1, "ETH")], "仿写以太止盈")
+    # Mixed sides with no stated side need the single latest open, so a missing time must not pick one.
+    prompt = prompt_for([opening("a", 1, 2, "ETH", "long"), opening("b", 2, 1, "ETH", "short")], "仿写以太止盈")
     spec = followup.candidates_from_user(prompt["user"])
     for invalid in (None, "", "2024-07-31T00:00:00"):
         spec["context"][0]["open_time"] = invalid
@@ -257,11 +258,12 @@ def assert_resolution(kind):
     elif kind == "latest":
         text, expected = "仿写以太止盈", 2
     elif kind == "same-side":
+        # One-way netting: both ETH shorts are one position on the exchange, so both are targeted.
         opens = [opening("first", 1, 2, "ETH", "short"), opening("second", 2, 1, "ETH", "short")]
-        text, expected = "仿写以太空单止盈", None
+        text, expected = "仿写以太空单止盈", [2, 1]
     elif kind == "tie":
         opens = [opening("first", 1, 1, "ETH"), opening("second", 2, 1, "ETH")]
-        text, expected = "仿写以太止盈", None
+        text, expected = "仿写以太止盈", [1, 2]
     elif kind == "unknown":
         opens = [opening("first", 1, 2, "ETH", text="仿写开仓"), opening("second", 2, 1, "ETH", text="仿写开仓")]
         text, expected = "仿写这笔止盈", None
@@ -271,6 +273,11 @@ def assert_resolution(kind):
     else:
         raise AssertionError(kind)
     prompt = prompt_for(opens, text, previous)
+    if isinstance(expected, list):
+        result = validate(prompt, pending("close_all", text))
+        assert sorted(row["target_message_id"] for row in result["instructions"]) == sorted(expected)
+        assert all(row["uncertain"] is False for row in result["instructions"])
+        return
     # A proposed candidate id is still insufficient evidence when scope is ambiguous.
     draft = pending("close_all", text) if expected is not None else instruction(1, "close_all", text, symbol="ETH")
     assert_target(validate(prompt, draft), expected, expected is None)
@@ -281,12 +288,21 @@ def test_named_direction_latest_and_ambiguity_counterexamples(kind):
     assert_resolution(kind)
 
 
+def test_netting_skips_finished_opens_and_mixed_sides_keep_latest():
+    opens = [opening("first", 1, 3, "ETH", "short"), opening("second", 2, 2, "ETH", "short"), opening("third", 3, 1, "ETH", "long")]
+    # Mixed sides and no stated side: still only the single latest open.
+    assert_target(validate(prompt_for(opens, "仿写以太止盈"), pending("close_all", "仿写以太止盈")), 3, False)
+    # Stated side: every live open of that side.
+    result = validate(prompt_for(opens, "仿写以太空单走了"), pending("close_all", "仿写以太空单走了"))
+    assert sorted(row["target_message_id"] for row in result["instructions"]) == [1, 2]
+
+
 @pytest.mark.parametrize("name,before,after,kind", [
     ("_resolve_targets", "elif len(named) == 1:", "elif False:", "named"),
     ("_resolve_targets", "if side is not None:", "if False:", "side"),
-    ("_resolve_targets", "elif side is None:", "elif True:", "same-side"),
+    ("_resolve_targets", "elif len(sides) == 1 and live:", "elif False:", "same-side"),
     ("_resolve_targets", "if recent is not None:", "if False:", "latest"),
-    ("_recent_root", "return roots[0] if len(roots) == 1 else None", "return roots[0]", "tie"),
+    ("_resolve_targets", "live = [root for root in matched_roots", "live = [root for root in matched_roots[:1]", "tie"),
     ("_resolve_targets", "selected = []\n    if bulk:", 'selected = [context[0]["root_message_id"]] if context else []\n    if bulk:', "unknown"),
 ], ids=["named", "side", "same-side-ambiguous", "latest", "time-tie", "no-guess"])
 def test_targeting_mutations(name, before, after, kind):

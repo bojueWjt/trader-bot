@@ -937,8 +937,15 @@ def _resolve_targets(instruction, text, roots, target_context):
             matched = [row for row in matched if row.get("side") == side or
                        (row.get("side") is None and len({item["root_message_id"] for item in matched}) == 1)]
         matched_roots = list(dict.fromkeys(row["root_message_id"] for row in matched))
+        sides = {row.get("side") for row in matched if row.get("side") is not None}
+        live = [root for root in matched_roots
+                if not any(row.get("has_visible_terminal", False) for row in matched if row["root_message_id"] == root)]
         if len(matched_roots) == 1:
             selected = matched_roots
+        elif len(sides) == 1 and live:
+            # One-way accounts net every open of a symbol and side into a single position, so a named
+            # instruction ("以太空单走一半") applies to all of them; finished opens are left out.
+            selected = live
         elif side is None:
             recent = _recent_root(matched)
             if recent is not None:
