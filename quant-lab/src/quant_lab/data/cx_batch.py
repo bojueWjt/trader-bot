@@ -451,6 +451,41 @@ def run_batches(prompts: Path, directory: Path, *, executable=None, batch_size=2
         return report
 
 
+def revalidate_raw(prompts: Path, run_dir: Path, output_dir: Path):
+    """Re-apply the current validators to a run's saved model output; never calls the model.
+
+    Uses each key's latest successful raw item (metrics error null), the same text, schema and
+    follow-up candidate context as the original run. Keys with no successful raw item are counted
+    as missing, not invented.
+    """
+    rows = {row["key"]: row for row in read_jsonl(prompts)}
+    latest = {}
+    raws = [p for p in (run_dir / "raw").glob("*.json") if not p.name.endswith(".metrics.json")]
+    for raw in sorted(raws, key=lambda p: (p.stat().st_mtime_ns, p.name)):
+        try:
+            if json.loads(raw.with_suffix(".metrics.json").read_text()).get("error") is not None:
+                continue
+            items = json.loads(raw.read_text(encoding="utf-8"), parse_float=Decimal)["items"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        for item in items:
+            if isinstance(item, dict) and item.get("key") in rows:
+                latest[item["key"]] = item
+    out = {}
+    for key, item in latest.items():
+        row = rows[key]
+        own = _followup_contexts([row]).get(key)
+        out[key] = {"key": key, **quote_response(item, row["text"], candidates=own, expected_schema=row.get("schema_name"))}
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _atomic_text(output_dir / "responses.jsonl", "".join(dumps(out[k]) + "\n" for k in sorted(out)))
+    stats = [r.get("response", {}).get("stats", {}) for r in out.values()]
+    report = {"prompts": len(rows), "revalidated": len(out), "missing": len(rows) - len(out),
+              "abstained": sum("abstain" in r for r in out.values()),
+              "rejected": sum(s.get("rejected", 0) for s in stats)}
+    write_json(output_dir / "revalidate.json", report)
+    return report
+
+
 def import_responses(responses: Path, output: Path):
     items = {}
     for row in read_jsonl(responses):
@@ -565,6 +600,10 @@ def main(argv=None):
     parser = sub.add_parser("import")
     parser.add_argument("--responses", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser = sub.add_parser("revalidate", help="re-apply current validators to a run's raw model output (no model call)")
+    parser.add_argument("--prompts", type=Path, required=True)
+    parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
     args = ap.parse_args(argv)
     if args.command == "run":
         report = run_batches(args.prompts, args.output_dir, executable=args.codex, batch_size=args.batch_size,
@@ -572,6 +611,8 @@ def main(argv=None):
                              backoff=args.backoff, model=args.model)
     elif args.command == "import":
         report = import_responses(args.responses, args.output)
+    elif args.command == "revalidate":
+        report = revalidate_raw(args.prompts, args.run_dir, args.output_dir)
     else:
         from .lake import Layout
         layout = Layout.flat(args.build_dir) if args.build_dir else Layout.from_root(args.lake_root)

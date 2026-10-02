@@ -26,6 +26,8 @@
 - 「80%的人要止盈」的人群百分数不算仓位比例；止盈指令仍不带 fraction。校验拒绝把这种数字当减仓比例。
 - 取消挂单 / 撤单 → `cancel_pending`，不带 fraction。加仓 → `add`。只有 add 和 reduce 可以带 fraction。
 - 止损原文有成本 / 保本 / 入场价 → `move_stop`，`to_entry=true`，`price=null`。不能用 entry price 代替，也不能没有这些原词就写 `to_entry=true`。这句话只看本条 `evidence_quote` 和 `stop.quote`，不用整篇里其他指令的词，也不用其他候选的入场价。
+  - 校验另认可真实频道里的同义说法（`TO_ENTRY_WORDS`，10-02 起；prompt 不变、录制 key 不变）：报本、入场点/位/区/水平、进场价/点/位、开仓价/点/位、盈亏平衡、收支平衡、无风险、BE/B/E/breakeven，以及「移至/移到/调整到/设在…入场（不含入场时）」。旧词表让 Titan/高卢人/Cash/峰哥约 400 条拉保本被拒。反向检查（数字止损其实是入场价）仍只用成本/保本/入场价。
+  - 只说「止损上移 / 推防守 / 移动止损」而没有去处的仍拒（`move_stop_without_destination`），不猜移到哪。
 - `stop.price` 或 `to_entry=true` 只属于 `move_stop`。
 - 只有评论 → `none`。
 - `一半` = 50，quote 必须含原文「一半」。明确 `%` 才走百分数，50 表示 50%。比例必须是有限、非负的数，quote 必须严格引用原文，不补比例。reduce 不能超过 100%。add 没有比例上界：原文写明 150% 或 200% 时按原文保存，不截成 100。任何动作的 `pct/100` 都必须能精确落进 Decimal(38,12)，否则整条拒绝。这条精度是校验和落盘规则，不写进给模型的 prompt。sNaN 一类信号转成该条拒绝，不让整批中断。
@@ -53,6 +55,8 @@ PY=.venv-g1/bin/python
 "$PY" -m quant_lab.data.followup export --build-dir "$LAKE" --graph-version "$GV" --channel -100 --sample 100 --seed 0 --output "$B/prompts.jsonl"
 "$PY" -m quant_lab.data.cx_batch run --prompts "$B/prompts.jsonl" --output-dir "$B/run"
 "$PY" -m quant_lab.data.followup import --responses "$B/run/responses.jsonl" --output "$B/recorded.json"
+# 校验规则改了而模型输出不用重跑时：用 run/raw 里保存的原始输出按当前校验重算，不调用模型
+"$PY" -m quant_lab.data.cx_batch revalidate --prompts "$B/prompts.jsonl" --run-dir "$B/run" --output-dir "$B/run-revalidated"
 "$PY" -m quant_lab.data.followup build --build-dir "$LAKE" --graph-version "$GV" --llm-fixture "$B/recorded.json" --output "$B/followup_action.parquet"
 ```
 

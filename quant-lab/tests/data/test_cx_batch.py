@@ -565,3 +565,25 @@ def test_wire_message_drops_only_redundant_copies(tmp_path, fake_codex, monkeypa
     other = dict(row, system="另一套规则")
     assert cx.wire_message(other) is other
     assert len(cx.dumps(wire)) < len(cx.dumps(row)) / 2
+
+
+def test_revalidate_reuses_raw_output_without_calling_the_model(tmp_path, fake_codex, monkeypatch):
+    script, capture = fake_codex
+    path, run = tmp_path / "prompts", tmp_path / "run"
+    prompts(path, 3)
+    cx.run_batches(path, run, executable=str(script), batch_size=2)
+    before = len(calls(capture))
+    report = cx.revalidate_raw(path, run, tmp_path / "again")
+    assert len(calls(capture)) == before and report["revalidated"] == 3 and report["missing"] == 0
+    original = {r["key"]: r for r in cx.read_jsonl(run / "responses.jsonl")}
+    assert {r["key"]: r for r in cx.read_jsonl(tmp_path / "again" / "responses.jsonl")} == original
+    # The current validator decides, not the one that ran at collection time.
+    monkeypatch.setattr(cx, "quote_response", lambda item, text, **kwargs: cx.abstain("revalidated"))
+    cx.revalidate_raw(path, run, tmp_path / "strict")
+    assert all("abstain" in r for r in cx.read_jsonl(tmp_path / "strict" / "responses.jsonl"))
+    # Failed attempts are ignored; their keys are missing, never invented.
+    for metrics in (run / "raw").glob("*.metrics.json"):
+        doc = json.loads(metrics.read_text())
+        doc["error"] = "codex_timeout"
+        metrics.write_text(json.dumps(doc))
+    assert cx.revalidate_raw(path, run, tmp_path / "none")["missing"] == 3

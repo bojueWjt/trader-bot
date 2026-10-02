@@ -1310,3 +1310,25 @@ def test_same_instrument_episodes_of_one_message_share_an_instruction():
     mixed = [legs[0], dict(legs[1], side="short")]
     rows = followup._instruction_rows(prompt, checked, mixed, "g")
     assert len(rows) == 1 and rows[0]["episode_ambiguity"] == "ambiguous_root_episode" and rows[0]["uncertain"] is True
+
+
+@pytest.mark.parametrize("words", ["入场点", "入场区域", "盈亏平衡点", "收支平衡", "BE", "breakeven", "开仓价", "进场价",
+                                   "入场水平", "无风险"])
+def test_to_entry_accepts_real_breakeven_wording(words):
+    # 真实频道的拉保本说法：模型给 to_entry=true，旧词表（成本/保本/入场价）全部拒掉。
+    text = f"止损移至{words}"
+    kept = validate_one(text, instruction(1, "move_stop", text, stop_obj=stop(to_entry=True, quote=text)))
+    assert kept["stop"]["to_entry"] is True and kept["stop"]["price"] is None
+
+
+def test_to_entry_still_needs_entry_wording_and_numbers_stay_numbers():
+    for text in ("止损上移", "请务必在入场时设置止损", "移动止损"):
+        bad = envelope(instruction(1, "move_stop", text, stop_obj=stop(to_entry=True, quote=text)))
+        assert followup.validate_response(bad, text, candidate_root_ids=[1])["instructions"] == []
+    moved = validate_one("止损移至入场", instruction(1, "move_stop", "止损移至入场",
+                                                  stop_obj=stop(to_entry=True, quote="止损移至入场")))
+    assert moved["stop"]["to_entry"] is True
+    # The reverse guard (numeric stop that is really the entry price) keeps the original narrow words.
+    numeric = "止损移至入场点下方 90"
+    kept = validate_one(numeric, instruction(1, "move_stop", numeric, stop_obj=stop((90, "90"), quote="90")))
+    assert kept["stop"]["price"]["value"] == "90" and kept["stop"]["to_entry"] is False

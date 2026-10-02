@@ -26,6 +26,13 @@ RULE_VERSION = "followup-v3"
 FOLLOWUP_OPS = frozenset({"reduce", "take_profit", "close", "stop_move", "cancel", "add"})
 ACTIONS = ("close_all", "reduce", "move_stop", "cancel_pending", "add", "none")
 ENTRY_MARKERS = ("成本", "保本", "入场价")
+# 证明「止损移到入场/保本」的其他真实说法。模型对这些都正确给出 to_entry=true，旧词表只认上面三个词，
+# Titan/高卢人/Cash/峰哥 共 400 条拉保本因此被拒（入场区、入场点、盈亏平衡、BE、开仓价……）。
+# ENTRY_MARKERS 仍单独用于「数字止损其实是入场价」的反向检查，不随这里放宽。
+TO_ENTRY_WORDS = re.compile(
+    r"报本|入场点|入场位|入场区|入场水平|进场价|进场点|进场位|开仓价|开仓点|开仓位|盈亏平衡|收支平衡|无风险"
+    r"|(?<![A-Za-z])(?:BE|B/E|[Bb]reak[- ]?[Ee]ven)(?![A-Za-z])"
+    r"|(?:移至|移到|移动到|调整至|调整到|调至|设在|设置在|设于|拉到|拉至|提到|提至|放到|放在)\s*(?:入场|进场|开仓|入口|条目)(?!时)")
 FRACTION_ACTIONS = frozenset({"reduce", "add"})
 CLOSED_PLANS = frozenset({"cancelled", "expired"})
 MAX_CONTEXT = 12
@@ -691,6 +698,10 @@ def _quotes_entry(quote):
     return isinstance(quote, str) and any(marker in quote for marker in ENTRY_MARKERS)
 
 
+def _proves_entry(quote):
+    return _quotes_entry(quote) or (isinstance(quote, str) and bool(TO_ENTRY_WORDS.search(quote)))
+
+
 def _prove_price(atom, text):
     if not isinstance(atom, dict) or set(atom) != {"value", "quote"}:
         raise ValueError("invalid_numeric_object")
@@ -769,7 +780,7 @@ def _clean_stop(stop, text, action, evidence):
         except (ValueError, TypeError, InvalidOperation) as exc:
             return None, "bad_price:" + str(exc)
     if to_entry:
-        if not _quotes_entry(quote) or proved is not None:
+        if not _proves_entry(quote) or proved is not None:
             return None, "to_entry_unproved"
     elif _local_entry_price(action, to_entry, quote, evidence):
         return None, "entry_price_instead_of_to_entry"
