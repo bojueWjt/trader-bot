@@ -51,6 +51,8 @@ def simulate(req: ExecutionRequest, *, kernel: Literal["A", "B"] = "A", market: 
         from quant_lab.market.nautilus_adapter import KernelBUnavailable
         if resolve_policy(req.policy_version).follow_teacher:
             raise KernelBUnavailable("follow_teacher management is unsupported by kernel B")
+        if resolve_policy(req.policy_version).nostop_enabled:   # v8 F1：固定名义无止损定量只在内核 A
+            raise KernelBUnavailable("nostop fixed-notional policies are unsupported by kernel B")
     if market is None:
         if resolver is None:
             raise ContractError("simulate 需要 market 或 resolver（按 market_manifest 装载行情）")

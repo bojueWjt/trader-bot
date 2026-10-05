@@ -33,8 +33,13 @@ def source_rows():
 @pytest.mark.parametrize("explicit", [False, True])
 @pytest.mark.parametrize("version", ["base-v1-timeexit-follow", "base-v1-timeexit-live-follow",
                                      "base-v1-timeexit-w60-follow", "base-v1-timeexit-w60-live-follow"])
-def test_follow_cli_default_and_explicit_path_reports_filters_and_executed_commands(built, explicit, version):
+def test_follow_cli_default_and_explicit_path_reports_filters_and_executed_commands(built, monkeypatch, explicit, version):
     root, _ = built
+    if "live" in version:
+        # The synthetic G1 build publishes no bronze message_version; since eaf2b2d a live replay with no root text is a
+        # batch error. Supply synthetic root texts (as tests/market/test_live_replay.py does) so this test keeps testing
+        # follow-teacher reporting rather than the missing-bronze guard.
+        monkeypatch.setattr(l0, "load_message_texts", lambda ids: {value: "BTC 做多 入场 100" for value in ids})
     episodes = source_rows()
     path = root / "explicit.parquet" if explicit else Layout.from_root(None).silver_dir / "followup_action.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)

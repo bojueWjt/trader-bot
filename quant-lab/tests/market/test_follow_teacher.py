@@ -357,9 +357,9 @@ def test_all_15_old_hashes_and_112_synthetic_cases_are_byte_identical(monkeypatc
 
 def test_new_build_identity_covers_changed_source():
     frozen = json.loads(BASELINE.read_text())
-    assert a.KERNEL_VERSION == "kernel-a-v0.6"
+    assert a.KERNEL_VERSION == "kernel-a-v0.7"
     digest = hashlib.sha256()
     for name in a._SRC_FILES:
         digest.update((Path(a.__file__).parent / name).read_bytes())
-    assert a.kernel_build_id() == f"kernel-a-v0.6+{digest.hexdigest()[:12]}"
+    assert a.kernel_build_id() == f"kernel-a-v0.7+{digest.hexdigest()[:12]}"
     assert a.kernel_build_id() != frozen["build"]

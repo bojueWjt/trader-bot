@@ -59,11 +59,22 @@ def real(eps) -> pl.DataFrame:
 
 
 CONTRACT_PENDING_G2: set[str] = set()          # G2 已落地 §5.10（fraction_source / entry_fractions / tp_fractions）；保持为空，任何差异即漂移
+# G2 自 6325e1d（kernel A v0.5）多出的派生列：evaluable = 四项覆盖全过 ∧ 未删失 ∧ net_R 非空，完全由已镜像列决定，
+# G3 不读它。桩不镜像它（改 research/synthetic.py 会动 G3 研究代码摘要）；对拍改为断言它确实只是派生值。
+G2_DERIVED_ONLY = {"evaluable"}
+
+
+def _assert_derived_only(real: pl.DataFrame) -> None:
+    covered = pl.all_horizontal(pl.col(k) == True for k in ("mark_ok", "funding_ok", "rules_ok", "bars_ok"))  # noqa: E712
+    expected = covered & pl.col("censor_reason").is_null() & pl.col("net_R").is_not_null()
+    assert real.select((pl.col("evaluable") == expected).all()).item()
 
 
 def test_batch_schema_mirror_matches_contract_and_g2():
     from quant_lab.market.execution import BATCH_SCHEMA
-    mine, g2 = synthetic.BATCH_SCHEMA, BATCH_SCHEMA
+    mine = synthetic.BATCH_SCHEMA
+    g2 = {k: v for k, v in BATCH_SCHEMA.items() if k not in G2_DERIVED_ONLY}
+    assert set(BATCH_SCHEMA) - set(g2) == G2_DERIVED_ONLY
     assert set(g2) <= set(mine), "G2 有列而桩没有 → 桩漂移"
     extra = set(mine) - set(g2)
     assert extra <= CONTRACT_PENDING_G2, f"桩多出未在契约中的列 {extra - CONTRACT_PENDING_G2}"
@@ -108,6 +119,8 @@ def test_real_and_fake_outputs_same_columns_and_dtypes(eps, real):
     assert set(real["fraction_source"].unique()) == {"plan", "policy"}                   # §5.10 第 5 条两种来源各 ≥1
     from decimal import Decimal
     assert all(sum(v) == Decimal(1) for v in real["entry_fractions"].to_list())
+    _assert_derived_only(real)
+    real = real.drop(*G2_DERIVED_ONLY)
     assert set(real.columns) <= set(fake.columns) and set(fake.columns) - set(real.columns) <= CONTRACT_PENDING_G2
     assert {k: str(v) for k, v in real.schema.items()} == {k: str(fake.schema[k]) for k in real.columns}
     assert set(fake["fraction_source"].unique()) == {"plan", "policy"}

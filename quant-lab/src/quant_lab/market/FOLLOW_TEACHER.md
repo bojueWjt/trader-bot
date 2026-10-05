@@ -1,4 +1,4 @@
-# Follow teacher backtest (kernel A v0.6)
+# Follow teacher backtest (kernel A v0.7)
 
 `base-v1-timeexit-follow`, `base-v1-timeexit-live-follow`,
 `base-v1-timeexit-w60-follow`, `base-v1-timeexit-w60-live-follow` opt into teacher
@@ -83,6 +83,69 @@ compatibility is verified separately, never implemented by freezing old builds.
 | base-v1-timeexit-live-follow | caf17563082ad3bbdf8ba8aed680ce0da0e8d71f3e27a873b3d100b5e3a33ce2 |
 | base-v1-timeexit-w60-follow | 51bb2d2e479eb0141fe91ce241a9b0f4daf4e3a736c894c2273860293124c376 |
 | base-v1-timeexit-w60-live-follow | 1fecbd45e6ad5e75a0c6d1e26fc9c2adb393288bb0cbca18ad36dadc064a3cfd |
+
+## v8: stopless plans, live v4 and the second pass (kernel A v0.7)
+
+`OrderPlan.stop` may be null. Such a plan only runs under a policy with
+`nostop_leg_notional_k` (each leg k×B) or `nostop_plan_notional_k` (k×B split
+equally); both are excluded from content unless set, so all 19 earlier hashes are
+unchanged. The request must then be `sizing.mode=fixed_qty`. L0 shapes a zone to
+one limit at its near end (long: upper edge, short: lower edge), applies the live
+profile, then sizes `q_i = N_i / (p_i × multiplier)` from the final prices
+(market legs: t_dec as-of mark) and records `sizing_basis=nostop`. Missing,
+non-TRADING or tick/multiplier-less rules at t_dec give `NOSTOP_RULES_UNRESOLVED`
+(never `PLAN_CONTRACT_INVALID`). Old policies keep `PLAN_NO_STOP`.
+
+Kernel A v0.7 builds no `sl-0` for a stopless plan until the teacher supplies a
+stop: a priced `move_stop` on an open position creates `sl-0` at once (mark
+trigger; an already-crossed price triggers immediately); a move or `to_entry`
+before entry places `sl-0` at the fill. No automatic breakeven without `sl-0`.
+Plans with a stop produce byte-identical events (112 frozen cases). Kernel B
+rejects every nostop policy before the market resolver.
+
+Live v4 (`trader-v3-live-v4`) applies only to rows carrying a `stop_rule` key:
+`r9_fuzzy_break` gets exactly one 0.1% (silver already widened 0.3%),
+`close_from_clause` none, every other rule 0.1% only when a fuzzy word sits on
+`stop_base` in the stop message (`stop_source_version_id`, else the root text),
+breakout wording off. A `relative` stop, and any base equal to an entry level
+rather than the stop, is anchored on the stop price itself, so the entry's
+「附近」 never widens it. Rows without the key keep v3. The audit's
+`stop_v4.stop_message` is none / resolved / unresolved, the summary counts
+`n_stop_text_unresolved`, and a stop message not visible strictly before t_dec
+fails the run (look-ahead in the graph).
+
+Episodes with `repost_of`/`amend_of` run in a causal second pass ordered by
+(t_dec, episode_id): a repost is skipped (`REPOST_OF_LIVE_PLAN`) while any member
+of the target's family (target plus executed reposts and amends) is alive
+strictly before its t_dec, or was decided at the same t_dec; if no member is
+known live but a censored member's evidence ends while it was still live, the
+state is unknown and the repost gets `REPOST_TARGET_CENSORED`. An amend needs a
+follow policy (`AMEND_REQUIRES_FOLLOW`), an unfilled target
+(`AMEND_TARGET_FILLED`) and a target whose state is known
+(`AMEND_TARGET_CENSORED`). A skipped target is replaced by its nearest executed
+ancestor; a target without a result makes the plan independent.
+Stopless market legs have no 0.25R stale-quote gate (the gate is measured in
+stop distance); `market_ref_entries.nostop_quoted` counts their quote-to-mark gaps.
+
+Summary `overall/by/cumulative_R/censor_counts` cover `sizing_basis=risk` rows
+only (old policies: unchanged); `blocks.nostop` reports U metrics, MAE and
+censor-time mark-to-market; `blocks.total` is a money sum only.
+
+| v8 policy | content_hash |
+| --- | --- |
+| base-v1-timeexit-w14-live | c0fefe0a2d74e3199091a521b5360e7be86482185dc1dc160c92d00f5652db49 |
+| base-v1-timeexit-w14-live-follow | 740d1bd40b24aaf8376c03e26d1db08610b751bd1a16db334f0736915503c0b5 |
+| base-v1-timeexit-w60-live-follow-ns300 | 1269a7a730a04eaafefe2287d49a8adf0db32c80eb57dc6fb7a47b324d87a198 |
+| base-v1-timeexit-w1-live-follow-ns300 | 42ada5b2b3fe4735c14b93d2c1bda80e3c975630d5747273f6a28698f0ab0148 |
+| base-v1-timeexit-live-follow-ns300 | 0c924d1faa5dadef99050420c1217143bff46ed0868bc05f7efd38622de631a3 |
+| base-v1-timeexit-w14-live-follow-ns300 | 16b41a23d7a170776d85b8f80dba9201c614c9c944fbfb89e2dbabd854b8b293 |
+| base-v1-timeexit-w60-live-follow-ns100 | 327c603e265fda9905436d5db2cbea5599bdf608db0347e6ce60fee135b05147 |
+| base-v1-timeexit-w60-live-follow-ns3rd | 6d654abfe74431f13781933df485b5c0cfb6ae16504ba592883cf5911136dea0 |
+| base-v1-timeexit-w60-live-ns300 | 1a74a32fa8ac7174462a9d1ce61050699253e5b11290cdc8afa243be2a6b6e3c |
+
+Tests: `tests/market/test_nostop.py`, the v4 cases in `test_live_profile.py`,
+`test_live_replay.py::test_v8_rows_use_v4_and_v7_rows_keep_v3`; both mutation
+scripts carry v8 mutants.
 
 ## Validation and explicit choices
 
