@@ -1,7 +1,7 @@
 """v8 F3 cx.triage.v1 side pass: selection, as-of context, deterministic checks and the silver sidecar.
 
 All messages, prices and ids are made up. The lake is built from the frozen schemas (message_version,
-canonical_plan, episode + the §4 columns plan_link_kind/dup_of, plan_link) without running the pipeline.
+canonical_plan, extracted_event, episode + the §4 columns plan_link_kind/dup_of, plan_link) without running the pipeline.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import sys
 import polars as pl
 import pytest
 
-from quant_lab.data import cx_batch as cx, cx_triage as tr, lifecycle, normalize, validate
+from quant_lab.data import cx_batch as cx, cx_triage as tr, extract, lifecycle, normalize, validate
 from quant_lab.data.lake import Layout, stable_id
 from quant_lab.data.llm import record_key
 
@@ -32,14 +32,14 @@ def at(minutes=0.0, seconds=0.0):
 class Lake:
     def __init__(self, tmp_path):
         self.layout = Layout.flat(tmp_path / "lake").ensure()
-        self.messages, self.plans, self.episodes, self.links = [], [], [], []
+        self.messages, self.plans, self.episodes, self.links, self.events = [], [], [], [], []
 
-    def msg(self, mid, when, text, *, grade="V", reply=None, edit_delay_s=None, channel=CH, kinds=(), svid=None):
+    def msg(self, mid, when, text, *, grade="V", reply=None, edit_delay_s=None, channel=CH, kinds=(), svid=None, visible=None):
         last_edit = when + timedelta(seconds=edit_delay_s) if edit_delay_s is not None else None
         self.messages.append(dict(source_id=dict(peer_id=channel, message_id=mid), channel_id=channel, channel_name="仿写频道",
                                   message_type="message", source_version_id=svid or f"m{mid}", version_no=1, sequence=mid, content_hash=f"h{mid}",
                                   text=text, media_kinds=list(kinds), media_hashes=[], reply_to_message_id=reply, message_date=when,
-                                  last_edit_at=last_edit, time_grade=grade, event_time=when, available_at=when, ingested_at=when,
+                                  last_edit_at=last_edit, time_grade=grade, event_time=when, available_at=when if visible is None else visible, ingested_at=when,
                                   reason_codes=[], batch_id="tg-fake"))
         return f"m{mid}"
 
@@ -66,8 +66,15 @@ class Lake:
     def root(self, mid, when, text, **kw):
         grade, edit = kw.pop("grade", "V"), kw.pop("edit_delay_s", None)
         link_kind, dup_of, extra = kw.pop("link_kind", "root"), kw.pop("dup_of", None), kw.pop("episode", {})
-        self.msg(mid, when, text, grade=grade, edit_delay_s=edit, reply=kw.pop("reply", None))
+        self.msg(mid, when, text, grade=grade, edit_delay_s=edit, reply=kw.pop("reply", None), visible=kw.pop("visible", None))
         return self.episode(self.plan(mid, **kw), link_kind=link_kind, dup_of=dup_of, **extra)
+
+    def event(self, mid, branch, action):
+        """An extracted_event row carrying the v2 action (with its text spans), as extract writes it."""
+        self.events.append(dict(extract_id=f"x{mid}-{branch}", source_version_id=f"m{mid}", channel_id=CH, message_id=mid, version_no=1,
+                                branch_index=branch, checks=json.dumps({"schema_version": 2, "time_ref": "now", "action": action}, ensure_ascii=False),
+                                kind="entry_proposal", symbol_raw=action.get("symbol_raw"), spans=action.get("spans"), reason_codes=[],
+                                event_time=at(), available_at=at(), ingested_at=at()))
 
     def link(self, mid, branch, episode, kept, kind, gap_s):
         self.links.append(dict(channel_id=CH, message_id=mid, source_version_id=f"m{mid}", branch_index=branch, episode_id=episode,
@@ -77,13 +84,15 @@ class Lake:
         pl.DataFrame(self.messages, schema=normalize.MESSAGE_VERSION_SCHEMA).write_parquet(self.layout.message_version)
         pl.DataFrame(self.plans, schema=validate.CANONICAL_PLAN_SCHEMA).write_parquet(self.layout.canonical_plan)
         pl.DataFrame(self.episodes, schema={**lifecycle.EPISODE_SCHEMA, **EPISODE_EXTRA}).write_parquet(self.layout.episode(GV))
+        if self.events:
+            pl.DataFrame(self.events, schema=extract.EXTRACTED_EVENT_SCHEMA).write_parquet(self.layout.extracted_event)
         if self.links:
             pl.DataFrame(self.links, schema=LINK_SCHEMA).write_parquet(self.layout.gold_dir / f"plan_link__{GV}.parquet")
         return self.layout
 
 
 def prompts(layout):
-    rows, meta, counts = tr.plan_prompts(layout, GV)
+    rows, meta, _, counts = tr.plan_prompts(layout, GV)
     return {r["source_version_id"]: r for r in rows}, meta, counts
 
 
@@ -222,7 +231,7 @@ def test_two_branches_of_one_message_get_independent_results(tmp_path):
 
 
 # ---------------------------------------------------------------- 5-8: deterministic rules
-def test_contract_discouraged_wording_is_not_entry_whatever_the_model_says(tmp_path):
+def test_contract_discouraged_wording_is_flagged_and_the_verdict_stays_the_models(tmp_path):
     rule = tr.deterministic_rule("仿写 合约先等等，现货布局 BTC 60000")
     assert (rule["code"], rule["verdict"], rule["reason"]) == ("CONTRACT_DISCOURAGED", "not_entry", "advised_not_to_follow")
     for text in ("仿写 合约先别做", "仿写 先别开合约", "仿写 这单不建议跟", "仿写 不许合约", "仿写 别跟", "仿写 不要跟这单"):
@@ -234,8 +243,9 @@ def test_contract_discouraged_wording_is_not_entry_whatever_the_model_says(tmp_p
     assert counts["rule_CONTRACT_DISCOURAGED"] == 1
     side, _ = sidecar(tmp_path, lake.layout, {rows["m1"]["key"]: {"response": item(answer(evidence_quote="BTC 60000 多"))}})
     row = side[("m1", 0)]
-    assert (row["verdict"], row["reason"], row["rule_code"], row["exclusion_code"]) == ("not_entry", "advised_not_to_follow", "CONTRACT_DISCOURAGED", "CONTRACT_DISCOURAGED")
-    assert row["model_verdict"] == "new_entry" and row["status"] == "ok"
+    # B's lifecycle applies the rule (not_entry, CONTRACT_DISCOURAGED); the sidecar keeps the validated answer and the span.
+    assert (row["verdict"], row["reason"], row["exclusion_code"], row["status"]) == ("new_entry", "other", None, "ok")
+    assert (row["rule_code"], text[row["rule_start"]:row["rule_end"]]) == ("CONTRACT_DISCOURAGED", "合约先等")
 
 
 def test_spot_only_wording_keeps_the_entry_as_spot(tmp_path):
@@ -247,7 +257,8 @@ def test_spot_only_wording_keeps_the_entry_as_spot(tmp_path):
     rows, _, _ = prompts(lake.write())
     side, _ = sidecar(tmp_path, lake.layout, {rows["m1"]["key"]: {"response": item(answer(evidence_quote="BTC 60000 多"))}})
     row = side[("m1", 0)]
-    assert (row["verdict"], row["venue_hint"], row["rule_code"], row["exclusion_code"]) == ("new_entry", "spot", "SPOT_ONLY", None)
+    assert (row["verdict"], row["venue_hint"], row["rule_code"], row["exclusion_code"]) == ("new_entry", "unspecified", "SPOT_ONLY", None)
+    assert (row["rule_start"], row["rule_end"]) == (3, 7)  # 「不做合约」: B sets venue spot from it
 
 
 def test_ordinary_follow_wording_is_not_discouragement():
@@ -265,7 +276,7 @@ def test_cash_watch_area_post_is_not_entry(tmp_path):
     rows, _, _ = prompts(lake.write())
     side, _ = sidecar(tmp_path, lake.layout, {})
     row = side[("m1", 0)]
-    assert (row["status"], row["verdict"], row["exclusion_code"]) == ("missing", "not_entry", "CASH_WATCH_POST")
+    assert (row["status"], row["verdict"], row["exclusion_code"], row["rule_code"]) == ("missing", None, "TRIAGE_MISSING", "CASH_WATCH_POST")
 
 
 def test_rules_read_the_branch_paragraph_when_the_message_names_several_coins():
@@ -368,6 +379,11 @@ def test_sidecar_counts_missing_abstain_and_uncertain_separately(tmp_path):
         tr.build_sidecar(lake.layout, GV, recording(tmp_path / "bad.json", {}, version="cx-batch-v2"), tmp_path / "x.parquet")
     with pytest.raises(ValueError, match="sidecar_duplicate_key"):
         tr.check_sidecar(pl.concat([frame, frame.head(1)]))
+    # The rule codes are B's to apply: the sidecar's exclusion_code never carries one.
+    with pytest.raises(ValueError, match="sidecar_bad_exclusion_code"):
+        tr.check_sidecar(frame.with_columns(pl.lit("CONTRACT_DISCOURAGED").alias("exclusion_code")))
+    with pytest.raises(ValueError, match="sidecar_bad_rule_code"):
+        tr.check_sidecar(frame.with_columns(pl.lit("NOT_A_RULE").alias("rule_code")))
 
 
 @pytest.fixture
@@ -441,3 +457,124 @@ def test_cx_batch_dispatches_answers_to_this_module():
     assert cx.quote_response(good, TEXT, expected_schema="cx.numfill.v1")["abstain"]["note"] == "response_schema_mismatch"
     assert cx.quote_response(good, TEXT, expected_schema="cx.actions.v2")["abstain"]["note"] == "response_schema_mismatch"
     assert cx.side_pass(tr.SCHEMA_NAME) is tr
+
+
+# ---------------------------------------------------------------- review fixes: t_vis cut, paragraph scope, missing rows, sha
+def test_context_is_cut_by_t_vis_not_by_message_date(tmp_path):
+    lake = Lake(tmp_path)
+    # The root was first seen 30 minutes after it was posted: t_vis(root) = at(30).
+    lake.root(10, at(0), "仿写 BTC 60000 多", visible=at(30))
+    # Posted earlier, visible later (a late first_seen and an H1 on a later clock): never in the prompt.
+    lake.msg(1, at(-10), "仿写 早发晚见的闲聊", visible=at(31))
+    lake.msg(2, at(-15), "仿写 编辑后才可见的旧帖", grade="H1", edit_delay_s=7200, visible=at(45))
+    lake.root(3, at(-20), "仿写 BTC 59000 多 早发晚见", entry=("limit", "59000", "59000"), visible=at(40))
+    # Posted after the root's message_date, visible before its t_vis: in the prompt.
+    lake.msg(4, at(5), "仿写 晚发早见的闲聊", visible=at(6))
+    lake.root(5, at(10), "仿写 BTC 61000 多 晚发早见", entry=("limit", "61000", "61000"), visible=at(12))
+    rows, _, _ = prompts(lake.write())
+    doc = user(rows["m10"])
+    blob = json.dumps(doc, ensure_ascii=False)
+    for hidden in ("早发晚见", "编辑后才可见"):
+        assert hidden not in blob
+    assert [(p["message_id"], p["minutes_before"]) for p in doc["previous"]] == [(4, 24), (5, 18)]
+    assert [(c["message_id"], c["minutes_before"]) for c in doc["candidates"]] == [(5, 18)]
+
+
+def test_reply_parent_with_the_roots_own_clock_is_not_context(tmp_path):
+    lake = Lake(tmp_path)
+    lake.msg(1, at(0), "仿写 同一时刻的父消息")
+    lake.root(2, at(0), "仿写 BTC 60000 多", reply=1)
+    lake.msg(3, at(0, -1), "仿写 早一秒的父消息")
+    lake.root(4, at(0, 30), "仿写 BTC 60100 多", reply=3)
+    rows, _, _ = prompts(lake.write())
+    assert user(rows["m2"])["reply_text"] is None
+    assert user(rows["m4"])["reply_text"] == "仿写 早一秒的父消息"
+
+
+# Two coins, so the rule reads paragraphs. The discouragement sits only on the third line, which has no coin of
+# its own: BTC's first leg is cut from it by the sibling leg's anchor (61000), not by another coin mention.
+MULTI = "仿写 SUI 3.2 多\n仿写 BTC 60000 多\n61000 再补一单，不建议跟"
+MULTI_LEGS = (("SUI", "3.2"), ("BTC", "60000"), ("BTC", "61000"))
+
+
+def _leg_action(index):
+    symbol, price = MULTI_LEGS[index]
+    start = MULTI.index(price)
+    return dict(op="open", time_ref="now", symbol_raw=symbol, branch_index=index,
+                spans=[dict(field="entry.price", start=start, end=start + len(price), source="text")])
+
+
+@pytest.mark.parametrize("source", ["extracted_event", "canonical_plan"])
+def test_rule_audit_reads_each_branchs_own_paragraph_through_the_pipeline(tmp_path, source):
+    lake = Lake(tmp_path)
+    lake.msg(1, at(0), MULTI)
+    for branch, (symbol, price) in enumerate(MULTI_LEGS):
+        action = _leg_action(branch)
+        checks = {"schema_version": 2, "time_ref": "now", "action": action} if source == "canonical_plan" else None
+        lake.episode(lake.plan(1, branch, symbol=symbol, entry=("limit", price, price), checks=checks))
+        if source == "extracted_event":
+            lake.event(1, branch, action)
+    rows, _, counts = prompts(lake.write())
+    assert rows["m1"]["branch_indexes"] == [0, 1, 2] and counts["rule_CONTRACT_DISCOURAGED"] == 1 and counts["rule_none"] == 2
+    got = item(answer(0, evidence_quote="SUI 3.2 多"), answer(1, evidence_quote="BTC 60000 多"), answer(2, evidence_quote="61000 再补一单"))
+    side, report = sidecar(tmp_path, lake.layout, {rows["m1"]["key"]: {"response": got}})
+    sui, btc, leg = (side[("m1", i)] for i in range(3))
+    assert sui["rule_code"] is None and btc["rule_code"] is None and (btc["rule_start"], btc["rule_end"]) == (None, None)
+    assert leg["rule_code"] == "CONTRACT_DISCOURAGED" and MULTI[leg["rule_start"]:leg["rule_end"]] == "不建议跟"
+    assert [r["verdict"] for r in (sui, btc, leg)] == ["new_entry"] * 3 and [r["exclusion_code"] for r in (sui, btc, leg)] == [None] * 3
+    assert report["rule_CONTRACT_DISCOURAGED_model_new_entry"] == 1
+
+
+def test_a_null_branch_index_reads_its_plan_link_row(tmp_path):
+    lake = Lake(tmp_path)
+    kept = lake.root(1, at(0), "仿写 SOL 150 多 止损 140", symbol="SOL", stop="140", entry=("limit", "150", "150"))
+    lake.root(2, at(5), "仿写 做多 SOL", symbol="SOL", branch=None, link_kind="body_after_title", dup_of=kept)
+    lake.link(2, None, "e2-None", kept, "body_after_title", 300.0)  # 300 s apart per plan_link: not a companion
+    rows, _, counts = prompts(lake.write())
+    assert sorted(rows) == ["m2"] and rows["m2"]["branch_indexes"] == [0] and "excluded_companion" not in counts
+
+
+def test_a_selected_root_without_text_or_clock_still_gets_a_missing_row(tmp_path):
+    lake = Lake(tmp_path)
+    lake.msg(1, at(0), "", kinds=("photo",))                     # an image-only root: no text, no prompt
+    lake.episode(lake.plan(1))
+    lake.root(2, at(1), "仿写 BTC 60000 多")
+    rows, meta, unprompted, counts = tr.plan_prompts(lake.write(), GV)
+    assert [r["source_version_id"] for r in rows] == ["m2"] and counts["selected_no_own_stop"] == 2
+    assert counts["skipped_no_clock_or_text"] == 1 and [(b["source_version_id"], b["branch_index"]) for b in unprompted] == [("m1", 0)]
+    side, report = sidecar(tmp_path, lake.layout, {rows[0]["key"]: {"response": item(answer())}})
+    row = side[("m1", 0)]
+    assert (row["status"], row["status_note"], row["exclusion_code"], row["verdict"], row["prompt_key"]) == \
+        ("missing", "no_text_or_clock", "TRIAGE_MISSING", None, None)
+    assert (row["message_id"], row["source_plan_id"], row["available_at"]) == (1, "p1-0", at(0))
+    assert report["rows"] == 2 == counts["selected_no_own_stop"] and report["status_missing"] == 1 and report["missing_share"] == 0.5
+
+
+def test_rebuilding_the_same_sidecar_gives_the_same_sha_without_an_explicit_clock(tmp_path, capsys):
+    lake = Lake(tmp_path)
+    lake.root(1, at(0), "仿写 BTC 60000 多")
+    lake.root(2, at(3), "仿写 BTC 60100 多", visible=at(7))
+    rows, _, _ = prompts(lake.write())
+    rec = recording(tmp_path / "triage.json", {rows["m1"]["key"]: {"response": item(answer())}})
+    first = tr.build_sidecar(lake.layout, GV, rec, tmp_path / "a.parquet")
+    second = tr.build_sidecar(lake.layout, GV, rec, tmp_path / "b.parquet")
+    assert first["sidecar"]["sha256"] == second["sidecar"]["sha256"] and first["ingested_at"] == at(7).isoformat()
+    assert pl.read_parquet(tmp_path / "a.parquet")["ingested_at"].unique().to_list() == [at(7)]
+    stamp = "2026-10-05T00:00:00+00:00"
+    assert tr.main(["build", "--build-dir", str(tmp_path / "lake"), "--graph-version", GV, "--recording", str(rec),
+                    "--output", str(tmp_path / "c.parquet"), "--ingested-at", stamp]) == 0
+    assert json.loads(capsys.readouterr().out)["ingested_at"] == stamp
+    assert pl.read_parquet(tmp_path / "c.parquet")["ingested_at"].unique().to_list() == [datetime(2026, 10, 5, tzinfo=UTC)]
+    with pytest.raises(SystemExit):
+        tr.main(["build", "--build-dir", str(tmp_path / "lake"), "--graph-version", GV, "--recording", str(rec),
+                 "--output", str(tmp_path / "d.parquet"), "--ingested-at", "2026-10-05T00:00:00"])
+
+
+def test_a_candidate_with_a_close_clause_stop_shows_it_as_a_close_stop(tmp_path):
+    lake = Lake(tmp_path)
+    close = {"schema_version": 2, "time_ref": "now", "stop_rule": {"rule": "close_from_clause", "base": "57000"}}
+    lake.root(1, at(-10), "仿写 BTC 60000 多 4小时收盘跌破57000止损", stop="57000", checks=close)
+    lake.root(2, at(0), "仿写 BTC 60500 多")
+    rows, _, _ = prompts(lake.write())
+    assert tr.own_stop(lake.plans[0]) == ("close", Decimal("57000"))
+    assert [c["stop"] for c in user(rows["m2"])["candidates"]] == ["close 57000"]

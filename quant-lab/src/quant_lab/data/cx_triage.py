@@ -9,8 +9,11 @@ Selection (one v8a graph, stage 1, before any sidecar):
   2. every F11-promoted root (checks.time_ref_promoted), with or without a stop.
   Roots are grouped by source_version_id: one prompt per message, listing only that message's selected branches.
 
-Prompt context (all cut strictly before t_vis(root) = the root version's available_at, v8 §2):
-  reply_text  the F7 reply parent (extract.reply_context, original-time versions only);
+Prompt context (all cut strictly before t_vis(root) = the root version's available_at, v8 §2; never by
+message_date, so an H1 or late-first-seen message whose message_date is earlier but whose clock is later
+stays out, and one posted later but visible earlier stays in):
+  reply_text  the F7 reply parent (extract.reply_context, original-time versions only), restricted to parent
+              versions with t_vis strictly before t_vis(root) (F7 alone allows <=);
   previous    the last PREVIOUS_N other messages of the channel with t_vis < t_vis(root), latest visible version
               each, PREVIOUS_CHARS characters at most;
   candidates  up to CANDIDATE_N entry roots of the same channel with 0 < t_vis(root) - t_vis <= 72 h, same coin
@@ -24,15 +27,20 @@ every enum must be legal. A branch failing any check is recorded as verdict=unce
 (TRIAGE_INVALID). The stored response keeps the model's raw `branches` next to `checked`, so a recording
 revalidates to the same result.
 
-Deterministic rules (deterministic_rule) take precedence over the model and are applied to the branch's own
-paragraph (the whole text when the message names at most one coin): D4 discouragement wording ->
-CONTRACT_DISCOURAGED (not_entry); Cash-style 「关注区域 …… 失效」 watch posts -> CASH_WATCH_POST (not_entry);
-「只做现货 / 坚持现货 / 不做合约」 -> venue_hint=spot, kept. B's lifecycle applies the same rules to every root and
-reads the sidecar by its frozen schema (SIDECAR_SCHEMA) without importing this module.
+The D4/Cash deterministic rules are owned by B: its lifecycle applies them to every root (with or without a
+stop) on the root's paragraph and they take precedence over the triage verdict there. This module never
+applies them. The sidecar's verdict / reason / venue_hint are the validated model answer only;
+deterministic_rule() is an audit view of the same wording (rule_code, rule_start, rule_end on the branch's
+paragraph, the whole text when the message names at most one coin), so a disagreement between the model and
+the rule can be listed without a second copy of the rule deciding anything.
 
 Sidecar silver/nostop_triage.parquet: one row per selected (source_version_id, branch_index), also for missing
-recordings (status=missing). exclusion_code is the main-scope reason code (None only for new_entry):
-TRIAGE_NOT_ENTRY / TRIAGE_UNCERTAIN / TRIAGE_INVALID / TRIAGE_MISSING / CONTRACT_DISCOURAGED / CASH_WATCH_POST.
+recordings (status=missing, status_note=no_recording or the abstain note) and for selected roots that have no
+text or no clock and so got no prompt (status=missing, status_note=no_text_or_clock). exclusion_code is the
+triage reason code (None only for an ok new_entry): TRIAGE_NOT_ENTRY / TRIAGE_UNCERTAIN / TRIAGE_INVALID /
+TRIAGE_MISSING. B reads the sidecar by its frozen schema (_sidecar_schema) without importing this module.
+ingested_at is --ingested-at, or by default the latest available_at of the rows, so rebuilding the same graph
+and recording gives the same file sha.
 Only v8a builds it from the recording; v8, v8w, v8nw and v8e copy the same file. sidecar_signature(path) is
 what goes into input_hash_of and rule_versions["triage"].
 
@@ -58,7 +66,7 @@ from typing import Any
 
 SCHEMA_NAME = "cx.triage.v1"
 IMPORT_VERSION = "cx-triage-v1"
-TRIAGE_RULES_VERSION = "triage-v1"  # selection, prompt context and deterministic rules of this module
+TRIAGE_RULES_VERSION = "triage-v1"  # selection, prompt context and the rule audit of this module
 SIDECAR_NAME = "nostop_triage.parquet"
 
 VERDICTS = ("new_entry", "not_entry", "uncertain")
@@ -94,12 +102,13 @@ relation 不是 none 时，relation_target_message_id 必须是 candidates 里�
 evidence_quote：从 text 中逐字复制的一段连续原文（不改字、不加省略号、不拼接），用来支持你的 verdict。
 """
 
-# D4 / Cash deterministic rules (v8 §1). 「不要跟/别跟」 followed by 风/在/大/着 is ordinary speech, not advice.
+# D4 / Cash wording (v8 §1), audit only here (B applies the rule). 「不要跟/别跟」 followed by 风/在/大/着 is
+# ordinary speech, not advice.
 DISCOURAGED = re.compile(r"合约先别做|合约先等|先别开合约|不建议跟|不许合约|(?:不要|别)跟(?![风在大着])")
 SPOT_ONLY = re.compile(r"只做现货|坚持现货|不做合约")
 WATCH_AREA = re.compile(r"关注区域")
 WATCH_INVALIDATION = re.compile(r"失效")
-EXCLUDING_RULES = ("CONTRACT_DISCOURAGED", "CASH_WATCH_POST")
+RULE_CODES = ("CONTRACT_DISCOURAGED", "CASH_WATCH_POST", "SPOT_ONLY")
 # A recorded abstain caused by a malformed answer is an invalid answer; any other abstain (refusal, transport) is missing.
 INVALID_ABSTAIN_NOTES = {"invalid_triage_envelope", "missing_triage_context", "response_schema_mismatch", "invalid_side_pass_envelope"}
 
@@ -112,7 +121,7 @@ def _sidecar_schema():
         "verdict": pl.String, "reason": pl.String, "venue_hint": pl.String, "relation": pl.String,
         "relation_target_message_id": pl.Int64, "evidence_quote": pl.String, "evidence_start": pl.Int64, "evidence_end": pl.Int64,
         "status": pl.String, "status_note": pl.String, "invalid_reasons": pl.List(pl.String), "model_verdict": pl.String,
-        "rule_code": pl.String, "exclusion_code": pl.String,
+        "rule_code": pl.String, "rule_start": pl.Int64, "rule_end": pl.Int64, "exclusion_code": pl.String,
         "prompt_key": pl.String, "response_hash": pl.String, "recording_version": pl.String, "recording_sha256": pl.String,
         "triage_schema": pl.String, "triage_rules_version": pl.String, "source_graph_version": pl.String,
         "event_time": pl.Datetime("us", "UTC"), "available_at": pl.Datetime("us", "UTC"), "ingested_at": pl.Datetime("us", "UTC"),
@@ -121,7 +130,7 @@ def _sidecar_schema():
 
 SIDECAR_KEY = ("source_version_id", "branch_index")
 STATUSES = ("ok", "invalid", "missing")
-EXCLUSION_CODES = ("TRIAGE_NOT_ENTRY", "TRIAGE_UNCERTAIN", "TRIAGE_INVALID", "TRIAGE_MISSING", *EXCLUDING_RULES)
+EXCLUSION_CODES = ("TRIAGE_NOT_ENTRY", "TRIAGE_UNCERTAIN", "TRIAGE_INVALID", "TRIAGE_MISSING")
 
 
 # ---------------------------------------------------------------- schema / prompt
@@ -236,10 +245,10 @@ def rule_scope(text, action=None, siblings=()):
 
 
 def deterministic_rule(text, action=None, siblings=()):
-    """The D4/Cash rule that decides this branch before the model, or None.
+    """The D4/Cash wording on this branch's paragraph, or None (audit: B's lifecycle is where the rule applies).
 
-    {code, verdict, reason, venue_hint, span}: CONTRACT_DISCOURAGED and CASH_WATCH_POST are not_entry;
-    SPOT_ONLY keeps the model verdict and only sets venue_hint=spot."""
+    {code, verdict, reason, venue_hint, span}: CONTRACT_DISCOURAGED and CASH_WATCH_POST mean not_entry;
+    SPOT_ONLY keeps the entry and only means venue spot."""
     text = text or ""
     lo, hi = rule_scope(text, action, siblings)
     seg = text[lo:hi]
@@ -272,9 +281,11 @@ def own_stop(plan) -> tuple[str, Decimal] | None:
     """The plan's own stop before plan_merge: canonical_plan.stop, or a close stop parsed from its v2 action
     (scaled like lifecycle._order_plan). ("price"|"close", level) or None."""
     from .close_stop import parse_close_stop
-    if plan.get("stop") is not None:
-        return "price", Decimal(str(plan["stop"]))
     checks = _checks(plan)
+    if plan.get("stop") is not None:
+        rule = checks.get("stop_rule")
+        kind = "close" if isinstance(rule, dict) and rule.get("rule") == "close_from_clause" else "price"
+        return kind, Decimal(str(plan["stop"]))
     if checks.get("schema_version") != 2:
         return None
     stop = (checks.get("action") or {}).get("stop")
@@ -308,6 +319,10 @@ def _tps(plan) -> list[str]:
             continue
         out.append(_num(tp["level"]) + ("%" if tp.get("kind") == "pct" else ""))
     return out
+
+
+def _branch(row) -> int:
+    return row.get("branch_index") or 0
 
 
 def _symbol(plan) -> str | None:
@@ -348,14 +363,14 @@ def _load(layout, graph_version):
     links = {}
     if link_path.exists():
         for row in pl.read_parquet(link_path).to_dicts():
-            links[(row.get("source_version_id"), row.get("branch_index"))] = row
+            links[(row.get("source_version_id"), _branch(row))] = row
     return resolved, episodes, plans, events, versions, links
 
 
 def _companion_excluded(episode, plan, by_episode, versions, links) -> bool:
     if episode.get("plan_link_kind") not in COMPANION_KINDS or not episode.get("dup_of"):
         return False
-    link = links.get((plan["source_version_id"], plan.get("branch_index")))
+    link = links.get((plan["source_version_id"], _branch(plan)))
     if link is not None and link.get("gap_s") is not None and abs(link["gap_s"]) > COMPANION_MAX_GAP_S:
         return False
     kept = by_episode.get(episode["dup_of"])
@@ -386,7 +401,7 @@ def select(episodes, plans, versions, links):
         if not promoted and _companion_excluded(episode, plan, by_episode, versions, links):
             counts["excluded_companion"] += 1
             continue
-        key = (plan["source_version_id"], plan.get("branch_index") or 0)
+        key = (plan["source_version_id"], _branch(plan))
         if key in chosen:
             counts["duplicate_branch_roots"] += 1
             continue
@@ -416,7 +431,7 @@ def _context_pools(versions, episodes, plans):
         candidates[plan["channel_id"]][plan["plan_id"]] = (version["available_at"], plan, version)
     pools = {}
     for channel, rows in candidates.items():
-        ordered = sorted(rows.values(), key=lambda r: (r[0], _message_id(r[2]) or 0, r[1].get("branch_index") or 0, r[1]["plan_id"]))
+        ordered = sorted(rows.values(), key=lambda r: (r[0], _message_id(r[2]) or 0, _branch(r[1]), r[1]["plan_id"]))
         pools[channel] = ([r[0] for r in ordered], ordered)
     return {c: ([v["available_at"] for v in rows], rows) for c, rows in messages.items()}, pools
 
@@ -446,7 +461,7 @@ def candidate_plans(pool, root_version, coins):
     lo = bisect.bisect_left(times, t_root - timedelta(seconds=CANDIDATE_WINDOW_S))
     hi = bisect.bisect_left(times, t_root)
     found = [r for r in rows[lo:hi] if _message_id(r[2]) != mid]
-    found.sort(key=lambda r: (0 if _coin(r[1]) in coins else 1, -r[0].timestamp(), _message_id(r[2]) or 0, r[1].get("branch_index") or 0))
+    found.sort(key=lambda r: (0 if _coin(r[1]) in coins else 1, -r[0].timestamp(), _message_id(r[2]) or 0, _branch(r[1])))
     out = []
     for t_vis, plan, version in found[:CANDIDATE_N]:
         stop = own_stop(plan)
@@ -456,9 +471,23 @@ def candidate_plans(pool, root_version, coins):
     return out
 
 
-def plan_prompts(layout, graph_version):
-    """Prompt rows and per-key branch metadata, shared by export and build so both compute the same keys."""
+def reply_text(version, by_message):
+    """F7's reply parent (original-time versions, extract.reply_context), restricted to parent versions visible
+    strictly before the root: F7 alone admits a parent with the same clock, the triage context does not."""
     from .extract import reply_context
+    key = (version.get("channel_id"), version.get("reply_to_message_id"))
+    t_root = version.get("available_at")
+    if t_root is None or key[1] is None:
+        return None
+    earlier = [p for p in by_message.get(key, []) if p.get("available_at") is not None and p["available_at"] < t_root]
+    return reply_context(version, {key: earlier})
+
+
+def plan_prompts(layout, graph_version):
+    """(rows, meta, unprompted, counts), shared by export and build so both compute the same keys.
+
+    rows: one prompt per selected message; meta: per prompt key, the version and its selected branches;
+    unprompted: the selected branches of messages with no text or no clock (no prompt, a missing sidecar row)."""
     from .llm import record_key
     resolved, episodes, plans, events, versions, links = _load(layout, graph_version)
     by_svid = {v["source_version_id"]: v for v in versions}
@@ -469,23 +498,26 @@ def plan_prompts(layout, graph_version):
     for row in events or plans.values():
         checks = _checks(row)
         if checks.get("schema_version") == 2 and isinstance(checks.get("action"), dict):
-            actions[row["source_version_id"]].append((row.get("branch_index") or 0, checks["action"]))
+            actions[row["source_version_id"]].append((_branch(row), checks["action"]))
     selected, counts = select(episodes, plans, by_svid, links)
     message_pools, candidate_pools = _context_pools(versions, episodes, plans)
     grouped = defaultdict(list)
     for episode, plan, selected_as in selected:
         grouped[plan["source_version_id"]].append((episode, plan, selected_as))
-    rows, meta = [], {}
+    rows, meta, unprompted = [], {}, []
     for svid in sorted(grouped):
         version = by_svid.get(svid)
         if version is None or version.get("available_at") is None or not (version.get("text") or "").strip():
             counts["skipped_no_clock_or_text"] += len(grouped[svid])
+            for episode, plan, selected_as in grouped[svid]:
+                unprompted.append(dict(source_version_id=svid, version=version, graph_version=resolved, branch_index=_branch(plan),
+                                       episode=episode, plan=plan, selected_as=selected_as, rule=None))
             continue
         text = version["text"]
         branches_meta, branches, coins = [], [], set()
         own = {i: a for i, a in actions.get(svid, [])}
         for episode, plan, selected_as in grouped[svid]:
-            index = plan.get("branch_index") or 0
+            index = _branch(plan)
             action = own.get(index) or _checks(plan).get("action")
             siblings = [a for i, a in actions.get(svid, []) if i != index]
             branches.append(dict(branch_index=index, symbol=_symbol(plan), side=plan.get("side"), entry_summary=entry_summary(plan), tps=_tps(plan)))
@@ -496,7 +528,7 @@ def plan_prompts(layout, graph_version):
         previous = previous_messages(message_pools.get(version["channel_id"], ([], [])), version)
         candidates = candidate_plans(candidate_pools.get(version["channel_id"], ([], [])), version, coins - {None})
         system, user = build_prompt(text, channel_name=version.get("channel_name"), message_date=date,
-                                    reply_text=reply_context(version, by_message), previous=previous, branches=branches, candidates=candidates)
+                                    reply_text=reply_text(version, by_message), previous=previous, branches=branches, candidates=candidates)
         key = record_key(system, user, SCHEMA_NAME)
         rows.append(dict(key=key, system=system, user=user, schema_name=SCHEMA_NAME, source_version_id=svid,
                          channel_id=version["channel_id"], channel_name=version.get("channel_name"), message_time=date, text=text,
@@ -510,13 +542,13 @@ def plan_prompts(layout, graph_version):
             if b["rule"] is not None:
                 counts["rule_" + b["rule"]["code"]] += 1
     counts["unique_keys"] = len({r["key"] for r in rows})
-    return rows, meta, dict(sorted(counts.items()), graph_version=resolved)
+    return rows, meta, unprompted, dict(sorted(counts.items()), graph_version=resolved)
 
 
 def export(layout, graph_version, output: Path):
     """Triage prompts (cx_batch transfer format, schema_name cx.triage.v1) for one graph; no model call."""
     from . import cx_batch
-    rows, _, counts = plan_prompts(layout, graph_version)
+    rows, _, _, counts = plan_prompts(layout, graph_version)
     cx_batch._atomic_text(output, "".join(cx_batch.dumps(r) + "\n" for r in rows))
     cx_batch.write_json(Path(output).with_suffix(".stats.json"), counts)
     return counts
@@ -535,9 +567,8 @@ def _response_hash(response) -> str:
     return hashlib.sha256(json.dumps(response, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
 
 
-def exclusion_code(status, verdict, rule_code):
-    if rule_code in EXCLUDING_RULES:
-        return rule_code
+def exclusion_code(status, verdict):
+    """The triage reason code of one branch; the D4/Cash rule codes are B's to apply, never folded in here."""
     if status == "missing":
         return "TRIAGE_MISSING"
     if status == "invalid":
@@ -545,7 +576,28 @@ def exclusion_code(status, verdict, rule_code):
     return {"new_entry": None, "not_entry": "TRIAGE_NOT_ENTRY"}.get(verdict, "TRIAGE_UNCERTAIN")
 
 
-def sidecar_rows(rows, meta, recording, *, ingested_at: datetime):
+def _empty_row(status, note):
+    return dict(verdict="uncertain" if status == "invalid" else None, reason=None, venue_hint="unspecified", relation="none",
+                relation_target_message_id=None, evidence_quote=None, evidence_start=None, evidence_end=None,
+                status=status, status_note=note, invalid_reasons=[note] if status == "invalid" else [], model_verdict=None)
+
+
+def _finish(row, branch, *, svid, version, prompt_key, graph_version, response_hash, recording, ingested_at):
+    plan, episode, rule = branch["plan"], branch["episode"], branch["rule"]
+    row.update(source_version_id=svid, branch_index=branch["branch_index"], channel_id=plan["channel_id"],
+               message_id=plan.get("message_id") if version is None else _message_id(version),
+               source_plan_id=plan["plan_id"], source_episode_id=episode["episode_id"], selected_as=branch["selected_as"],
+               rule_code=rule["code"] if rule else None, rule_start=rule["span"][0] if rule else None,
+               rule_end=rule["span"][1] if rule else None, exclusion_code=exclusion_code(row["status"], row["verdict"]),
+               prompt_key=prompt_key, response_hash=response_hash, recording_version=recording["version"],
+               recording_sha256=recording["sha256"], triage_schema=SCHEMA_NAME, triage_rules_version=TRIAGE_RULES_VERSION,
+               source_graph_version=graph_version, event_time=(version or {}).get("message_date"),
+               available_at=(version or {}).get("available_at"), ingested_at=ingested_at)
+    return row
+
+
+def sidecar_rows(rows, meta, recording, *, ingested_at: datetime, unprompted=()):
+    """One row per selected branch. verdict / reason / venue_hint are the validated model answer only."""
     out, counts = [], Counter()
     for prompt in rows:
         record = recording["items"].get(prompt["key"])
@@ -573,28 +625,28 @@ def sidecar_rows(rows, meta, recording, *, ingested_at: datetime):
                            evidence_end=c["evidence_span"][1] if c["evidence_span"] else None,
                            status=c["status"], status_note=None, invalid_reasons=c["invalid_reasons"], model_verdict=c["model_verdict"])
             else:
-                row = dict(verdict="uncertain" if status == "invalid" else None, reason=None, venue_hint="unspecified", relation="none",
-                           relation_target_message_id=None, evidence_quote=None, evidence_start=None, evidence_end=None,
-                           status=status, status_note=note, invalid_reasons=[note] if status == "invalid" else [], model_verdict=None)
-            rule = branch["rule"]
-            rule_code = rule["code"] if rule else None
-            if rule and rule["verdict"]:
-                row.update(verdict=rule["verdict"], reason=rule["reason"])
-            if rule and rule["venue_hint"]:
-                row["venue_hint"] = rule["venue_hint"]
-            plan, episode = branch["plan"], branch["episode"]
-            row.update(source_version_id=prompt["source_version_id"], branch_index=branch["branch_index"], channel_id=version["channel_id"],
-                       message_id=_message_id(version), source_plan_id=plan["plan_id"], source_episode_id=episode["episode_id"],
-                       selected_as=branch["selected_as"], rule_code=rule_code,
-                       exclusion_code=exclusion_code(row["status"], row["verdict"], rule_code),
-                       prompt_key=prompt["key"], response_hash=response_hash, recording_version=recording["version"],
-                       recording_sha256=recording["sha256"], triage_schema=SCHEMA_NAME, triage_rules_version=TRIAGE_RULES_VERSION,
-                       source_graph_version=prompt["graph_version"], event_time=version.get("message_date"),
-                       available_at=version["available_at"], ingested_at=ingested_at)
-            out.append(row)
-            counts["status_" + row["status"]] += 1
-            counts["exclusion_" + str(row["exclusion_code"])] += 1
+                row = _empty_row(status, note)
+            out.append(_finish(row, branch, svid=prompt["source_version_id"], version=version, prompt_key=prompt["key"],
+                               graph_version=prompt["graph_version"], response_hash=response_hash, recording=recording,
+                               ingested_at=ingested_at))
+    for branch in unprompted:
+        out.append(_finish(_empty_row("missing", "no_text_or_clock"), branch, svid=branch["source_version_id"], version=branch["version"],
+                           prompt_key=None, graph_version=branch["graph_version"], response_hash=None, recording=recording,
+                           ingested_at=ingested_at))
+    for row in out:
+        counts["status_" + row["status"]] += 1
+        counts["exclusion_" + str(row["exclusion_code"])] += 1
+        if row["rule_code"] is not None:
+            counts[f"rule_{row['rule_code']}_model_{row['verdict']}"] += 1
     return out, counts
+
+
+def default_ingested_at(rows, meta, unprompted) -> datetime | None:
+    """The latest clock among the sidecar's own rows: a function of the graph alone, so a rebuild of the same
+    graph and recording writes the same bytes (--ingested-at overrides it)."""
+    clocks = [m["version"]["available_at"] for m in meta.values()]
+    clocks += [b["version"]["available_at"] for b in unprompted if b["version"] and b["version"].get("available_at") is not None]
+    return max(clocks, default=None)
 
 
 def check_sidecar(frame):
@@ -606,7 +658,7 @@ def check_sidecar(frame):
     if frame.select(list(SIDECAR_KEY)).is_duplicated().any():
         raise ValueError("sidecar_duplicate_key")
     domains = dict(status=STATUSES, verdict=(*VERDICTS, None), reason=(*REASONS, None), venue_hint=VENUES,
-                   relation=RELATIONS, exclusion_code=(*EXCLUSION_CODES, None))
+                   relation=RELATIONS, exclusion_code=(*EXCLUSION_CODES, None), rule_code=(*RULE_CODES, None))
     for column, values in domains.items():
         bad = set(frame[column].to_list()) - set(values)
         if bad:
@@ -615,19 +667,22 @@ def check_sidecar(frame):
 
 
 def build_sidecar(layout, graph_version, recording, output: Path, *, ingested_at: datetime | None = None):
-    """silver/nostop_triage.parquet from the v8a graph and the imported triage recording (no model call)."""
+    """silver/nostop_triage.parquet from the v8a graph and the imported triage recording (no model call).
+
+    ingested_at defaults to default_ingested_at (deterministic), never to the wall clock."""
     import polars as pl
     from . import cx_batch
-    from .lake import now_utc, write_parquet_atomic
+    from .lake import write_parquet_atomic
     fixture = load_recording(recording)
-    rows, meta, counts = plan_prompts(layout, graph_version)
-    records, status_counts = sidecar_rows(rows, meta, fixture, ingested_at=ingested_at or now_utc())
+    rows, meta, unprompted, counts = plan_prompts(layout, graph_version)
+    stamp = ingested_at or default_ingested_at(rows, meta, unprompted)
+    records, status_counts = sidecar_rows(rows, meta, fixture, ingested_at=stamp, unprompted=unprompted)
     schema = _sidecar_schema()
     frame = pl.DataFrame(records, schema=schema) if records else pl.DataFrame(schema=schema)
     frame = check_sidecar(frame.sort(list(SIDECAR_KEY)))
     write_parquet_atomic(frame, Path(output))
     report = dict(counts, **dict(sorted(status_counts.items())), rows=frame.height, recording_sha256=fixture["sha256"],
-                  sidecar=sidecar_signature(output))
+                  ingested_at=stamp.isoformat() if stamp else None, sidecar=sidecar_signature(output))
     report["missing_share"] = round(status_counts["status_missing"] / frame.height, 6) if frame.height else 0.0
     cx_batch.write_json(Path(output).with_suffix(".stats.json"), report)
     return report
@@ -649,6 +704,14 @@ def sidecar_signature(path) -> dict[str, Any]:
                 recording_version=one("recording_version"), recording_sha256=one("recording_sha256"))
 
 
+def _utc_datetime(value: str) -> datetime:
+    from datetime import UTC
+    stamp = datetime.fromisoformat(value)
+    if stamp.tzinfo is None:
+        raise argparse.ArgumentTypeError("--ingested-at needs a timezone (e.g. 2026-10-05T00:00:00+00:00)")
+    return stamp.astimezone(UTC)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="command", required=True)
@@ -661,6 +724,8 @@ def main(argv=None):
         p.add_argument("--output", type=Path, required=True)
         if name == "build":
             p.add_argument("--recording", type=Path, required=True, help="cx_batch import --schema cx.triage.v1 output")
+            p.add_argument("--ingested-at", type=_utc_datetime, default=None,
+                           help="ISO-8601 ingested_at for every row (default: the latest available_at of the rows)")
     args = ap.parse_args(argv)
     from . import cx_batch
     from .lake import Layout
@@ -668,7 +733,7 @@ def main(argv=None):
     if args.command == "export":
         report = export(layout, args.graph_version, args.output)
     else:
-        report = build_sidecar(layout, args.graph_version, args.recording, args.output)
+        report = build_sidecar(layout, args.graph_version, args.recording, args.output, ingested_at=args.ingested_at)
     print(cx_batch.dumps(report))
     return 0
 
