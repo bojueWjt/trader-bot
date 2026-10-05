@@ -8,6 +8,14 @@ Committed production references (paths relative to trader-bot):
 Entry fractions in kernel A are *quantity* fractions. A zone therefore needs
 weights proportional to risk_share / stop_distance; explicit pairs need 1/price.
 The common risk budget, lot rounding, wallet and fill rules remain kernel A's.
+
+v4 (v8 F4): rows from a v8 graph carry a ``stop_rule`` key (value may be empty)
+and the stop is read from the silver derivation instead of re-deriving it here:
+r9_fuzzy_break was already widened 0.3% upstream, so live forces only the 0.1%;
+close_from_clause gets no widening; every other rule widens 0.1% only when a
+fuzzy word sits on ``stop_base`` in the stop message text (breakout wording off).
+Rows without the key (v7 graphs) keep the v3 behaviour byte for byte. A plan
+without a stop (v8 F1) skips the stop entirely; entries and targets are unchanged.
 """
 from __future__ import annotations
 
@@ -17,7 +25,8 @@ import re
 
 from quant_lab.market.contract import ContractError, D, RATIO_QUANTUM
 
-PROFILE_VERSION = "trader-v3-live-v3"   # v2: SL/TP 0.1% only with fuzzy wording; v3: wording attached to the price itself, no label needed
+PROFILE_VERSION = "trader-v3-live-v4"   # v2: SL/TP 0.1% only with fuzzy wording; v3: wording attached to the price itself, no label needed;
+                                        # v4: v8 rows read the silver stop_rule (r9 widened upstream, live adds only 0.1%)
 SOURCES = [
     "hermes-profile/skills/trading/v3-trader/SKILL.md:19",
     "hermes-profile/skills/trading/v3-trader/SKILL.md:27",
@@ -100,7 +109,7 @@ def _mentions(clause: str) -> list[tuple[set, bool, bool]]:
     return out
 
 
-def wording_flags(plan: dict, text: str | None) -> dict:
+def wording_flags(plan: dict, text: str | None, *, breakouts: bool = True) -> dict:
     """Price-anchored, line-based matching; missing/ambiguous evidence stays exact.
 
     A labelled clause (入场/止损/止盈…) holding the level decides it; two such
@@ -147,13 +156,13 @@ def wording_flags(plan: dict, text: str | None) -> dict:
             # Only wording on this number counts: a run-on clause may carry another price's 附近,
             # and one target clause may list several levels.
             fuzzy = any(prices & values and near for values, near, _ in c["mentions"])
-            breakout = role == "stop" and (bool(_BREAKOUT.search(c["text"]))
+            breakout = role == "stop" and breakouts and (bool(_BREAKOUT.search(c["text"]))
                                            or any(prices & values and broke for values, _, broke in c["mentions"]))
             return fuzzy or breakout, breakout, c["line"] if fuzzy or breakout else None
         pool = [(c["line"], m) for c in clauses if role != "entry" or c["line_side_ok"] for m in c["mentions"]]
         hits = [[(line, m) for line, m in pool if price in m[0]] for price in prices]
         fuzzy = bool(hits) and all(any(m[1] for _, m in found) for found in hits)
-        breakout = role == "stop" and bool(hits) and all(any(m[2] for _, m in found) for found in hits)
+        breakout = role == "stop" and breakouts and bool(hits) and all(any(m[2] for _, m in found) for found in hits)
         line = next((line for found in hits for line, m in found if m[1] or m[2]), None)
         return fuzzy or breakout, breakout, line if fuzzy or breakout else None
 
@@ -172,7 +181,8 @@ def wording_flags(plan: dict, text: str | None) -> dict:
             fuzzy, _, line = level(prices, "entry")
             entry_legs.append(fuzzy)
             entry_line = entry_line or line
-    stop_fuzzy, stop_breakout, stop_line = level({D(plan["stop"]["price"])}, "stop")
+    stop_fuzzy, stop_breakout, stop_line = (level({D(plan["stop"]["price"])}, "stop") if plan.get("stop") is not None
+                                            else (False, False, None))
     return {
         "entry_fuzzy": any(entry_legs),
         "entry_legs_fuzzy": entry_legs,
@@ -182,6 +192,31 @@ def wording_flags(plan: dict, text: str | None) -> dict:
         "entry_line": entry_line if any(entry_legs) else (together[0]["line"] if len(together) == 1 else None),
         "stop_line": stop_line,
     }
+
+
+def _widen_stop(stop: Decimal, long: bool) -> Decimal:
+    """The single 0.1% stop widening (v3 fuzzy stops and every v4 widening go through here)."""
+    stop *= Decimal("0.999") if long else Decimal("1.001")
+    return stop
+
+
+#: v8 stop rules (silver checks.stop_rule.rule) that live v4 handles specially; all others are wording-only.
+STOP_RULE_R9 = "r9_fuzzy_break"
+STOP_RULE_CLOSE = "close_from_clause"
+
+
+def v4_stop_widening(plan: dict, stop_meta: dict, text: str | None) -> tuple[bool, str]:
+    """(widen 0.1%?, why) for a v8 row. Never adds the 0.3% breakout: silver already did it for r9."""
+    rule = stop_meta.get("stop_rule") or None
+    if rule == STOP_RULE_R9:
+        return True, "r9_forced"
+    if rule == STOP_RULE_CLOSE:
+        return False, "close_trigger"
+    base = stop_meta.get("stop_base")
+    base = D(plan["stop"]["price"]) if base in (None, "") else D(base)
+    probe = dict(plan, stop={"price": base})
+    near = wording_flags(probe, text, breakouts=False)["stop_fuzzy"]
+    return near, "near_wording" if near else "exact"
 
 
 def round_price(price: Decimal, tick: Decimal, *, upward: bool) -> Decimal:
@@ -205,13 +240,16 @@ def quantity_fractions(weights: list[Decimal]) -> list[Decimal]:
     return parts
 
 
-def apply_live_profile(plan: dict, text: str | None, tick_size: Decimal, *, enabled: bool = True) -> tuple[dict, dict | None]:
+def apply_live_profile(plan: dict, text: str | None, tick_size: Decimal, *, enabled: bool = True,
+                       stop_meta: dict | None = None, stop_text: str | None = None) -> tuple[dict, dict | None]:
     """Return a plan copy and a text-free audit. Disabled is an identity operation.
 
     Entry rounds up for long/down for short; SL and TP round down for long/up
     for short, as required by SKILL §9 (easier fill / later stop trigger).
     market_ref prices are sizing references: leave them alone, preserving market
     fills and the existing as-of/stale-quote handling in L0.
+    stop_meta (v8 rows: {"stop_rule", "stop_base"}) selects the v4 stop rules; stop_text is the
+    message holding the stop (falls back to the root text).
     """
     if not enabled:
         return plan, None
@@ -226,14 +264,25 @@ def apply_live_profile(plan: dict, text: str | None, tick_size: Decimal, *, enab
         counts["tick_rounding"] += int(value != D(price))
         return value
 
-    stop = D(plan["stop"]["price"])
-    if flags["stop_breakout"]:
-        stop *= Decimal("0.997") if long else Decimal("1.003")
-        counts["stop_breakout"] = 1
-    if flags["stop_fuzzy"]:
-        stop *= Decimal("0.999") if long else Decimal("1.001")
-        counts["stop_widening"] = 1
-    out["stop"]["price"] = snapped(stop, upward=not long)
+    v4 = None
+    if plan.get("stop") is not None:
+        stop = D(plan["stop"]["price"])
+        if stop_meta is None:
+            if flags["stop_breakout"]:
+                stop *= Decimal("0.997") if long else Decimal("1.003")
+                counts["stop_breakout"] = 1
+            if flags["stop_fuzzy"]:
+                stop = _widen_stop(stop, long)
+                counts["stop_widening"] = 1
+        else:
+            source = stop_text if stop_text is not None else text
+            widen, why = v4_stop_widening(plan, stop_meta, source)
+            if widen:
+                stop = _widen_stop(stop, long)
+                counts["stop_widening"] = 1
+            v4 = {"stop_rule": stop_meta.get("stop_rule") or None, "decision": why,
+                  "stop_text_resolved": stop_text is not None}
+        out["stop"]["price"] = snapped(stop, upward=not long)
     for tp, fuzzy in zip(out.get("tps", []), flags["tp_fuzzy"]):
         price = D(tp["level"])
         if fuzzy:
@@ -267,6 +316,8 @@ def apply_live_profile(plan: dict, text: str | None, tick_size: Decimal, *, enab
     if counts["zone_ladder"]:
         if len(plan["entries"]) != 1:
             raise ContractError("live profile supports one zone per opening")
+        if out.get("stop") is None:
+            raise ContractError("live profile zone allocation needs a stop (stopless zones are shaped to one limit first)")
         distances = [abs(a["price"] - out["stop"]["price"]) for a in allocation]
         if any(distance <= 0 for distance in distances):
             raise ContractError("live profile zone has zero stop distance after rounding")
@@ -284,4 +335,6 @@ def apply_live_profile(plan: dict, text: str | None, tick_size: Decimal, *, enab
     audit = {"profile": PROFILE_VERSION, "status": "applied", "tick_size": tick,
              "wording": flags, "rule_counts": counts, "zone_allocation": allocation,
              "execution_plan": out}
+    if v4 is not None:
+        audit["stop_v4"] = v4
     return out, audit

@@ -62,7 +62,10 @@ def test_old_hashes_and_disabled_policy_bytes_are_pinned():
         assert c.canonical_json(policy.model_dump()) == c.canonical_json(explicit.model_dump())
         assert "live_execution_profile" not in policy.model_dump()
     follow_bases = ("base-v1-timeexit", "base-v1-timeexit-live", "base-v1-timeexit-w60", "base-v1-timeexit-w60-live")
-    assert set(registry) == set(LEGACY_HASHES) | {v + "-live" for v in BASES} | {v + "-follow" for v in follow_bases}
+    # v8 adds the 14-day live bases and seven stopless (ns) policies; every earlier registration is unchanged.
+    v8 = {"base-v1-timeexit-w14-live", "base-v1-timeexit-w14-live-follow"} | set(c.NOSTOP_POLICIES)
+    assert len(c.NOSTOP_POLICIES) == 7
+    assert set(registry) == set(LEGACY_HASHES) | {v + "-live" for v in BASES} | {v + "-follow" for v in follow_bases} | v8
     for base in BASES:
         live = c.resolve_policy(base + "-live")
         body = live.model_dump()
@@ -111,6 +114,24 @@ def test_four_live_policies_construct_and_run_kernel_a(base, side, shape):
             assert abs(actual - D(1) * share) < D("0.0001")
     if shape == "pair":
         assert abs(quantities[0] * prices[0] - quantities[1] * prices[1]) < D("0.0002")
+
+
+def test_v8_rows_use_v4_and_v7_rows_keep_v3():
+    """A stop_rule key (even empty) marks a v8 row: live v4 reads it; rows without it keep v3 byte for byte."""
+    assert l0.PROFILE_VERSION == "trader-v3-live-v4"
+    policy = c.resolve_policy(BASES[0] + "-live")
+    text = "入场100\n止损略破80"
+    fixed, audit = l0.prepare_execution(row(), policy=policy, text=text, tick_size=D("0.001"))
+    assert fixed["order_plan"]["stop"]["price"] == D("79.680") and "stop_v4" not in audit
+    v8 = dict(row(), stop_rule=None, stop_base=None)
+    fixed, audit = l0.prepare_execution(v8, policy=policy, text=text, tick_size=D("0.001"))
+    assert fixed["order_plan"]["stop"]["price"] == D("80") and audit["stop_v4"]["decision"] == "exact"
+    r9 = dict(row(), stop_rule="r9_fuzzy_break", stop_base=D("80.24"))
+    fixed, audit = l0.prepare_execution(r9, policy=policy, text=text, tick_size=D("0.001"), stop_text="止损小幅跌破80.24")
+    assert fixed["order_plan"]["stop"]["price"] == D("79.920")       # 80 × 0.999 only; no second 0.3%
+    assert audit["stop_v4"] == {"stop_rule": "r9_fuzzy_break", "decision": "r9_forced", "stop_text_resolved": True}
+    req = request(fixed, policy.version)
+    assert simulate(req, market=market()).censor_reason is None
 
 
 def test_bronze_accessor_uses_exact_root_versions_and_rejects_ambiguity(tmp_path, monkeypatch):

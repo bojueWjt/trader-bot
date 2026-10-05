@@ -1,4 +1,4 @@
-"""quant_lab.market.kernel_a —— 候选 A：自研永续参考实现 v0.6（ADR-G2 §4–§7、§11；M-07；review-G2-P1 S01–S05/S07/S08/S13 闭合）。
+"""quant_lab.market.kernel_a —— 候选 A：自研永续参考实现 v0.7（ADR-G2 §4–§7、§11；M-07；review-G2-P1 S01–S05/S07/S08/S13 闭合）。
 
 order_plan → 规范执行事件。单 episode 隔离账户、one_way、USDT 线性合约（multiplier 参与全部金额）。
 判定顺序（每个时刻，ADR §5.1）：
@@ -8,6 +8,8 @@ order_plan → 规范执行事件。单 episode 隔离账户、one_way、USDT �
   → P7 入场后保护重检（一次）→ P8 暴露与不变量。
 分钟内部启动：市价从下一完整 bar 开始；marketable 限价可按已知 last 即时成交。加载启动前闭合 bar 只作 as-of 游标，不消费过去极值。
 不 import nautilus_adapter；不与候选 B 共享撮合/触发/funding helper。
+v0.7（v8 F1）：无止损计划（plan.stop 为空）不建 sl-0、不触发止损；老师给出移损价（或开仓前的移损/保本）后才建 sl-0，
+按 mark 触发。有止损计划的事件流与 v0.6 逐字节相同。
 """
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ from quant_lab.market.contract import (
     ManagementAction, canonical_json, entry_expiry_at, grid_points_between, missing_funding_times, request_canonical, resolve_policy, trace_hash,
 )
 
-KERNEL_VERSION = "kernel-a-v0.6"
+KERNEL_VERSION = "kernel-a-v0.7"
 ZERO = Decimal(0)
 US = dt.timedelta(microseconds=1)
 
@@ -90,7 +92,7 @@ class KernelA:
         self.plan = req.order_plan
         self.market = market
         self.close_bars = set()
-        if self.plan.stop.trigger == "close":
+        if self.plan.stop is not None and self.plan.stop.trigger == "close":
             self.close_bars = {(b.open_time, b.c) for b in market.bars_last if b.interval_s == 60}
         self.policy = policy or resolve_policy(req.policy_version)
         if policy is None and self.policy.content_hash != req.policy_hash:
@@ -382,7 +384,9 @@ class KernelA:
         sl = self.orders.get("sl-0")
         if self.stop_to_entry:
             self.stop_override = quantize_ratio(self.entry_cost / self.entry_qty)
-        if sl is None:
+        if sl is None and self.stop_override is None and self.plan.stop is None:
+            pass    # v0.7 无止损计划：老师给价之前不建 sl-0（止盈照建）
+        elif sl is None:
             self.seq_counter += 1
             price = self.plan.stop.price if self.stop_override is None else self.stop_override
             sl = Order("sl-0", "sl", exit_side, "stop_market", price, absq, seq=self.seq_counter)
@@ -505,8 +509,15 @@ class KernelA:
             self.close_at = ts
 
     # ------------------------------------------------------------------ 触发
-    def protective_stop(self) -> tuple[Decimal, str]:
+    def protective_stop(self) -> tuple[Decimal | None, str]:
         # 老师移价保留原 trigger/timeframe；BE1 仍按原策略改成 mark。计划止损不改。
+        if self.plan.stop is None:
+            # v0.7 无止损计划：只有老师给的止损（或保本）才保护，按 mark 触发；否则没有止损。
+            if self.teacher_stop or self.breakeven_done:
+                sl = self.orders.get("sl-0")
+                if sl is not None and sl.price is not None:
+                    return sl.price, "mark"
+            return None, "none"
         if self.breakeven_done or self.teacher_stop:
             sl = self.orders.get("sl-0")
             if sl is not None and sl.price is not None:
@@ -518,13 +529,15 @@ class KernelA:
         if self.mark is None or self.pos == 0:
             return False
         price, basis = self.protective_stop()
-        if basis != "mark":
+        if price is None or basis != "mark":
             return False
         return self.mark <= price if self.sign > 0 else self.mark >= price
 
     def close_stop_hit(self, p: PricePoint) -> bool:
         """Only genuine UTC-aligned 1m bar closes; C is timestamped end minus 1µs."""
         if self.breakeven_done:
+            return False
+        if self.plan.stop is None:
             return False
         stop = self.plan.stop
         if stop.trigger != "close" or self.pos == 0 or p.path_step != "C":
@@ -767,6 +780,8 @@ class KernelA:
             if sl is not None and sl.live and not sl.triggered:
                 sl.price = price
                 self.emit(ts, "amended", sl.id, "sl", price=price, qty=sl.qty)
+            elif sl is None and self.pos != 0 and price is not None:
+                self.protect(ts)        # v0.7：无止损持仓收到老师止损价 → 此刻新建 sl-0
             crossed = self.pos != 0 and price is not None and self.mark is not None
             if crossed:
                 crossed = self.mark <= price if self.sign > 0 else self.mark >= price

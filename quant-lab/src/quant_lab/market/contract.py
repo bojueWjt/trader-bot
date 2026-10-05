@@ -16,6 +16,8 @@
   仅 base-v1-timeexit 在行情完整时按市价平余仓，closed(reason=time_exit)，net_pnl/net_R 为已实现值。
 - breakeven_after_first_tp 为 false 时不进入政策内容；为 true 时，首次实际止盈成交且余仓非零，把存活 sl-0 改到当前均价并只按 mark 触发一次。计划止损与 risk_budget 分母不变。
 - live_execution_profile 为 false 时不进入政策内容。为 true 时，L0 在构造请求前按 trader-v3 实盘口径改执行计划；内核撮合与定量公式不变。
+- 无止损计划（v8 F1/D2）：order_plan.stop 可空，只能配带 nostop_leg_notional_k / nostop_plan_notional_k 的策略且 sizing=fixed_qty
+  （L0 按每腿固定名义定量）。内核不建 sl-0，直到老师给出移损价；有止损计划的序列化与行为逐字节不变。
 """
 from __future__ import annotations
 
@@ -182,7 +184,7 @@ class OrderPlan(_Model):
     instrument_id: str = Field(pattern=INSTRUMENT_ID_RE)
     side: Side
     entries: list[Entry]
-    stop: Stop
+    stop: Stop | None = None                   # v8 F1：无止损计划（只配无止损策略，固定名义定量）；有值时序列化字节不变
     tps: list[TakeProfit] = []
     sizing: Sizing
     expiry: Expiry
@@ -192,7 +194,8 @@ class OrderPlan(_Model):
     def _chk(self):
         if not self.entries:
             raise ContractError("entries 不能为空")
-        for d in (self.stop.price, *(t.level for t in self.tps), *(e.price_lo for e in self.entries), *(e.price_hi for e in self.entries)):
+        stop_prices = () if self.stop is None else (self.stop.price,)
+        for d in (*stop_prices, *(t.level for t in self.tps), *(e.price_lo for e in self.entries), *(e.price_hi for e in self.entries)):
             check_decimal(d, "price")
         # §5.10 B8 第 3 条：同一列表全有或全无
         ef = [e.fraction for e in self.entries]
@@ -214,12 +217,12 @@ class OrderPlan(_Model):
         lo = min(e.price_lo for e in self.entries)
         hi = max(e.price_hi for e in self.entries)
         if self.side == "long":
-            if self.stop.price >= lo:
+            if self.stop is not None and self.stop.price >= lo:
                 raise ContractError("long 的 stop 必须低于最低入场价")
             if any(t.level <= hi for t in self.tps):
                 raise ContractError("long 的 TP 必须高于最高入场价")
         else:
-            if self.stop.price <= hi:
+            if self.stop is not None and self.stop.price <= hi:
                 raise ContractError("short 的 stop 必须高于最高入场价")
             if any(t.level >= lo for t in self.tps):
                 raise ContractError("short 的 TP 必须低于最低入场价")
@@ -345,9 +348,17 @@ class ExecutionPolicy(_Model):
     breakeven_after_first_tp: bool = Field(default=False, exclude=True)
     live_execution_profile: bool = Field(default=False, exclude=True)
     follow_teacher: bool = Field(default=False, exclude=True)
+    # v8 F1/D2：无止损计划的固定名义定量（每腿 k×B，或整笔 k×B 按腿等分；B = risk_budget）。两者互斥；
+    # 未设置时不进 dump，旧策略哈希不变。有止损计划仍按风险预算定量。
+    nostop_leg_notional_k: Decimal | None = Field(default=None, exclude=True)
+    nostop_plan_notional_k: Decimal | None = Field(default=None, exclude=True)
 
     def model_dump(self, *args, **kwargs):
         payload = super().model_dump(*args, **kwargs)
+        for name in ("nostop_leg_notional_k", "nostop_plan_notional_k"):
+            value = getattr(self, name)
+            if value is not None:
+                payload[name] = str(value) if kwargs.get("mode") == "json" else value
         if self.time_exit_at_horizon:
             payload["time_exit_at_horizon"] = True
         if self.breakeven_after_first_tp:
@@ -364,6 +375,20 @@ class ExecutionPolicy(_Model):
         if value < 0:
             raise ContractError("latency_s 必须非负：启动时刻不能早于决策时刻")
         return value
+
+    @model_validator(mode="after")
+    def _nostop_domain(self):
+        leg, whole = self.nostop_leg_notional_k, self.nostop_plan_notional_k
+        if leg is not None and whole is not None:
+            raise ContractError("nostop_leg_notional_k 与 nostop_plan_notional_k 互斥")
+        for name, value in (("nostop_leg_notional_k", leg), ("nostop_plan_notional_k", whole)):
+            if value is not None:
+                check_decimal(value, name)
+        return self
+
+    @property
+    def nostop_enabled(self) -> bool:
+        return self.nostop_leg_notional_k is not None or self.nostop_plan_notional_k is not None
 
     def cost(self, scenario: str) -> CostSpec:
         if scenario not in self.costs:
@@ -423,6 +448,32 @@ POLICIES["base-v1-timeexit-w60-be1-live"] = POLICIES["base-v1-timeexit-w60-be1"]
 for _base in ("base-v1-timeexit", "base-v1-timeexit-live", "base-v1-timeexit-w60", "base-v1-timeexit-w60-live"):
     POLICIES[_base + "-follow"] = POLICIES[_base].model_copy(
         update={"version": _base + "-follow", "follow_teacher": True})
+# v8：14 天基底的实盘口径与跟单口径。
+POLICIES["base-v1-timeexit-w14-live"] = POLICIES["base-v1-timeexit-w14"].model_copy(
+    update={"version": "base-v1-timeexit-w14-live", "live_execution_profile": True})
+POLICIES["base-v1-timeexit-w14-live-follow"] = POLICIES["base-v1-timeexit-w14-live"].model_copy(
+    update={"version": "base-v1-timeexit-w14-live-follow", "follow_teacher": True})
+# v8 F1/D2：无止损计划按固定名义跟（B=180 时 k=300/180 即每腿 300U；100U 档；整笔 ≤ 账户 9000U 的 1/3）。
+# 有止损计划在这些策略下仍按风险预算定量，内核行为与基底策略相同。
+NOSTOP_LEG_300 = Decimal("1.666666666667")
+NOSTOP_LEG_100 = Decimal("0.555555555556")
+NOSTOP_PLAN_THIRD = Decimal("16.666666666667")
+for _version, _base, _update in (
+    ("base-v1-timeexit-w60-live-follow-ns300", "base-v1-timeexit-w60-live-follow", {"nostop_leg_notional_k": NOSTOP_LEG_300}),
+    ("base-v1-timeexit-w1-live-follow-ns300", "base-v1-timeexit-live-follow",
+     {"nostop_leg_notional_k": NOSTOP_LEG_300, "research_horizon_s": 86400}),
+    ("base-v1-timeexit-live-follow-ns300", "base-v1-timeexit-live-follow", {"nostop_leg_notional_k": NOSTOP_LEG_300}),
+    ("base-v1-timeexit-w14-live-follow-ns300", "base-v1-timeexit-w14-live-follow", {"nostop_leg_notional_k": NOSTOP_LEG_300}),
+    ("base-v1-timeexit-w60-live-follow-ns100", "base-v1-timeexit-w60-live-follow", {"nostop_leg_notional_k": NOSTOP_LEG_100}),
+    ("base-v1-timeexit-w60-live-follow-ns3rd", "base-v1-timeexit-w60-live-follow", {"nostop_plan_notional_k": NOSTOP_PLAN_THIRD}),
+    ("base-v1-timeexit-w60-live-ns300", "base-v1-timeexit-w60-live", {"nostop_leg_notional_k": NOSTOP_LEG_300}),
+):
+    POLICIES[_version] = ExecutionPolicy.model_validate({**POLICIES[_base].model_dump(), "version": _version, **_update,
+        "time_exit_at_horizon": POLICIES[_base].time_exit_at_horizon,
+        "breakeven_after_first_tp": POLICIES[_base].breakeven_after_first_tp,
+        "live_execution_profile": POLICIES[_base].live_execution_profile,
+        "follow_teacher": POLICIES[_base].follow_teacher})
+NOSTOP_POLICIES = tuple(v for v, p in POLICIES.items() if p.nostop_enabled)
 
 
 POLICY_HASH_REGISTRY = Path(__file__).with_name("policy_hashes.json")   # S12：version→hash 跨修订登记（改内容必须改版本名并更新登记）
@@ -572,6 +623,12 @@ class ExecutionRequest(_Model):
             raise ContractError(f"policy_hash 与 policy_version={self.policy_version} 的内容哈希不符（{self.policy_hash[:12]} != {expected[:12]}）")
         if self.entry_ttl_s is None:
             raise ContractError("entry_ttl_s 未能解析（计划与 policy 都未给）")
+        if self.order_plan.stop is None:
+            # v8 F1：无止损计划没有风险距离可定量，只能走无止损策略的固定名义（L0 已换算成 fixed_qty）。
+            if not pol.nostop_enabled:
+                raise ContractError(f"无止损计划需要无止损策略（policy {self.policy_version} 未设 nostop_*_notional_k）")
+            if self.order_plan.sizing.mode != "fixed_qty":
+                raise ContractError("无止损计划必须是 sizing.mode=fixed_qty（按固定名义换算的数量）")
         # S19（与 S17 同型，契约判例 3）：显式 TTL 是**解析结果的记录**，不是独立输入——
         # 作者给值时须等于作者值，作者留空时须等于 policy 兜底值；否则同一 policy_hash 下可擅改入场期限，
         # 把标签从 tp_hit 翻成 unfilled_expired。

@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 UNIT = "tests/market/test_follow_teacher.py::"
 REPLAY = "tests/market/test_follow_replay.py::"
 FLOW = "tests/integration/test_follow_teacher_l0.py::"
+NS = "tests/market/test_nostop.py::"
 CONTRACT = "contract.py"
 KERNEL = "kernel_a.py"
 L0 = "l0_replay.py"
@@ -49,7 +50,7 @@ CASES = [
     ("close-stop-timeframe-changed", KERNEL, 'basis = "mark" if self.breakeven_done else self.plan.stop.trigger', 'basis = "mark"', UNIT + "test_move_stop_preserves_close_timeframe_until_crossed_at_instruction"),
     ("public-b-accepts-follow", "execution.py", 'if resolve_policy(req.policy_version).follow_teacher:', 'if False:', UNIT + "test_kernel_b_rejects_follow_before_market_resolver_or_nautilus"),
     ("adapter-b-accepts-follow", "nautilus_adapter.py", 'if policy.follow_teacher:', 'if False:', UNIT + "test_kernel_b_rejects_follow_before_market_resolver_or_nautilus"),
-    ("new-version-not-bumped", KERNEL, 'KERNEL_VERSION = "kernel-a-v0.6"', 'KERNEL_VERSION = "kernel-a-v0.5"', UNIT + "test_new_build_identity_covers_changed_source"),
+    ("new-version-not-bumped", KERNEL, 'KERNEL_VERSION = "kernel-a-v0.7"', 'KERNEL_VERSION = "kernel-a-v0.6"', UNIT + "test_new_build_identity_covers_changed_source"),
     ("uncertain-actions-adopted", L0, 'elif row["uncertain"] is not False:', 'elif False:', REPLAY + "test_filter_counts_strict_visibility_uncertainty_ambiguity_episode_channel_graph_and_none"),
     ("ambiguous-episode-adopted", L0, 'elif row["episode_ambiguity"] not in (None, ""):', 'elif False:', REPLAY + "test_filter_counts_strict_visibility_uncertainty_ambiguity_episode_channel_graph_and_none"),
     ("at-tdec-adopted", L0, 'if available <= req.t_dec:', 'if available < req.t_dec:', REPLAY + "test_filter_counts_strict_visibility_uncertainty_ambiguity_episode_channel_graph_and_none"),
@@ -73,6 +74,25 @@ CASES = [
     ("discard-count-zero", L0, '"n_discarded": sum(discarded.values())', '"n_discarded": 0', REPLAY + "test_filter_counts_strict_visibility_uncertainty_ambiguity_episode_channel_graph_and_none"),
     ("kind-count-zero", L0, 'kind: adopted_kinds[kind]', 'kind: 0', REPLAY + "test_filter_counts_strict_visibility_uncertainty_ambiguity_episode_channel_graph_and_none"),
     ("non-follow-reads-follow-file", L0, 'load_followup_actions(followup_path) if policy.follow_teacher else []', 'load_followup_actions(followup_path)', FLOW + "test_non_follow_does_not_read_followup_file"),
+    # v8 F1 stopless execution (kernel A v0.7) and the §4 second pass.
+    ("nostop-kernel-b-accepted", "execution.py", 'if resolve_policy(req.policy_version).nostop_enabled:', 'if False:', NS + "test_kernel_b_rejects_nostop_policies_before_resolver"),
+    ("nostop-sl-built-without-teacher-price", KERNEL, 'if sl is None and self.stop_override is None and self.plan.stop is None:', 'if False:', NS + "test_fixed_notional_btc_leg_has_no_stop_events"),
+    ("nostop-teacher-stop-not-placed", KERNEL, 'elif sl is None and self.pos != 0 and price is not None:\n                self.protect(ts)', 'elif False:\n                self.protect(ts)', NS + "test_teacher_stop_on_stopless_position_creates_sl_and_triggers_on_mark"),
+    ("nostop-teacher-stop-close-basis", KERNEL, 'if sl is not None and sl.price is not None:\n                    return sl.price, "mark"\n            return None, "none"', 'if sl is not None and sl.price is not None:\n                    return sl.price, "close"\n            return None, "none"', NS + "test_teacher_stop_below_market_waits_then_triggers"),
+    ("nostop-contract-accepts-risk-sizing", CONTRACT, 'if self.order_plan.sizing.mode != "fixed_qty":', 'if False:', NS + "test_ns_policy_stopless_plan_requires_fixed_qty"),
+    ("nostop-old-policy-accepts-stopless", CONTRACT, 'if not pol.nostop_enabled:\n                raise', 'if False:\n                raise', NS + "test_ns_policy_stopless_plan_requires_fixed_qty"),
+    ("nostop-leg-notional-ignored", L0, 'notionals = [policy.nostop_leg_notional_k * risk_budget] * n', 'notionals = [risk_budget] * n', NS + "test_fixed_notional_btc_leg_has_no_stop_events"),
+    ("nostop-plan-notional-not-split", L0, 'notionals = [policy.nostop_plan_notional_k * risk_budget / n] * n', 'notionals = [policy.nostop_plan_notional_k * risk_budget] * n', NS + "test_whole_plan_third_splits_equally_across_legs"),
+    ("nostop-zone-far-end", L0, 'near = entry["price_hi"] if long else entry["price_lo"]', 'near = entry["price_lo"] if long else entry["price_hi"]', NS + "test_zone_becomes_near_end_single_limit"),
+    ("nostop-rules-merged-with-contract", L0, 'return None, None, "NOSTOP_RULES_UNRESOLVED", resolved, stale', 'return None, None, "PLAN_CONTRACT_INVALID:ValueError", resolved, stale', NS + "test_missing_rules_are_their_own_exclusion"),
+    ("nostop-old-policy-executes", L0, 'if nostop and not policy.nostop_enabled:', 'if False:', NS + "test_old_policy_keeps_plan_no_stop"),
+    ("summary-mixes-blocks", L0, 'rows = _risk_rows(all_rows)', 'rows = all_rows', NS + "test_summary_overall_is_risk_only_and_blocks_split"),
+    ("repost-family-ignored", L0, 'if any(alive_at(events[m], req.t_dec) for m in members[family[target]]):', 'if alive_at(events[target], req.t_dec):', NS + "test_second_pass_repost_family"),
+    ("repost-skip-chain-ignored", L0, 'while target in skipped and target not in seen:', 'while False:', NS + "test_second_pass_repost_family"),
+    ("alive-sees-equal-time", L0, 'prior = [e for e in events if e["ts"] < t]', 'prior = [e for e in events if e["ts"] <= t]', NS + "test_alive_at_only_sees_strictly_earlier_events"),
+    ("amend-filled-target-executed", L0, 'elif entry_filled_before(events[target], req.t_dec):', 'elif False:', NS + "test_second_pass_amend"),
+    ("amend-without-follow-executed", L0, 'if not follow:\n                reason = "AMEND_REQUIRES_FOLLOW"', 'if False:\n                reason = "AMEND_REQUIRES_FOLLOW"', NS + "test_second_pass_amend"),
+    ("mtm-ignores-mark", L0, 'unrealized = (Decimal(str(mark_price)) - row["entry_avg_price"]) * residual * sign * mult', 'unrealized = Decimal(0)', NS + "test_censored_nostop_mark_to_market_uses_censor_time_mark"),
 ]
 
 

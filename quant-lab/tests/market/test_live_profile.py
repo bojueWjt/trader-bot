@@ -290,3 +290,103 @@ def test_run_on_clause_wording_stays_with_its_own_price():
     assert wording_flags(custom("long", ("100", "100"), "80", []), "入场100\n止损80，亏一点没事")["stop_fuzzy"] is False
     assert wording_flags(custom("long", ("116630", "116630"), "115700", []), "如果BTC在116630$左右提供机会")["entry_fuzzy"] is True
     assert wording_flags(custom("long", ("240", "240"), "221", []), "入场点：在240点附近买入\n止损点：221")["entry_fuzzy"] is True
+
+
+# ---------------------------------------------------------------------------
+# live v4 (v8 F4): v8 rows carry the silver stop_rule; all texts below are invented.
+def v8_plan(side, entry, stop, *, trigger="mark", timeframe=None, symbol="BTCUSDT"):
+    out = custom(side, (entry, entry), stop, [], symbol=symbol)
+    out["stop"].update(trigger=trigger, timeframe=timeframe)
+    return out
+
+
+def r9(base):
+    return {"stop_rule": "r9_fuzzy_break", "stop_base": D(base)}
+
+
+@pytest.mark.parametrize("text", ["BTC 6万6附近接多，小幅跌破就止损", "BTC 66000附近多\n止损：小幅跌破65802", "BTC 66000多\n止损65802"])
+def test_v4_r9_widens_once_and_never_reapplies_breakout(text):
+    # Silver already moved the stop 0.3% below the base (66000 × 0.997 = 65802); live only adds 0.1% and rounds.
+    out, audit = apply_live_profile(v8_plan("long", "66000", "65802"), text, D("0.1"), stop_meta=r9("66000"))
+    assert out["stop"]["price"] == D("65736.1")                      # 65802 × 0.999 = 65736.198 → floor to tick
+    assert audit["rule_counts"]["stop_breakout"] == 0 and audit["rule_counts"]["stop_widening"] == 1
+    assert audit["stop_v4"] == {"stop_rule": "r9_fuzzy_break", "decision": "r9_forced", "stop_text_resolved": False}
+    short, _ = apply_live_profile(v8_plan("short", "3180", "3229.66"), "ETH 3170-3190 空，小幅涨破3220一点止损", D("0.01"),
+                                  stop_meta=r9("3220"))
+    assert short["stop"]["price"] == D("3232.89")                    # 3229.66 × 1.001 = 3232.88966 → ceil to tick
+
+
+@pytest.mark.parametrize("rule", [None, "", "plain_break", "chart", "relative", "supplement", "inherited_amend",
+                                  "close_like_kept_price"])
+def test_v4_close_and_wording_rules(rule):
+    meta = {"stop_rule": rule, "stop_base": None}
+    exact, audit = apply_live_profile(v8_plan("long", "150", "145", symbol="SOLUSDT"), "SOL 150 附近多，跌破145就止损", D("0.001"), stop_meta=meta)
+    assert exact["stop"]["price"] == D("145") and audit["rule_counts"]["stop_widening"] == 0
+    near, audit = apply_live_profile(v8_plan("long", "150", "145", symbol="SOLUSDT"), "SOL 150 附近多，跌破145附近就走", D("0.001"), stop_meta=meta)
+    assert near["stop"]["price"] == D("144.855") and audit["stop_v4"]["decision"] == "near_wording"
+    # Breakout wording is not a fuzzy word in v4: only r9 (decided in silver) moves a stop for it.
+    broke, audit = apply_live_profile(v8_plan("long", "100", "80"), "入场100\n止损略破80", D("0.001"), stop_meta=meta)
+    assert broke["stop"]["price"] == D("80") and audit["rule_counts"]["stop_breakout"] == 0
+    v3, _ = apply_live_profile(v8_plan("long", "100", "80"), "入场100\n止损略破80", D("0.001"))
+    assert v3["stop"]["price"] == D("79.680")
+    close, audit = apply_live_profile(v8_plan("long", "70000", "68000", trigger="close", timeframe="1d"),
+                                      "BTC 7万多，日线收盘跌破68000附近止损", D("0.1"),
+                                      stop_meta={"stop_rule": "close_from_clause", "stop_base": D(68000)})
+    assert close["stop"] == {"price": D("68000"), "trigger": "close", "timeframe": "1d"}
+    assert audit["stop_v4"]["decision"] == "close_trigger" and audit["rule_counts"]["stop_widening"] == 0
+
+
+def test_v4_anchors_wording_on_stop_base_in_stop_text():
+    meta = {"stop_rule": "supplement", "stop_base": D("223")}
+    out, audit = apply_live_profile(v8_plan("short", "216.4", "223", symbol="SOLUSDT"), "SOL 216.4 空", D("0.01"), stop_meta=meta,
+                                    stop_text="止损:223附近")
+    assert out["stop"]["price"] == D("223.23") and audit["stop_v4"]["stop_text_resolved"] is True
+    plain, _ = apply_live_profile(v8_plan("short", "216.4", "223", symbol="SOLUSDT"), "SOL 216.4 空 止损223附近", D("0.01"), stop_meta=meta,
+                                  stop_text="止损:223")
+    assert plain["stop"]["price"] == D("223")                        # the stop message decides, not the root
+    fallback, _ = apply_live_profile(v8_plan("short", "216.4", "223", symbol="SOLUSDT"), "SOL 216.4 空 止损223附近", D("0.01"), stop_meta=meta)
+    assert fallback["stop"]["price"] == D("223.23")                  # no stop message → root text
+    # Wording must sit on the base: a relative stop's text has no such price, so it stays exact.
+    relative, _ = apply_live_profile(v8_plan("long", "100000", "99000"), "BTC 现价多，带1000点防守，100000附近", D("0.1"),
+                                     stop_meta={"stop_rule": "relative", "stop_base": None})
+    assert relative["stop"]["price"] == D("99000")
+    based, _ = apply_live_profile(v8_plan("long", "100", "79.5"), "入场100\n止损80附近", D("0.001"),
+                                  stop_meta={"stop_rule": "plain_break", "stop_base": D(80)})
+    assert based["stop"]["price"] == D("79.420")                     # base 80 carries 附近 → the stop 79.5 widens
+
+
+def test_stopless_plan_skips_the_stop_and_keeps_entry_and_target_wording():
+    source = plan()
+    source["stop"] = None
+    for meta in (None, {"stop_rule": None, "stop_base": None}):
+        out, audit = apply_live_profile(source, "入场100附近\n目标130附近", D("0.001"), stop_meta=meta)
+        assert out["stop"] is None and audit["rule_counts"]["stop_widening"] == 0
+        assert out["entries"][0]["price_lo"] == D("100.100") and out["tps"][0]["level"] == D("129.870")
+    flags = wording_flags(source, "止损略破80")
+    assert flags["stop_fuzzy"] is False and flags["stop_breakout"] is False
+
+
+# 30 invented stop sentences: the silver breakout reading must match live v3 sentence for sentence (spec F4 test 18).
+BREAKOUT_CORPUS = [
+    ("long", "80", "止损略破80"), ("long", "80", "止损小幅跌破80"), ("long", "80", "止损：80"), ("long", "80", "止损80附近"),
+    ("long", "80", "止损跌破80一点"), ("long", "80", "止损稍微跌破80"), ("long", "80", "跌破80止损"), ("long", "80", "80略破就走"),
+    ("long", "80", "止损80，略破再说"), ("long", "80", "SL 80"), ("long", "80", "止损 80（小幅跌破）"), ("long", "80", "止损:80一点"),
+    ("long", "80", "防守80"), ("long", "80", "止损小幅跌破 80"), ("long", "80", "止损80\n目标略破120"),
+    ("short", "120", "止损略破120"), ("short", "120", "止损小幅涨破120"), ("short", "120", "止损小幅突破120"),
+    ("short", "120", "止损稍微超过120"), ("short", "120", "止损稍微涨破120"), ("short", "120", "止损：120"),
+    ("short", "120", "止损涨破120一点"), ("short", "120", "止损120附近"), ("short", "120", "突破120止损"),
+    ("short", "120", "止损120\n入场100附近"), ("short", "120", "SL 120 小幅突破"), ("short", "120", "120略破就走"),
+    ("short", "120", "止损:小幅涨破120"), ("short", "120", "止损 120 一点"), ("short", "120", "止损120，略破离场"),
+]
+
+
+def test_silver_stop_rules_breakout_matches_live_v3():
+    import re
+    from quant_lab.market import live_profile
+    stop_rules = pytest.importorskip("quant_lab.data.stop_rules")   # A 组模块；未合入时跳过
+    assert len(BREAKOUT_CORPUS) == 30
+    for side, price, text in BREAKOUT_CORPUS:
+        p = custom(side, ("100", "100"), price, [])
+        assert bool(stop_rules.breakout_on(D(price), text)) == wording_flags(p, text)["stop_breakout"], (side, price, text)
+    for word in live_profile._BREAKOUT.pattern.split("|"):          # 数据层词表 ⊇ live 词表
+        assert re.search(stop_rules._BREAKOUT, word), word

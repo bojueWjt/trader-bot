@@ -19,5 +19,14 @@
  "base-v1-timeexit-follow": "c3d67b1574f29ae338c7f4736b09e7d87651c9c00d85fddbd1992b265924eeac",
  "base-v1-timeexit-live-follow": "caf17563082ad3bbdf8ba8aed680ce0da0e8d71f3e27a873b3d100b5e3a33ce2",
  "base-v1-timeexit-w60-follow": "51bb2d2e479eb0141fe91ce241a9b0f4daf4e3a736c894c2273860293124c376",
- "base-v1-timeexit-w60-live-follow": "1fecbd45e6ad5e75a0c6d1e26fc9c2adb393288bb0cbca18ad36dadc064a3cfd"
+ "base-v1-timeexit-w60-live-follow": "1fecbd45e6ad5e75a0c6d1e26fc9c2adb393288bb0cbca18ad36dadc064a3cfd",
+ "base-v1-timeexit-w14-live": "c0fefe0a2d74e3199091a521b5360e7be86482185dc1dc160c92d00f5652db49",
+ "base-v1-timeexit-w14-live-follow": "740d1bd40b24aaf8376c03e26d1db08610b751bd1a16db334f0736915503c0b5",
+ "base-v1-timeexit-w60-live-follow-ns300": "1269a7a730a04eaafefe2287d49a8adf0db32c80eb57dc6fb7a47b324d87a198",
+ "base-v1-timeexit-w1-live-follow-ns300": "42ada5b2b3fe4735c14b93d2c1bda80e3c975630d5747273f6a28698f0ab0148",
+ "base-v1-timeexit-live-follow-ns300": "0c924d1faa5dadef99050420c1217143bff46ed0868bc05f7efd38622de631a3",
+ "base-v1-timeexit-w14-live-follow-ns300": "16b41a23d7a170776d85b8f80dba9201c614c9c944fbfb89e2dbabd854b8b293",
+ "base-v1-timeexit-w60-live-follow-ns100": "327c603e265fda9905436d5db2cbea5599bdf608db0347e6ce60fee135b05147",
+ "base-v1-timeexit-w60-live-follow-ns3rd": "6d654abfe74431f13781933df485b5c0cfb6ae16504ba592883cf5911136dea0",
+ "base-v1-timeexit-w60-live-ns300": "1a74a32fa8ac7174462a9d1ce61050699253e5b11290cdc8afa243be2a6b6e3c"
 }
