@@ -549,6 +549,26 @@ def test_second_pass_reposts_at_the_same_t_dec_execute_once():
     assert decisions["E2"]["decision"] == "REPOST_OF_LIVE_PLAN"
 
 
+def test_second_pass_target_decided_after_the_repost_or_amend_is_not_ended():
+    """Review fix: the target T's t_dec (day 0.5) is after the repost R / amend A (day 0.1) — G1 moved it later. T has no
+    events before day 0.1, which state_at reads as "ended", but T will still be placed: R is REPOST_OF_LIVE_PLAN and A
+    yields with its own code; T is the one execution of the plan."""
+    t_dec = T0 + 0.5 * DAY
+    first = pl.DataFrame({"episode_id": ["T"], "t_dec": [t_dec], "canonical_events": [life(0.6, None)], "censor_reason": [None]},
+                         schema={"episode_id": pl.Utf8, "t_dec": pl.Datetime("us", "UTC"),
+                                 "canonical_events": pl.List(execution.EVENT_STRUCT), "censor_reason": pl.Utf8})
+    run, ran = runner({"R": life(0.1, None), "A": life(0.1, None)})
+    _, excluded, decisions = l0.second_pass(first, [(pending_req("R", 0.1), "repost", "T")], follow=True, run=run)
+    assert ran == [] and excluded == {"REPOST_OF_LIVE_PLAN": 1} and decisions["R"]["decision"] == "REPOST_OF_LIVE_PLAN"
+    _, excluded, decisions = l0.second_pass(first, [(pending_req("A", 0.1), "amend", "T")], follow=True, run=run)
+    assert ran == [] and excluded == {"AMEND_TARGET_DECIDED_LATER": 1}
+    assert decisions["A"]["decision"] == "AMEND_TARGET_DECIDED_LATER" and "AMEND_TARGET_DECIDED_LATER" in l0.SECOND_PASS_EXCLUSIONS
+    # Decided before the target and the target ended: unchanged (the repost runs).
+    first_early = frame([("T", life(0, 0.05))])
+    _, excluded, decisions = l0.second_pass(first_early, [(pending_req("R", 0.1), "repost", "T")], follow=True, run=run)
+    assert ran == ["R"] and decisions["R"]["decision"] == "repost_family_ended"
+
+
 def test_link_of_reads_repost_then_amend():
     assert l0.link_of({"repost_of": "T", "amend_of": "U"}) == ("repost", "T")
     assert l0.link_of({"repost_of": "", "amend_of": "U"}) == ("amend", "U")
@@ -599,6 +619,42 @@ def test_replay_executes_stopless_plan_in_its_own_block(built, monkeypatch):
     old = l0.replay(graph_version="l0-test", channel=CHANNEL, out=root / "old", policy_version="base-v1-timeexit-w60-live",
                     risk_budget=B)
     assert old["replay_exclusions"]["reason_counts"] == {"PLAN_NO_STOP": 1}
+
+
+#: Spec F1 / §4: the G1 columns trades must carry (a literal list, so a column dropped from PASSTHROUGH_COLUMNS fails).
+SPEC_PASSTHROUGH = ("nostop_kind", "venue_hint", "triage_verdict", "plan_link_kind", "family_id", "stop_rule",
+                    "time_ref_promoted", "promotion_scope", "signal_age_s", "edit_delay_s", "edit_may_contain_outcome")
+
+
+def test_replay_passes_every_g1_column_through_with_the_episode_values(built, monkeypatch):
+    """Spec F1: the 11 G1 columns reach trades unchanged (v8_report only soft-flags a missing edit_may_contain_outcome,
+    so a dropped column has to fail here). The fixture graph is a G1 v8 graph: every column exists there."""
+    root, _ = built
+    monkeypatch.setattr(l0, "load_message_texts", lambda ids: {value: "BTC 做多 入场 100 目标 110" for value in ids})
+    episodes = l0.load_episodes("l0-test", decision_graph=True).filter(pl.col("channel_id") == CHANNEL)
+    assert set(SPEC_PASSTHROUGH) <= set(episodes.columns)
+    l0.replay(graph_version="l0-test", channel=CHANNEL, out=root / "pt", policy_version=NS_PLAIN, risk_budget=B)
+    table = pl.read_parquet(root / "pt" / "trades.parquet")
+    assert table.height > 0 and set(SPEC_PASSTHROUGH) <= set(table.columns)
+    expected = {r["episode_id"]: r for r in episodes.select("episode_id", *SPEC_PASSTHROUGH).to_dicts()}
+    for row in table.select("episode_id", *SPEC_PASSTHROUGH).to_dicts():
+        assert row == expected[row["episode_id"]]
+    for name in SPEC_PASSTHROUGH:
+        assert table.schema[name] == episodes.schema[name], name
+
+
+def test_replay_records_the_l0_build_identity(built, monkeypatch):
+    """Review fix: summary and every trade row carry l0_build_id (L0 sources, not only the kernel's)."""
+    root, _ = built
+    monkeypatch.setattr(l0, "load_message_texts", lambda ids: {value: "BTC 做多 入场 100 目标 110" for value in ids})
+    report = l0.replay(graph_version="l0-test", channel=CHANNEL, out=root / "id", policy_version=NS_PLAIN, risk_budget=B)
+    table = pl.read_parquet(root / "id" / "trades.parquet")
+    assert report["l0_build_id"] == l0.l0_build_id() and report["l0_build_id"].startswith(l0.L0_VERSION + "+")
+    assert table["l0_build_id"].unique().to_list() == [report["l0_build_id"]]
+    assert json.loads((root / "id" / "summary.json").read_text())["l0_build_id"] == report["l0_build_id"]
+    assert {"l0_replay.py", "live_profile.py", "execution.py"} <= set(l0._L0_SRC_FILES)
+    monkeypatch.setattr(l0, "_L0_SRC_FILES", ("l0_replay.py", "execution.py"))
+    assert l0.l0_build_id() != report["l0_build_id"]          # live_profile.py is part of the identity
 
 
 @pytest.mark.parametrize("minutes,decision", [(1, "REPOST_OF_LIVE_PLAN"), (10, "repost_family_ended")])

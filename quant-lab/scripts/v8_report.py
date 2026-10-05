@@ -5,6 +5,10 @@
 
 - 样本：可评估且已成交的单 —— fill_status ∈ {filled, partial}、censor_reason 为空、
   mark_ok/funding_ok/rules_ok/bars_ok 严格为 true、net_R 非空（同 v7 final_report2）。
+  v8-report-2 起，无止损块（及合计表里的无止损单）另把「已成交、被删失」的单按删失时刻的 mtm_U_at_censor 计入：
+  无止损单只靠止盈或时间出场，拿得越久越容易碰上缺口、下架而删失，丢掉它们会让样本偏向赚钱的单。
+  删失单占（可评估 + 删失）的比例 > 10%，或有删失单没有 mtm（无法估值）时，「盈利」降为「无显著优势」并标
+  「删失降级」；删失 mtm 合计为负另标「删失浮亏」。v1（删失丢弃）的表与判定在同一份报告里并列重报（键 v1）。
 - 区间（按 t_dec，UTC）：判定期 = 各频道数据起点至 2026-06-30，只用这一段下结论；
   校准期 = 2026-07-01 至 09-30，单独出表，不下结论；09-30 之后的行不进任何表。
 - 三张表（按频道，再加六频道合计 ALL）：
@@ -33,8 +37,13 @@
 - 只有主口径参与判定。S、E、W、H、C 各批次（其余 l0-v8* 目录）以及 edit_may_contain_outcome 剔除，只报区间。
   敏感性与头条的 v8e 用主口径的数据起点（两者取早）对齐周跨度与 28 天块原点。
 - 同代输入：主口径与各持有期档里，同一个 policy_version 只能有一个 policy_hash；主口径、持有期档与 v8e 的
-  kernel_version 只能有一个；持有期档的 follow_teacher.path 必须与同频道主口径相同。v8e 必须是主口径策略、
-  B=180、图版本不同于主图。不满足时拒绝出报告。其余敏感性批次不同代时该频道标「未出」并写原因。
+  kernel_version 只能有一个，l0_build_id（L0 编排代码身份：无止损定量、第二遍、live v4 都在那里）也只能有一个
+  （v8-report-2 起；没有这一列的旧产物记为空值，与有值的混在一起同样拒绝）；持有期档的 follow_teacher.path 必须与
+  同频道主口径相同。v8e 必须是主口径策略、B=180、图版本不同于主图。不满足时拒绝出报告。其余敏感性批次不同代时
+  该频道标「未出」并写原因。
+- 分诊门（D6，v8-report-2 起）：主口径、持有期档与 v8e 里，按无止损定量的行和 time_ref_promoted 非空的行，
+  triage_verdict 必须是 new_entry，否则拒绝出报告（漏传分诊 sidecar 或误用 v8a 图时，存疑与非开仓的无止损根会
+  按 300U 混进主口径）。
 
 用法（研究机）：
   python scripts/v8_report.py --reports $R --out $R/final-report-v8 \
@@ -62,12 +71,18 @@ import sys
 import numpy as np
 import polars as pl
 
-JUDGMENT_VERSION = "v8-report-1"
+JUDGMENT_VERSION = "v8-report-2"
 CHANGELOG = [
     {"version": "v8-report-1", "date": "2026-10-05",
      "change": "初版：§10.4 口径冻结（在任何 v8 L0 结果之前）。冻结前按审查补齐：同代输入校验（策略哈希、内核版本、"
                "跟单表）、v8e 头条的策略/B/图版本校验与周跨度对齐、首尾不完整周写明、出场日累计曲线与回撤起止时刻、"
                "不可评估周与单数、读不了的敏感性目录标未出、numpy/polars/python 版本入报告。判定口径本身不变。"},
+    {"version": "v8-report-2", "date": "2026-10-06",
+     "change": "集成审查（仍在任何 v8 L0 结果之前）。判定口径修改：无止损块与合计表把已成交、被删失的无止损单按 "
+               "mtm_U_at_censor 计入（v1 丢弃删失单，删失偏向亏损单，会抬高点估计与下界）；删失单占比 > 10% 或有删失单"
+               "无法估值时「盈利」降为「无显著优势」（标「删失降级」），删失 mtm 合计为负标「删失浮亏」。v1 的表与判定在"
+               "每张无止损/合计表的 v1 键下并列重报，头条另列 v1 判定。输入校验（不改口径）：主口径/持有期档/v8e 的无止损行"
+               "与升级行 triage_verdict 必须为 new_entry（D6）；l0_build_id 进同代校验。"},
 ]
 
 UTC = dt.timezone.utc
@@ -98,6 +113,9 @@ PROFIT, LOSS, NO_EDGE, INSUFFICIENT = "盈利", "亏损", "无显著优势", "�
 DEPENDS_ON_HOLD, HOLD_MISSING = "依持有期而定", "持有期档缺失"
 BLOCK_SENSITIVE = "对块长敏感"
 SUMMARY_KEYS = ("graph_version", "policy_version", "policy_hash", "risk_budget")
+CENSOR_SHARE_MAX = 0.10
+CENSOR_DOWNGRADED, CENSOR_LOSS, CENSOR_SHARE_HIGH, CENSOR_UNVALUED = "删失降级", "删失浮亏", "删失占比高", "删失无法估值"
+TRIAGE_GATED_VERDICT = "new_entry"
 
 
 class ReportError(Exception):
@@ -111,6 +129,16 @@ class ReportError(Exception):
 def evaluable(row: dict) -> bool:
     return (row.get("fill_status") in FILLED and row.get("censor_reason") in (None, "")
             and row.get("net_R") is not None and all(row.get(key) is True for key in COVERAGE))
+
+
+def censored_filled(row: dict) -> bool:
+    """Filled (or partially) and censored: the outcome after the censor time is not observed."""
+    return row.get("fill_status") in FILLED and row.get("censor_reason") not in (None, "")
+
+
+def censor_mtm(row: dict) -> float | None:
+    value = row.get("mtm_U_at_censor")
+    return None if value is None else float(Decimal(str(value)))
 
 
 def sizing_of(row: dict) -> str:
@@ -306,6 +334,7 @@ def load_run(directory: Path, channel: str, *, policy: str | None = None, budget
                     "policy_hash": summary.get("policy_hash"), "graph_version": summary.get("graph_version"),
                     "risk_budget": str(summary.get("risk_budget")), "n_rows": len(rows),
                     "kernel_versions": kernel_versions(rows),
+                    "l0_build_ids": l0_build_ids(summary, rows),
                     "follow_teacher_path": follow.get("path") if isinstance(follow, dict) else None,
                     "summary_sha256": _sha(summary_path), "trades_sha256": _sha(trades_path)}
     return run
@@ -330,6 +359,22 @@ def kernel_versions(rows: list[dict]) -> list:
     return sorted({r.get("kernel_version") for r in rows}, key=lambda v: (v is not None, str(v)))
 
 
+def l0_build_ids(summary: dict, rows: list[dict]) -> list:
+    """Distinct L0 code identities of the summary and the rows (None kept, as for kernel_version)."""
+    return sorted({summary.get("l0_build_id")} | {r.get("l0_build_id") for r in rows}, key=lambda v: (v is not None, str(v)))
+
+
+def check_triaged(run: Run) -> None:
+    """D6: in the main scope (and the holds, v8e) a stopless or promoted root runs only when triage said new_entry."""
+    for row in run.rows:
+        promoted = row.get("time_ref_promoted") not in (None, "")
+        if (sizing_of(row) == SIZING_NOSTOP or promoted) and row.get("triage_verdict") != TRIAGE_GATED_VERDICT:
+            what = "stopless" if sizing_of(row) == SIZING_NOSTOP else "promoted"
+            raise ReportError(f"{run.directory}: {what} row {row.get('episode_id')} has triage_verdict "
+                              f"{row.get('triage_verdict')!r}, not {TRIAGE_GATED_VERDICT!r}: the main 口径 executes only "
+                              f"triaged new entries (D6); was the graph built without the triage sidecar (stage 1 / v8a)?")
+
+
 class Generation:
     """One code generation across main, the holding-period runs and v8e (S1): one policy_hash per policy_version,
     one kernel_version, and each hold reads the same follow_teacher table as main for its channel."""
@@ -337,11 +382,13 @@ class Generation:
     def __init__(self):
         self.policy_hashes: dict[str, set] = defaultdict(set)
         self.kernels: set = set()
+        self.l0_builds: set = set()
         self.follow_paths: dict[str, str | None] = {}
 
     def add(self, run: Run, *, main: bool = False, follow_like_main: bool = False) -> None:
         self.policy_hashes[run.summary["policy_version"]].add(run.summary["policy_hash"])
         self.kernels.update(run.identity["kernel_versions"])
+        self.l0_builds.update(run.identity["l0_build_ids"])
         path = run.identity["follow_teacher_path"]
         if main:
             self.follow_paths[run.channel] = path
@@ -356,6 +403,9 @@ class Generation:
         if len(self.kernels) > 1:
             raise ReportError(f"kernel_version differs across main/hold/v8e runs (mixed generations): "
                               f"{sorted(map(str, self.kernels))}")
+        if len(self.l0_builds) > 1:
+            raise ReportError(f"l0_build_id differs across main/hold/v8e runs (mixed generations): "
+                              f"{sorted(map(str, self.l0_builds))}")
 
     def mismatch(self, run: Run) -> str | None:
         """Why a sensitivity run is not of this generation (None when it is)."""
@@ -366,11 +416,15 @@ class Generation:
         extra = set(run.identity["kernel_versions"]) - self.kernels
         if self.kernels and extra:
             return f"{run.directory}: kernel_version {sorted(map(str, extra))} differs from main {sorted(map(str, self.kernels))}"
+        extra = set(run.identity["l0_build_ids"]) - self.l0_builds
+        if self.l0_builds and extra:
+            return f"{run.directory}: l0_build_id {sorted(map(str, extra))} differs from main {sorted(map(str, self.l0_builds))}"
         return None
 
     def describe(self) -> dict:
         return {"policy_hashes": {pv: sorted(map(str, hashes))[0] for pv, hashes in sorted(self.policy_hashes.items())},
                 "kernel_version": next(iter(self.kernels)) if len(self.kernels) == 1 else sorted(map(str, self.kernels)),
+                "l0_build_id": next(iter(self.l0_builds)) if len(self.l0_builds) == 1 else sorted(map(str, self.l0_builds)),
                 "follow_teacher_paths": dict(sorted(self.follow_paths.items()))}
 
 
@@ -423,11 +477,53 @@ def with_stop_table(rows, period, origin, *, judged) -> dict:
     return table
 
 
-def nostop_table(rows, period, origin, *, judged) -> dict:
+def nostop_samples(block: list[dict], *, censored_as_mtm: bool) -> tuple[list[tuple[dt.datetime, float]], dict]:
+    """Stopless samples: evaluable rows at net_U, plus (v2) filled censored rows at their censor-time mark-to-market.
+
+    Returns the samples and the censoring facts the downgrade rule reads. A censored row without mtm is not valued
+    (it is counted as unvalued), never read as 0."""
+    evaluated = [r for r in block if evaluable(r)]
+    censored = [r for r in block if censored_filled(r)]
+    valued = [r for r in censored if censor_mtm(r) is not None] if censored_as_mtm else []
+    samples = [(r["t_dec"], float(net_U(r))) for r in evaluated] + [(r["t_dec"], censor_mtm(r)) for r in valued]
+    n_known = len(evaluated) + len(censored)
+    info = {"censored_as_mtm": censored_as_mtm, "n_censored_filled": len(censored), "n_valued_at_mtm": len(valued),
+            "n_unvalued": sum(censor_mtm(r) is None for r in censored),
+            "mtm_sum_U": float(sum(censor_mtm(r) for r in censored if censor_mtm(r) is not None)),
+            "censored_share": (len(censored) / n_known) if n_known else None}
+    return samples, info
+
+
+def censor_guard(table: dict, info: dict, *, judged: bool) -> dict:
+    """v2: flag censoring that could hide losses; downgrade a profit when too much is censored or not valued."""
+    table["censoring"] = info
+    if not info["censored_as_mtm"]:
+        return table
+    flags = []
+    if info["censored_share"] is not None and info["censored_share"] > CENSOR_SHARE_MAX:
+        flags.append(CENSOR_SHARE_HIGH)
+    if info["n_unvalued"]:
+        flags.append(CENSOR_UNVALUED)
+    if info["mtm_sum_U"] < 0:
+        flags.append(CENSOR_LOSS)
+    downgrade = CENSOR_SHARE_HIGH in flags or CENSOR_UNVALUED in flags
+    if judged and downgrade and PROFIT in (table["verdict"], table["verdict_28d"]):
+        table["verdict_before_censor_guard"] = [table["verdict"], table["verdict_28d"]]
+        table["verdict"] = NO_EDGE if table["verdict"] == PROFIT else table["verdict"]
+        table["verdict_28d"] = NO_EDGE if table["verdict_28d"] == PROFIT else table["verdict_28d"]
+        flags.append(CENSOR_DOWNGRADED)
+        table["flags"] = [BLOCK_SENSITIVE] if table["verdict"] != table["verdict_28d"] else []
+    table["flags"] = table["flags"] + flags
+    return table
+
+
+def nostop_table(rows, period, origin, *, judged, censored_as_mtm: bool = True) -> dict:
     block = block_rows(rows, SIZING_NOSTOP, period)
     chosen = [r for r in block if evaluable(r)]
-    table = per_trade_table([(r["t_dec"], float(net_U(r))) for r in chosen], origin, judged=judged, unit="U/单")
+    samples, info = nostop_samples(block, censored_as_mtm=censored_as_mtm)
+    table = per_trade_table(samples, origin, judged=judged, unit="U/单")
     table["n_filled_not_evaluable"] = len(filled_not_evaluable(block))
+    censor_guard(table, info, judged=judged)
     with_notional = [r for r in chosen if r.get("entry_notional_U") not in (None, 0)]
     total_notional = sum((Decimal(str(r["entry_notional_U"])) for r in with_notional), Decimal(0))
     table["net_U_over_notional"] = {
@@ -438,19 +534,22 @@ def nostop_table(rows, period, origin, *, judged) -> dict:
     return table
 
 
-def total_table(stop_rows, nostop_rows, period, span, *, judged) -> dict:
-    block = block_rows(stop_rows, SIZING_RISK, period) + block_rows(nostop_rows, SIZING_NOSTOP, period)
-    table = weekly_total_table([(r["t_dec"], float(net_U(r))) for r in block if evaluable(r)], span, judged=judged)
-    table.update(not_evaluable_gaps(block))
-    return table
+def total_table(stop_rows, nostop_rows, period, span, *, judged, censored_as_mtm: bool = True) -> dict:
+    stop_block = block_rows(stop_rows, SIZING_RISK, period)
+    nostop_block = block_rows(nostop_rows, SIZING_NOSTOP, period)
+    nostop, info = nostop_samples(nostop_block, censored_as_mtm=censored_as_mtm)
+    table = weekly_total_table([(r["t_dec"], float(net_U(r))) for r in stop_block if evaluable(r)] + nostop, span,
+                               judged=judged)
+    table.update(not_evaluable_gaps(stop_block + nostop_block))
+    return censor_guard(table, info, judged=judged)
 
 
-def three_tables(stop_rows, nostop_rows, period, data_start, *, judged) -> dict:
+def three_tables(stop_rows, nostop_rows, period, data_start, *, judged, censored_as_mtm: bool = True) -> dict:
     span = span_for(period, data_start)
     origin = span[0] if span else None
     return {"with_stop": with_stop_table(stop_rows, period, origin, judged=judged),
-            "nostop": nostop_table(nostop_rows, period, origin, judged=judged),
-            "total": total_table(stop_rows, nostop_rows, period, span, judged=judged)}
+            "nostop": nostop_table(nostop_rows, period, origin, judged=judged, censored_as_mtm=censored_as_mtm),
+            "total": total_table(stop_rows, nostop_rows, period, span, judged=judged, censored_as_mtm=censored_as_mtm)}
 
 
 def _open_close(row: dict) -> tuple[dt.datetime | None, dt.datetime | None]:
@@ -623,6 +722,7 @@ def build_report(reports: Path, channels: list[str], *, main_dir: str = MAIN_DIR
         run = load_run(reports / main_dir, ch, policy=MAIN_POLICY, budget=B_MAIN)
         if run is None:
             raise ReportError(f"main 口径 missing for channel {ch}: {reports / main_dir / ch}")
+        check_triaged(run)
         generation.add(run, main=True)
         main_runs[ch] = run
         main_rows[ch] = _tag(run.rows, ch)
@@ -637,6 +737,7 @@ def build_report(reports: Path, channels: list[str], *, main_dir: str = MAIN_DIR
             if hrun.summary["graph_version"] != run.summary["graph_version"]:
                 raise ReportError(f"{hrun.directory}: graph {hrun.summary['graph_version']} differs from main "
                                   f"{run.summary['graph_version']}")
+            check_triaged(hrun)
             generation.add(hrun, follow_like_main=True)
             hold_rows[hold][ch] = _tag(hrun.rows, ch)
             inputs[f"hold:{hold}"][ch] = hrun.identity
@@ -654,6 +755,7 @@ def build_report(reports: Path, channels: list[str], *, main_dir: str = MAIN_DIR
             if erun.summary["graph_version"] == main_runs[ch].summary["graph_version"]:
                 raise ReportError(f"{erun.directory}: v8e graph {erun.summary['graph_version']} is the main graph; "
                                   f"it must be the <ch>-v8e variant graph")
+            check_triaged(erun)
             generation.add(erun)
             edit_runs[ch] = erun
     generation.check()
@@ -679,19 +781,24 @@ def build_report(reports: Path, channels: list[str], *, main_dir: str = MAIN_DIR
             span = span_for(period, starts[scope])
             origin = span[0] if span else None
             tables["with_stop"][scope] = with_stop_table(main, period, origin, judged=judged)
-            per_hold_nostop, per_hold_total = {}, {}
-            for hold in HOLDS:
-                rows = rows_for(hold_rows[hold], scope)
-                if rows is None:
-                    per_hold_nostop[hold] = per_hold_total[hold] = None
-                    continue
-                per_hold_nostop[hold] = nostop_table(rows, period, origin, judged=judged)
-                per_hold_total[hold] = total_table(main, rows, period, span, judged=judged)
-            nostop_entry = {"holds": per_hold_nostop}
-            total_entry = {"holds": per_hold_total}
-            if judged:
-                nostop_entry.update(consensus(per_hold_nostop))
-                total_entry.update(consensus(per_hold_total))
+            entries = {}
+            for version, as_mtm in (("v2", True), ("v1", False)):
+                per_hold_nostop, per_hold_total = {}, {}
+                for hold in HOLDS:
+                    rows = rows_for(hold_rows[hold], scope)
+                    if rows is None:
+                        per_hold_nostop[hold] = per_hold_total[hold] = None
+                        continue
+                    per_hold_nostop[hold] = nostop_table(rows, period, origin, judged=judged, censored_as_mtm=as_mtm)
+                    per_hold_total[hold] = total_table(main, rows, period, span, judged=judged, censored_as_mtm=as_mtm)
+                nostop_part, total_part = {"holds": per_hold_nostop}, {"holds": per_hold_total}
+                if judged:
+                    nostop_part.update(consensus(per_hold_nostop))
+                    total_part.update(consensus(per_hold_total))
+                entries[version] = (nostop_part, total_part)
+            # 现行口径（v2：删失无止损单按 mtm 计入）在外层；v1（删失丢弃）在 v1 键下并列重报（冻结规则：新旧两版都报）。
+            nostop_entry = {**entries["v2"][0], "v1": entries["v1"][0]}
+            total_entry = {**entries["v2"][1], "v1": entries["v1"][1]}
             tables["nostop"][scope] = nostop_entry
             tables["total"][scope] = total_entry
         out[period] = tables
@@ -755,7 +862,8 @@ def build_report(reports: Path, channels: list[str], *, main_dir: str = MAIN_DIR
     edit_name = next((name for name, directory in named.items() if directory == edit_dir), None)
     for scope in scopes:
         main_total = out["judgment"]["total"][scope]
-        entry = {"main": {"verdict": main_total.get("verdict"), "w60": main_total["holds"]["w60"]}}
+        entry = {"main": {"verdict": main_total.get("verdict"), "verdict_v1": main_total["v1"].get("verdict"),
+                          "w60": main_total["holds"]["w60"]}}
         v8e_tables = sensitivity_out[edit_name]["tables"][scope] if edit_name is not None else {"status": "未出"}
         start = sensitivity_starts.get((edit_dir, scope), starts[scope])
         if "judgment" not in v8e_tables:
@@ -780,6 +888,10 @@ def build_report(reports: Path, channels: list[str], *, main_dir: str = MAIN_DIR
 
 def frozen_rules() -> dict:
     return {"sample": "fill_status∈{filled,partial} ∧ censor_reason 空 ∧ 四项覆盖为 true ∧ net_R 非空",
+            "nostop_censored": (f"无止损块与合计表另把已成交、被删失的无止损单按 mtm_U_at_censor 计入（v1 丢弃，键 v1 并列重报）；"
+                                f"删失占比 > {CENSOR_SHARE_MAX:.0%} 或有删失单无法估值时「盈利」降为「{NO_EDGE}」"
+                                f"（{CENSOR_DOWNGRADED}），删失 mtm 合计为负标「{CENSOR_LOSS}」"),
+            "triage_gate": "主口径/持有期档/v8e：无止损行与 time_ref_promoted 非空行 triage_verdict 必须为 new_entry（D6）",
             "judgment_period": f"数据起点 ≤ t_dec < {JUDGMENT_END.isoformat()}",
             "calibration_period": f"{JUDGMENT_END.isoformat()} ≤ t_dec < {CALIBRATION_END.isoformat()}（不下结论）",
             "partial_weeks": ("首尾不完整周按整周计入、不折算天数：判定期首周为数据起点所在 ISO 周；判定期末周为 "
@@ -793,7 +905,7 @@ def frozen_rules() -> dict:
             "verdict": {"insufficient": f"n<{MIN_TRADES} 或非空周<{MIN_WEEKS}", "profit": "下界>0", "loss": "上界<0",
                         "else": NO_EDGE},
             "holds": {"with_stop": "w60（主口径）", "nostop": list(HOLDS), "rule": "四档一致才给判定"},
-            "generation": ("同一 policy_version 只有一个 policy_hash；主口径/持有期档/v8e 只有一个 kernel_version；"
+            "generation": ("同一 policy_version 只有一个 policy_hash；主口径/持有期档/v8e 只有一个 kernel_version 与一个 l0_build_id；"
                            "持有期档的 follow_teacher.path 与主口径相同；v8e = 主口径策略、B=180、非主图"),
             "risk_budget_B": str(B_MAIN), "account_U": str(ACCOUNT_U), "main_policy": MAIN_POLICY,
             "hold_policies": HOLD_POLICIES}
@@ -839,7 +951,7 @@ def render_text(report: dict) -> str:
              "合计只有金额；不出合计均值 R 与合计胜率。无止损块仅内核 A。"]
     generation = (report.get("inputs") or {}).get("generation")
     if generation:
-        lines.append(f"同代输入：kernel_version {generation['kernel_version']} · 策略哈希 "
+        lines.append(f"同代输入：kernel_version {generation['kernel_version']} · l0_build_id {generation.get('l0_build_id')} · 策略哈希 "
                      + ", ".join(f"{pv}={h[:12]}" for pv, h in generation["policy_hashes"].items()))
     lines.append("")
 
@@ -863,9 +975,16 @@ def render_text(report: dict) -> str:
         for key, label in (("nostop", "[无止损块] 每单平均 net_U"), ("total", "[金额合计] 每周 net_U 之和的周均值（空周=0）")):
             lines.append(label)
             for scope, entry in tables[key].items():
-                lines.append(f"  {scope}: {entry.get('verdict') or ''}{' ' + ','.join(entry.get('flags') or []) if entry.get('flags') else ''}")
+                v1 = entry.get("v1") or {}
+                lines.append(f"  {scope}: {entry.get('verdict') or ''}{' ' + ','.join(entry.get('flags') or []) if entry.get('flags') else ''}"
+                             f"{' · v1（删失丢弃）' + v1['verdict'] if v1.get('verdict') else ''}")
                 for hold, table in entry["holds"].items():
                     lines.append("  " + (row(f"·{hold}", table) if table is not None else f"  ·{hold} 未出"))
+                    censoring = (table or {}).get("censoring") or {}
+                    if censoring.get("n_censored_filled"):
+                        lines.append(f"      删失成交 {censoring['n_censored_filled']} 单 · 按 mtm 计入 {censoring['n_valued_at_mtm']} · "
+                                     f"无法估值 {censoring['n_unvalued']} · mtm 合计 {_fmt(censoring['mtm_sum_U'], 1)}U · "
+                                     f"占比 {_fmt(censoring['censored_share'], 3)}")
         lines.append("")
     lines.append("== 逐月（主口径） ==")
     for scope, data in report["monthly"].items():
@@ -888,7 +1007,7 @@ def render_text(report: dict) -> str:
     for scope, entry in report["headline"].items():
         v8e = entry["v8e"]
         common = entry["main"].get("w60_on_common_span")
-        lines.append(f"  {scope}: 主口径 {entry['main']['verdict']} · w60 {_ci(entry['main']['w60'])}"
+        lines.append(f"  {scope}: 主口径 {entry['main']['verdict']}（v1 {entry['main'].get('verdict_v1')}） · w60 {_ci(entry['main']['w60'])}"
                      f"{' · 同跨度 ' + _ci(common) if common else ''} · "
                      f"v8e{' ' + _batch_label(edit) if edit else ''} {_ci(v8e) if 'ci95' in v8e else v8e.get('status')} · "
                      f"跨度 {_when(entry['span']['first_week'])} 起 {entry['span']['n_span_weeks']} 周")

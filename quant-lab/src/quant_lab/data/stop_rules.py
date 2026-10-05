@@ -26,7 +26,7 @@ from decimal import Decimal
 import math
 import re
 
-STOP_RULES_VERSION = "stop-rules-v1"
+STOP_RULES_VERSION = "stop-rules-v2"  # v2: 「走势/走向/走弱…」 are not stop wording; plain breaks must be anchored
 WIDEN = Decimal("0.003")
 
 # ---------------------------------------------------------------- live v3 copy (live_profile.py:36-100)
@@ -154,9 +154,12 @@ _SLIGHTLY = r"(?:小幅|(?<![策战忽省攻谋侵粗概简领约])略微?|稍�
 FUZZY_BREAK = re.compile(
     rf"{_SLIGHTLY}\s*(?P<verb>跌破|跌穿|破位|涨破|突破|升破|超过|破)\s*(?:的)?\s*(?:{REFERENCE})?\s*(?P<n>{NUM})?"
     rf"|(?P<verb2>跌破|涨破|突破|破)\s*(?P<n2>{NUM})\s*(?:万|[wWkK])?\s*一点")
+# 「走」 only as the verb 'leave': 走势/走强/走弱/走高/走低/走到/走出/走向/走完 are about the market, not a stop
+# (same lookahead as STOP_ANCHOR). 「跌破68000走势就转弱」 states no stop.
+_LEAVE = r"走(?![势强弱高低到出向完])"
 PLAIN_BREAK_STOP = re.compile(
     rf"(?P<verb>跌破|跌穿|涨破|突破|升破|破)\s*(?:{REFERENCE})?\s*(?P<n>{NUM})?\s*(?:附近|左右|一带|上下|一线)?\s*(?:就|则|后)?\s*"
-    r"(?:小幅|略微?|稍微?)?\s*(?:止损|离场|走人|走|认错|出局|小损)")
+    rf"(?:小幅|略微?|稍微?)?\s*(?:止损|离场|走人|{_LEAVE}|认错|出局|小损)")
 # Any break ... stop wording in one clause, used only to keep close/indicator conditions out of intraday stops.
 LOOSE_BREAK_STOP = re.compile(r"(?:跌破|跌穿|涨破|突破|升破|破位|破)[^。；;！!？?\n]{0,16}?(?:止损|离场|走人|出局|认错)")
 CLOSE_COND = re.compile(r"收盘|收线|收于|收在|收回|收不回|站不回|站稳|有效跌破|有效突破|有效站上|确认|\d+\s*根")
@@ -462,6 +465,8 @@ def _derive_from_paragraph(result, text, action, siblings, entries, long):
         hits.append(dict(start=m.start(), end=m.end(), verb=verb, raw=raw, fuzzy=True,
                          n_span=(m.start("n"), m.end("n")) if m["n"] else (m.start("n2"), m.end("n2")) if m["n2"] else None))
     for m in PLAIN_BREAK_STOP.finditer(seg):
+        if not anchored(m.start(), m.end()):
+            continue
         hits.append(dict(start=m.start(), end=m.end(), verb=m["verb"], raw=m["n"], fuzzy=False,
                          n_span=(m.start("n"), m.end("n")) if m["n"] else None))
     if not hits:

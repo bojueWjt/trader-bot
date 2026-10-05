@@ -68,6 +68,27 @@ def test_plain_break_keeps_the_price(text):
     assert stop == Decimal('145') and rule['rule'] == 'plain_break' and rule['widened'] == '0'
 
 
+@pytest.mark.parametrize('text,action', [
+    ('仿写 BTC 7万多，跌破68000走势就转弱', ('BTC', 'long', (70000, '7万'))),
+    ('仿写 BTC 7万多，如果跌破68000走向就看空', ('BTC', 'long', (70000, '7万'))),
+    ('仿写 ETH 3200多，破3100走弱', ('ETH', 'long', (3200, None))),
+])
+def test_market_wording_with_zou_is_not_a_stop(text, action):
+    """Review fix (D1, 不编止损): 「走势/走向/走弱」 describe the market. No stop is derived from them, so the plan stays
+    stopless (D2 fixed notional) instead of getting an invented intraday stop."""
+    symbol, side, (price, quote) = action
+    stop, rule, _ = one(text, act(symbol, side, limit(price, quote) if quote else limit(price)))
+    assert stop is None and rule is None
+
+
+def test_bare_zou_after_a_break_needs_a_stop_anchor():
+    # 「破X走」 without 就/则/后/即/直接 is not anchored to a stop: not derived (the anchored 「就走」 form still is).
+    stop, rule, _ = one('仿写 SOL 150 附近多，跌破145走', act('SOL', 'long', limit(150)))
+    assert stop is None and rule is None
+    stop, rule, _ = one('仿写 SOL 150 附近多，跌破145就走', act('SOL', 'long', limit(150)))
+    assert stop == Decimal('145') and rule['rule'] == 'plain_break'
+
+
 def test_close_wording_never_becomes_an_intraday_stop():
     text = '仿写 BTC 7万多，日线收盘跌破6.8万止损'
     # Condition stop: left to the close-stop path.

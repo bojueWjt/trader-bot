@@ -63,6 +63,10 @@ def v8(synthetic, tmp_path_factory):
     flipped = table["episode_id"][0]
     table = table.with_columns(pl.when(pl.col("episode_id") == flipped).then(pl.lit("nostop"))
                                .otherwise(pl.col("sizing_basis")).alias("sizing_basis"))
+    # A stopless row in the main scope is always a triaged new entry (D6; v8_report refuses anything else since
+    # v8-report-2); the flip imitates such a row, so it carries that verdict too.
+    table = table.with_columns(pl.when(pl.col("episode_id") == flipped).then(pl.lit("new_entry"))
+                               .otherwise(pl.col("triage_verdict")).alias("triage_verdict"))
     table.write_parquet(folder / "trades.parquet")
     summary = json.loads((folder / "summary.json").read_text())
     summary.update(json.loads(json.dumps(summarize(table), default=str)))
@@ -130,13 +134,16 @@ def test_channel_list_carries_v8_columns(v8):
     assert record["net_U"] == (None if record["net_R"] is None else record["net_R"] * Decimal("180"))
     risk = trade["variants"]["w60lf-ns300"]
     assert risk["sizing_basis"] == "risk" and "legs_n" in risk
-    # 报告里没有的列不写成空字段；图没有 dup_of 不写合并数，而不是写 0。
-    # 集成（B 组合入后）：合成图由 G1 建，带 v8 列与 dup_of；断言随报告/图的实际列走，两个方向都查。
+    # 合成图由 G1 v8 建（B 组合入后），带全部 v8 列与 dup_of：F1 的 11 个透传列必须真到了报告和频道页记录里，
+    # 图的合并数必须写出。列被 G2 丢掉时这里要红（v8_report 对缺 edit_may_contain_outcome 只标「列缺失」）。
+    # 「报告里没有的列不写成空字段」由 test_trade_records_carry_only_the_reports_own_v8_columns 用去列的旧报告检查。
     columns = set(pl.read_parquet(v8["config_doc"]["reports"] + "/l0-v8-w60lf-ns300/demo/trades.parquet").columns)
-    for field in ("plan_link_kind", "triage_verdict"):
-        assert (field in risk) == (field in columns)
+    for field in ("nostop_kind", "venue_hint", "triage_verdict", "plan_link_kind", "family_id", "stop_rule",
+                  "time_ref_promoted", "promotion_scope", "signal_age_s", "edit_delay_s", "edit_may_contain_outcome"):
+        assert field in columns, field
+        assert field in risk, field
     graph_counts = data_module.dup_counts(dashboard.channel("demo")["layout"], "viz-test", CHANNEL)
-    assert ("n_dup_members" in risk) == (graph_counts is not None)
+    assert graph_counts is not None and "n_dup_members" in risk
     assert "n_dup_members" not in trade and "内核 A" in data["nostop_note"]
 
 
@@ -169,6 +176,7 @@ def test_trade_records_carry_only_the_reports_own_v8_columns(dashboard, tmp_path
     assert records
     # 合并数取自图的 dup_of，不取自报告：集成后合成图由 G1 v8 建、带 dup_of，此时合并数照写；图没有 dup_of 时不写。
     graph_has_dup = data_module.dup_counts(old.channel("demo")["layout"], "viz-test", CHANNEL) is not None
+    assert graph_has_dup
     for record in records:
         assert not set(data_module.V8_TRADE_FIELDS) & set(record)
         assert not {"sizing_basis", "net_U"} & set(record)

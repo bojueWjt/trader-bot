@@ -14,6 +14,9 @@
   （多单高于 T 最高档、空单低于 T 最低档）→ 独立单，继承 T 的止损，合成 cancel_pending(T)；不要求价差 > 1%
   （方案测试 10：2270 挂单、现价 2285，差 0.66%，是改单）。
 - 补充止损（F6）的 Δ 从该计划原帖（组内最早成员）算起，不从 linker 挂靠的那条复述算起；三道校验缺比较价时拒收（no_reference）。
+- 冻结：一组一旦被 amend 或 repost 引用，它的字段与 t_dec 就定格。之后再到的补充止损（含 Δ ≤ W_sup 的）不再并进它，
+  只合成一条 move_stop：组被改单引用时指向最近的那张改单（实际替换它的计划），否则指向该组保留单。否则原单的 t_dec
+  会被推到改单/重发之后，G2 第二遍看不到原单当时在场，同一计划会执行两次，合成的撤单也会因早于原单 t_dec 被丢掉。
 
 「可见截断」：目标组的所有成员都必须严格早于 C（Δ=0 时要求 sequence 能定先后），并且只用当时的字段。
 stage 2 才使用分诊 relation（amends / reenters 覆盖确定性判定），并在保留单本口径不可执行时把指向它的
@@ -28,7 +31,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-PLAN_MERGE_VERSION = "plan-merge-v1"
+PLAN_MERGE_VERSION = "plan-merge-v2"  # v2: a group referenced by an amend/repost is frozen (stops after it become move_stop)
 COMPANION_S = 120
 DEFAULT_SUPPLEMENT_S = 1800
 LINK_S = 1800
@@ -305,7 +308,18 @@ def merge(roots: list[Item], supplements: list[Item] = (), *, conditionals: list
     by_message: dict[tuple, list[str]] = {}
     group_of: dict[str, str] = {}
     counters: dict[str, int] = {"ambiguous_targets": 0, "late_entry_dropped": 0, "late_stop_tps_dropped": 0, "supplement_rejected": 0,
-                                "late_stop_without_price": 0}
+                                "late_stop_without_price": 0, "frozen_stop_as_move": 0}
+    #: group gid → the latest amend that replaced it (None: referenced by a repost only). A frozen group never absorbs.
+    frozen: dict[str, str | None] = {}
+
+    def freeze(g: Group, amender: str | None = None):
+        if amender is not None or g.gid not in frozen:
+            frozen[g.gid] = amender if amender is not None else frozen.get(g.gid)
+
+    def stop_receiver(g: Group) -> Group:
+        """Where a stop for a frozen group goes: the plan that replaced it (latest amend), else the group itself."""
+        amender = frozen.get(g.gid)
+        return groups[group_of[amender]] if amender is not None and amender in group_of else g
 
     def order(i: Item):
         return (i.t_vis, i.sequence if i.sequence is not None else -1, i.message_id, i.branch_index, i.pid)
@@ -373,6 +387,7 @@ def merge(roots: list[Item], supplements: list[Item] = (), *, conditionals: list
     def repost(c: Item, t: Group, gap: float):
         # A repost is its own group in the target's family; G2 decides whether it runs (family alive at t_dec).
         new_group(c, family=t.family)
+        freeze(t)
         link = links[c.pid]
         link.kind, link.repost_of = "repost", t.kept
         link.gap_s, link.target_message_id = _ceil_s(gap), items[t.kept].message_id
@@ -401,6 +416,15 @@ def merge(roots: list[Item], supplements: list[Item] = (), *, conditionals: list
             # linker attached the stop to: a stop linked to a later restatement is still Δ after the plan was posted.
             gap = _gap(c, g)
             link.gap_s, link.target_message_id, link.group = _ceil_s(gap), items[g.members[0]].message_id, g.gid
+            if g.gid in frozen:
+                receiver = stop_receiver(g)
+                if receiver.stop is not None:
+                    link.kind = "stop_move"  # the amend that replaced R states its own stop: a move, left to followup
+                    continue
+                link.kind, link.kept = "late_stop", receiver.kept
+                link.synthetic.append({"action": "move_stop", "target": receiver.kept, "at": c.t_vis, "stop": c.stop})
+                counters["frozen_stop_as_move"] += int(gap <= w_sup)
+                continue
             if gap <= w_sup:
                 absorb(g, c, "supplement", stop_from_c=True)
                 g.members.remove(c.pid)  # a supplement is not a member episode
@@ -510,6 +534,7 @@ def merge(roots: list[Item], supplements: list[Item] = (), *, conditionals: list
         def amend(target: Group):
             g = independent(c, "amend", amend_of=target.kept, target_message_id=items[target.kept].message_id,
                             gap_s=_ceil_s(_gap(c, target)))
+            freeze(target, c.pid)
             if c.stop is None and target.stop is not None:
                 g.stop, g.stop_pid = target.stop, target.stop_pid
                 links[c.pid].stop, links[c.pid].stop_pid = target.stop, target.stop_pid
@@ -550,6 +575,15 @@ def merge(roots: list[Item], supplements: list[Item] = (), *, conditionals: list
                     else:
                         repost(c, t, gap)
                     continue
+                if adds_stop and t.gid in frozen:
+                    receiver = stop_receiver(t)
+                    dup(c, t, "late_stop", gap)
+                    if receiver.stop is None:
+                        links[c.pid].synthetic.append({"action": "move_stop", "target": receiver.kept, "at": c.t_vis, "stop": c.stop})
+                        counters["frozen_stop_as_move"] += int(gap <= w_sup)
+                    counters["late_entry_dropped"] += int(c.priced)
+                    counters["late_stop_tps_dropped"] += int(bool(c.tps))
+                    continue
                 if adds_stop:
                     if gap <= w_sup:
                         if any(items[m].is_title for m in t.members) or c.is_title:
@@ -570,7 +604,7 @@ def merge(roots: list[Item], supplements: list[Item] = (), *, conditionals: list
                     counters["late_stop_tps_dropped"] += int(bool(c.tps))
                     continue
                 # only an explicit entry was added
-                if gap <= COMPANION_S:
+                if gap <= COMPANION_S and t.gid not in frozen:
                     kind = "image_text_pair" if items[t.kept].has_media != c.has_media else "body_after_title"
                     absorb(t, c, kind, stop_from_c=False)
                     links[c.pid].gap_s = _ceil_s(gap)

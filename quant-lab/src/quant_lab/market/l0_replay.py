@@ -17,6 +17,7 @@ import argparse
 from collections import Counter
 import datetime as dt
 from decimal import ROUND_DOWN, Decimal
+import hashlib
 import json
 from pathlib import Path
 
@@ -34,6 +35,23 @@ from quant_lab.market.execution import load_market_from_lake, simulate_batch
 from quant_lab.market.live_profile import PROFILE_VERSION, RULES, SOURCES, apply_live_profile, quantity_fractions
 from quant_lab.market.partition_check import load_rules, rule_at
 from quant_lab.market.vision import LakePaths
+
+
+#: L0 orchestration identity. kernel_build_id covers only kernel_a.py/contract.py, but v8 put execution semantics here
+#: too (stopless shape and sizing, the repost/amend second pass, NOSTOP_RULES_UNRESOLVED) and in live_profile.py (live
+#: v4 stop rules); execution.py routes requests to the kernels. A change to any of them changes which trades exist and
+#: how they are sized while policy_hash and kernel_version stay the same, so every summary and trade row carries this id.
+L0_VERSION = "l0-replay-v8"
+_L0_SRC_FILES = ("l0_replay.py", "live_profile.py", "execution.py")
+
+
+def l0_build_id() -> str:
+    """Version string + sha256 of the L0 source files (name and bytes, in a fixed order)."""
+    h = hashlib.sha256()
+    for name in _L0_SRC_FILES:
+        h.update(name.encode())
+        h.update((Path(__file__).parent / name).read_bytes())
+    return f"{L0_VERSION}+{h.hexdigest()[:12]}"
 
 
 def _covered(row: dict) -> bool:
@@ -521,8 +539,11 @@ def prepare_episode_request(row: dict, *, marks, lake: Path, policy, risk_budget
 #: REPOST_TARGET_CENSORED / AMEND_TARGET_CENSORED: a family member (or the amend target) is censored and its evidence
 #: ends before E.t_dec while it was still live — whether it is live at E.t_dec is unknown, which is neither "live"
 #: nor "ended" (uncomparable ≠ equal), so the coverage gap gets its own code instead of hiding in a business one.
+#: AMEND_TARGET_DECIDED_LATER: the amend target's own t_dec is after the amend's (G1 delayed it). At the amend's t_dec
+#: the target has no events yet, which reads as "ended" but is not: the target will still be placed, so the amend would
+#: be the same plan a second time. Conservatively the amend yields (the target runs once, with its own fields).
 SECOND_PASS_EXCLUSIONS = ("REPOST_OF_LIVE_PLAN", "REPOST_TARGET_CENSORED", "AMEND_REQUIRES_FOLLOW", "AMEND_TARGET_FILLED",
-                          "AMEND_TARGET_CENSORED")
+                          "AMEND_TARGET_CENSORED", "AMEND_TARGET_DECIDED_LATER")
 
 
 def link_of(row: dict) -> tuple[str | None, str | None]:
@@ -572,7 +593,9 @@ def second_pass(first: pl.DataFrame, pending: list[tuple[ExecutionRequest, str, 
     family(T) = {T} ∪ executed reposts and executed amends of it (an amend replaces T's pending order: same plan).
     A target skipped here is replaced by its nearest executed ancestor; a target with no execution result
     (excluded in G1 or L0) makes E an independent plan that starts a new family. A member decided at the same t_dec
-    as E is live (it was just placed). A censored member whose evidence ends before E.t_dec while still live makes
+    as E is live (it was just placed); a member decided after E (the target's t_dec was moved later in G1) is live too:
+    it has no events before E.t_dec but it is still going to be placed, so it is not "ended" (REPOST_OF_LIVE_PLAN; an
+    amend gets AMEND_TARGET_DECIDED_LATER). A censored member whose evidence ends before E.t_dec while still live makes
     the family state unknown → REPOST_TARGET_CENSORED (an amend: AMEND_TARGET_CENSORED). ``run(request)`` simulates
     one request into a one-row frame.
     """
@@ -594,7 +617,7 @@ def second_pass(first: pl.DataFrame, pending: list[tuple[ExecutionRequest, str, 
         if target not in events:
             decision = "independent_no_target_result"
         elif kind == "repost":
-            states = {"live" if decided[m] == req.t_dec else state_at(events[m], censors[m], req.t_dec)
+            states = {"live" if decided[m] >= req.t_dec else state_at(events[m], censors[m], req.t_dec)
                       for m in members[family[target]]}
             if "live" in states:
                 reason = "REPOST_OF_LIVE_PLAN"
@@ -604,6 +627,8 @@ def second_pass(first: pl.DataFrame, pending: list[tuple[ExecutionRequest, str, 
         else:
             if not follow:
                 reason = "AMEND_REQUIRES_FOLLOW"
+            elif decided[target] > req.t_dec:
+                reason = "AMEND_TARGET_DECIDED_LATER"
             elif entry_filled_before(events[target], req.t_dec):
                 reason = "AMEND_TARGET_FILLED"
             elif state_at(events[target], censors[target], req.t_dec) == "unknown":
@@ -821,6 +846,8 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
     )
     table = table.with_columns(*[pl.Series(name, [derived[eid][name] for eid in table["episode_id"]], dtype=dtype)
                                   for name, dtype in DERIVED_COLUMNS.items()])
+    build_id = l0_build_id()
+    table = table.with_columns(pl.lit(build_id, dtype=pl.String).alias("l0_build_id"))
     passthrough = [name for name in PASSTHROUGH_COLUMNS if name in episodes.columns and name not in table.columns]
     if passthrough:
         table = table.join(episodes.select("episode_id", *passthrough), on="episode_id", how="left").sort(["t_dec", "episode_id"])
@@ -832,7 +859,7 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
             [canonical_json(live_records[eid]) for eid in table["episode_id"]], dtype=pl.String))
     report = {
         "claim_status": "descriptive_only", "graph_version": graph_version, "channel": channel,
-        "kernel": "A", "policy_version": policy.version, "policy_hash": policy.content_hash,
+        "kernel": "A", "policy_version": policy.version, "policy_hash": policy.content_hash, "l0_build_id": build_id,
         "policy": policy.model_dump(mode="json"), "risk_budget": str(risk_budget),
         "cost_scenario": "base", "path_scenario": "primary", "market_lake": str(lake),
         "market_manifest_hashes": market_hashes,
@@ -892,7 +919,7 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
     write_parquet_atomic(table, target / "trades.parquet")
     (target / "summary.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     lines = ["claim_status: descriptive_only", "", f"graph_version: {graph_version}", f"channel: {channel}",
-             f"policy: {policy.version}", f"policy_hash: {policy.content_hash}",
+             f"policy: {policy.version}", f"policy_hash: {policy.content_hash}", f"l0_build_id: {build_id}",
              f"kernel: A; cost: base; path: primary; risk_budget: {risk_budget}", "",
              "政策未给 TTL/比例时用 G2 基线兜底；观察窗由 G2 build_request 推导。",
              "缺行情或历史交易规则时保留删失，不填补；结果仅为描述。", ""]

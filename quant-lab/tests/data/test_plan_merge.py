@@ -124,6 +124,54 @@ def test_10_reply_at_market_past_the_limit_is_amend():
     assert merge([t, quoted])[0]["c"].kind == "amend"
 
 
+def test_10c_stop_after_an_amend_never_moves_the_replaced_plan_and_lands_on_the_amend():
+    """Review fix: a stopless limit T, amended at +300 s by a market reply C, then a stop supplement for T at +600 s
+    (inside W_sup). T's group is frozen by the amend: the stop is not absorbed (T keeps t_dec at its own post, so the
+    cancel_pending at t_vis(C) stays after it), and it becomes a move_stop on C, the plan that replaced T."""
+    t = it("t", 1, 0, inst=ETH, side="long", legs=[2270], text="挂单 2270 做多 ETH")
+    c = it("c", 2, 300, inst=ETH, side="long", market=True, mark=2286, quote=2285, reply=1, text="现价 2285 入场")
+    s = it("s", 3, 600, inst=ETH, side="long", stop=2205, supplement_of="t", reply=1, text="止损:2205")
+    links, counts = merge([t, c], [s])
+    assert links["c"].kind == "amend" and links["c"].stop is None
+    assert links["c"].synthetic == [{"action": "cancel_pending", "target": "t", "at": T0 + timedelta(seconds=300), "stop": None}]
+    assert links["t"].stop is None and set(links["t"].providers) == {"t"}
+    assert links["s"].kind == "late_stop" and links["s"].gap_s == 600
+    assert links["s"].synthetic == [{"action": "move_stop", "target": "c", "at": T0 + timedelta(seconds=600), "stop": D(2205)}]
+    assert counts["frozen_stop_as_move"] == 1
+    # The same stop as a full plan message replying to T (adds a stop to T) is not merged into the frozen T either.
+    # (Another author, so T is its only link target; the same author within 1800 s of C would also link C → ambiguous.)
+    d = it("d", 3, 600, inst=ETH, side="long", legs=[2270], stop=2205, reply=1, author="b", text="ETH 2270 多 止损 2205")
+    links, _ = merge([t, c, d])
+    assert links["t"].stop is None and set(links["t"].providers) == {"t"}
+    assert links["d"].kind == "late_stop" and links["d"].dup_of == "t"
+    assert links["d"].synthetic == [{"action": "move_stop", "target": "c", "at": T0 + timedelta(seconds=600), "stop": D(2205)}]
+    # Without the amend the supplement still merges into T (unchanged F6 behaviour).
+    links, _ = merge([t], [s])
+    assert links["s"].kind == "supplement" and links["t"].stop == D(2205)
+
+
+def test_10d_an_amend_with_its_own_stop_leaves_a_later_stop_for_t_to_followup():
+    t = it("t", 1, 0, inst=ETH, side="long", legs=[2270], text="挂单 2270 做多 ETH")
+    c = it("c", 2, 300, inst=ETH, side="long", market=True, mark=2286, quote=2285, stop=2210, reply=1,
+           relation="amends", relation_target=1, text="现价 2285 入场 止损 2210")
+    s = it("s", 3, 600, inst=ETH, side="long", stop=2205, supplement_of="t", reply=1)
+    links, _ = merge([t, c], [s], stage=2)
+    assert links["c"].kind == "amend" and links["c"].stop == D(2210)
+    assert links["s"].kind == "stop_move" and not links["s"].synthetic and links["t"].stop is None
+
+
+def test_10e_a_reposted_group_is_frozen_too():
+    """An identical repost R freezes T: a stop supplement for T after R is a move_stop on T, never a t_dec change."""
+    t = it("t", 1, 0, inst=ETH, side="long", legs=[2270], text="ETH 2270 多")
+    r = it("r", 2, 120, inst=ETH, side="long", legs=[2270], author=None, text="ETH 2270 多")
+    s = it("s", 3, 600, inst=ETH, side="long", stop=2205, supplement_of="t", reply=1)
+    links, _ = merge([t, r], [s])
+    assert links["r"].kind == "repost" and links["r"].repost_of == "t"
+    assert links["t"].stop is None and set(links["t"].providers) == {"t"}
+    assert links["s"].kind == "late_stop"
+    assert links["s"].synthetic == [{"action": "move_stop", "target": "t", "at": T0 + timedelta(seconds=600), "stop": D(2205)}]
+
+
 @pytest.mark.parametrize("side,legs,stop,price,kind", [
     ("long", [2270], 2205, 2265, "restatement"),   # below a long limit: T can still fill, not an amend
     ("short", [2270], 2330, 2275, "restatement"),  # above a short limit: T can still fill

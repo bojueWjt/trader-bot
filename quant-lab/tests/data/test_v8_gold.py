@@ -77,6 +77,26 @@ def test_formal_three_hours_later_is_late_stop_and_commentary_executes(tmp_path)
     assert late and late[0]["synthetic_stop_price"] == D("3229.66") and late[0]["kept_episode_id"] == comment["episode_id"]
 
 
+def test_stop_after_an_amend_goes_to_the_amend_and_never_delays_the_replaced_plan(tmp_path):
+    """Review fix (end to end): limit T without a stop, a market reply C amends it at +300 s, a stop for T arrives at
+    +600 s. T keeps t_dec = t0+1 s (so the synthetic cancel at +300 s is after it), C keeps t_dec = +301 s, and the stop
+    reaches C as a synthetic move_stop instead of being merged into T."""
+    msgs = [Msg(1, "仿写 挂单 2270 做多 ETH", 0, [open_action("ETH", "long", entry=2270)]),
+            Msg(2, "仿写 现价 2285 入场", 300, [open_action("ETH", "long", entry="cmp:2285")], reply=1),
+            Msg(3, "止损:2205", 600, [stop_action(2205)], reply=1)]
+    r = build(tmp_path, msgs, marks={"ETH": 2286})
+    t, c = episode(r, 1), episode(r, 2)
+    assert c["plan_link_kind"] == "amend" and c["amend_of"] == t["episode_id"]
+    assert t["t_dec"] == T0 + timedelta(seconds=1) and t["order_plan"]["stop"] is None
+    assert c["t_dec"] == T0 + timedelta(seconds=301) and c["order_plan"]["stop"] is None
+    rows = r["summary"]["plan_link_rows"]
+    cancel = [row for row in rows if row["synthetic_action"] == "cancel_pending"]
+    move = [row for row in rows if row["synthetic_action"] == "move_stop"]
+    assert len(cancel) == 1 and cancel[0]["kept_episode_id"] == t["episode_id"] and cancel[0]["synthetic_at"] > t["t_dec"]
+    assert len(move) == 1 and move[0]["kept_episode_id"] == c["episode_id"] and move[0]["synthetic_stop_price"] == D(2205)
+    assert move[0]["synthetic_at"] == T0 + timedelta(seconds=600) and move[0]["synthetic_at"] > c["t_dec"]
+
+
 def test_repost_and_family_columns(tmp_path):
     msgs = [Msg(1, "仿写 BTC 多 66933 止损 66000", 0, [open_action("BTC", "long", entry=66933, stop=66000)]),
             Msg(2, "仿写 BTC 多 66933 止损 66000", 2 * 86400, [open_action("BTC", "long", entry=66933, stop=66000)])]

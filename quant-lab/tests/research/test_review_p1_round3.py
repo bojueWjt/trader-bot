@@ -209,7 +209,7 @@ def test_S12_nonfinite_under_common_mask_rejected(value, arm):
 def test_S14_probe_E_mixed_sources_three_leg_G2_parity(entry_plan, tp_plan):
     from quant_lab.market.contract import build_request, resolve_policy
     from quant_lab.market.execution import simulate_batch
-    from tests.research.test_g2_parity import _resolver
+    from tests.research.test_g2_parity import G2_DERIVED_ONLY, _assert_derived_only, _resolver
     row = S.fake_episodes(1, span_days=2, seed=3, censor_frac=0).row(0, named=True)
     plan = row['order_plan']
     for key, given in [('entries', entry_plan), ('tps', tp_plan)]:
@@ -219,7 +219,10 @@ def test_S14_probe_E_mixed_sources_three_leg_G2_parity(entry_plan, tp_plan):
                         risk_budget=Decimal(100), market_manifest='m')
     fake = S.fake_execution(pl.DataFrame([row], schema_overrides={'order_plan': S.ORDER_PLAN_DTYPE}), policy_version='base-v1')
     real = simulate_batch([req], kernel='A', resolver=_resolver, strict=True)
-    assert list(fake.schema.items()) == list(real.schema.items())
+    # G2 batch columns the stub does not mirror are derived only (same handling as test_g2_parity: kernel A v0.5+
+    # writes evaluable, fully determined by mirrored columns); every other column and the order must match.
+    assert list(fake.schema.items()) == [(k, v) for k, v in real.schema.items() if k not in G2_DERIVED_ONLY]
+    _assert_derived_only(real)
     for field in ('fraction_source', 'entry_fractions', 'tp_fractions'):
         assert fake[field].to_list() == real[field].to_list()
     assert fake['entry_fractions'].to_list()[0] == list(req.entry_fractions)

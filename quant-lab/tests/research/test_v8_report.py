@@ -30,14 +30,19 @@ SCHEMA = {"episode_id": pl.String, "graph_version": pl.String, "policy_hash": pl
           "mark_ok": pl.Boolean, "funding_ok": pl.Boolean, "rules_ok": pl.Boolean, "bars_ok": pl.Boolean,
           "sizing_basis": pl.String, "filled_qty": DEC, "entry_notional_U": DEC,
           "position_open_at": pl.Datetime("us", "UTC"), "position_close_at": pl.Datetime("us", "UTC"),
-          "censor_at": pl.Datetime("us", "UTC"), "edit_may_contain_outcome": pl.Boolean, "kernel_version": pl.String}
+          "censor_at": pl.Datetime("us", "UTC"), "edit_may_contain_outcome": pl.Boolean, "kernel_version": pl.String,
+          "mtm_U_at_censor": DEC, "triage_verdict": pl.String, "time_ref_promoted": pl.String, "l0_build_id": pl.String}
 KERNEL = "A-test-0.7"
+L0_BUILD = "l0-replay-v8+test"
 
 
 def trade(eid, t, net_R, *, basis="risk", budget="180", fill="filled", censor=None, notional=None,
-          open_at=None, close_at=None, edit=None, cover=True, **extra):
+          open_at=None, close_at=None, edit=None, cover=True, mtm=None, **extra):
     filled = fill in ("filled", "partial")
-    return {"episode_id": eid, "t_dec": t, "fill_status": fill, "censor_reason": censor,
+    # 主口径里无止损行一定经过分诊判 new_entry（D6）；有止损、非升级行是 n/a。
+    extra.setdefault("triage_verdict", "new_entry" if basis == "nostop" else "n/a")
+    extra.setdefault("l0_build_id", L0_BUILD)
+    return {"episode_id": eid, "mtm_U_at_censor": None if mtm is None else Decimal(str(mtm)), "time_ref_promoted": None, "t_dec": t, "fill_status": fill, "censor_reason": censor,
             "net_R": None if net_R is None else Decimal(str(net_R)), "risk_budget": Decimal(budget),
             "mark_ok": cover, "funding_ok": True, "rules_ok": True, "bars_ok": True, "sizing_basis": basis,
             "filled_qty": Decimal("1") if filled else Decimal("0"),
@@ -63,7 +68,8 @@ def publish(reports: Path, directory: str, channel: str, rows: list[dict], *, po
     n_nostop = sum(r["sizing_basis"] == "nostop" for r in rows)
     summary = {"channel": -100, "graph_version": graph, "policy_version": policy, "policy_hash": policy_hash,
                "risk_budget": budget, "overall": {"n_trades": len(rows) - n_nostop},
-               "blocks": {"nostop": {"n_trades": n_nostop}}}
+               "blocks": {"nostop": {"n_trades": n_nostop}},
+               "l0_build_id": next((r.get("l0_build_id") for r in rows), L0_BUILD)}     # L0 写进 summary 与每一行
     if follow is not None:
         summary["follow_teacher"] = {"path": follow_path(channel) if follow == "main" else follow}
     (folder / "summary.json").write_text(json.dumps(summary))
@@ -223,6 +229,50 @@ def test_weeks_counted_as_zero_without_evaluable_trades_are_visible():
     assert per_trade["n"] == 1 and per_trade["n_filled_not_evaluable"] == 3
 
 
+def test_censored_stopless_trades_count_at_their_censor_mtm_and_v1_drops_them():
+    """Review fix (v8-report-2): a filled stopless trade censored by SYMBOL_TIME_INVALID with mtm −900 is part of the
+    stopless sample at −900; v1 (re-reported) drops it as before."""
+    rows = weekly_series("n", 40, ["0.3", "0.1"], basis="nostop", notional=600)
+    lost = trade("gone", MON + dt.timedelta(weeks=3, days=2), None, basis="nostop", censor="SYMBOL_TIME_INVALID", mtm=-900)
+    v1 = rep.nostop_table(rows + [lost], "judgment", MON, judged=True, censored_as_mtm=False)
+    v2 = rep.nostop_table(rows + [lost], "judgment", MON, judged=True)
+    base = rep.nostop_table(rows, "judgment", MON, judged=True)
+    assert v1["n"] == base["n"] == 40 and v1["mean"] == base["mean"] and v1["ci95"] == base["ci95"]
+    assert v1["n_filled_not_evaluable"] == 1
+    assert v2["n"] == 41 and v2["sum"] == pytest.approx(base["sum"] - 900)
+    assert v2["censoring"]["n_censored_filled"] == 1 and v2["censoring"]["mtm_sum_U"] == -900
+    assert rep.CENSOR_LOSS in v2["flags"] and rep.CENSOR_LOSS not in v1["flags"]
+    span = rep.weeks_between(MON, MON + dt.timedelta(weeks=40))
+    total_v1 = rep.total_table([], rows + [lost], "judgment", span, judged=False, censored_as_mtm=False)
+    total_v2 = rep.total_table([], rows + [lost], "judgment", span, judged=False)
+    assert total_v2["sum"] == pytest.approx(total_v1["sum"] - 900) and total_v2["n"] == total_v1["n"] + 1
+
+
+def test_heavy_or_unvalued_censoring_downgrades_a_profit(monkeypatch):
+    monkeypatch.setattr(rep, "bootstrap_interval", lambda sums, counts, **_: [0.1, 0.2])
+    rows = weekly_series("n", 40, ["0.3"], basis="nostop", notional=600)
+    # 3 censored of 43 known (< 10%), valued and positive: profit stays, no flag.
+    few = [trade(f"c{i}", MON + dt.timedelta(weeks=i, days=1), None, basis="nostop", censor="BAR_GAP", mtm=5) for i in range(3)]
+    table = rep.nostop_table(rows + few, "judgment", MON, judged=True)
+    assert table["verdict"] == "盈利" and table["flags"] == []
+    # 5 of 45 (> 10%): downgraded and flagged; v1 keeps the profit.
+    many = [trade(f"c{i}", MON + dt.timedelta(weeks=i, days=1), None, basis="nostop", censor="BAR_GAP", mtm=5) for i in range(5)]
+    table = rep.nostop_table(rows + many, "judgment", MON, judged=True)
+    assert table["verdict"] == table["verdict_28d"] == "无显著优势"
+    assert table["flags"] == [rep.CENSOR_SHARE_HIGH, rep.CENSOR_DOWNGRADED]
+    assert table["verdict_before_censor_guard"] == ["盈利", "盈利"]
+    assert rep.nostop_table(rows + many, "judgment", MON, judged=True, censored_as_mtm=False)["verdict"] == "盈利"
+    # One censored row without mtm cannot be valued: not read as 0, the profit is downgraded.
+    unknown = [trade("cx", MON + dt.timedelta(days=1), None, basis="nostop", censor="FUNDING_SCHEDULE_GAP")]
+    table = rep.nostop_table(rows + unknown, "judgment", MON, judged=True)
+    assert table["n"] == 40 and table["censoring"]["n_unvalued"] == 1
+    assert table["verdict"] == "无显著优势" and rep.CENSOR_UNVALUED in table["flags"]
+    # The total table follows the same rule.
+    span = rep.weeks_between(MON, MON + dt.timedelta(weeks=40))
+    total = rep.total_table([], rows + many, "judgment", span, judged=True)
+    assert total["verdict"] == "无显著优势" and rep.CENSOR_DOWNGRADED in total["flags"]
+
+
 def test_block_length_disagreement_is_flagged(monkeypatch):
     monkeypatch.setattr(rep, "bootstrap_interval", lambda sums, counts, **_: [0.1, 0.2] if len(sums) > 15 else [-0.1, 0.2])
     samples = [(MON + dt.timedelta(weeks=i), 1.0) for i in range(40)]
@@ -340,7 +390,8 @@ def test_end_to_end_report(tmp_path):
     assert doc["frozen_rules"]["bootstrap"]["quantile_method"] == "linear"
     # S1：同代输入写进 inputs。
     generation = doc["inputs"]["generation"]
-    assert generation["kernel_version"] == KERNEL
+    assert generation["kernel_version"] == KERNEL and generation["l0_build_id"] == L0_BUILD
+    assert doc["judgment_version"] == "v8-report-2" and [c["version"] for c in doc["changelog"]] == ["v8-report-1", "v8-report-2"]
     assert generation["policy_hashes"][rep.MAIN_POLICY] == "ph"
     assert generation["follow_teacher_paths"] == {"alpha": follow_path("alpha"), "beta": follow_path("beta")}
     assert doc["inputs"]["hold:w1"]["alpha"]["follow_teacher_path"] == follow_path("alpha")
@@ -353,6 +404,10 @@ def test_end_to_end_report(tmp_path):
     assert judgment["nostop"]["beta"]["verdict"] == "依持有期而定"
     assert judgment["nostop"]["beta"]["holds"]["w1"]["verdict"] == "亏损"
     assert judgment["total"]["alpha"]["verdict"] == "盈利"
+    # v1（删失丢弃）并列重报；没有删失单时两版相同。
+    assert judgment["nostop"]["beta"]["v1"]["verdict"] == "依持有期而定"
+    assert judgment["total"]["alpha"]["v1"]["holds"]["w60"]["mean"] == judgment["total"]["alpha"]["holds"]["w60"]["mean"]
+    assert doc["headline"]["alpha"]["main"]["verdict_v1"] == "盈利"
     total = judgment["total"]["alpha"]["holds"]["w60"]
     assert total["unit"] == "U/周" and total["n"] == 44 + 1 + 44
     assert not {"win_rate", "mean_R"} & set(total)
@@ -447,6 +502,34 @@ def _break(reports: Path, break_it: str):
     elif break_it == "v8e_graph":
         rewrite(edit, summary=lambda s: s.update(graph_version=MAIN_GRAPH),
                 frame=lambda f: f.with_columns(pl.lit(MAIN_GRAPH).alias("graph_version")))
+    elif break_it == "l0_build":
+        rewrite(reports / rep.HOLD_DIRS["5d"] / "alpha", summary=lambda s: s.update(l0_build_id="l0-replay-v8+other"))
+    elif break_it == "l0_build_rows":
+        rewrite(reports / rep.HOLD_DIRS["w14"] / "beta",
+                frame=lambda f: f.with_columns(pl.lit(None, dtype=pl.String).alias("l0_build_id")))
+    elif break_it in ("untriaged", "untriaged_hold", "untriaged_v8e", "promoted_untriaged"):
+        folder = {"untriaged": main, "untriaged_hold": hold, "untriaged_v8e": edit, "promoted_untriaged": main}[break_it]
+        if break_it == "promoted_untriaged":
+            change = (pl.when(pl.col("episode_id") == "alpha-s3").then(pl.lit("setup_card")).otherwise(pl.col("time_ref_promoted"))
+                      .alias("time_ref_promoted"))
+        elif break_it == "untriaged_v8e":
+            change = pl.when(pl.col("episode_id") == "alpha-s0").then(pl.lit("nostop")).otherwise(pl.col("sizing_basis")).alias("sizing_basis")
+        else:
+            change = (pl.when(pl.col("episode_id") == "alpha-n5").then(pl.lit(None, dtype=pl.String))
+                      .otherwise(pl.col("triage_verdict")).alias("triage_verdict"))
+
+        def frame(f, change=change, break_it=break_it):
+            f = f.with_columns(change)
+            if break_it == "untriaged_v8e":    # 一张无止损行（分诊为 n/a，不是 new_entry），summary 计数随之调整
+                f = f.with_columns(pl.when(pl.col("episode_id") == "alpha-s0").then(pl.lit("n/a"))
+                                   .otherwise(pl.col("triage_verdict")).alias("triage_verdict"))
+            return f
+
+        def summary(s, break_it=break_it):
+            if break_it == "untriaged_v8e":
+                s["overall"]["n_trades"] -= 1
+                s["blocks"]["nostop"]["n_trades"] += 1
+        rewrite(folder, frame=frame, summary=summary)
     elif break_it == "v8e_hash":
         rewrite(edit, summary=lambda s: s.update(policy_hash="ph-other"),
                 frame=lambda f: f.with_columns(pl.lit("ph-other").alias("policy_hash")))
@@ -461,6 +544,9 @@ def _break(reports: Path, break_it: str):
     ("hash", "policy_hash differs across runs"), ("kernel", "kernel_version differs"),
     ("follow", "follow_teacher.path"), ("v8e_policy", "is not the frozen"), ("v8e_budget", "risk_budget"),
     ("v8e_graph", "is the main graph"), ("v8e_hash", "policy_hash differs across runs"),
+    ("l0_build", "l0_build_id differs"), ("l0_build_rows", "l0_build_id differs"),
+    ("untriaged", "stopless row alpha-n5 has triage_verdict None"), ("untriaged_hold", "stopless row alpha-n5"),
+    ("untriaged_v8e", "stopless row alpha-s0 has triage_verdict 'n/a'"), ("promoted_untriaged", "promoted row alpha-s3"),
 ])
 def test_inconsistent_inputs_are_refused(tmp_path, break_it, message, capsys):
     reports = tmp_path / "reports"
@@ -495,9 +581,14 @@ def test_unfinished_sensitivity_does_not_block_the_judgment(tmp_path):
     (broken / "trades.parquet").write_bytes(b"PAR1 not really")
     (broken / "summary.json").write_text(json.dumps({"graph_version": "g", "policy_version": "p", "policy_hash": "h",
                                                      "risk_budget": "180", "overall": {"n_trades": 1}}))
-    # 不同代的敏感性批次（内核版本不同）只标未出并写原因。
+    # 不同代的敏感性批次（内核版本不同、L0 代码身份不同）只标未出并写原因。
     publish(reports, "l0-v8-oldkernel", "alpha", [trade("o1", MON, "1", kernel_version="A-test-0.6")],
             policy="base-v1-timeexit-w60-live-ns300")
+    publish(reports, "l0-v8-oldl0", "alpha", [trade("o2", MON, "1", l0_build_id="l0-replay-v8+old")],
+            policy="base-v1-timeexit-w60-live-ns300")
+    # 宽口径（v8w 一类）执行存疑分诊：敏感性批次不查分诊门，照出区间。
+    publish(reports, "l0-v8-wide", "alpha", [trade("w1", MON, "0.2", basis="nostop", triage_verdict="uncertain")],
+            policy=rep.MAIN_POLICY)
     # v8e 写到一半：头条的 v8e 标未出（不拒绝），主口径判定照出。
     edit = reports / rep.EDIT_DIR / "alpha" / "summary.json"
     edit.write_text(edit.read_text()[:10])
@@ -509,6 +600,8 @@ def test_unfinished_sensitivity_does_not_block_the_judgment(tmp_path):
     assert "lacks overall/blocks" in tables["l0-v8-nocount"]["refused"]
     assert "unreadable L0 output" in tables["l0-v8-broken"]["refused"]
     assert "kernel_version" in tables["l0-v8-oldkernel"]["refused"]
+    assert "l0_build_id" in tables["l0-v8-oldl0"]["refused"]
+    assert "judgment" in tables["l0-v8-wide"]
     assert "judgment" in tables["l0-v8cmp-w60lf"]                   # 完整的批次照出区间
     assert doc["headline"]["alpha"]["v8e"]["status"] == "未出" and "unreadable" in doc["headline"]["alpha"]["v8e"]["refused"]
     assert doc["judgment"]["with_stop"]["alpha"]["verdict"] == "盈利"
