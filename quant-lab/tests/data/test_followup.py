@@ -436,7 +436,7 @@ def test_past_and_conditional_never_become_candidates():
 
     widen(followup.qualifying_source_ids)
     with pytest.raises(AssertionError):
-        widen(mutant(followup.qualifying_source_ids, 'checks.get("time_ref") != "now"', "False"))
+        widen(mutant(followup.qualifying_source_ids, 'cx_v2.effective_time_ref(checks) != "now"', "False"))
 
     def past_open(fn):
         def body():
@@ -446,7 +446,7 @@ def test_past_and_conditional_never_become_candidates():
 
     real_roots = roots_of(june_moment())
     assert 55 not in real_roots
-    opened = mutant(followup.visible_opens, 'checks.get("time_ref") != "now"', "False")
+    opened = mutant(followup.visible_opens, 'cx_v2.effective_time_ref(checks) != "now"', "False")
     events, _messages, episodes, episode_events = scenario()
     assert 55 in [row["root_message_id"] for row in opened(events, episodes, episode_events, june_moment())]
 
@@ -575,11 +575,12 @@ def test_episode_ambiguity_and_decimal_fraction_mutants():
             rows = followup._instruction_rows(prompt, checked, episodes, "g")
             assert rows[0]["episode_id"] is None and rows[0]["episode_ambiguity"] == "ambiguous_root_episode"
             assert rows[0]["uncertain"] is True
-        restored("_map_episode", fn, body)
+        restored("_map_episode_redirect", fn, body)
 
-    ambiguous(followup._map_episode)
+    # v8 F13: matching goes through _map_episode_redirect (dup_of → kept plan) before ambiguity is counted.
+    ambiguous(followup._map_episode_redirect)
     with pytest.raises(AssertionError):
-        ambiguous(mutant(followup._map_episode, 'return None, "ambiguous_root_episode"', "return matches[0], None"))
+        ambiguous(mutant(followup._map_episode_redirect, 'return None, "ambiguous_root_episode", None', 'return targets[0][0]["episode_id"], None, None'))
     with pytest.raises(AssertionError):
         rows = mutant(followup._instruction_rows, "or ambiguity is not None", "and False")(prompt, checked, episodes, "g")
         assert rows[0]["uncertain"] is True
@@ -592,11 +593,11 @@ def test_episode_ambiguity_and_decimal_fraction_mutants():
         def body():
             row = followup._instruction_rows(prompt, checked, [], "g")[0]
             assert row["episode_ambiguity"] == "episode_not_found" and row["uncertain"] is True
-        restored("_map_episode", fn, body)
+        restored("_map_episode_redirect", fn, body)
 
-    unmapped(followup._map_episode)
+    unmapped(followup._map_episode_redirect)
     with pytest.raises(AssertionError):
-        unmapped(mutant(followup._map_episode, 'return None, "episode_not_found"', "return None, None"))
+        unmapped(mutant(followup._map_episode_redirect, 'return None, "episode_not_found", None', "return None, None, None"))
 
     half = followup.validate_response(envelope(instruction(3, "reduce", "先减一半", fraction=atom(50, "一半"))), "先减一半", candidate_root_ids=[3])["instructions"]
 

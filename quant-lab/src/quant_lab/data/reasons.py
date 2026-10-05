@@ -34,6 +34,18 @@ class Reason(StrEnum):
     LABEL_RIGHT_CENSORED = "LABEL_RIGHT_CENSORED"
     CONSENT_REVOKED = "CONSENT_REVOKED"
     EDIT_ORIGINAL_UNAVAILABLE = "EDIT_ORIGINAL_UNAVAILABLE"  # 契约 v1 §9.1 新增（H1：仅最终编辑版可见，原始入场隔离），一般
+    # v8（方案 §4，research-schema §4 增原因码；全部一般严重度）
+    SAME_PLAN_COMPANION = "SAME_PLAN_COMPANION"  # F2：同一计划的伴随部分（标题帖/图文对/解说帖/同条分支），dup_of 保留单
+    SAME_PLAN_RESTATEMENT = "SAME_PLAN_RESTATEMENT"  # F2：同一计划的复述或晚到止损（只合成 move_stop），dup_of 保留单
+    STALE_SIGNAL_30M = "STALE_SIGNAL_30M"  # F8：signal_age_s > 1800（规则 14）
+    STALE_EDIT_30M = "STALE_EDIT_30M"  # F8：变体图 -v8e 中编辑晚于发帖 30 分钟的 H1 版本不当决策根
+    TRIAGE_NOT_ENTRY = "TRIAGE_NOT_ENTRY"  # F3：分诊判非开仓
+    TRIAGE_UNCERTAIN = "TRIAGE_UNCERTAIN"  # F3：分诊判存疑（主口径不执行，宽口径执行）
+    TRIAGE_MISSING = "TRIAGE_MISSING"  # F3：需要分诊但 sidecar 没有该分支
+    TRIAGE_INVALID = "TRIAGE_INVALID"  # F3：分诊结果未过确定性校验（按存疑计）
+    CASH_WATCH_POST = "CASH_WATCH_POST"  # F3/D6：「关注区域 … 失效 …」观察帖
+    CONTRACT_DISCOURAGED = "CONTRACT_DISCOURAGED"  # F3/D4：合约先别做/不建议跟/不要跟 等劝阻词
+    PROMOTED_WIDE_ONLY = "PROMOTED_WIDE_ONLY"  # F11：只进宽口径的升级根（P1-past、P2）
 
 
 #: 致命类：契约 §4 原文三项（方向/品种/归属/数量级错）。RAW_HASH_MISMATCH 是"停批"动作而非严重度，按契约归一般。
@@ -64,6 +76,17 @@ PRIMARY_PRIORITY: tuple[Reason, ...] = (
     Reason.ENTRY_MARK_DEVIATION,
     Reason.VOL_HISTORY_SHORT,
     Reason.LABEL_RIGHT_CENSORED,
+    Reason.STALE_EDIT_30M,
+    Reason.STALE_SIGNAL_30M,
+    Reason.CONTRACT_DISCOURAGED,
+    Reason.CASH_WATCH_POST,
+    Reason.TRIAGE_NOT_ENTRY,
+    Reason.TRIAGE_INVALID,
+    Reason.TRIAGE_UNCERTAIN,
+    Reason.TRIAGE_MISSING,
+    Reason.PROMOTED_WIDE_ONLY,
+    Reason.SAME_PLAN_RESTATEMENT,
+    Reason.SAME_PLAN_COMPANION,
     Reason.NOT_SIGNAL,
     Reason.BAR_GAP,
     Reason.OHLC_INVALID,

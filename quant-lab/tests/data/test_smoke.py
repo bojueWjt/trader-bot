@@ -37,10 +37,10 @@ def test_pipeline_order_and_layers():
 def test_reason_codes_match_contract_exactly():
     text = CONTRACT.read_text(encoding="utf-8")
     block = text.split("## 4. 原因码")[1].split("严重度")[0]
-    in_contract = set(re.findall(r"\b[A-Z][A-Z_]{3,}\b", block)) | set(re.findall(r"§4 增原因码 `([A-Z_]+)`", text))
+    in_contract = set(re.findall(r"\b[A-Z][A-Z_]{3,}\b", block)) | set(re.findall(r"§4 增原因码 `([A-Z][A-Z0-9_]+)`", text))  # v8 codes carry digits (STALE_SIGNAL_30M)
     in_code = {str(c) for c in reasons.Reason}
     assert in_code == in_contract, f"仅代码有: {in_code - in_contract}; 仅契约有: {in_contract - in_code}"
-    assert len(reasons.Reason) == 29
+    assert len(reasons.Reason) == 40  # v8 §4: 11 new general-severity codes (research-schema §9.11)
     from quant_lab.data import codes
     assert codes.ReasonCode is reasons.Reason and codes.FATAL_REASONS is reasons.FATAL  # §9.5 公共路径 = 纯别名
 

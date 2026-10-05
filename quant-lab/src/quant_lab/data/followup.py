@@ -22,7 +22,9 @@ from .lifecycle import C_STATES, P_STATES
 from .llm import Abstention, RecordedClient, record_key
 
 SCHEMA_NAME = "followup-v1"
-RULE_VERSION = "followup-v3"
+RULE_VERSION = "followup-v3"  # rendered into the prompt (render_user): v8 does not bump it, or every recorded key changes
+#: v8 F13: dup_of redirection to the kept plan + plan_merge synthetic move_stop/cancel_pending (report and rows)
+MAPPING_VERSION = "followup-map-v2"
 FOLLOWUP_OPS = frozenset({"reduce", "take_profit", "close", "stop_move", "cancel", "add"})
 ACTIONS = ("close_all", "reduce", "move_stop", "cancel_pending", "add", "none")
 ENTRY_MARKERS = ("成本", "保本", "入场价")
@@ -175,7 +177,7 @@ def qualifying_source_ids(events):
     chosen = set()
     for event in events:
         checks = _checks(event)
-        if not _v2(checks) or checks.get("op") not in FOLLOWUP_OPS or checks.get("time_ref") != "now":
+        if not _v2(checks) or checks.get("op") not in FOLLOWUP_OPS or cx_v2.effective_time_ref(checks) != "now":
             continue
         source = event.get("source_version_id")
         if source:
@@ -437,7 +439,7 @@ def visible_opens(events, episodes, episode_events, moment, messages=None, publi
         now_open_versions = []
         for event in versions:
             checks = _checks(event)
-            if not _v2(checks) or checks.get("op") != "open" or checks.get("time_ref") != "now":
+            if not _v2(checks) or checks.get("op") != "open" or cx_v2.effective_time_ref(checks) != "now":
                 continue
             now_open_versions.append(event)
         if not now_open_versions:
@@ -1055,21 +1057,49 @@ def validate_response(payload, text, *, candidate_root_ids, entry_prices=(), can
     }
 
 
+def _redirected(matches, episodes):
+    """v8 F13: an episode merged into another plan (dup_of) is managed through its kept episode."""
+    by_id = {ep["episode_id"]: ep for ep in episodes}
+    out = []
+    for ep in matches:
+        target = ep.get("dup_of")
+        if target and target in by_id:
+            out.append((by_id[target], ep["episode_id"]))
+        else:
+            out.append((ep, None))
+    unique = {}
+    for ep, source in out:
+        unique.setdefault(ep["episode_id"], (ep, []))
+        if source:
+            unique[ep["episode_id"]][1].append(source)
+    return list(unique.values())
+
+
 def _map_episode(channel_id, root_message_id, episodes):
+    episode_id, ambiguity, _ = _map_episode_redirect(channel_id, root_message_id, episodes)
+    return episode_id, ambiguity
+
+
+def _map_episode_redirect(channel_id, root_message_id, episodes):
+    """(episode_id, ambiguity, redirected_from): dup_of episodes point at their kept plan before counting matches."""
     if root_message_id is None:
-        return None, None
-    matches = [ep["episode_id"] for ep in episodes if _stored_int(ep.get("channel_id")) == channel_id and _stored_int(ep.get("root_message_id")) == root_message_id]
-    if len(matches) == 1:
-        return matches[0], None
-    if len(matches) > 1:
-        return None, "ambiguous_root_episode"
-    return None, "episode_not_found"
+        return None, None, None
+    matches = [ep for ep in episodes if _stored_int(ep.get("channel_id")) == channel_id and _stored_int(ep.get("root_message_id")) == root_message_id]
+    targets = _redirected(matches, episodes)
+    if len(targets) == 1:
+        ep, sources = targets[0]
+        return ep["episode_id"], None, (",".join(sorted(sources)) or None)
+    if len(targets) > 1:
+        return None, "ambiguous_root_episode", None
+    return None, "episode_not_found", None
 
 
 def _netted_episodes(channel_id, root_message_id, episodes):
     """One message can root several episodes (two entry legs, spot + futures). When they all trade the same
-    known instrument and side they are one one-way position, so an instruction applies to each of them."""
+    known instrument and side they are one one-way position, so an instruction applies to each of them.
+    Merged (dup_of) episodes are redirected to their kept plan first (F13)."""
     matches = [ep for ep in episodes if _stored_int(ep.get("channel_id")) == channel_id and _stored_int(ep.get("root_message_id")) == root_message_id]
+    matches = [ep for ep, _ in _redirected(matches, episodes)]
     keys = {(ep.get("instrument_id"), ep.get("side")) for ep in matches}
     if len(matches) > 1 and len(keys) == 1:
         instrument, side = next(iter(keys))
@@ -1107,7 +1137,7 @@ def _instruction_rows(prompt, instructions, episodes, graph_version):
         pct = None if instruction["fraction_pct"] is None else Decimal(instruction["fraction_pct"]["value"])
         fraction = _fraction_value(pct)
         price = None if instruction["stop"]["price"] is None else Decimal(instruction["stop"]["price"]["value"])
-        episode_id, ambiguity = _map_episode(prompt["channel_id"], instruction["target_message_id"], episodes)
+        episode_id, ambiguity, redirected_from = _map_episode_redirect(prompt["channel_id"], instruction["target_message_id"], episodes)
         evidence = _evidence(instruction)
         targets = [(episode_id, ambiguity)]
         if ambiguity == "ambiguous_root_episode":
@@ -1139,8 +1169,50 @@ def _instruction_rows(prompt, instructions, episodes, graph_version):
                 "uncertain": uncertain,
                 "graph_version": graph_version,
                 "rule_version": RULE_VERSION,
+                "source": "llm",
+                "redirected_from": redirected_from if len(targets) == 1 else None,
+                "mapping_version": MAPPING_VERSION,
             })
     return rows
+
+
+def synthetic_rows(layout, graph_version, episodes, channels=()):
+    """F13: plan_merge's synthetic instructions — late_stop → move_stop (always priced), amend → cancel_pending.
+
+    available_at is the source message's t_vis; these rows are certain (uncertain=False) and unambiguous."""
+    path = Path(layout.gold_dir) / f"plan_link__{graph_version}.parquet"
+    if not path.exists():
+        return [], {"plan_link": "absent"}
+    links = pl.read_parquet(path)
+    roots = {ep["episode_id"]: ep for ep in episodes}
+    wanted = set(channels)
+    rows, counts = [], {}
+    for link in links.iter_rows(named=True):
+        action = link.get("synthetic_action")
+        if action not in ("move_stop", "cancel_pending"):
+            continue
+        if wanted and link["channel_id"] not in wanted:
+            continue
+        price = link.get("synthetic_stop_price")
+        if action == "move_stop" and price is None:
+            counts["move_stop_without_price"] = counts.get("move_stop_without_price", 0) + 1
+            continue  # never a move_stop(None)
+        episode_id = link["kept_episode_id"]
+        target = roots.get(episode_id, {})
+        evidence = json.dumps({"source": "plan_merge", "plan_link_kind": link["plan_link_kind"], "merge_version": link["merge_version"]},
+                              ensure_ascii=False, sort_keys=True)
+        rows.append({
+            "instruction_id": stable_id(RULE_VERSION, graph_version, "plan_merge", link["source_version_id"], link["branch_index"], action, episode_id, price),
+            "channel_id": link["channel_id"], "channel_name": None, "message_id": link["message_id"],
+            "source_version_id": link["source_version_id"], "available_at": link["synthetic_at"],
+            "target_message_id": _stored_int(target.get("root_message_id")), "episode_id": episode_id, "episode_ambiguity": None,
+            "target_symbol": target.get("instrument_id"), "action": action, "fraction_pct": None, "fraction": None,
+            "stop_price": price, "to_entry": False if action == "move_stop" else None, "evidence": evidence, "uncertain": False,
+            "graph_version": graph_version, "rule_version": RULE_VERSION, "source": "plan_merge", "redirected_from": None,
+            "mapping_version": MAPPING_VERSION,
+        })
+        counts[action] = counts.get(action, 0) + 1
+    return rows, counts
 
 
 FOLLOWUP_SCHEMA = {
@@ -1163,6 +1235,9 @@ FOLLOWUP_SCHEMA = {
     "uncertain": pl.Boolean,
     "graph_version": pl.String,
     "rule_version": pl.String,
+    "source": pl.String,
+    "redirected_from": pl.String,
+    "mapping_version": pl.String,
 }
 
 
@@ -1240,7 +1315,12 @@ def build_actions(layout, graph_version, llm_fixture, *, output=None, channels=(
         report["none_actions"] += sum(row["action"] == "none" for row in built)
         report["episode_ambiguous"] += sum(row["episode_ambiguity"] == "ambiguous_root_episode" for row in built)
         report["episode_missing"] += sum(row["episode_ambiguity"] == "episode_not_found" for row in built)
+        report["redirected"] = report.get("redirected", 0) + sum(row["redirected_from"] is not None for row in built)
         rows.extend(built)
+    synthetic, synthetic_counts = synthetic_rows(layout, resolved, tables["episode"], channels=channels)
+    rows.extend(synthetic)
+    report["mapping_version"] = MAPPING_VERSION
+    report["synthetic"] = synthetic_counts
     report["instructions"] = len(rows)
     destination = Path(output) if output else layout.silver_dir / "followup_action.parquet"
     _write_table(rows, destination)

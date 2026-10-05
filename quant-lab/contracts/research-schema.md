@@ -609,3 +609,19 @@ G3 用四审自身的反例脚本原样复跑，`ledger_code_version_equal` 由 
 **放行条件**：白名单必须**替代**通用运行状态扫描，**不得叠加在其之前**；否则通用反射仍会在下一轮被找到新载体，循环不结束。
 
 详见 `docs/adr/ruling-G0-R10-scope-and-acceptance.md`。
+
+### §9.11 v8 原因码（方案 v8 §4；随 B 组合入，与 reasons.py、test_smoke 同一提交落盘）
+
+全部一般严重度，只增不改；原因码总数 29 → 40。
+
+- **§4 增原因码 `SAME_PLAN_COMPANION`**：F2 同一计划的伴随部分（标题帖、图文对、解说帖、同条消息分支），dup_of 保留单，不另开仓。
+- **§4 增原因码 `SAME_PLAN_RESTATEMENT`**：F2 同一计划的复述，或超过补止损窗口才到的止损（只合成 move_stop），dup_of 保留单。
+- **§4 增原因码 `STALE_SIGNAL_30M`**：F8 规则 14，signal_age_s > 1800。
+- **§4 增原因码 `STALE_EDIT_30M`**：F8 变体图 -v8e，编辑晚于发帖 30 分钟的 H1 版本不当决策根、不进合并池。
+- **§4 增原因码 `TRIAGE_NOT_ENTRY`**：F3 分诊判非开仓。
+- **§4 增原因码 `TRIAGE_UNCERTAIN`**：F3 分诊判存疑（主口径不执行，宽口径 -v8w 执行）。
+- **§4 增原因码 `TRIAGE_MISSING`**：F3 需要分诊但 sidecar 没有该分支（与无效、存疑分开计数）。
+- **§4 增原因码 `TRIAGE_INVALID`**：F3 分诊结果没过确定性校验（引号、候选、枚举），按存疑处理。
+- **§4 增原因码 `CASH_WATCH_POST`**：F3「关注区域 … 失效 …」观察帖。
+- **§4 增原因码 `CONTRACT_DISCOURAGED`**：F3/D4 合约劝阻词（合约先别做、不建议跟、不要跟 …）。
+- **§4 增原因码 `PROMOTED_WIDE_ONLY`**：F11 只进宽口径的升级根（来自 past 的 P1、P2）。

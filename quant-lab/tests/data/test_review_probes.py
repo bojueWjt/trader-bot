@@ -125,7 +125,7 @@ def test_r07_x07_quarantine_inheritance(probes):
 
 def test_r08_x08_schema_and_source_clocks(probes):
     r = probes["r2:R08"]
-    assert r["asserted_event_time"] and r["alias"] and r["codes"] == 29
+    assert r["asserted_event_time"] and r["alias"] and r["codes"] == 40  # v8 §4: 29 + 11 general codes
     assert r["source_clock_mismatches"] == 0 and probes["r2:X08-all-clock"] == []
     assert all(probes["r2:X08-basis"])
     assert probes["r3:PUBLIC-eligibility"] == [{k: 0 for k in lifecycle.ELIG_KEYS}]
@@ -512,8 +512,9 @@ def test_r4_original_counterexamples(r4_probes, item):
     if item == "V01":
         assert values[0][1:] == ["60000.123456789123", "Decimal"]
     elif item == "V02":
-        assert len(values[0]) == 2
-        assert len({r["cluster_id"] for r in values[0]}) == 1
+        # v8 F2 (D3): the same author's identical card one minute later is a restatement of the same plan (dup_of,
+        # SAME_PLAN_RESTATEMENT), so only the original reaches the decision view; it was 2 rows in one cluster in v7.
+        assert len(values[0]) == 1 and values[0][0]["root_message_id"] == 1
     elif item == "V03":
         assert all(v[1] != "pass" for v in values)  # r4 §6: no physical sample IDs.
     elif item == "V04":
@@ -565,11 +566,17 @@ def test_v02_default_copy_family_and_future_invariance(tmp_path):
     rows = [(text, None, T, 'a')]
     before = _decision(_pipeline(tmp_path / 'one', rows)[5])
     rows.append((text, None, T + timedelta(minutes=1), 'a'))
-    after = _decision(_pipeline(tmp_path / 'two', rows)[5])
-    assert before.height == 1 and after.height == 2
-    assert after['cluster_id'].n_unique() == 1
+    full = _pipeline(tmp_path / 'two', rows)[5]
+    after = _decision(full)
+    # v8 F2 (D3): the same author's identical card within 1800 s restates the plan → dup_of the original, not a
+    # second decision (v7 kept both in one copy cluster). The copy evidence still marks the restatement.
+    assert before.height == 1 and after.height == 1
     assert before.to_dicts() == after.filter(pl.col('root_message_id') == 1).to_dicts()
-    assert after.filter(pl.col('root_message_id') == 2)['audit_stratum'][0] == 'repost_same_channel'
+    copy = full.filter(pl.col('root_message_id') == 2).row(0, named=True)
+    original = full.filter(pl.col('root_message_id') == 1).row(0, named=True)
+    assert copy['dup_of'] == original['episode_id'] and copy['plan_link_kind'] == 'restatement'
+    assert 'SAME_PLAN_RESTATEMENT' in copy['reason_codes'] and not copy['dec_eligibility']['entry_decision']
+    assert copy['dec_audit_stratum'] == 'repost_same_channel' and copy['cluster_id'] == original['cluster_id']
     rows.append((text, None, T + timedelta(minutes=2), 'a'))
     future = _decision(_pipeline(tmp_path / 'three', rows)[5])
     assert after.sort('root_message_id').to_dicts() == future.filter(pl.col('root_message_id') <= 2).sort('root_message_id').to_dicts()

@@ -24,8 +24,12 @@ from .market_stub import InstrumentRegistry, MarkProvider, PlausibilityCalibrati
 from .reasons import Reason
 from .close_stop import parse_close_stop
 
-RULE_VERSION = "tg45-validate-v0.7"
+RULE_VERSION = "tg45-validate-v0.8"  # v8: F4 stop_rule marks, F9 relative stops, F11 D3/D4, F12 spot TP gate
 LN3 = math.log(3.0)
+LN10 = math.log(10.0)
+#: F4：数据层给不出止损、但已写明「为何没有」的提示 → 按无止损单执行（D2），不再当作条件止损映射失败
+NOSTOP_EXECUTABLE_HINTS = frozenset({"zero_distance_break", "reference_level", "ambiguous_break", "relative_ambiguous"})
+SPOT_TP_WORDS = ("现货", "长线")
 MAX_STALENESS_S = 120
 SIGNAL_KINDS = {"entry_proposal", "amend", "add", "stop_move", "tp_ladder", "reduce", "close_claimed", "entry_claimed", "cancel", "expire", "correction", "delete_notice"}
 
@@ -122,7 +126,14 @@ def canonicalize_row(r: dict[str, Any], *, registry: InstrumentRegistry) -> tupl
             if source_entry["kind"] == "zone" or len(values) != len(atoms) or len(set(values)) != 1:
                 percent_ref = None
         source_stop = action.get("stop")
-        if source_stop and source_stop["kind"] == "condition":
+        stop_rule = source_checks.get("stop_rule") or {}
+        if stop_rule.get("rule") == "close_from_clause" and stop is not None:
+            checks["stop_trigger"] = {"basis": "close", "timeframe": stop_rule.get("timeframe"), "condition": None, "rule": "close_from_clause"}
+        if source_stop and source_stop["kind"] == "condition" and stop_rule:
+            pass  # F4: silver derived (or marked) this stop; the condition is not re-mapped
+        elif source_stop and source_stop["kind"] == "condition" and stop is None and source_checks.get("nostop_hint") in NOSTOP_EXECUTABLE_HINTS:
+            checks["stop_condition_dropped"] = source_checks["nostop_hint"]  # an explained missing stop is the D2 no-stop path
+        elif source_stop and source_stop["kind"] == "condition":
             atom = source_stop.get("price")
             inherited = {u["field"]: Decimal(u["factor"]) for u in source_checks.get("unit_inherited", [])}
             level = Decimal(atom["value"]) * inherited.get("stop.price", 1) if atom is not None else None
@@ -224,7 +235,8 @@ def canonicalize_row(r: dict[str, Any], *, registry: InstrumentRegistry) -> tupl
     if v2 and mapping_issues:
         checks["mapping_issues"] = mapping_issues
         elig["execution"] = False
-    if v2 and source_checks.get("time_ref") != "now":
+    from .cx_v2 import effective_time_ref
+    if v2 and effective_time_ref(source_checks) != "now":
         elig["execution"] = False
         elig["original_entry"] = False
     out = {
@@ -243,7 +255,8 @@ def market_check_row(c: dict[str, Any], *, t_a: datetime | None, marks: MarkProv
         t_plaus = None if not t_plaus else PlausibilityCalibration(dict(t_plaus), version="adhoc-unfrozen", frozen_at=datetime.max.replace(tzinfo=t_a.tzinfo) if t_a else datetime.max)
     checks: dict[str, Any] = {"dependencies": []}
     inst = c["instrument_id"]
-    has_price = c["entry"] is not None or c["stop"] is not None
+    pending = c.get("stop_pending") or {}
+    has_price = c["entry"] is not None or c["stop"] is not None or (bool(pending) and c.get("side") in ("long", "short"))
     if inst is None or t_a is None or not has_price:
         return out, reasons, checks
     m = marks.mark_at(inst, t_a, max_staleness_s=MAX_STALENESS_S)
@@ -290,6 +303,8 @@ def market_check_row(c: dict[str, Any], *, t_a: datetime | None, marks: MarkProv
                 c["stop"] *= factor
             c["tps"] = [{**t, "level": t["level"] * factor} for t in c["tps"]]
             checks["unit_rescaled"] = {"factor": str(factor), "basis": "mark"}
+    if c["stop"] is None and pending and c.get("side") in ("long", "short"):
+        _resolve_pending_stop(c, pending, mp, checks)
     e = c["entry"]
     if e and e.get("lo") is not None:
         dlo, dhi = log_deviation(e["lo"], mp), log_deviation(e["hi"], mp)
@@ -316,9 +331,12 @@ def market_check_row(c: dict[str, Any], *, t_a: datetime | None, marks: MarkProv
         conflict = True
         checks.setdefault("scale_conflict_field", "entry")
     kept = []
+    tp_gate = LN10 if c.get("tp_wide_gate") else LN3  # F12: a long spot / long-term target may sit far above entry
+    if c.get("tp_wide_gate"):
+        checks["tp_gate"] = {"ln": "ln10", "basis": "spot_or_long_term_wording"}
     for t in c["tps"]:
         d = log_deviation(t["level"], ref)
-        if d is None or d >= LN3:
+        if d is None or d >= tp_gate:
             checks.setdefault("tps_dropped_scale", []).append({"level": str(t["level"]), "reason": "outside_ln3"})
         else:
             kept.append(t)
@@ -345,17 +363,155 @@ def market_check_row(c: dict[str, Any], *, t_a: datetime | None, marks: MarkProv
     return out, reasons, checks
 
 
+def _resolve_pending_stop(c: dict[str, Any], pending: dict[str, Any], mp: Decimal, checks: dict[str, Any]) -> None:
+    """F4 mark_at_t_a and F9 relative stops are priced here, where the as-of mark is known."""
+    from . import stop_rules
+    long = c["side"] == "long"
+    if pending.get("mark_widen"):
+        stop = stop_rules._widen(mp, long)
+        c["stop"] = stop
+        checks["stop_from_mark"] = {"mark": str(mp), "stop": str(stop), "widened": str(stop_rules.WIDEN)}
+        return
+    relative = pending.get("relative")
+    if relative:
+        ref_kind = "entry_ref" if c.get("entry_ref") is not None else "mark"
+        ref = c["entry_ref"] if ref_kind == "entry_ref" else mp
+        stop = stop_rules.resolve_relative(relative, c["side"], ref)
+        if stop is None:
+            checks["nostop_hint"] = "relative_ambiguous"
+            return
+        c["stop"] = stop
+        checks["stop_relative_resolved"] = {"ref": ref_kind, "ref_price": str(ref), "stop": str(stop), "kind": relative["kind"], "value": relative["value"]}
+
+
+def _promoted_side(r: dict[str, Any], source: dict[str, Any], *, registry: InstrumentRegistry, marks: MarkProvider) -> None:
+    """F11-D3: a promoted open without a side but with a stop takes its side from the stop against the entry (or the mark)."""
+    if not source.get("time_ref_promoted") or r.get("side") in ("long", "short") or r.get("stop") is None:
+        return
+    stop = Decimal(str(r["stop"]))
+    values = [Decimal(str(v)) for v in (r.get("entries") or [])]
+    if not values and r.get("entry"):
+        values = [Decimal(str(r["entry"]["lo"])), Decimal(str(r["entry"]["hi"]))]
+    basis = "entry"
+    if not values:
+        from .extract import canonical_symbol
+        inst, status = registry.resolve(canonical_symbol(r.get("symbol_raw")), r["available_at"])
+        if status != "mapped" or r["available_at"] is None:
+            return
+        mark = marks.mark_at(inst, r["available_at"], max_staleness_s=MAX_STALENESS_S)
+        if mark.price is None or mark.price <= 0:
+            return
+        values, basis = [Decimal(str(mark.price))], "mark"
+    side = "long" if all(stop < v for v in values) else "short" if all(stop > v for v in values) else None
+    if side is None:
+        return
+    r["side"] = side
+    source["side_inferred_promoted"] = {"side": side, "basis": basis}
+    r["checks"] = json.dumps(source, ensure_ascii=False)
+
+
+INHERIT_WINDOW_S = 1800
+
+
+def inherit_symbols(rows: list[dict[str, Any]], mv: pl.DataFrame) -> int:
+    """F11-D4: fill symbol_raw of a v2 promoted open / stop_move / amend that names no coin.
+
+    Two sources only, both strictly visible before the row (§2 cut): the reply parent's actions when they name one
+    coin; or the same author's "now open" messages within 1800 s when they all name one coin and the author named no
+    other coin from the latest of them up to this row. Ambiguity fills nothing. Mutates rows; returns the fill count."""
+    from .cx_v2 import effective_time_ref
+    from .extract import canonical_symbol
+
+    def extractor(row):
+        return (row.get("extractor") or {}).get("name")
+
+    def coins(found):
+        return {canonical_symbol(p["symbol_raw"]) for p in found if p.get("symbol_raw")}
+
+    cols = [c for c in ("source_version_id", "author_id", "reply_to_message_id") if c in mv.columns]
+    meta = {r["source_version_id"]: r for r in mv.select(cols).iter_rows(named=True)} if "source_version_id" in cols else {}
+    by_message: dict[tuple, list[dict]] = {}
+    by_author: dict[tuple, list[dict]] = {}
+    for r in rows:
+        m = meta.get(r["source_version_id"], {})
+        by_message.setdefault((r["channel_id"], r["message_id"]), []).append(r)
+        if m.get("author_id") is not None:
+            by_author.setdefault((r["channel_id"], m["author_id"]), []).append(r)
+    filled = 0
+    for r in rows:
+        if r.get("symbol_raw") or r["available_at"] is None:
+            continue
+        source = json.loads(r.get("checks") or "{}")
+        if source.get("schema_version") != 2:
+            continue
+        promoted_open = r["kind"] == "entry_proposal" and bool(source.get("time_ref_promoted"))
+        if not (promoted_open or r["kind"] in ("stop_move", "amend")):
+            continue
+        m = meta.get(r["source_version_id"], {})
+        at = r["available_at"]
+        found = None
+        parent = m.get("reply_to_message_id")
+        if parent is not None:
+            prior = [p for p in by_message.get((r["channel_id"], parent), [])
+                     if p["available_at"] is not None and p["available_at"] < at and extractor(p) == extractor(r) and p.get("symbol_raw")]
+            if len(coins(prior)) == 1:
+                src = max(prior, key=lambda p: p["available_at"])
+                found = (src["symbol_raw"], src, "reply_parent")
+        if found is None and m.get("author_id") is not None:
+            window = [p for p in by_author.get((r["channel_id"], m["author_id"]), [])
+                      if p["available_at"] is not None and p["available_at"] < at and extractor(p) == extractor(r)
+                      and (at - p["available_at"]).total_seconds() <= INHERIT_WINDOW_S]
+            opens = []
+            for p in window:
+                pc = json.loads(p.get("checks") or "{}")
+                if p["kind"] == "entry_proposal" and p.get("symbol_raw") and (pc.get("schema_version") != 2 or effective_time_ref(pc) == "now"):
+                    opens.append(p)
+            symbols = coins(opens)
+            if len(symbols) == 1:
+                latest = max(opens, key=lambda p: p["available_at"])
+                named = coins([p for p in window if p["available_at"] >= latest["available_at"]])
+                if named <= symbols:
+                    found = (latest["symbol_raw"], latest, "same_author_recent")
+        if found is None:
+            continue
+        symbol, src, basis = found
+        r["symbol_raw"] = symbol
+        source["symbol_inherited"] = {"symbol": symbol, "basis": basis, "source_version_id": src["source_version_id"], "message_id": src["message_id"]}
+        source.setdefault("dependencies", []).append({"ref": src["source_version_id"], "purpose": "all", "available_at": src["available_at"].isoformat()})
+        r["checks"] = json.dumps(source, ensure_ascii=False)
+        filled += 1
+    return filled
+
+
+def _tp_wide_gate(r: dict[str, Any], source: dict[str, Any], side: str | None, text: str | None) -> bool:
+    """F12: a long plan whose own paragraph says spot / long-term keeps far targets (ln10 instead of ln3)."""
+    if side != "long" or not text:
+        return False
+    seg = text
+    if source.get("schema_version") == 2 and source.get("action"):
+        from . import stop_rules
+        bounds = stop_rules.segment(text, dict(source["action"], symbol_raw=r.get("symbol_raw")))
+        if bounds is None:
+            return False
+        seg = text[bounds[0]:bounds[1]]
+    return any(w in seg for w in SPOT_TP_WORDS)
+
+
 def validate_frame(ex: pl.DataFrame, mv: pl.DataFrame, *, registry: InstrumentRegistry, marks: MarkProvider, t_plaus: PlausibilityCalibration | None = None,
                    ingested_at: datetime | None = None) -> tuple[pl.DataFrame, list[dict], dict[tuple[int, str], LayerLedger], dict[str, Any]]:
     ingested_at = ingested_at or now_utc()
     batch_id = ex["batch_id"][0] if ex.height else "tg-empty"
     frame = ex.join(mv.select("source_version_id", "time_grade", pl.col("message_date").dt.year().cast(pl.String).fill_null("unknown").alias("_year")), on="source_version_id", how="left")
+    texts = dict(zip(mv["source_version_id"].to_list(), mv["text"].to_list())) if "text" in mv.columns else {}
     rows: list[dict[str, Any]] = []
     qrows: list[dict[str, Any]] = []
-    for r in frame.iter_rows(named=True):
+    frame_rows = list(frame.iter_rows(named=True))
+    inherit_symbols([r for r in frame_rows if r["kind"] in SIGNAL_KINDS], mv)
+    for r in frame_rows:
         if r["kind"] not in SIGNAL_KINDS:
             continue
         source = json.loads(r.get("checks") or "{}")
+        _promoted_side(r, source, registry=registry, marks=marks)
         if source.get("gauls_template"):
             from .extract import canonical_symbol, gauls_second_entry
             inst, status = registry.resolve(canonical_symbol(r["symbol_raw"]), r["available_at"])
@@ -383,8 +539,17 @@ def validate_frame(ex: pl.DataFrame, mv: pl.DataFrame, *, registry: InstrumentRe
         can, reasons4, checks = canonicalize_row(r, registry=registry)
         checks.update(json.loads(r.get("checks") or "{}"))
         can["unit_inherited"] = checks.get("unit_inherited", [])
+        pending = {}
+        rule = checks.get("stop_rule") or {}
+        if can["stop"] is None and rule.get("base_source") == "mark_at_t_a":
+            pending["mark_widen"] = True
+        elif can["stop"] is None and checks.get("stop_relative"):
+            pending["relative"] = checks["stop_relative"]
+        can["stop_pending"] = pending
+        can["tp_wide_gate"] = _tp_wide_gate(r, checks, can["side"], texts.get(r["source_version_id"]))
         mk, reasons5, checks5 = market_check_row(can, t_a=r["available_at"], marks=marks, t_plaus=t_plaus, channel_id=r["channel_id"])
-        can.pop("unit_inherited", None)
+        for key in ("unit_inherited", "stop_pending", "tp_wide_gate"):
+            can.pop(key, None)
         inherited = [c for c in (r["reason_codes"] or []) if c != Reason.NOT_SIGNAL]  # 层 1/3 拒因跨层携带（S07）
         reasons = sorted(set(reasons4 + reasons5 + inherited))
         elig = checks.pop("eligibility")

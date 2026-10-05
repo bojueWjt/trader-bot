@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from decimal import Decimal
 from datetime import datetime, timedelta
 from typing import Any
@@ -29,9 +30,27 @@ from .graph import DEFAULT_PROCESSING_DELAY_S, closure_available_at, dependency_
 from .lake import D12, LayerLedger, Layout, append_quarantine, cum_prev, loss_row_from_ledger, mapping_rows, now_utc, preserve_ingested_at, quarantine_row, schema_hash, stable_id, write_loss, write_mapping, write_parquet_atomic
 from .reasons import Reason
 from .close_stop import parse_close_stop
+from . import cx_v2 as _cx_v2
+from . import plan_merge as _plan_merge
 
-RULE_VERSION = "tg-lifecycle-v0.7"  # Close-stop mapping participates in frozen graph identity.
+RULE_VERSION = "tg-lifecycle-v0.8"  # v8: plan_merge (F2/F6), signal age (F8), triage sidecar gating (F3), plan_link table.
 HORIZON_S = 7 * 24 * 3600
+STALE_SIGNAL_S = 1800  # 规则 14：signal_age_s > 1800 → STALE_SIGNAL_30M
+EDIT_OUTCOME_S = 300  # edit_may_contain_outcome：编辑晚于发帖 5 分钟以上且带结果词
+TRIAGE_FILE = "nostop_triage.parquet"
+#: 冻结 sidecar schema（方案 §4 / F3）：主键 (source_version_id, branch_index)；其余列按名读取，不 import cx_triage。
+TRIAGE_KEY = ("source_version_id", "branch_index")
+TRIAGE_VERDICTS = ("new_entry", "not_entry", "uncertain")
+#: D4 劝阻词（§1）：「不要跟/别跟」后面紧跟 风/在/大/着 的不算
+CONTRACT_DISCOURAGED_RE = re.compile(r"合约先别做|合约先等|先别开合约|不建议跟|不许合约|(?:不要|别)跟(?![风在大着])")
+#: Cash 观察帖：「关注区域 …… 失效 ……」
+CASH_WATCH_RE = re.compile(r"关注(?:区域|区间)")
+CASH_WATCH_INVALIDATION_RE = re.compile(r"失效")
+LOW_LEVERAGE_RE = re.compile(r"1倍|一倍|低倍|不会爆仓|不设止损|不用止损")
+NOSTOP_HINT_KINDS = ("zero_distance_break", "reference_level", "ambiguous_break", "relative_ambiguous")
+EXECUTION_BLOCKING = frozenset({Reason.SAME_PLAN_COMPANION, Reason.SAME_PLAN_RESTATEMENT, Reason.STALE_SIGNAL_30M, Reason.STALE_EDIT_30M,
+                                Reason.TRIAGE_NOT_ENTRY, Reason.TRIAGE_UNCERTAIN, Reason.TRIAGE_MISSING, Reason.TRIAGE_INVALID,
+                                Reason.CASH_WATCH_POST, Reason.CONTRACT_DISCOURAGED, Reason.PROMOTED_WIDE_ONLY})
 
 P_STATES = ("none", "active", "cancelled", "expired")
 C_STATES = ("unknown", "claimed_open", "claimed_closed")
@@ -137,6 +156,21 @@ EPISODE_SCHEMA: dict[str, Any] = {
     "deleted_after_observation_any": pl.Boolean,
     "root_plan_id": pl.String, "root_source_version_id": pl.String, "root_message_id": pl.Int64, "replay_required": pl.Boolean,
     "n_events": pl.Int32, "n_invalid_transitions": pl.Int32, "reason_codes": pl.List(pl.String), "rule_version": pl.String, "batch_id": pl.String,
+    # v8 §4 episode 新列（全部进入决策快照哈希）
+    "plan_group_id": pl.String, "family_id": pl.String, "dup_of": pl.String, "plan_link_kind": pl.String,
+    "repost_of": pl.String, "amend_of": pl.String, "reentry_of": pl.String, "reentry_parent_stop": D12,
+    "stop_rule": pl.String, "stop_base": D12, "stop_source_version_id": pl.String,
+    "nostop_kind": pl.String, "venue_hint": pl.String, "triage_verdict": pl.String, "triage_reason": pl.String, "promotion_scope": pl.String,
+    "signal_age_s": pl.Int64, "edit_delay_s": pl.Int64, "signal_anchor": pl.String,
+    "edit_original_unavailable": pl.Boolean, "edit_may_contain_outcome": pl.Boolean, "entry_legs_n": pl.Int32, "time_ref_promoted": pl.String,
+    "event_time": pl.Datetime("us", "UTC"), "available_at": pl.Datetime("us", "UTC"), "ingested_at": pl.Datetime("us", "UTC"),
+}
+#: gold/plan_link__<gv>.parquet：每个入场分支和每条补充一行（方案 §4）
+PLAN_LINK_SCHEMA: dict[str, Any] = {
+    "channel_id": pl.Int64, "message_id": pl.Int64, "source_version_id": pl.String, "branch_index": pl.Int32,
+    "episode_id": pl.String, "kept_episode_id": pl.String, "family_id": pl.String, "plan_link_kind": pl.String,
+    "target_message_id": pl.Int64, "gap_s": pl.Int64, "synthetic_action": pl.String, "synthetic_at": pl.Datetime("us", "UTC"),
+    "synthetic_stop_price": D12, "merge_version": pl.String,
     "event_time": pl.Datetime("us", "UTC"), "available_at": pl.Datetime("us", "UTC"), "ingested_at": pl.Datetime("us", "UTC"),
 }
 EVENT_SCHEMA: dict[str, Any] = {
@@ -162,8 +196,12 @@ def dec_plan_possible(root: dict[str, Any]) -> bool:
     return root["entry"] is not None or (root.get("entry_mode") == "market_ref")
 
 
-def _order_plan(root: dict[str, Any], stop: float | None, tps: list[dict], expires_after_s: int | None) -> dict[str, Any] | None:
-    """冻结计划快照：只写有原文来源的字段；缺入场方式 → None（不猜市价）；缺分配比例留 null（由 G2 policy 展开，S06）。"""
+def _order_plan(root: dict[str, Any], stop: float | None, tps: list[dict], expires_after_s: int | None,
+                stop_meta: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """冻结计划快照：只写有原文来源的字段；缺入场方式 → None（不猜市价）；缺分配比例留 null（由 G2 policy 展开，S06）。
+
+    v8 F4：stop_meta 来自止损所在那条消息（rule = silver checks.stop_rule.rule；injected = 止损来自别的消息）。
+    有 silver 标记或注入的止损时不再按本条的条件止损映射置空；close_from_clause 以收盘触发。"""
     if root["instrument_id"] is None or root["side"] not in ("long", "short"):
         return None
     e = root["entry"]
@@ -181,6 +219,9 @@ def _order_plan(root: dict[str, Any], stop: float | None, tps: list[dict], expir
     else:
         entries = [{"kind": "limit", "price_lo": e["lo"], "price_hi": e["hi"], "fraction": None, "tif": "GTC", "post_only": False}]
     stop_plan = {"price": stop, "trigger": "mark"} if stop is not None else None
+    stop_meta = stop_meta or {}
+    if stop_plan is not None and stop_meta.get("rule") == "close_from_clause" and stop_meta.get("timeframe"):
+        stop_plan = {"price": stop, "trigger": "close", "timeframe": stop_meta["timeframe"]}
     checks = json.loads(root.get("checks") or "{}")
     # checks.action keeps the quoted values; a price whose unit was inherited (cx_v2.inherited_prices) is rescaled here.
     rescale = Decimal(str(checks.get("unit_rescaled", {}).get("factor", 1)))
@@ -202,7 +243,8 @@ def _order_plan(root: dict[str, Any], stop: float | None, tps: list[dict], expir
                                     fraction=Decimal(fraction["value"]) / 100 if fraction else None,
                                     tif="IOC" if level["kind"] == "market_ref" else "GTC", post_only=False))
         source_stop = action.get("stop")
-        if source_stop and source_stop["kind"] == "condition":
+        marked = bool(stop_meta.get("injected") or stop_meta.get("rule") or checks.get("stop_rule"))
+        if source_stop and source_stop["kind"] == "condition" and not marked:
             atom = source_stop.get("price")
             level = Decimal(atom["value"]) * factor.get("stop.price", 1) if atom is not None else None
             if level is not None:
@@ -251,9 +293,150 @@ def _order_plan(root: dict[str, Any], stop: float | None, tps: list[dict], expir
             "sizing": {"mode": "risk_budget", "qty": None}, "expiry": {"entry_ttl_s": int(expires_after_s) if expires_after_s else None, "max_holding_s": None}, "reduce_only_exit": True}
 
 
+def triage_index(triage: pl.DataFrame | None) -> dict[tuple[str, int], dict[str, Any]] | None:
+    """Frozen sidecar schema (F3): one row per (source_version_id, branch_index); None = no sidecar (stage 1)."""
+    if triage is None:
+        return None
+    missing = [c for c in (*TRIAGE_KEY, "verdict") if c not in triage.columns]
+    if missing:
+        raise ValueError(f"triage sidecar 缺列 {missing}（冻结 schema：主键 source_version_id+branch_index，另有 verdict 等）")
+    out: dict[tuple[str, int], dict[str, Any]] = {}
+    for row in triage.iter_rows(named=True):
+        key = (row["source_version_id"], int(row["branch_index"] or 0))
+        if key in out:
+            raise ValueError(f"triage sidecar 主键重复：{key}")
+        out[key] = row
+    return out
+
+
+def triage_status(row: dict[str, Any] | None) -> tuple[str, Reason | None]:
+    """(verdict label, blocking reason in the main scope). A row that failed the deterministic checks is uncertain/INVALID."""
+    if row is None:
+        return "missing", Reason.TRIAGE_MISSING
+    status = str(row.get("status") or "").lower()
+    invalid = status in ("invalid", "rejected") or row.get("invalid") is True or row.get("valid") is False
+    verdict = row.get("verdict")
+    if invalid or verdict not in TRIAGE_VERDICTS:
+        return "invalid", Reason.TRIAGE_INVALID
+    if status in ("missing", "abstain", "abstained"):
+        return "missing", Reason.TRIAGE_MISSING
+    if verdict == "new_entry":
+        return "new_entry", None
+    if verdict == "not_entry":
+        return "not_entry", Reason.TRIAGE_NOT_ENTRY
+    return "uncertain", Reason.TRIAGE_UNCERTAIN
+
+
+def _decimal(v) -> Decimal | None:
+    return None if v is None else Decimal(str(v))
+
+
+def _segment_text(text: str, checks: dict[str, Any], symbol_raw: str | None) -> str:
+    """The branch's own paragraph (stop_rules.segment), whole text when it cannot be cut."""
+    action = checks.get("action") if checks.get("schema_version") == 2 else None
+    if not action or not text:
+        return text or ""
+    from . import stop_rules
+    try:
+        bounds = stop_rules.segment(text, dict(action, symbol_raw=symbol_raw))
+    except (KeyError, TypeError, ValueError):
+        bounds = None
+    return text[bounds[0]:bounds[1]] if bounds else text
+
+
+def _merge_item(p: dict[str, Any], mvd: dict[str, dict], t_post: dict[tuple, datetime], *, supplement_of: str | None = None,
+                conditional: bool = False) -> _plan_merge.Item | None:
+    if p.get("available_at") is None:
+        return None
+    m = mvd.get(p["source_version_id"], {})
+    checks = json.loads(p.get("checks") or "{}")
+    text = m.get("text") or ""
+    seg = _segment_text(text, checks, p.get("symbol_raw"))
+    e = p.get("entry")
+    legs: list[Decimal] = []
+    market_ref = False
+    if p.get("entries"):
+        legs = [Decimal(str(v)) for v in p["entries"]]
+    elif e and e.get("kind") != "market_ref" and e.get("lo") is not None:
+        legs = sorted({Decimal(str(e["lo"])), Decimal(str(e["hi"]))})
+    if e is None and p.get("entry_mode") == "market_ref" or (e and e.get("kind") == "market_ref"):
+        market_ref = True
+    action = checks.get("action") or {}
+    if (action.get("entry") or {}).get("kind") == "ladder" and any(l.get("kind") == "market_ref" for l in action["entry"].get("levels", [])):
+        market_ref = True
+    stop = _decimal(p.get("stop"))
+    compact = re.sub(r"\s", "", text)
+    return _plan_merge.Item(
+        pid=p["plan_id"], svid=p["source_version_id"], channel=p["channel_id"], message_id=p["message_id"], t_vis=p["available_at"],
+        t_post=t_post.get((p["channel_id"], p["message_id"]), p["available_at"]), author=m.get("author_id"), reply_to=m.get("reply_to_message_id"),
+        sequence=m.get("sequence"), inst=p.get("instrument_id"), side=p.get("side"), branch_index=int(p.get("branch_index") or 0),
+        legs=tuple(legs), market_ref=market_ref, mark=_decimal(p.get("mark_price")), entry_kind=(e or {}).get("kind"), stop=stop,
+        quote=_decimal(e["lo"]) if e and e.get("kind") == "market_ref" and e.get("lo") is not None else None,
+        tps=tuple(t["level"] for t in (p.get("tps") or [])), text=text, segment=seg,
+        has_media=bool(m.get("media_hashes") or m.get("media_kinds")) or bool(checks.get("chart_fill")),
+        is_title=not legs and stop is None and len(compact) <= 40, card=_plan_merge.is_card(seg),
+        venue_words=bool(_plan_merge.VENUE_WORDS.search(seg)), reentry_words=bool(_plan_merge.REENTRY_WORDS.search(seg)),
+        supplement_of=supplement_of, conditional=conditional)
+
+
+def _edit_delay(row: dict[str, Any]) -> int:
+    """Edit delay of one H1 version: last_edit_at − message_date (0 for other grades or unknown clocks)."""
+    if row.get("time_grade") != "H1":
+        return 0
+    ta = json.loads(row.get("temporal_assumptions") or "{}")
+    if ta.get("edit_delay_s") is not None:
+        return int(ta["edit_delay_s"])
+    if row.get("event_time") is not None and row.get("message_date") is not None:
+        return max(0, _plan_merge.whole_seconds(row["event_time"] - row["message_date"]))
+    return 0
+
+
+def _stop_meta(src: dict[str, Any] | None, *, injected: bool) -> dict[str, Any]:
+    """Live v4 stop columns from the plan that supplied the decision stop (方案 §4：stop_rule / stop_base / stop_source_version_id)."""
+    if src is None:
+        return {"rule": None, "base": None, "svid": None, "timeframe": None, "injected": injected}
+    checks = json.loads(src.get("checks") or "{}")
+    rule = checks.get("stop_rule") or {}
+    if checks.get("stop_from_mark"):
+        return {"rule": "r9_fuzzy_break", "base": _decimal(checks["stop_from_mark"]["mark"]), "svid": src["source_version_id"], "timeframe": None, "injected": injected}
+    if checks.get("stop_relative_resolved"):
+        return {"rule": "relative", "base": None, "svid": src["source_version_id"], "timeframe": None, "injected": injected}
+    if rule.get("rule"):
+        return {"rule": rule["rule"], "base": _decimal(rule.get("base")), "svid": src["source_version_id"], "timeframe": rule.get("timeframe"), "injected": injected}
+    return {"rule": "supplement" if injected else None, "base": None, "svid": src["source_version_id"], "timeframe": None, "injected": injected}
+
+
+def _rule_versions(registry_version: str, *, triage_version: str = "", wide: bool = False, supplement_window_s: int = _plan_merge.DEFAULT_SUPPLEMENT_S,
+                   max_edit_delay_s: int | None = None) -> dict[str, str]:
+    versions = {"normalize": _normalize.RULE_VERSION, "dedup": _dedup.RULE_VERSION, "extract": _extract.RULE_VERSION, "validate": _validate.RULE_VERSION,
+                "linker": _linker.RULE_VERSION, "lifecycle": RULE_VERSION, "registry": registry_version, "plan_merge": _plan_merge.PLAN_MERGE_VERSION}
+    if triage_version:
+        versions["triage"] = triage_version
+    variant = variant_signature(wide=wide, supplement_window_s=supplement_window_s, max_edit_delay_s=max_edit_delay_s)
+    if variant:
+        versions["variant"] = variant
+    return versions
+
+
+def variant_signature(*, wide: bool = False, supplement_window_s: int = _plan_merge.DEFAULT_SUPPLEMENT_S, max_edit_delay_s: int | None = None) -> str:
+    """Non-default variant switches as one string ('' for the main scope)."""
+    parts = []
+    if wide:
+        parts.append("wide")
+    if int(supplement_window_s) != _plan_merge.DEFAULT_SUPPLEMENT_S:
+        parts.append(f"supplement_window_s={int(supplement_window_s)}")
+    if max_edit_delay_s is not None:
+        parts.append(f"max_edit_delay_s={int(max_edit_delay_s)}")
+    return ";".join(parts)
+
+
 def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.DataFrame, dg: pl.DataFrame | None, *, graph_version: str, registry_version: str = "",
                 processing_delay_s: int = DEFAULT_PROCESSING_DELAY_S, horizon_s: int = HORIZON_S, ingested_at: datetime | None = None,
-                observation_end: datetime | None = None, plan_source: str = "parser", extracted_event: pl.DataFrame | None = None) -> tuple[pl.DataFrame, pl.DataFrame, list[dict], dict[tuple[int, str], LayerLedger], dict[str, Any]]:
+                observation_end: datetime | None = None, plan_source: str = "parser", extracted_event: pl.DataFrame | None = None,
+                triage: pl.DataFrame | None = None, triage_version: str = "", wide: bool = False,
+                supplement_window_s: int = _plan_merge.DEFAULT_SUPPLEMENT_S, max_edit_delay_s: int | None = None) -> tuple[pl.DataFrame, pl.DataFrame, list[dict], dict[tuple[int, str], LayerLedger], dict[str, Any]]:
+    """v8 变体开关：wide（-v8w：执行存疑/缺失分诊与宽口径升级）、supplement_window_s（-v8nw 取 0）、
+    max_edit_delay_s（-v8e：编辑延迟超过它的 H1 版本先移出合并池再重算）。triage 为冻结 schema 的 sidecar（None = stage 1）。"""
     ingested_at = ingested_at or now_utc()
     batch_id = cp["batch_id"][0] if cp.height else "tg-empty"
     from .plan_source import select_plans, disagreements, descriptive_only
@@ -280,11 +463,105 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
     obs_end = observation_end or max((p["available_at"] for p in plans.values() if p["available_at"]), default=ingested_at)
     if not registry_version and "registry_version" in cp.columns and cp.height:
         registry_version = cp["registry_version"][0] or ""
-    rule_versions = {"normalize": _normalize.RULE_VERSION, "dedup": _dedup.RULE_VERSION, "extract": _extract.RULE_VERSION, "validate": _validate.RULE_VERSION, "linker": _linker.RULE_VERSION, "lifecycle": RULE_VERSION, "registry": registry_version}
+    rule_versions = _rule_versions(registry_version, triage_version=triage_version, wide=wide, supplement_window_s=supplement_window_s,
+                                   max_edit_delay_s=max_edit_delay_s)
 
     def key(pid: str) -> tuple:
         p = plans[pid]
         return (p["available_at"] or obs_end, mvd.get(p["source_version_id"], {}).get("sequence") or 0, pid)
+
+    # ---------------------------------------------------------------- v8 pre-pass: executability, plan merge (F2/F6/F3/F8/F11)
+    tri = triage_index(triage)
+    stage = 2 if tri is not None else 1
+    t_post: dict[tuple, datetime] = {}
+    for r in mvd.values():
+        ident = (r.get("channel_id"), (r.get("source_id") or {}).get("message_id"))
+        if r.get("available_at") is not None and (ident not in t_post or r["available_at"] < t_post[ident]):
+            t_post[ident] = r["available_at"]
+    root_info: dict[str, dict[str, Any]] = {}
+    for rid in roots:
+        p = plans[rid]
+        checks = json.loads(p.get("checks") or "{}")
+        text = mvd.get(p["source_version_id"], {}).get("text") or ""
+        seg = _segment_text(text, checks, p.get("symbol_raw"))
+        promoted = checks.get("time_ref_promoted") or None
+        blocks: list[str] = []
+        if CONTRACT_DISCOURAGED_RE.search(seg):
+            blocks.append(Reason.CONTRACT_DISCOURAGED)
+        if CASH_WATCH_RE.search(seg) and CASH_WATCH_INVALIDATION_RE.search(seg):
+            blocks.append(Reason.CASH_WATCH_POST)
+        if promoted and promoted.get("scope") == "wide" and not wide:
+            blocks.append(Reason.PROMOTED_WIDE_ONLY)
+        needs_triage = p.get("stop") is None or bool(promoted)
+        verdict, verdict_reason, triage_row = ("n/a", None, None) if not needs_triage else (None, None, None)
+        if needs_triage and tri is not None:
+            triage_row = tri.get((p["source_version_id"], int(p.get("branch_index") or 0)))
+            verdict, verdict_reason = triage_status(triage_row)
+            if verdict_reason is not None:
+                blocks.append(verdict_reason)
+        edit_delay = _edit_delay(mvd.get(p["source_version_id"], {}))
+        stale_edit = max_edit_delay_s is not None and edit_delay > max_edit_delay_s
+        if stale_edit:
+            blocks.append(Reason.STALE_EDIT_30M)
+        # The wide scope (-v8w) executes uncertain, missing and invalid triage; the code is still recorded.
+        wide_ok = {Reason.TRIAGE_UNCERTAIN, Reason.TRIAGE_MISSING, Reason.TRIAGE_INVALID} if wide else set()
+        blocking = [b for b in blocks if b not in wide_ok]
+        root_info[rid] = {"checks": checks, "seg": seg, "promoted": promoted, "verdict": verdict, "triage": triage_row, "blocks": blocks,
+                          "blocking": blocking, "stale_edit": stale_edit, "edit_delay": edit_delay}
+    items: list[_plan_merge.Item] = []
+    for rid in roots:
+        if root_info[rid]["stale_edit"]:
+            continue  # -v8e: out of the merge pool before merging (TR-3)
+        it = _merge_item(plans[rid], mvd, t_post)
+        if it is None:
+            continue
+        it.executable = not root_info[rid]["blocking"]
+        tr = root_info[rid]["triage"]
+        if tr is not None and root_info[rid]["verdict"] not in ("invalid", "missing"):
+            it.relation = tr.get("relation")
+            target = tr.get("relation_target_message_id")
+            it.relation_target = int(target) if target is not None else None
+        items.append(it)
+    pooled = {it.pid for it in items}
+    supplements, scale_rejected = [], {}
+    for rid in roots:
+        if rid not in pooled:
+            continue
+        for pid in members.get(rid, []):
+            p = plans[pid]
+            if p["kind"] not in ("stop_move", "amend") or p.get("stop") is None or sel[pid]["method"] == "same_source":
+                continue
+            if max_edit_delay_s is not None and _edit_delay(mvd.get(p["source_version_id"], {})) > max_edit_delay_s:
+                continue
+            it = _merge_item(p, mvd, t_post, supplement_of=rid)
+            if it is None:
+                continue
+            if Reason.UNIT_SCALE_CONFLICT in (p.get("reason_codes") or []):
+                scale_rejected[pid] = "scale_not_unique"
+            supplements.append(it)
+    conditionals = []
+    for pid, p in plans.items():
+        checks = json.loads(p.get("checks") or "{}")
+        if p["kind"] == "entry_claimed" and checks.get("schema_version") == 2 and checks.get("op") == "open" \
+                and checks.get("time_ref") == "conditional" and not checks.get("time_ref_promoted") and p.get("instrument_id"):
+            it = _merge_item(p, mvd, t_post, conditional=True)
+            if it is not None:
+                conditionals.append(it)
+    for rid in roots:
+        if rid in pooled and Reason.PROMOTED_WIDE_ONLY in root_info[rid]["blocking"]:
+            it = _merge_item(plans[rid], mvd, t_post, conditional=True)
+            if it is not None:
+                conditionals.append(it)
+    links, merge_counts = _plan_merge.merge(items, supplements, conditionals=conditionals, stage=stage, supplement_window_s=supplement_window_s,
+                                            rejected_supplements=scale_rejected)
+    for rid in roots:
+        if rid not in links:  # out of the pool (v8e long edit, unknown clock): its own plan, never merged
+            links[rid] = _plan_merge.Link(pid=rid, kind="root", group=rid, kept=rid, family=rid)
+
+    def episode_of(pid: str | None) -> str | None:
+        return None if pid is None else stable_id("ep", graph_version, pid)[:32]
+
+    plan_link_rows: list[dict[str, Any]] = []
 
     ep_rows: list[dict[str, Any]] = []
     ev_rows: list[dict[str, Any]] = []
@@ -317,13 +594,44 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
         decision_eligible_at = t_dec = None
         a_star, dep_refs = plan_dependencies(root, mvd, rule_versions, index=dep_index)
         price_a_star, price_refs = plan_dependencies(root, mvd, rule_versions, purpose="price_check", index=dep_index)
-        # H1 默认不作决策根；仅当该版本在敏感性口径下已按最后编辑时刻定可见时刻时放行（假设写在 temporal_assumptions）。
-        h1 = root.get("time_grade") == "H1" and not json.loads(root_mv.get("temporal_assumptions") or "{}").get("edit_visible_at_last_edit")
-        if not is_orphan and not h1 and root["instrument_id"] is not None:
+        # v8 F2/F6/C0：保留单的字段来自同计划的其他消息；t_dec 取用到字段的消息里最晚的可见时刻（§2 deps）。
+        link = links.get(root_id) if not is_orphan else None
+        info = root_info.get(root_id, {})
+        eff = root
+        stop_src, injected = (root if root.get("stop") is not None else None), False
+        used = []
+        if link is not None and link.kind == "conditional_confirmed" and link.conditional_parent in plans:
+            parent = plans[link.conditional_parent]
+            eff = dict(root, instrument_id=parent["instrument_id"], side=parent["side"], entry=parent["entry"], entries=parent["entries"],
+                       entry_mode=parent.get("entry_mode"), checks=parent.get("checks"), stop=parent["stop"], tps=parent["tps"],
+                       expires_after_s=parent.get("expires_after_s") or root.get("expires_after_s"))
+            stop_src, injected = (parent if parent.get("stop") is not None else None), True
+            used = [link.conditional_parent]
+        elif link is not None and link.kept == root_id and link.dup_of is None:
+            eff = dict(root)
+            if link.stop_pid not in (None, root_id) and link.stop is not None:
+                eff["stop"] = plans[link.stop_pid]["stop"] if link.stop_pid in plans else link.stop
+                stop_src, injected = plans.get(link.stop_pid), True
+            if link.tps_pid not in (None, root_id) and link.tps_pid in plans and not root.get("tps"):
+                eff["tps"] = plans[link.tps_pid]["tps"]
+            used = [pid for pid in link.providers if pid != root_id and pid in plans]
+            if link.kind == "amend" and link.stop_pid not in (None, root_id) and root.get("stop") is None:
+                used.append(link.stop_pid)
+        for pid in used:
+            more, refs = plan_dependencies(plans[pid], mvd, rule_versions, index=dep_index)
+            a_star = None if (a_star is None or more is None) else max(a_star, more)
+            dep_refs = sorted(set(dep_refs) | set(refs))
+        # H1 默认不作决策根；仅当该版本在敏感性口径下已按最后编辑时刻（或 v8 主口径的原帖时刻）定可见时刻时放行。
+        root_ta = json.loads(root_mv.get("temporal_assumptions") or "{}")
+        h1 = root.get("time_grade") == "H1" and not (root_ta.get("edit_visible_at_last_edit") or root_ta.get("edit_visible_at_post"))
+        if not is_orphan and not h1 and eff["instrument_id"] is not None:
             decision_eligible_at = a_star
             t_dec = t_dec_of(a_star, processing_delay_s)
         p_state, c_state = "none", "unknown"
-        stop, tps = (root["stop"], list(root["tps"] or [])) if not is_orphan else (None, [])
+        stop, tps = (eff["stop"], list(eff["tps"] or [])) if not is_orphan else (None, [])
+        dec_stop_meta = _stop_meta(stop_src, injected=injected) if stop is not None else _stop_meta(None, injected=False)
+        if link is not None and link.kind == "amend" and injected and stop is not None:
+            dec_stop_meta["rule"] = "inherited_amend"  # F2：改单继承原单止损
         stop_event_id = None
         field_events = {}
         deleted_any = False
@@ -334,6 +642,23 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
         reasons: list[str] = list(root["reason_codes"] or [])
         if a_star is None:
             reasons.append(Reason.DEPENDENCY_NOT_AVAILABLE)
+        # v8 (F2/F3/F8/F11)：本口径下不执行的原因；全部写进 reason_codes，blocking 的同时关掉入场决策
+        v8_codes = list(info.get("blocks", []))
+        blocking = list(info.get("blocking", []))
+        if link is not None and link.dup_of is not None:
+            code = Reason.SAME_PLAN_RESTATEMENT if link.kind in _plan_merge.RESTATEMENT_KINDS else Reason.SAME_PLAN_COMPANION
+            v8_codes.append(code)
+            blocking.append(code)
+        anchor_t = t_post.get((root["channel_id"], root["message_id"]), root["available_at"])
+        signal_age = None
+        if t_dec is not None and anchor_t is not None:
+            age = t_dec - timedelta(seconds=processing_delay_s) - anchor_t
+            signal_age = _plan_merge.whole_seconds(age)
+            if age > timedelta(seconds=STALE_SIGNAL_S):
+                v8_codes.append(Reason.STALE_SIGNAL_30M)
+                blocking.append(Reason.STALE_SIGNAL_30M)
+        reasons.extend(c for c in v8_codes if c not in reasons)
+        stop_meta_now = dict(dec_stop_meta)
         grades = [root_mv.get("time_grade", "U")]
         claimed_outcome = None
         dec: dict[str, Any] = {"state": None, "stop": stop, "tps": [dict(t) for t in tps], "events": [], "invalid": 0, "grades": [grades[0]], "reasons": sorted(set(reasons))}
@@ -396,10 +721,18 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
             if action == "L":
                 payload["left_truncated_amend"] = True  # 只记录，不应用补丁（S09）
             supersedes = next(iter(correction_targets.values()), None)
-            if action in ("=", "move") and kind in ("amend", "stop_move") and p["stop"] is not None:
+            member_link = links.get(e["pid"]) if not e["root"] else None
+            rejected = member_link is not None and member_link.supplement_rejected is not None
+            if rejected:
+                payload["supplement_rejected"] = member_link.supplement_rejected  # F6：三道校验不过的补充止损不取价
+            if action in ("=", "move") and kind in ("amend", "stop_move") and p["stop"] is not None and not rejected:
                 payload["stop"] = {"old": stop, "new": p["stop"]}
+                had_stop = root.get("stop") is not None  # the root's own stop: a visible change is a move, not a supplement
                 stop = p["stop"]
                 supersedes = stop_event_id
+                stop_meta_now = _stop_meta(p, injected=True)
+                if had_stop and stop_meta_now["rule"] == "supplement":
+                    stop_meta_now["rule"] = None  # a visible move of an existing stop is an explicit price
             if action in ("=", "move") and kind in ("amend", "tp_ladder") and p["tps"]:
                 payload["tps"] = {"old": [t["level"] for t in tps], "new": [t["level"] for t in p["tps"]]}
                 tps = list(p["tps"])
@@ -427,6 +760,7 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
             grades.append(mvd.get(p["source_version_id"], {}).get("time_grade", "U"))
             if not description_only and t_dec is not None and decision_visible(e["edge_available_at"], t_dec):
                 dec.update({"state": (p_state, c_state), "stop": stop, "tps": [dict(t) for t in tps]})
+                dec_stop_meta = dict(stop_meta_now)
                 dec["events"].append((e["pid"], kind, action))
                 dec["invalid"] += int(action == "I")
                 dec["grades"].append(grades[-1])
@@ -441,16 +775,18 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
         right_censored, censor_at, censor_reason = False, None, None
         if p_state in ("none", "active") and c_state != "claimed_closed" and horizon is not None:
             right_censored, censor_at, censor_reason = True, min(horizon, obs_end), Reason.LABEL_RIGHT_CENSORED
-        elig = json.loads(root["eligibility_by_estimand"]) if root.get("eligibility_by_estimand") else {}
-        elig["entry_decision"] = t_dec is not None and root["instrument_id"] is not None and elig.get("execution", True)
+        elig = json.loads(eff["eligibility_by_estimand"]) if eff.get("eligibility_by_estimand") else {}
+        elig["entry_decision"] = t_dec is not None and eff["instrument_id"] is not None and elig.get("execution", True)
         elig["outcome"] = claimed_outcome is not None  # A13：有作者终态（全平/取消/到期）→ true，否则 false；决策视图恒 false
         if is_orphan or replay_required or h1:
             elig["execution"] = False
         if h1:
             elig["entry_decision"] = False  # 仅最终编辑版：原始入场隔离，不复活为可执行入场（S02）
+        if blocking:
+            elig["entry_decision"] = elig["execution"] = False
         if replay_required:
             elig = {k: False for k in ELIG_KEYS}
-        dec_plan = _order_plan(root, dec["stop"], dec["tps"], root.get("expires_after_s")) if (t_dec is not None) else None
+        dec_plan = _order_plan(eff, dec["stop"], dec["tps"], eff.get("expires_after_s"), stop_meta=dec_stop_meta) if (t_dec is not None) else None
         if dec_plan is None and t_dec is not None:
             elig["entry_decision"] = False
             elig["execution"] = False
@@ -470,14 +806,54 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
                     dec_audit_stratum = "repost_same_channel"
             if dec_group is None:
                 dec_group = "dg-" + stable_id("dg", root["source_version_id"])[:16]
-        root_elig = json.loads(root["eligibility_by_estimand"]) if root.get("eligibility_by_estimand") else {}
+        root_elig = json.loads(eff["eligibility_by_estimand"]) if eff.get("eligibility_by_estimand") else {}
         if price_a_star is None or t_dec is None or price_a_star >= t_dec:
             root_elig["price_check"] = False
         dec_elig = {"description": True, "outcome": False, "original_entry": root_elig.get("original_entry", True), "price_check": root_elig.get("price_check", True),
-                    "execution": bool(root_elig.get("execution", True)) and not is_orphan and not h1 and dec_plan_possible(root),
-                    "entry_decision": t_dec is not None and root["instrument_id"] is not None and bool(root_elig.get("execution", True)) and dec_plan_possible(root)}
+                    "execution": bool(root_elig.get("execution", True)) and not is_orphan and not h1 and dec_plan_possible(eff),
+                    "entry_decision": t_dec is not None and eff["instrument_id"] is not None and bool(root_elig.get("execution", True)) and dec_plan_possible(eff)}
+        if blocking:
+            dec_elig["entry_decision"] = dec_elig["execution"] = False
         if decision_replay_required:
             dec_elig = {k: False for k in ELIG_KEYS}
+        # v8 episode columns (§4)
+        plan_stop = (dec_plan or {}).get("stop")
+        promoted = info.get("promoted") or {}
+        seg = info.get("seg") or ""
+        tr = info.get("triage") or {}
+        venue = _plan_merge.venue_of(seg)
+        if venue == "unspecified" and tr.get("venue_hint") in ("perp", "spot", "coin_m", "unspecified"):
+            venue = tr["venue_hint"]
+        nostop_kind = None
+        if dec_plan is not None and plan_stop is None:
+            hint = json.loads(eff.get("checks") or "{}").get("nostop_hint")
+            if hint in NOSTOP_HINT_KINDS:
+                nostop_kind = hint
+            elif venue == "spot":
+                nostop_kind = "spot"
+            elif LOW_LEVERAGE_RE.search(seg):
+                nostop_kind = "declared_low_lev"
+            else:
+                nostop_kind = "contract_no_stop"
+        dep_versions = [root["source_version_id"]] + [plans[pid]["source_version_id"] for pid in used if pid in plans]
+        dep_rows = [mvd.get(v, {}) for v in dep_versions]
+        edit_delay = max((_edit_delay(r) for r in dep_rows), default=0)
+        h1_rows = [r for r in dep_rows if r.get("time_grade") == "H1"]
+        edit_original_unavailable = any(json.loads(r.get("temporal_assumptions") or "{}").get("edit_original_unavailable") for r in h1_rows)
+        may_contain_outcome = any(_edit_delay(r) > EDIT_OUTCOME_S and _cx_v2.RESULT_WORDS.search(r.get("text") or "") for r in h1_rows)
+        meta = dec_stop_meta if plan_stop is not None else _stop_meta(None, injected=False)
+        v8_cols = {
+            "plan_group_id": episode_of(link.group) if link else None, "family_id": episode_of(link.family) if link else None,
+            "dup_of": episode_of(link.dup_of) if link else None, "plan_link_kind": link.kind if link else None,
+            "repost_of": episode_of(link.repost_of) if link else None, "amend_of": episode_of(link.amend_of) if link else None,
+            "reentry_of": episode_of(link.reentry_of) if link else None, "reentry_parent_stop": link.reentry_parent_stop if link else None,
+            "stop_rule": meta["rule"], "stop_base": meta["base"], "stop_source_version_id": meta["svid"],
+            "nostop_kind": nostop_kind, "venue_hint": venue if not is_orphan else None, "triage_verdict": info.get("verdict"),
+            "triage_reason": tr.get("reason") if tr else None, "promotion_scope": promoted.get("scope"),
+            "signal_age_s": signal_age, "edit_delay_s": edit_delay, "signal_anchor": ("confirm" if link and link.kind == "conditional_confirmed" else "root") if t_dec is not None else None,
+            "edit_original_unavailable": edit_original_unavailable, "edit_may_contain_outcome": bool(may_contain_outcome),
+            "entry_legs_n": len(dec_plan["entries"]) if dec_plan else None, "time_ref_promoted": promoted.get("rule"),
+        }
         # 簇（契约 §9.7 A5）：v0 经济簇 = 可用于簇的复制组（近似组 usable_for_cluster=false 不算），否则单机会自成一簇（= episode_id）；决策视图用 t_dec 前可见成员
         dgr = dg_rows.get(root["source_version_id"])
         desc_group = dgr["duplicate_group_id"] if (dgr and dgr.get("usable_for_cluster", True) and len(dg_members.get(dgr["duplicate_group_id"], [])) > 1) else None
@@ -486,11 +862,11 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
         dec_deriv = stable_id("dec-deriv", graph_version, dec["events"], dec["state"], dec["stop"], [(t["level"], t.get("fraction")) for t in dec["tps"]], dec["invalid"], dec["reasons"], dec_grade, dec_group, dec_cluster_id, rule_versions) if dec["state"] else None
         snap = snapshot_hash(graph_version=graph_version, episode_id=episode_id, root_plan_id=root_id, t_dec=t_dec, dependency_ids=dep_refs,
                              fields={"order_plan": dec_plan, "state": dec["state"], "n_events": len(dec["events"]), "invalid": dec["invalid"], "reasons": dec["reasons"], "grade": dec_grade,
-                                     "dup_group": dec_group, "cluster": dec_cluster_id, "audit_stratum": dec_audit_stratum, "elig": dec_elig, "delay": processing_delay_s}, rule_versions=rule_versions) if dec_plan else None
+                                     "dup_group": dec_group, "cluster": dec_cluster_id, "audit_stratum": dec_audit_stratum, "elig": dec_elig, "delay": processing_delay_s, "v8": v8_cols}, rule_versions=rule_versions) if dec_plan else None
         deriv = stable_id("deriv", graph_version, [(e["pid"], e["kind"]) for e in evs], p_state, c_state, stop, [t["level"] for t in tps], rule_versions, obs_end)
         ep_rows.append({
             "episode_id": episode_id, "graph_version": graph_version, "predecessor_ids": [], "successor_ids": [], "channel_id": root["channel_id"], "trader_id": root_mv.get("author_id"),
-            "instrument_id": root["instrument_id"], "side": root["side"], "entry_branch_id": root_id, "duplicate_group_id": dg_rows.get(root["source_version_id"], {}).get("duplicate_group_id"), "cluster_id": cluster_id,
+            "instrument_id": eff["instrument_id"], "side": eff["side"], "entry_branch_id": root_id, "duplicate_group_id": dg_rows.get(root["source_version_id"], {}).get("duplicate_group_id"), "cluster_id": cluster_id,
             "author_plan_state": p_state, "author_claim_state": c_state, "entry_observed": entry_observed, "exit_observed": exit_observed, "left_truncated": is_orphan,
             "right_censored": right_censored, "censor_at": censor_at, "censor_reason": censor_reason, "time_grade_min": weakest(grades),
             "decision_eligible_at": decision_eligible_at, "t_dec": t_dec, "processing_delay_s": processing_delay_s, "order_plan": dec_plan, "decision_snapshot_hash": snap,
@@ -505,6 +881,7 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
             "deleted_after_observation_any": deleted_any,
             "root_plan_id": root_id, "root_source_version_id": root["source_version_id"], "root_message_id": root["message_id"], "replay_required": replay_required,
             "n_events": len(evs), "n_invalid_transitions": n_invalid, "reason_codes": sorted(set(reasons)), "rule_version": RULE_VERSION, "batch_id": batch_id,
+            **v8_cols,
             "event_time": root["event_time"], "available_at": max((e["edge_available_at"] for e in evs if e["edge_available_at"]), default=root["available_at"]), "ingested_at": ingested_at,
         })
         if a_star is None and not is_orphan:
@@ -519,6 +896,20 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
         qrows.append(quarantine_row(batch_id=batch_id, object_kind="canonical_plan", object_id=pid, object_version=p["source_version_id"], partition_id=f"channel={p['channel_id']}",
                                     reason_codes=sorted(set([Reason.ENTRY_LINK_AMBIGUOUS] + adj[pid]["reason_codes"])), rule_version=RULE_VERSION, schema_hash_=SCHEMA_HASH, source_refs={"message_id": p["message_id"]},
                                     event_time=p["event_time"], available_at=p["available_at"], ingested_at=ingested_at, field_path="link", observed_value_ref="unresolved", expected_contract="ADR-G1 §4"))
+    # v8 gold/plan_link: one row per entry branch and per supplement (F2/F6/F13 read it)
+    for pid, link in sorted(links.items()):
+        p = plans.get(pid)
+        if p is None:
+            continue
+        owner = link.supplement_of or pid
+        synth = link.synthetic[0] if link.synthetic else {}
+        plan_link_rows.append({
+            "channel_id": p["channel_id"], "message_id": p["message_id"], "source_version_id": p["source_version_id"], "branch_index": int(p.get("branch_index") or 0),
+            "episode_id": episode_of(owner), "kept_episode_id": episode_of(synth.get("target") or link.kept or owner),
+            "family_id": episode_of(link.family) if link.family else None, "plan_link_kind": link.kind if link.supplement_rejected is None else "supplement_rejected",
+            "target_message_id": link.target_message_id, "gap_s": link.gap_s, "synthetic_action": synth.get("action"), "synthetic_at": synth.get("at"),
+            "synthetic_stop_price": synth.get("stop"), "merge_version": _plan_merge.PLAN_MERGE_VERSION,
+            "event_time": p["event_time"], "available_at": p["available_at"], "ingested_at": ingested_at})
     # A terminal predecessor stays immutable; the new proposal owns a new episode and branch.
     for episode in ep_rows:
         root = plans[episode["root_plan_id"]]
@@ -569,6 +960,9 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
             op["sizing"]["qty"] = _dec(op["sizing"]["qty"])
         r["dec_stop"] = _dec(r["dec_stop"])
         r["dec_tps"] = [_dec(x) for x in r["dec_tps"]] if r["dec_tps"] is not None else None
+        r["reentry_parent_stop"], r["stop_base"] = _dec(r["reentry_parent_stop"]), _dec(r["stop_base"])
+    for row in plan_link_rows:
+        row["synthetic_stop_price"] = _dec(row["synthetic_stop_price"])
     episodes = pl.DataFrame(ep_rows, schema=EPISODE_SCHEMA) if ep_rows else pl.DataFrame(schema=EPISODE_SCHEMA)
     events = pl.DataFrame(ev_rows, schema=EVENT_SCHEMA) if ev_rows else pl.DataFrame(schema=EVENT_SCHEMA)
     # 记账（层 6）：输入 = 全部 canonical_plan（parser 行）；输出 = episode；管理归并 → merge 映射；未解决 → review
@@ -612,7 +1006,32 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
     summary.update(plan_source=plan_source, episode_sources=episode_sources,
                    n_disagreements=len(conflicts), disagreements=conflicts,
                    n_disagreement_episodes=len(conflict_episodes), disagreement_episode_ids=sorted(conflict_episodes))
+    summary["v8"] = v8_report(episodes, plan_link_rows, merge_counts, stage=stage)
+    summary["plan_link_rows"] = plan_link_rows
     return episodes, events, qrows, ledgers, summary
+
+
+def v8_report(episodes: pl.DataFrame, plan_link_rows: list[dict], merge_counts: dict[str, int], *, stage: int) -> dict[str, Any]:
+    """构建报告（方案 §8 第 5 步）：plan_link_kind、分诊、nostop_kind、stop_rule、STALE、PROMOTED_WIDE_ONLY、TRIAGE_MISSING 计数。"""
+    def counts(column: str) -> dict[str, int]:
+        if not episodes.height or column not in episodes.columns:
+            return {}
+        return {str(k): v for k, v in sorted(episodes.group_by(column).len().iter_rows(), key=lambda kv: str(kv[0]))}
+
+    codes: dict[str, int] = {}
+    for row in episodes.select("reason_codes").iter_rows() if episodes.height else []:
+        for code in row[0] or []:
+            if code in EXECUTION_BLOCKING:
+                codes[code] = codes.get(code, 0) + 1
+    kinds: dict[str, int] = {}
+    for row in plan_link_rows:
+        kinds[row["plan_link_kind"]] = kinds.get(row["plan_link_kind"], 0) + 1
+    decision = episodes.filter(pl.col("dec_eligibility").struct.field("entry_decision")) if episodes.height else episodes
+    return {"stage": stage, "merge_version": _plan_merge.PLAN_MERGE_VERSION, "plan_link_kind": dict(sorted(kinds.items())),
+            "merge_counters": {k: v for k, v in sorted(merge_counts.items()) if not k.startswith("kind:")},
+            "triage_verdict": counts("triage_verdict"), "nostop_kind": counts("nostop_kind"), "stop_rule": counts("stop_rule"),
+            "reason_codes": dict(sorted(codes.items())), "n_decision_entries": decision.height,
+            "n_decision_nostop": int(decision["nostop_kind"].is_not_null().sum()) if decision.height else 0}
 
 
 def _sig(df: pl.DataFrame, key: str) -> str:
@@ -621,8 +1040,41 @@ def _sig(df: pl.DataFrame, key: str) -> str:
     return stable_id(df.select(cols).sort(key).to_dicts())
 
 
+def triage_path(layout: Layout):
+    return layout.silver_dir / TRIAGE_FILE
+
+
+def load_triage(layout: Layout) -> tuple[pl.DataFrame | None, str, str | None]:
+    """The silver copy of the triage sidecar: (frame, rule version string, file sha256). No file → stage 1."""
+    from .lake import sha256_file
+    path = triage_path(layout)
+    if not path.exists():
+        return None, "", None
+    frame = pl.read_parquet(path)
+    sha = sha256_file(path)
+    schemas = sorted({str(v) for v in frame["triage_schema"].to_list() if v is not None}) if "triage_schema" in frame.columns else []
+    recordings = sorted({str(v) for v in frame["recording_version"].to_list() if v is not None}) if "recording_version" in frame.columns else []
+    version = f"sidecar:{sha[:16]}|schema:{','.join(schemas) or '-'}|recording:{','.join(recordings) or '-'}"
+    return frame, version, sha
+
+
+def silver_signature(layout: Layout) -> str:
+    """Every silver/bronze input of a graph (plans, edges, adjudications, copy groups, versions, extractions)."""
+    cp = pl.read_parquet(layout.canonical_plan)
+    cb = pl.read_parquet(layout.silver_dir / "candidate_edges.parquet")
+    jd = pl.read_parquet(layout.silver_dir / "adjudications.parquet")
+    dg = pl.read_parquet(layout.duplicate_group) if layout.duplicate_group.exists() else None
+    mv = pl.read_parquet(layout.message_version)
+    ex = pl.read_parquet(layout.extracted_event) if layout.extracted_event.exists() else pl.DataFrame()
+    return stable_id("silver", _sig(cp, "plan_id"), _sig(cb, "candidate_id"), _sig(jd, "request_id"), _sig(dg, "source_version_id") if dg is not None else 0,
+                     _sig(mv, "source_version_id"), _sig(ex, "extract_id") if ex.height else "")
+
+
+VARIANT_KEYS = ("wide", "supplement_window_s", "max_edit_delay_s")
+
+
 def input_hash_of(layout: Layout, *, ingested_at: datetime | None = None, registry_version: str = "registry-synthetic-v1", **kw) -> str:
-    """图版本输入 hash：全部 parser plan 列、候选边全列、裁决全列、复制组全列、规则版本、延迟/终点/H（S10）。"""
+    """图版本输入 hash：全部 parser plan 列、候选边全列、裁决全列、复制组全列、规则版本、延迟/终点/H（S10）；v8 加 sidecar 与变体开关。"""
     ingested_at = ingested_at or now_utc()
     cp = pl.read_parquet(layout.canonical_plan)
     cb = pl.read_parquet(layout.silver_dir / "candidate_edges.parquet")
@@ -633,7 +1085,8 @@ def input_hash_of(layout: Layout, *, ingested_at: datetime | None = None, regist
     mv_used = mv  # album members and intermediate parents are structural inputs too
     if not registry_version and "registry_version" in cp.columns and cp.height:
         registry_version = cp["registry_version"][0] or ""
-    rule_versions = {"normalize": _normalize.RULE_VERSION, "dedup": _dedup.RULE_VERSION, "extract": _extract.RULE_VERSION, "validate": _validate.RULE_VERSION, "linker": _linker.RULE_VERSION, "lifecycle": RULE_VERSION, "registry": registry_version}
+    _, triage_version, _ = load_triage(layout)
+    rule_versions = _rule_versions(registry_version, triage_version=triage_version, **{k: kw[k] for k in VARIANT_KEYS if k in kw})
     obs_end = kw.get("observation_end") or max((t for t in cp["available_at"].to_list() if t is not None), default=ingested_at)
     signature = stable_id("gin", _sig(cp, "plan_id"), _sig(cb, "candidate_id"), _sig(jd, "request_id"), _sig(dg, "source_version_id") if dg is not None else 0, _sig(mv_used, "source_version_id"), _sig(ex, "extract_id") if ex.height else "",
                      rule_versions, kw.get("processing_delay_s", DEFAULT_PROCESSING_DELAY_S), obs_end.isoformat(), kw.get("horizon_s", HORIZON_S))
@@ -642,7 +1095,29 @@ def input_hash_of(layout: Layout, *, ingested_at: datetime | None = None, regist
     return signature
 
 
-def run(layout: Layout, *, graph_version: str, ingested_at: datetime | None = None, registry_version: str = "registry-synthetic-v1", **kw) -> dict[str, Any]:
+def like_settings(layout: Layout, like: str) -> dict[str, Any]:
+    """`--like <gv>`: read plan_source / registry / sidecar sha of a published graph and assert the silver inputs are the same."""
+    from .graph import resolve_alias
+    resolved = resolve_alias(layout, like)
+    doc = read_manifest(layout, resolved)
+    if doc is None:
+        raise RuntimeError(f"--like {like}: 没有已发布的 manifest（{resolved}）")
+    a = doc.get("assumptions") or {}
+    for k in ("plan_source", "registry_version", "silver_signature"):
+        if k not in a:
+            raise RuntimeError(f"--like {resolved}: manifest 缺 {k}（v8 之前的图不能作变体基准）")
+    now = silver_signature(layout)
+    if now != a["silver_signature"]:
+        raise RuntimeError(f"--like {resolved}: silver 输入签名不一致（{now[:12]} ≠ {a['silver_signature'][:12]}），变体只能重算同一 silver 的 gold")
+    _, _, sha = load_triage(layout)
+    if sha != a.get("triage_sidecar_sha256"):
+        raise RuntimeError(f"--like {resolved}: triage sidecar sha 不一致（{sha} ≠ {a.get('triage_sidecar_sha256')}）")
+    return {"plan_source": a["plan_source"], "registry_version": a["registry_version"], "like": resolved}
+
+
+def run(layout: Layout, *, graph_version: str, ingested_at: datetime | None = None, registry_version: str = "registry-synthetic-v1",
+        variant_only: bool = False, **kw) -> dict[str, Any]:
+    """variant_only=True（lifecycle --like）：只写 gold、manifest、plan_link 与 plan_source 汇总，不写第 6 层损耗/映射、隔离与复核表。"""
     if is_tombstoned(layout, graph_version):
         raise RuntimeError(f"graph_version={graph_version} 已 tombstone，不可重写；请用新版本号")
     ingested_at = ingested_at or now_utc()
@@ -656,45 +1131,92 @@ def run(layout: Layout, *, graph_version: str, ingested_at: datetime | None = No
     if old is not None and old.get("input_hash") != input_hash:
         raise RuntimeError(f"graph_version={graph_version} 已发布且输入不同（不可变派生版本）：换新版本号；不提供 force")
     ex = pl.read_parquet(layout.extracted_event) if layout.extracted_event.exists() else None
-    episodes, events, qrows, ledgers, summary = build_graph(cp, mv, cb, jd, dg, graph_version=graph_version, registry_version=registry_version, ingested_at=ingested_at, extracted_event=ex, **kw)
+    triage, triage_version, triage_sha = load_triage(layout)
+    episodes, events, qrows, ledgers, summary = build_graph(cp, mv, cb, jd, dg, graph_version=graph_version, registry_version=registry_version, ingested_at=ingested_at,
+                                                            extracted_event=ex, triage=triage, triage_version=triage_version, **kw)
+    plan_link_rows = summary.pop("plan_link_rows")
     layout.ensure()
     old_ep = pl.read_parquet(layout.episode(graph_version)) if layout.episode(graph_version).exists() else None
     old_ev = pl.read_parquet(layout.episode_event(graph_version)) if layout.episode_event(graph_version).exists() else None
     write_parquet_atomic(preserve_ingested_at(episodes, old_ep, "episode_id"), layout.episode(graph_version))
     write_parquet_atomic(preserve_ingested_at(events, old_ev, "event_id"), layout.episode_event(graph_version))
-    append_quarantine(layout.quarantine_path, qrows)
+    links = pl.DataFrame(plan_link_rows, schema=PLAN_LINK_SCHEMA) if plan_link_rows else pl.DataFrame(schema=PLAN_LINK_SCHEMA)
+    write_parquet_atomic(links, plan_link_path(layout, graph_version))
     batch_id = summary["batch_id"]
-    lrows, maps = [], []
-    for key in sorted(ledgers, key=lambda k: (k[0], k[1])):
-        row, _ = loss_row_from_ledger(ledgers[key], batch_id=batch_id, cum_excluded_prev=cum_prev(layout, batch_id, (1, 2, 3, 4, 5), ledgers[key].stratum), rule_version=RULE_VERSION, schema_hash_=SCHEMA_HASH, clocks=(episodes["event_time"].max() if episodes.height else None, episodes["available_at"].max() if episodes.height else None, ingested_at))
-        lrows.append(row)
-        maps += mapping_rows(ledgers[key], batch_id=batch_id, rule_version=RULE_VERSION, ingested_at=ingested_at)
-    write_loss(layout.loss(batch_id), lrows, replace_layers={6})
-    write_mapping(layout.mapping(batch_id, 6), maps)
-    from .graph import record_migration
-    for episode in episodes.iter_rows(named=True):
-        if episode["migration_reason"] == "reopen":
-            record_migration(layout, old_graph_version=graph_version, new_graph_version=graph_version, predecessor_ids=episode["predecessor_ids"], successor_ids=[episode["episode_id"]], reason="reopen", approved_by=RULE_VERSION, at=episode["t_dec"] or ingested_at)
+    if not variant_only:
+        append_quarantine(layout.quarantine_path, qrows)
+        lrows, maps = [], []
+        for key in sorted(ledgers, key=lambda k: (k[0], k[1])):
+            row, _ = loss_row_from_ledger(ledgers[key], batch_id=batch_id, cum_excluded_prev=cum_prev(layout, batch_id, (1, 2, 3, 4, 5), ledgers[key].stratum), rule_version=RULE_VERSION, schema_hash_=SCHEMA_HASH, clocks=(episodes["event_time"].max() if episodes.height else None, episodes["available_at"].max() if episodes.height else None, ingested_at))
+            lrows.append(row)
+            maps += mapping_rows(ledgers[key], batch_id=batch_id, rule_version=RULE_VERSION, ingested_at=ingested_at)
+        write_loss(layout.loss(batch_id), lrows, replace_layers={6})
+        write_mapping(layout.mapping(batch_id, 6), maps)
+        from .graph import record_migration
+        for episode in episodes.iter_rows(named=True):
+            if episode["migration_reason"] == "reopen":
+                record_migration(layout, old_graph_version=graph_version, new_graph_version=graph_version, predecessor_ids=episode["predecessor_ids"], successor_ids=[episode["episode_id"]], reason="reopen", approved_by=RULE_VERSION, at=episode["t_dec"] or ingested_at)
     from .cx_batch import save_build_review, write_json
-    save_build_review(layout, graph_version, cp, mv, episodes, kw.get("plan_source", "parser"), events=events)
+    if not variant_only:
+        save_build_review(layout, graph_version, cp, mv, episodes, kw.get("plan_source", "parser"), events=events)
     summary["input_hash"] = input_hash
     write_json(layout.gold_dir / f"plan_source__{graph_version}.json", summary)
-    publish_manifest(layout, graph_version, input_hash=input_hash, rule_versions=summary["rule_versions"], assumptions={"processing_delay_s": summary["processing_delay_s"], "observation_end": summary["observation_end"], "horizon_s": kw.get("horizon_s", HORIZON_S), "plan_source": kw.get("plan_source", "parser")},
+    assumptions = {"processing_delay_s": summary["processing_delay_s"], "observation_end": summary["observation_end"], "horizon_s": kw.get("horizon_s", HORIZON_S),
+                   "plan_source": kw.get("plan_source", "parser"), "registry_version": registry_version, "silver_signature": silver_signature(layout),
+                   "triage_sidecar_sha256": triage_sha, "plan_link_signature": stable_id("plan-link", links.to_dicts()),
+                   "wide": bool(kw.get("wide", False)), "supplement_window_s": int(kw.get("supplement_window_s", _plan_merge.DEFAULT_SUPPLEMENT_S)),
+                   "max_edit_delay_s": kw.get("max_edit_delay_s"), "variant_only": variant_only}
+    publish_manifest(layout, graph_version, input_hash=input_hash, rule_versions=summary["rule_versions"], assumptions=assumptions,
                      counts={"episodes": episodes.height, "events": events.height, "decision_roots": summary["n_decision_roots"]}, built_at=ingested_at)
-    summary["paths"] = {"episode": str(layout.episode(graph_version)), "episode_event": str(layout.episode_event(graph_version))}
+    summary["paths"] = {"episode": str(layout.episode(graph_version)), "episode_event": str(layout.episode_event(graph_version)),
+                        "plan_link": str(plan_link_path(layout, graph_version))}
     return summary
+
+
+def plan_link_path(layout: Layout, graph_version: str):
+    return layout.gold_dir / f"plan_link__{graph_version}.parquet"
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="链接后重放双轨状态机，落 gold/episode 与 episode_event 并发布 manifest")
-    ap.add_argument("--plan-source", choices=["parser", "llm", "reconciled"], default="parser")
+    ap.add_argument("--plan-source", choices=["parser", "llm", "reconciled"], help="不带 --like 时必填")
+    ap.add_argument("--registry-version", help="不带 --like 时必填（品种登记版本）")
+    ap.add_argument("--like", help="从该图的 manifest 读 plan_source/registry/sidecar sha，断言 silver 输入一致，只重算 gold（变体）")
+    ap.add_argument("--wide", action="store_true", help="宽口径 -v8w：执行存疑/缺失分诊与只进宽口径的升级根")
+    ap.add_argument("--supplement-window-s", type=int, default=_plan_merge.DEFAULT_SUPPLEMENT_S, help="补止损合并窗口（主口径 1800；-v8nw 取 0）")
+    ap.add_argument("--max-edit-delay-s", type=int, help="-v8e：编辑延迟超过它的 H1 版本先移出合并池，不当决策根（STALE_EDIT_30M）")
     ap.add_argument("--graph-version", required=True)
+    ap.add_argument("--alias", action="store_true", help="graph-version 作别名：发布不可变版本 <alias>@<hash8> 并移动别名")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--out")
     g.add_argument("--lake-root")
     a = ap.parse_args(argv)
     layout = Layout.flat(a.out) if a.out else Layout.from_root(a.lake_root)
-    print(json.dumps(run(layout, graph_version=a.graph_version, plan_source=a.plan_source), ensure_ascii=False, indent=2, default=str))
+    variant = {"wide": a.wide, "supplement_window_s": a.supplement_window_s}
+    if a.max_edit_delay_s is not None:
+        variant["max_edit_delay_s"] = a.max_edit_delay_s
+    if a.like:
+        settings = like_settings(layout, a.like)
+        if a.plan_source and a.plan_source != settings["plan_source"]:
+            ap.error(f"--plan-source {a.plan_source} 与 --like 的 {settings['plan_source']} 不一致")
+        if a.registry_version and a.registry_version != settings["registry_version"]:
+            ap.error(f"--registry-version {a.registry_version} 与 --like 的 {settings['registry_version']} 不一致")
+        plan_source, registry_version, variant_only = settings["plan_source"], settings["registry_version"], True
+    else:
+        if not a.plan_source or a.registry_version is None:
+            ap.error("不带 --like 时必须显式给 --plan-source 和 --registry-version（不再默认 parser / registry-synthetic-v1）")
+        plan_source, registry_version, variant_only = a.plan_source, a.registry_version, False
+    kwargs = dict(plan_source=plan_source, **variant)
+    gv = a.graph_version
+    if a.alias:
+        from .graph import set_alias
+        ih = input_hash_of(layout, registry_version=registry_version, **kwargs)
+        gv = f"{a.graph_version}@{ih[:8]}"
+    out = run(layout, graph_version=gv, registry_version=registry_version, variant_only=variant_only, **kwargs)
+    if a.alias:
+        set_alias(layout, a.graph_version, gv)
+        out["alias"] = {a.graph_version: gv}
+    print(json.dumps(out, ensure_ascii=False, indent=2, default=str))
     return 0
 
 

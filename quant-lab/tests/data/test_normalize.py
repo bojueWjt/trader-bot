@@ -280,3 +280,32 @@ def test_h1_edit_visible_sensitivity_uses_last_edit_not_post_time(tmp_path):
     assert r["time_grade"] == "H1" and r["available_at"] == datetime(2024, 4, 2, 10, 20, tzinfo=UTC)
     assert ta["clock"] == "last_edit_at" and ta["edit_visible_at_last_edit"] is True
     assert "VERSION_TIME_UNKNOWN" not in r["reason_codes"]
+
+
+def test_h1_edit_visible_at_post_is_the_v8_main_clock(tmp_path):
+    """v8 F8 (D5): the final version of an edited message is visible at its original post time + 60 s; event_time is the
+    post time; the edit delay and the unavailable original are written down. Without the flag nothing changes."""
+    import shutil
+    fx = tmp_path / "fx"
+    shutil.copytree(FIX / "AlphaSignals", fx / "AlphaSignals")
+    (fx / "AlphaSignals" / "export_manifest.json").unlink()
+    post = Layout.flat(tmp_path / "post")
+    normalize.run(fx, post, ingested_at=datetime(2026, 9, 11, tzinfo=UTC), edit_visible_at_post=True)
+    d = pl.read_parquet(post.message_version)
+    r = d.filter((pl.col("source_id").struct.field("message_id") == A["CE1_edited_sl"])).row(0, named=True)
+    ta = json.loads(r["temporal_assumptions"])
+    assert r["time_grade"] == "H1" and r["available_at"] == datetime(2024, 4, 2, 10, 1, tzinfo=UTC)
+    assert r["event_time"] == datetime(2024, 4, 2, 10, 0, tzinfo=UTC)
+    assert ta["clock"] == "message_date+freeze_delay:edit_at_post" and ta["edit_visible_at_post"] is True
+    assert ta["edit_delay_s"] == 1200 and ta["edit_original_unavailable"] is True
+    assert "VERSION_TIME_UNKNOWN" not in r["reason_codes"]
+    legacy = Layout.flat(tmp_path / "legacy")
+    normalize.run(fx, legacy, ingested_at=datetime(2026, 9, 11, tzinfo=UTC))
+    old = pl.read_parquet(legacy.message_version)
+    o = old.filter((pl.col("source_id").struct.field("message_id") == A["CE1_edited_sl"])).row(0, named=True)
+    assert "edit_delay_s" not in json.loads(o["temporal_assumptions"]) and "edit_visible_at_post" not in json.loads(o["temporal_assumptions"])
+    assert o["available_at"] is None and "VERSION_TIME_UNKNOWN" in o["reason_codes"]
+    unedited = d.filter(pl.col("time_grade") != "H1").drop("ingested_at", "batch_id").sort("source_version_id")
+    assert unedited.equals(old.filter(pl.col("time_grade") != "H1").drop("ingested_at", "batch_id").sort("source_version_id"))
+    with pytest.raises(ValueError):
+        normalize.run(fx, Layout.flat(tmp_path / "both"), edit_visible_at_post=True, edit_visible_at_last_edit=True)

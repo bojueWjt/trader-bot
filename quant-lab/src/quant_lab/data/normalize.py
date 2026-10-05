@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import pathlib
 import shutil
 import unicodedata
@@ -152,11 +153,15 @@ def normalize_messages(
     freeze_delay_s: int = DEFAULT_FREEZE_DELAY_S,
     ingested_at: datetime | None = None,
     edit_visible_at_last_edit: bool = False,
+    edit_visible_at_post: bool = False,
 ) -> tuple[pl.DataFrame, list[dict[str, Any]], dict[tuple[int, str], LayerLedger], str]:
     """核心：RawMessage 列表 → (message_version df, quarantine rows, 分层记账, batch_id)。"""
+    if edit_visible_at_last_edit and edit_visible_at_post:
+        raise ValueError("edit_visible_at_last_edit 与 edit_visible_at_post 互斥")
     ingested_at = ingested_at or now_utc()
     raw_hashes = sorted({m.raw_hash for m in msgs})
-    batch_id = "tg-" + stable_id(raw_hashes, RULE_VERSION, freeze_delay_s, *(["edit-visible"] if edit_visible_at_last_edit else []))[:12]
+    batch_id = "tg-" + stable_id(raw_hashes, RULE_VERSION, freeze_delay_s, *(["edit-visible"] if edit_visible_at_last_edit else []),
+                                 *(["edit-at-post"] if edit_visible_at_post else []))[:12]
     delay = timedelta(seconds=freeze_delay_s)
     albums = _infer_albums(msgs)
     # 同一原始文件内同 message_id 且同证据时刻却内容不同 = 键冲突（多版本快照有不同证据时刻，不算冲突）
@@ -242,7 +247,16 @@ def normalize_messages(
             assumptions["clock"] = "export_snapshot_at" if m.export_snapshot_at else "unknown"
             assumptions["edit_original_unavailable"] = True
             assumptions["original_message_date"] = m.message_date.isoformat() if m.message_date else None
-            if edit_visible_at_last_edit and m.last_edit_at is not None and not m.edit_time_problem:
+            if edit_visible_at_post and m.message_date is not None:
+                if m.last_edit_at is not None and not m.edit_time_problem:
+                    assumptions["edit_delay_s"] = math.ceil((m.last_edit_at - m.message_date).total_seconds())  # never shorter than it was
+                # v8 主口径（D5）：编辑后的最终版按原帖时刻可见（message_date + freeze_delay），event_time 取原帖时刻。
+                # 编辑内容的前视由 G1 变体图 -v8e（--max-edit-delay-s）并列报告，这里只写明假设与编辑延迟。
+                event_time = m.message_date
+                available_at = m.message_date + delay
+                assumptions["clock"] = "message_date+freeze_delay:edit_at_post"
+                assumptions["edit_visible_at_post"] = True
+            elif edit_visible_at_last_edit and m.last_edit_at is not None and not m.edit_time_problem:
                 # 敏感性口径（默认关）：Telegram 的 edited 是最后一次编辑时刻，最终版自那一刻起可见。
                 # 仍是 H1、仍隔离原始入场；只把"最终版何时可见"从导出快照提前到最后编辑时刻，并写明假设。
                 available_at = m.last_edit_at
@@ -320,7 +334,7 @@ def normalize_messages(
     return df, qrows, ledgers, batch_id
 
 
-def run(fixture_dir: pathlib.Path, layout: Layout, *, freeze_delay_s: int = DEFAULT_FREEZE_DELAY_S, ingested_at: datetime | None = None, tdesktop_only: bool = False, allowed_peer_ids: frozenset[int] | None = None, extra_messages: Sequence[RawMessage] | None = None, source_messages: Sequence[RawMessage] | None = None, edit_visible_at_last_edit: bool = False) -> dict[str, Any]:
+def run(fixture_dir: pathlib.Path, layout: Layout, *, freeze_delay_s: int = DEFAULT_FREEZE_DELAY_S, ingested_at: datetime | None = None, tdesktop_only: bool = False, allowed_peer_ids: frozenset[int] | None = None, extra_messages: Sequence[RawMessage] | None = None, source_messages: Sequence[RawMessage] | None = None, edit_visible_at_last_edit: bool = False, edit_visible_at_post: bool = False) -> dict[str, Any]:
     """读导出 → 归一 → 落盘（追加去重、不重编号、保留首次 ingested_at）→ 损耗/映射 → manifest。"""
     layout.ensure()
     ingested_at = ingested_at or now_utc()
@@ -328,7 +342,7 @@ def run(fixture_dir: pathlib.Path, layout: Layout, *, freeze_delay_s: int = DEFA
     if extra_messages:
         msgs.extend(extra_messages)
     df, qrows, ledgers, batch_id = normalize_messages(msgs, layout, freeze_delay_s=freeze_delay_s, ingested_at=ingested_at,
-                                                      edit_visible_at_last_edit=edit_visible_at_last_edit)
+                                                      edit_visible_at_last_edit=edit_visible_at_last_edit, edit_visible_at_post=edit_visible_at_post)
     added = df.height
     if layout.message_version.exists():
         old = pl.read_parquet(layout.message_version)

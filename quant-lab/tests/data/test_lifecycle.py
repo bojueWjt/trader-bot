@@ -502,3 +502,20 @@ def test_edit_visible_sensitivity_revives_h1_at_last_edit_time_only_when_opted_i
     assert r["time_grade_min"] == "H1" and r["t_dec"] == t_dec_of(datetime(2024, 4, 2, 10, 20, tzinfo=UTC))
     assert r["eligibility_by_estimand"]["original_entry"] is False and "EDIT_ORIGINAL_UNAVAILABLE" in r["reason_codes"]
     assert _ep(ep, "A", A["CE1_edited_sl"])["t_dec"] is None
+
+
+def test_v8_edit_visible_at_post_decides_at_post_time_and_copies_the_triage_sidecar(tmp_path):
+    """v8 main clock (D5): an edited H1 root decides at message_date + 60 s + 1 s and carries its edit delay; the triage
+    sidecar is copied into silver, enters the input hash and is recorded in the manifest."""
+    from quant_lab.data.graph import read_manifest
+    sidecar = tmp_path / "triage.parquet"
+    pl.DataFrame({"source_version_id": ["none"], "branch_index": [0], "verdict": ["new_entry"], "triage_schema": ["cx.triage.v1"],
+                  "recording_version": ["rec-1"]}).write_parquet(sidecar)
+    layout, res = _build(tmp_path / "post", gv="fixture-post", edit_visible_at_post=True, triage_sidecar=sidecar)
+    r = _ep(pl.read_parquet(layout.episode("fixture-post")), "A", A["CE1_edited_sl"])
+    assert r["time_grade_min"] == "H1" and r["t_dec"] == datetime(2024, 4, 2, 10, 1, 1, tzinfo=UTC)
+    assert r["signal_age_s"] == 0 and r["edit_delay_s"] == 1200 and r["edit_original_unavailable"] is True
+    assert list((layout.gold_dir.parent / "_build").glob("*/silver/" + lifecycle.TRIAGE_FILE))  # the scoped build silver
+    doc = read_manifest(layout, "fixture-post")
+    assert doc["assumptions"]["triage_sidecar_sha256"] and doc["rule_versions"]["triage"].startswith("sidecar:")
+    assert res["lifecycle"]["v8"]["stage"] == 2

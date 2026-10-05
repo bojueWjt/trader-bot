@@ -50,8 +50,10 @@ def action_overridden(row, llm_rows):
 
 
 def descriptive_only(row):
+    """A v2 action that is not a current one describes only; a promoted open (F11, E1) counts as current."""
+    from .cx_v2 import effective_time_ref
     checks = json.loads(row.get("checks") or "{}")
-    return checks.get("schema_version") == 2 and checks.get("time_ref") != "now"
+    return checks.get("schema_version") == 2 and effective_time_ref(checks) != "now"
 
 
 def select_plans(cp: pl.DataFrame, plan_source: str = "parser", ex: pl.DataFrame | None = None) -> pl.DataFrame:
