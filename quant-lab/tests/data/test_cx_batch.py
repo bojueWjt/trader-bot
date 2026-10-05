@@ -105,7 +105,8 @@ def test_batches_resume_journal_and_mutants(tmp_path, fake_codex):
         assert len(list(cx.read_jsonl(output / "responses.jsonl"))) == 5
     invariant(cx.run_batches)
     with pytest.raises(AssertionError):
-        invariant(mutant(cx.run_batches, 'if k not in completed]', 'if True]'))
+        # (the earlier mutant string 'if k not in completed]' no longer occurred in run_batches, so it raised vacuously)
+        invariant(mutant(cx.run_batches, 'if k not in completed or _transport_failed(completed[k])]', 'if True]'))
     broken = mutant(cx.length_batches, 'len(batch) >= batch_size or size + length > max_chars', 'False')
     with pytest.raises(AssertionError):
         assert len(list(broken(list(cx.read_jsonl(path)), 2))) == 3
@@ -240,8 +241,11 @@ def test_export_versions_strata_context_and_mutants(tmp_path, monkeypatch):
         row = next(r for r in cx.read_jsonl(path) if r["source_version_id"] == "s1")
         assert row["previous_text"] == TEXT
     context_invariant(cx.export_prompts)
-    with pytest.raises(AssertionError):
-        context_invariant(mutant(cx.export_prompts, 'p["available_at"] <= cutoff', 'True'))
+    # v8 F7: the parent rule lives in extract.reply_context, shared with extract_frame.
+    with monkeypatch.context() as patch:
+        patch.setattr(extract, "reply_context", mutant(extract.reply_context, 'p["available_at"] <= row["available_at"]', 'True'))
+        with pytest.raises(AssertionError):
+            context_invariant(cx.export_prompts)
     def sample_invariant():
         cx.export_prompts(layout, path, sample=2, seed=7)
         assert {r["channel_id"] for r in cx.read_jsonl(path)} == {CHANNEL, OTHER}
@@ -587,3 +591,203 @@ def test_revalidate_reuses_raw_output_without_calling_the_model(tmp_path, fake_c
         doc["error"] = "codex_timeout"
         metrics.write_text(json.dumps(doc))
     assert cx.revalidate_raw(path, run, tmp_path / "none")["missing"] == 3
+
+
+# ---------------------------------------------------------------- v8 F5a: revalidate from stdout captures
+def v2_items(keys, value=100):
+    action = {"op": "open", "time_ref": "now", "symbol_raw": "BTC", "side": "long",
+              "entry": {"kind": "limit", "price": {"value": str(value), "quote": f"入场 {value}"}, "lo": None, "hi": None, "levels": []},
+              "stop": {"kind": "price", "price": {"value": "90", "quote": "止损 90"}, "condition": None},
+              "tps": [{"kind": "price", "value": {"value": "110", "quote": "110"}}], "field_issues": []}
+    return [{"key": k, "schema_version": 2, "actions": [action]} for k in keys]
+
+
+def v2_prompt_rows(path, n=3):
+    rows = []
+    for i in range(n):
+        system, user = cx_v2_build(TEXT, i)
+        rows.append(dict(key=record_key(system, user, "cx.actions.v2"), system=system, user=user, schema_name="cx.actions.v2",
+                         source_version_id=f"s{i}", channel_id=CHANNEL, text=TEXT, has_image=False, previous_text=None))
+    path.write_text("".join(cx.dumps(r) + "\n" for r in rows))
+    return rows
+
+
+def cx_v2_build(text, i):
+    from quant_lab.data import cx_v2
+    return cx_v2.build_prompt(text, channel_name="仿写频道", message_date=(T0 + timedelta(minutes=i)).isoformat())
+
+
+def test_revalidate_reads_stdout_like_json_and_skips_appledouble(tmp_path):
+    import os
+    path = tmp_path / "prompts"
+    rows = v2_prompt_rows(path)
+    keys = [r["key"] for r in rows]
+    as_json, as_stdout = tmp_path / "json-run", tmp_path / "stdout-run"
+    for run in (as_json, as_stdout):
+        (run / "raw").mkdir(parents=True)
+    envelope = {"items": v2_items(keys)}
+    (as_json / "raw" / "b-0.json").write_text(json.dumps(envelope))
+    (as_json / "raw" / "b-0.metrics.json").write_text(json.dumps({"error": None}))
+    # Codex echoes logs and partial JSON before the final envelope; the last complete one wins.
+    noise = 'codex log {"items": [broken\n' + json.dumps({"items": v2_items(keys, 999)}) + "\nthinking...\n"
+    (as_stdout / "raw" / "b-0.stdout.txt").write_text(noise + json.dumps(envelope) + "\ntokens used\n1,234\n")
+    (as_stdout / "raw" / "._b-0.stdout.txt").write_bytes(b"\x00\x05\x16\x07AppleDouble")
+    (as_stdout / "raw" / "c-0.stdout.txt").write_text('{"items": [')  # one corrupt capture never stops the rest
+    from_json = cx.revalidate_raw(path, as_json, tmp_path / "out-json")
+    from_stdout = cx.revalidate_raw(path, as_stdout, tmp_path / "out-stdout")
+    assert from_json["missing"] == from_stdout["missing"] == 0
+    assert from_stdout["skipped_appledouble"] == 1 and from_stdout["unreadable"] == 1 and from_stdout["stdout_only"] == 2
+    assert list(cx.read_jsonl(tmp_path / "out-json" / "responses.jsonl")) == list(cx.read_jsonl(tmp_path / "out-stdout" / "responses.jsonl"))
+    # Two captures of one key: the newer (mtime_ns, name) answer is used.
+    newer = as_stdout / "raw" / "d-0.stdout.txt"
+    newer.write_text(json.dumps({"items": v2_items(keys[:1], 101)}))
+    old = (as_stdout / "raw" / "b-0.stdout.txt").stat().st_mtime_ns
+    os.utime(newer, ns=(old + 10**9, old + 10**9))
+    cx.revalidate_raw(path, as_stdout, tmp_path / "out-newer")
+    got = {r["key"]: r for r in cx.read_jsonl(tmp_path / "out-newer" / "responses.jsonl")}
+    assert got[keys[0]]["response"]["actions"][0]["entry"]["price"] is None  # 101 is not in the text: rejected, but it was read
+    assert got[keys[1]]["response"]["actions"][0]["entry"]["price"]["value"] == "100"
+    # A json beside its stdout is authoritative.
+    (as_json / "raw" / "b-0.stdout.txt").write_text(json.dumps({"items": v2_items(keys, 999)}))
+    cx.revalidate_raw(path, as_json, tmp_path / "out-both")
+    assert list(cx.read_jsonl(tmp_path / "out-both" / "responses.jsonl")) == list(cx.read_jsonl(tmp_path / "out-json" / "responses.jsonl"))
+    # A recorded failure is skipped for a stdout capture too.
+    (as_stdout / "raw" / "d-0.metrics.json").write_text(json.dumps({"error": "codex_transport_or_batch_format"}))
+    assert cx.revalidate_raw(path, as_stdout, tmp_path / "out-failed")["failed_attempts"] == 1
+
+
+# ---------------------------------------------------------------- v8 side passes (SIDE_PASSES registry)
+SIDE_TEXT = "仿写 BTC 6万6附近接多，止损6万5"
+
+
+def numfill_rows(path, n=2):
+    from quant_lab.data import cx_numfill
+    rows = []
+    for i in range(n):
+        targets = [dict(branch_index=0, op="open", symbol="BTC", side="long", field="entry.price", known=["65000"])]
+        system, user = cx_numfill.build_prompt(SIDE_TEXT, channel_name="仿写频道", message_date=f"2024-07-01T00:0{i}:00+00:00",
+                                               source_key=f"main-{i}", targets=targets)
+        rows.append(dict(key=record_key(system, user, cx_numfill.SCHEMA_NAME), system=system, user=user, schema_name=cx_numfill.SCHEMA_NAME,
+                         source_version_id=f"s{i}", channel_id=CHANNEL, text=SIDE_TEXT, has_image=False, previous_text=None))
+    path.write_text("".join(cx.dumps(r) + "\n" for r in rows))
+    return rows
+
+
+@pytest.fixture
+def fake_side_codex(tmp_path, monkeypatch):
+    script, capture = tmp_path / "fake-side-codex", tmp_path / "side-calls.jsonl"
+    script.write_text(f'''#!{sys.executable}
+import json, os, pathlib, sys
+args = sys.argv[1:]
+schema = json.loads(pathlib.Path(args[args.index("--output-schema") + 1]).read_text())
+data = json.loads(sys.stdin.read())
+with open(os.environ["CX_CAPTURE"], "a") as stream:
+    stream.write(json.dumps({{"schema": schema, "instructions": data["instructions"], "messages": data["messages"]}}) + "\\n")
+items = []
+for message in data["messages"]:
+    fills = [{{"branch_index": t["branch_index"], "field": t["field"], "value": {{"value": "66000", "quote": "6万6"}}}} for t in message["targets"]]
+    fills.append({{"branch_index": 0, "field": "stop.price", "value": {{"value": "65000", "quote": "6万5"}}}})
+    items.append({{"key": message["key"], "schema_version": "cx.numfill.v1", "fills": fills}})
+pathlib.Path(args[args.index("-o") + 1]).write_text(json.dumps({{"items": items}}))
+''')
+    script.chmod(0o700)
+    monkeypatch.setenv("CX_CAPTURE", str(capture))
+    return script, capture
+
+
+def test_side_pass_batches_use_their_own_schema_rules_contexts_and_import_version(tmp_path, fake_side_codex):
+    from quant_lab.data import cx_numfill
+    script, capture = fake_side_codex
+    path, run = tmp_path / "prompts", tmp_path / "run"
+    rows = numfill_rows(path)
+    report = cx.run_batches(path, run, executable=str(script), batch_size=5, backoff=0)
+    assert report["abstained"] == 0
+    call = calls(capture)[0]
+    assert call["schema"] == json.loads(json.dumps(cx_numfill.output_schema())) == json.loads((run / "schema.json").read_text())
+    assert call["instructions"] == cx_numfill.RULES
+    assert all("system" not in m and "schema_version" not in m and m["targets"] for m in call["messages"])
+    responses = list(cx.read_jsonl(run / "responses.jsonl"))
+    for response in responses:
+        fills = response["response"]["fills"]
+        # The context is the row's own targets: stop.price was not asked for, so it is rejected.
+        assert [(f["field"], f["value"]["value"]) for f in fills] == [("entry.price", "66000")]
+        assert response["response"]["rejected"] == [dict(branch_index=0, field="stop.price", reason="not_a_target")]
+    out = tmp_path / "recorded.json"
+    cx.import_responses(run / "responses.jsonl", out)
+    assert json.loads(out.read_text())["version"] == cx_numfill.IMPORT_VERSION
+    assert cx.revalidate_raw(path, run, tmp_path / "again")["missing"] == 0
+    assert list(cx.read_jsonl(tmp_path / "again" / "responses.jsonl")) == sorted(responses, key=lambda r: r["key"])
+    assert {r["key"] for r in rows} == {r["key"] for r in responses}
+
+
+def test_side_pass_rows_never_mix(tmp_path, fake_side_codex):
+    script, _ = fake_side_codex
+    mixed = tmp_path / "mixed"
+    side = numfill_rows(tmp_path / "side")
+    main = v2_prompt_rows(tmp_path / "main", 1)
+    mixed.write_text("".join(cx.dumps(r) + "\n" for r in side + main))
+    with pytest.raises(ValueError, match="mixed_schema"):
+        cx.run_batches(mixed, tmp_path / "run", executable=str(script))
+    with pytest.raises(ValueError, match="mixed_schema"):
+        cx._schema_rules(side + main)
+    responses = tmp_path / "responses.jsonl"
+    responses.write_text(cx.dumps(dict(key="a", response=dict(schema_version="cx.numfill.v1", fills=[]))) + "\n"
+                         + cx.dumps(dict(key="b", response=dict(schema_version=2, actions=[]))) + "\n")
+    with pytest.raises(ValueError, match="mixed_schema"):
+        cx.import_responses(responses, tmp_path / "out.json")
+    tampered = dict(side[0], system="另一套规则")
+    tampered["key"] = record_key(tampered["system"], tampered["user"], tampered["schema_name"])
+    (tmp_path / "tampered").write_text(cx.dumps(tampered) + "\n")
+    with pytest.raises(ValueError, match="side_pass_prompt_mismatch"):
+        cx.run_batches(tmp_path / "tampered", tmp_path / "run2", executable=str(script))
+
+
+def test_side_pass_answers_are_checked_against_their_schema():
+    assert set(cx.SIDE_PASSES) == {"cx.triage.v1", "cx.numfill.v1"}
+    assert all(isinstance(v, str) for v in cx.SIDE_PASSES.values())
+    context = {"targets": [dict(branch_index=0, field="entry.price", known=[])]}
+    good = dict(schema_version="cx.numfill.v1", fills=[dict(branch_index=0, field="entry.price", value=dict(value="66000", quote="6万6"))])
+    assert cx.quote_response(good, SIDE_TEXT, candidates=context, expected_schema="cx.numfill.v1")["response"]["fills"]
+    # A v2 answer to a side-pass prompt, or a side-pass answer to a v2 prompt, is not stored.
+    assert cx.quote_response(dict(schema_version=2, actions=[]), SIDE_TEXT, expected_schema="cx.numfill.v1")["abstain"]["note"] == "response_schema_mismatch"
+    assert cx.quote_response(good, SIDE_TEXT, expected_schema="cx.actions.v2")["abstain"]["note"] == "response_schema_mismatch"
+    wrong = dict(good, fills=[dict(branch_index=0, field="entry.price", value=dict(value="6600", quote="6万6"))])
+    assert cx.quote_response(wrong, SIDE_TEXT, candidates=context, expected_schema="cx.numfill.v1")["response"]["fills"] == []
+
+
+# ---------------------------------------------------------------- v8 F7: export and build use one parent rule
+def graded_lake(tmp_path):
+    layout = Layout.flat(tmp_path / "lake").ensure()
+    rows = []
+    # (message_id, reply_to, grade, minute)
+    spec = [(1, None, "V", 0), (2, 1, "H1", 1),           # H1 child of a V parent: no parent
+            (3, None, "H1", 2), (4, 3, "H0", 3),          # H0 child of an H1 parent: no parent
+            (5, None, "H0", 4), (6, 5, "H0", 4.17),       # both original time, parent 10 s earlier: parent
+            (7, 8, "H0", 5), (8, None, "H0", 6)]          # parent later than the child: no parent
+    for i, (mid, reply, grade, minute) in enumerate(spec):
+        at = T0 + timedelta(minutes=minute)
+        rows.append(dict(source_id=dict(peer_id=CHANNEL, message_id=mid), channel_id=CHANNEL, channel_name="仿写频道",
+                         source_version_id=f"g{i}", text=f"仿写 BTC 第{mid}条 入场 {100 + mid} 止损 90 做多", message_type="message",
+                         message_date=at, event_time=at, available_at=at, ingested_at=at, version_no=1, sequence=i,
+                         reply_to_message_id=reply, media_kinds=[], media_hashes=[], reason_codes=[], batch_id="tg-graded",
+                         content_hash=f"g{i}", time_grade=grade))
+    mv = pl.DataFrame(rows, schema=normalize.MESSAGE_VERSION_SCHEMA)
+    mv.write_parquet(layout.message_version)
+    return layout, mv
+
+
+def test_export_and_extract_compute_the_same_key(tmp_path):
+    layout, mv = graded_lake(tmp_path)
+    path = tmp_path / "prompts"
+    cx.export_prompts(layout, path)
+    prompts = {r["source_version_id"]: r for r in cx.read_jsonl(path)}
+    assert [sid for sid, r in sorted(prompts.items()) if r["previous_text"]] == ["g5"]
+    client = RecordedClient({r["key"]: dict(response=dict(schema_version=2, actions=[])) for r in prompts.values()}, version="cx-batch-v2")
+    ex, _, _, report = extract.extract_frame(mv, None, client=client, ingested_at=T0)
+    llm = ex.filter(pl.col("extractor").struct.field("name") == "llm")
+    # Every message found its recording: export and build computed byte-identical keys.
+    assert report["llm"]["skipped"] == 0 and set(llm["source_version_id"]) == set(prompts)
+    assert report["llm"]["with_reply_parent"] == 1
+    contexts = {r["source_version_id"]: json.loads(r["checks"])["prompt_context"] for r in llm.iter_rows(named=True)}
+    assert contexts["g5"] == {"parent": "reply_parent", "rule": "orig-time-only-v1"}
+    assert contexts["g1"] == {"parent": "none", "rule": "orig-time-only-v1"}

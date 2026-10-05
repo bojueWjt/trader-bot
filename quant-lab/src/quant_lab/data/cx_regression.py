@@ -248,6 +248,9 @@ def summarize(rows):
     return dict(metrics=metrics, field_evidence_failed=sum(r['field_evidence_failed'] for r in rows),
                 pending_fields=sum(bool(v['pending']) for r in rows for v in r['fields'].values()),
                 messages_with_extra_open_actions=sum(bool(r['extra_open_actions']) for r in opens),
+                open_after_promotion=dict(predicted=sum(bool(r.get('predicted_open_promoted')) for r in rows),
+                                          promoted_only=sum(bool(r.get('predicted_open_promoted')) and not r['predicted_open'] for r in rows),
+                                          promoted_only_truth_open=sum(bool(r.get('predicted_open_promoted')) and not r['predicted_open'] and r['truth_open'] for r in rows)),
                 entry_market_leg_unevaluated=sum(not r['fields']['entry'].get('market_leg_evaluated', True) for r in opens if 'entry' in r['fields']),
                 passes=all(gates) and all(metrics[k]['passes'] is True for k in ('open_false_discovery', 'open_miss', *FIELDS, 'evidence_discarded')))
 
@@ -290,6 +293,9 @@ def check(truth_path, prompts_path, responses_path, *, adjudications=None):
         op_eval = gold.get('comparison', {}).get('op_evaluable', 'op' not in gold.get('image_affected_fields', []))
         truth_open = gold['truth_op'] == 'open' and op_eval
         now_opens = [a for a in actions if a['op'] == 'open' and a['time_ref'] == 'now']
+        # v8 F11: a separate column after deterministic promotion; the model's own classification above is unchanged.
+        promoted = [a for a in actions if a['op'] == 'open' and a['time_ref'] != 'now'
+                    and cx_v2.promote_time_ref(a, prompt['text'], [b for b in actions if b is not a])]
         predicted_open = bool(now_opens)
         # A single-trade gold label (one symbol, one side) cannot hold a post's second scenario ("多空两个方案").
         # Score the gold trade against the parsed open that is that trade; count the rest, never hide them.
@@ -332,7 +338,8 @@ def check(truth_path, prompts_path, responses_path, *, adjudications=None):
                          evidence_discarded=discarded and note.startswith('evidence_rejected'),
                          field_evidence_failed=stats.get('field_evidence_failed', 0),
                          field_evidence_failed_messages=bool(stats.get('field_evidence_failed')),
-                         extra_open_actions=len(now_opens) - len(aligned) if truth_open else 0))
+                         extra_open_actions=len(now_opens) - len(aligned) if truth_open else 0,
+                         predicted_open_promoted=bool(now_opens or promoted), promoted_open_actions=len(promoted)))
     channels = defaultdict(list)
     for row in rows:
         channels[row['channel']].append(row)

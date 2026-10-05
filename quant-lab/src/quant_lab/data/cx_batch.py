@@ -20,6 +20,13 @@ contain private messages; keep the batch directory outside the repository.
 rules, schema and that row's candidates. A file that mixes them with v1/v2
 is rejected. v2 prompt text, hash, RULES, output schema and wire shape stay
 unchanged.
+
+Side passes (SIDE_PASSES: cx.triage.v1, cx.numfill.v1) are independent schemas
+with their own recordings. Each module exports SCHEMA_NAME, RULES,
+IMPORT_VERSION, output_schema(), contexts_from_user(user) and
+validate_response(item, text, context) -> {"response"} | {"abstain"}; the
+runner, wire shape, validation, revalidation and import dispatch on it. A
+batch or response file never mixes a side pass with anything else.
 """
 from __future__ import annotations
 
@@ -48,6 +55,22 @@ OP_KINDS = {"open": {"entry_proposal", "entry_claimed"}, "add": {"add"}, "reduce
 from . import cx_v2
 
 BATCH_RULES = cx_v2.RULES
+#: schema_name -> module path. Imported lazily, so a registered module may land later than this table.
+SIDE_PASSES = {"cx.triage.v1": "quant_lab.data.cx_triage", "cx.numfill.v1": "quant_lab.data.cx_numfill"}
+
+
+def side_pass(schema_name):
+    """The side-pass module for this schema name, or None for extraction/followup rows."""
+    import importlib
+    path = SIDE_PASSES.get(schema_name)
+    return importlib.import_module(path) if path else None
+
+
+def _single_schema_kinds(names):
+    """Followup and side-pass schemas only travel alone."""
+    from . import followup
+    exclusive = {followup.SCHEMA_NAME, *SIDE_PASSES}
+    return bool(names & exclusive) and len(names) > 1
 
 
 def dumps(value):
@@ -106,7 +129,8 @@ def stratified(rows, n, seed, key):
 
 def export_prompts(layout, output: Path, *, channels=(), sample=None, seed=0, exclude_prompts=()):
     import polars as pl
-    from .llm import build_extract_prompt, record_key, SCHEMA_NAME_EXTRACT
+    from .extract import reply_context
+    from .llm import record_key
     from .sources import canonical_peer_id
 
     rows = pl.read_parquet(layout.message_version).to_dicts()
@@ -132,19 +156,14 @@ def export_prompts(layout, output: Path, *, channels=(), sample=None, seed=0, ex
     prompts = []
     for row in stratified(eligible, sample, seed, lambda r: r["channel_id"]):
         date = row["message_date"].isoformat() if row["message_date"] else None
-        system, user = build_extract_prompt(row["text"], channel_name=row["channel_name"], message_date=date)
-        cutoff = row["available_at"]
-        parents = by_message.get((row["channel_id"], row["reply_to_message_id"]), [])
-        # Unknown clocks and future edits cannot supply context.
-        parents = [p for p in parents if cutoff is not None and p["available_at"] is not None
-                   and p["available_at"] <= cutoff and p["source_version_id"] != row["source_version_id"]]
-        parent = max(parents, key=lambda p: (p["available_at"], p["version_no"]), default=None)
-        system, user = cx_v2.build_prompt(row["text"], channel_name=row["channel_name"], message_date=date, previous_text=parent["text"] if parent else None)
+        # Same rule as extract_frame (v8 F7): only original-time versions supply a reply parent.
+        previous_text = reply_context(row, by_message)
+        system, user = cx_v2.build_prompt(row["text"], channel_name=row["channel_name"], message_date=date, previous_text=previous_text)
         prompts.append({"key": record_key(system, user, cx_v2.SCHEMA_NAME), "system": system, "user": user,
                         "schema_name": cx_v2.SCHEMA_NAME, "source_version_id": row["source_version_id"],
                         "channel_id": row["channel_id"], "channel_name": row["channel_name"], "message_time": date,
                         "text": row["text"], "has_image": any(re.search(r"photo|image", k, re.I) for k in row["media_kinds"] or []),
-                        "previous_text": parent["text"] if parent else None})
+                        "previous_text": previous_text})
     _atomic_text(output, "".join(dumps(p) + "\n" for p in prompts))
     counts.update(eligible=len(eligible), exported=len(prompts), unique_keys=len({p["key"] for p in prompts}), seed=seed)
     write_json(Path(output).with_suffix(".stats.json"), counts)
@@ -166,6 +185,21 @@ def quote_response(item, text, *, candidates=None, expected_schema=None):
     """Strict provider validation then exact Decimal/token match; no span guessing.
     When the caller knows the input schema, a response from another schema is not stored."""
     from . import followup
+    claimed = item.get("schema_version") if isinstance(item, dict) else None
+    if expected_schema in SIDE_PASSES or (expected_schema is None and claimed in SIDE_PASSES):
+        name = expected_schema or claimed
+        if claimed != name:
+            return abstain("response_schema_mismatch")
+        module = side_pass(name)
+        try:
+            checked = module.validate_response(item, text, candidates)
+        except (ValueError, TypeError, KeyError):
+            return abstain("invalid_side_pass_envelope")
+        if "response" in checked and checked["response"].get("schema_version") != name:
+            return abstain("response_schema_mismatch")
+        return checked
+    if claimed in SIDE_PASSES:
+        return abstain("response_schema_mismatch")
     if expected_schema == followup.SCHEMA_NAME:
         if not isinstance(item, dict) or item.get("schema_version") != followup.SCHEMA_NAME:
             return abstain("response_schema_mismatch")
@@ -267,6 +301,13 @@ def wire_message(row):
         user = json.loads(row["user"])
         user.pop("schema_version", None)
         return {"key": row["key"], "schema_name": row["schema_name"], **user}
+    module = side_pass(row.get("schema_name"))
+    if module is not None:
+        if row.get("system") != module.RULES:
+            return row
+        user = json.loads(row["user"])
+        user.pop("schema_version", None)
+        return {"key": row["key"], "schema_name": row["schema_name"], **user}
     if row.get("schema_name") != cx_v2.SCHEMA_NAME or row.get("system") != BATCH_RULES:
         return row
     user = json.loads(row["user"])
@@ -277,18 +318,27 @@ def wire_message(row):
 def _schema_rules(batch):
     from . import followup
     names = {row.get("schema_name") for row in batch}
+    if _single_schema_kinds(names):
+        raise ValueError("mixed_schema")
     if names == {followup.SCHEMA_NAME}:
         return batch[0]["system"]
-    if followup.SCHEMA_NAME in names:
-        raise ValueError("mixed_schema")
+    if len(names) == 1 and next(iter(names)) in SIDE_PASSES:
+        return side_pass(next(iter(names))).RULES
     return BATCH_RULES
 
 
 def _followup_contexts(batch):
+    """Per-key validation context: followup candidates or a side pass's contexts_from_user."""
     from . import followup
-    if not batch or any(row.get("schema_name") != followup.SCHEMA_NAME for row in batch):
+    if not batch:
         return {}
-    return {row["key"]: followup.candidates_from_user(row["user"]) for row in batch}
+    names = {row.get("schema_name") for row in batch}
+    if names == {followup.SCHEMA_NAME}:
+        return {row["key"]: followup.candidates_from_user(row["user"]) for row in batch}
+    if len(names) == 1 and next(iter(names)) in SIDE_PASSES:
+        module = side_pass(next(iter(names)))
+        return {row["key"]: module.contexts_from_user(row["user"]) for row in batch}
+    return {}
 
 
 def _run_batch(batch, directory, executable, batch_id, retries, timeout, backoff=0, model="gpt-6-astra"):
@@ -373,12 +423,14 @@ def run_batches(prompts: Path, directory: Path, *, executable=None, batch_size=2
     with (directory / ".lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         inputs = {}
-        allowed = (SCHEMA_NAME_EXTRACT, cx_v2.SCHEMA_NAME, followup.SCHEMA_NAME)
+        allowed = (SCHEMA_NAME_EXTRACT, cx_v2.SCHEMA_NAME, followup.SCHEMA_NAME, *SIDE_PASSES)
         for row in read_jsonl(prompts):
             if row["schema_name"] not in allowed or row["key"] != record_key(row["system"], row["user"], row["schema_name"]):
                 raise ValueError("prompt_key_mismatch")
             if row["schema_name"] == followup.SCHEMA_NAME and row.get("system") != followup.RULES:
                 raise ValueError("followup_prompt_mismatch")
+            if row["schema_name"] in SIDE_PASSES and row.get("system") != side_pass(row["schema_name"]).RULES:
+                raise ValueError("side_pass_prompt_mismatch")
             user = json.loads(row["user"])
             if user["text"] != row["text"]:
                 raise ValueError("prompt_text_mismatch")
@@ -386,7 +438,7 @@ def run_batches(prompts: Path, directory: Path, *, executable=None, batch_size=2
                 raise ValueError("followup_context_mismatch")
             inputs.setdefault(row["key"], row)
         schemas = {row["schema_name"] for row in inputs.values()}
-        if followup.SCHEMA_NAME in schemas and len(schemas) > 1:
+        if _single_schema_kinds(schemas):
             raise ValueError("mixed_schema")
         response_path = directory / "responses.jsonl"
         # Atomic per-batch files are the journal. Rebuild the public JSONL after a crash.
@@ -408,10 +460,17 @@ def run_batches(prompts: Path, directory: Path, *, executable=None, batch_size=2
             raise ValueError("stale_v1_journal_use_new_output_dir")
         if any(completed[k].get("response", {}).get("schema_version") != followup.SCHEMA_NAME for k in inputs.keys() & completed.keys() if inputs[k]["schema_name"] == followup.SCHEMA_NAME and "response" in completed[k]):
             raise ValueError("stale_followup_journal_use_new_output_dir")
+        if any(completed[k].get("response", {}).get("schema_version") != inputs[k]["schema_name"] for k in inputs.keys() & completed.keys() if inputs[k]["schema_name"] in SIDE_PASSES and "response" in completed[k]):
+            raise ValueError("stale_side_pass_journal_use_new_output_dir")
         # Transport failures carry no model judgement, so a restart asks again.
         pending = [r for k, r in inputs.items() if k not in completed or _transport_failed(completed[k])]
         _atomic_text(response_path, "".join(dumps(completed[k]) + "\n" for k in sorted(completed)))
-        schema_doc = followup.output_schema() if schemas == {followup.SCHEMA_NAME} else output_schema()
+        if schemas == {followup.SCHEMA_NAME}:
+            schema_doc = followup.output_schema()
+        elif len(schemas) == 1 and next(iter(schemas)) in SIDE_PASSES:
+            schema_doc = side_pass(next(iter(schemas))).output_schema()
+        else:
+            schema_doc = output_schema()
         write_json(directory / "schema.json", schema_doc)
         started = time.monotonic()
         attempts = []
@@ -451,24 +510,75 @@ def run_batches(prompts: Path, directory: Path, *, executable=None, batch_size=2
         return report
 
 
+_ITEMS_START = re.compile(r'\{\s*"items"\s*:')
+
+
+def _items_from_stdout(path: Path):
+    """The last complete {"items":[...]} envelope in a codex stdout capture (searching from the end)."""
+    text = Path(path).read_text(encoding="utf-8", errors="replace")
+    decoder = json.JSONDecoder(parse_float=Decimal)
+    for match in reversed(list(_ITEMS_START.finditer(text))):
+        try:
+            doc, _ = decoder.raw_decode(text, match.start())
+        except ValueError:
+            continue
+        if isinstance(doc, dict) and isinstance(doc.get("items"), list):
+            return doc["items"]
+    raise ValueError("no_items_envelope")
+
+
+def _raw_outputs(raw_dir: Path, counts):
+    """One source per attempt prefix: the -o json when present, otherwise its stdout capture.
+
+    AppleDouble files (._*) are never read. Sorted by (mtime_ns, name), oldest first."""
+    sources = {}
+    for path in raw_dir.glob("*"):
+        name = path.name
+        if name.startswith("._"):
+            counts["skipped_appledouble"] += 1
+            continue
+        if name.endswith(".metrics.json") or not path.is_file():
+            continue
+        if name.endswith(".stdout.txt"):
+            sources.setdefault(name[:-len(".stdout.txt")], {})["stdout"] = path
+        elif name.endswith(".json"):
+            sources.setdefault(name[:-len(".json")], {})["json"] = path
+    out = []
+    for prefix, found in sources.items():
+        path = found.get("json") or found.get("stdout")
+        if "stdout" in found and "json" not in found:
+            counts["stdout_only"] += 1
+        out.append((path, prefix, "json" in found))
+    return sorted(out, key=lambda item: (item[0].stat().st_mtime_ns, item[0].name))
+
+
 def revalidate_raw(prompts: Path, run_dir: Path, output_dir: Path):
     """Re-apply the current validators to a run's saved model output; never calls the model.
 
     Uses each key's latest successful raw item (metrics error null), the same text, schema and
-    follow-up candidate context as the original run. Keys with no successful raw item are counted
-    as missing, not invented.
+    follow-up/side-pass context as the original run. An attempt without its -o json falls back to
+    the last items envelope in its stdout capture (v8 F5a). Keys with no successful raw item are
+    counted as missing, not invented; one unreadable file is counted and skipped.
     """
     rows = {row["key"]: row for row in read_jsonl(prompts)}
     latest = {}
-    raws = [p for p in (run_dir / "raw").glob("*.json") if not p.name.endswith(".metrics.json")]
-    for raw in sorted(raws, key=lambda p: (p.stat().st_mtime_ns, p.name)):
+    counts = {"skipped_appledouble": 0, "stdout_only": 0, "stdout_without_metrics": 0, "unreadable": 0, "failed_attempts": 0}
+    for raw, prefix, is_json in _raw_outputs(Path(run_dir) / "raw", counts):
+        metrics = raw.parent / (prefix + ".metrics.json")
         try:
-            if json.loads(raw.with_suffix(".metrics.json").read_text()).get("error") is not None:
-                continue
-            items = json.loads(raw.read_text(encoding="utf-8"), parse_float=Decimal)["items"]
+            # The -o json is trusted only beside its metrics; a bare stdout capture (copied run dirs keep
+            # only these) is read without one, and a recorded failure is skipped either way.
+            if is_json or metrics.exists():
+                if json.loads(metrics.read_text()).get("error") is not None:
+                    counts["failed_attempts"] += 1
+                    continue
+            else:
+                counts["stdout_without_metrics"] += 1
+            items = json.loads(raw.read_text(encoding="utf-8"), parse_float=Decimal)["items"] if is_json else _items_from_stdout(raw)
         except (OSError, ValueError, KeyError, TypeError):
+            counts["unreadable"] += 1
             continue
-        for item in items:
+        for item in items if isinstance(items, list) else []:
             if isinstance(item, dict) and item.get("key") in rows:
                 latest[item["key"]] = item
     out = {}
@@ -481,7 +591,7 @@ def revalidate_raw(prompts: Path, run_dir: Path, output_dir: Path):
     stats = [r.get("response", {}).get("stats", {}) for r in out.values()]
     report = {"prompts": len(rows), "revalidated": len(out), "missing": len(rows) - len(out),
               "abstained": sum("abstain" in r for r in out.values()),
-              "rejected": sum(s.get("rejected", 0) for s in stats)}
+              "rejected": sum(s.get("rejected", 0) for s in stats), **counts}
     write_json(output_dir / "revalidate.json", report)
     return report
 
@@ -498,10 +608,12 @@ def import_responses(responses: Path, output: Path):
         items[key] = record
     versions = [r.get("response", {}).get("schema_version") for r in items.values() if "response" in r]
     from . import followup
-    if any(version == followup.SCHEMA_NAME for version in versions) and any(version != followup.SCHEMA_NAME for version in versions):
+    if _single_schema_kinds(set(versions)):
         raise ValueError("mixed_schema")
     if versions and all(version == followup.SCHEMA_NAME for version in versions):
         version = followup.SCHEMA_NAME
+    elif versions and versions[0] in SIDE_PASSES:
+        version = side_pass(versions[0]).IMPORT_VERSION
     elif any(version == 2 for version in versions):
         version = "cx-batch-v2"
     else:

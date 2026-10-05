@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation
 import json
+import math
 import re
 import unicodedata
 
@@ -95,8 +96,48 @@ def _scale(unit):
     return Decimal(1000 if unit.lower() == "k" else 10000)
 
 
+# F5a. "6万6" / "5W6" / "6万65" / "7万5千": x万 plus a trailing y that fills the next places (6万65 = 66500).
+# A following 月/日/号/年/倍/人/个/次/%/天/周 makes it a count or a date, never a price; with 千 only one y digit.
+WAN_Y = re.compile(r"(?<![\w.,万])(?P<x>\d+)\s*[万wW]\s*(?P<y>\d{1,4})(?P<qian>\s*千)?(?!\d|\.\d)(?!\s*[千月日号年倍人个次%天周])", re.ASCII)
+# F5a. A price glued to a coin name or an SL/TP label ("bnb812", "SL0.2660"). Python lookbehinds are fixed-width,
+# so this is a separate pass. A coin name followed by one digit ("ETH2") is a name, not a price.
+GLUED = re.compile(r"(?<![A-Za-z0-9_])(?P<prefix>[A-Za-z]{2,10})(?P<num>\d+(?:\.\d+)?)(?:\s*(?P<unit>万|[wWkK]))?(?:[uU](?![A-Za-z]))?(?![\w万]|[.,]\d)(?!\s*[:：])", re.ASCII)
+GLUED_LABELS = {"SL", "TP"}
+GLUED_NOT_COINS = {"CMP", "DCA", "ENTRY", "STOP", "TARGET", "LOSS", "PROFIT", "LEV", "X"}
+
+
+def _glued_prefix_ok(prefix, number):
+    upper = prefix.upper()
+    if len(number.replace(".", "")) < 2:
+        return False
+    if upper in GLUED_LABELS:
+        return True
+    from .extract import SYMBOL_STOP
+    if upper in SYMBOL_STOP or upper in GLUED_NOT_COINS:
+        return False
+    return True
+
+
+def wan_y_value(x, y, qian=False):
+    if qian:
+        if len(y) != 1:
+            return None
+        return Decimal(x) * 10000 + Decimal(y) * 1000
+    return Decimal(x) * 10000 + Decimal(y) * Decimal(10) ** (4 - len(y))
+
+
 def tokens(text):
     norm, offsets = normalized(text)
+    for match in WAN_Y.finditer(norm):
+        value = wan_y_value(match["x"], match["y"], bool(match["qian"]))
+        if value is not None:
+            yield value, offsets[match.start()], offsets[match.end() - 1] + 1, False
+    for match in GLUED.finditer(norm):
+        if _glued_prefix_ok(match["prefix"], match["num"]):
+            value = Decimal(match["num"])
+            if match["unit"]:
+                value *= _scale(match["unit"])
+            yield value, offsets[match.start("num")], offsets[match.end() - 1] + 1, False
     matches = list(NUMBER.finditer(norm))
     for index, match in enumerate(matches):
         value = Decimal(re.sub(r"[,\s]", "", match["num"]))
@@ -258,8 +299,8 @@ def validate_response(payload, text):
                 field_evidence_failed=rejected, whole_message_discarded=int(discarded)))
 
 
-def inherited_prices(action):
-    """Infer omitted units only from validated price atoms in this action."""
+def price_atoms(action):
+    """(field, atom) for every price atom of one validated action, in schema order; atoms may be None."""
     atoms = []
     entry = action["entry"]
     if entry:
@@ -274,6 +315,12 @@ def inherited_prices(action):
     if stop and stop["kind"] in ("price", "condition") and stop.get("price") is not None:
         atoms.append(("stop.price", stop["price"]))
     atoms.extend((f"tps[{i}].value", tp["value"]) for i, tp in enumerate(action["tps"]) if tp["kind"] == "price")
+    return atoms
+
+
+def inherited_prices(action):
+    """Infer omitted units only from validated price atoms in this action."""
+    atoms = price_atoms(action)
     anchors, bare = [], []
     for field, atom in atoms:
         if atom is None:
@@ -306,6 +353,90 @@ def inherited_prices(action):
     return values, records
 
 
+COMMA_DECIMAL = re.compile(r"\d{1,3},\d{3}")
+
+
+def comma_decimal(action, skip=()):
+    """F5a. "2,188" quoted for a 2.05 entry is the European decimal 2.188, not 2188.
+
+    Only when the whole quote is d{1,3},ddd, the action has other price atoms, and every one of them sits
+    within ln1.5 of v/1000 and at least ln3 away from v. Returns {field: value} and the records."""
+    atoms = [(f, a) for f, a in price_atoms(action) if a is not None]
+    values, records = {}, []
+    for field, atom in atoms:
+        if field in skip or not COMMA_DECIMAL.fullmatch(atom["quote"].strip()):
+            continue
+        v = Decimal(atom["value"])
+        others = [Decimal(a["value"]) for f, a in atoms if f != field]
+        if not others or v <= 0:
+            continue
+        small = v / 1000
+        if all(p > 0 and abs(math.log(p / small)) < math.log(1.5) and abs(math.log(p / v)) >= math.log(3) for p in others):
+            values[field] = small
+            records.append(dict(field=field, **{"from": str(v), "to": str(small)}))
+    return values, records
+
+
+# F8/F11: wording that says the trade already happened or produced a result (shared with the gold edit flag).
+RESULT_WORDS = re.compile(r"已止盈|止盈了|已止损|止损了|打止损|已平仓|平仓了|已触发|已成交|吃到|拿到|✅|TP\s*\d?\s*(?:hit|已)|达成|命中|盈利\s*\d|\+\s*\d+(?:\.\d+)?\s*%|\d+(?:\.\d+)?R\b", re.I)
+PROMOTE_EXCLUDE = re.compile(r"已成交|已触及|已触发|回顾|昨天|昨晚|昨夜|凌晨发布|之前|仍在运行|还在|持仓中|不是交易指令|不构成|已止盈|已止损|已平仓")
+SETUP_LABEL = re.compile(r"入场|进场|买入区|首次入场|限价|Entry|买入设置|交易策略|潜在限价单", re.I)
+SHORT_TF_CONFIRM = re.compile(r"收线|收阴|收阳|这根[Kk]线|\d+\s*(?:分钟|min)\s*[Kk]?线?\s*收|收下去")
+SHORT_TF_EXCLUDE = re.compile(r"明天|今晚|今夜|非农|CPI|议息|美联储|利好|利空|下周|周末|开盘后", re.I)
+IMMINENT = re.compile(r"(?:准备|打算|这里|现在)\S{0,6}(?:空|多)\s*一手")
+PROMOTION_RULES_VERSION = "promote-v1"
+
+
+def promote_time_ref(action, text, siblings=()):
+    """F11. Deterministic promotion of a recorded past/conditional open to a current entry; None when not promoted.
+
+    Reads only the validated action and its own paragraph (stop_rules.segment); the model output is unchanged.
+    P2 (short-timeframe close confirmation) is checked before P1 so a setup card that waits for a candle
+    close stays wide-only."""
+    from . import stop_rules
+    if action.get("op") != "open" or action.get("time_ref") not in ("conditional", "past"):
+        return None
+    bounds = stop_rules.segment(text, action, siblings)
+    if bounds is None:
+        return None
+    lo, hi = bounds
+    seg = text[lo:hi]
+    if RESULT_WORDS.search(seg) or PROMOTE_EXCLUDE.search(seg):
+        return None
+
+    def record(rule, match, scope):
+        return {"from": action["time_ref"], "rule": rule, "span": [lo + match.start(), lo + match.end()], "scope": scope,
+                "version": PROMOTION_RULES_VERSION}
+
+    # A wait for a scheduled event (明天/非农/CPI...) is a future plan under every rule, not only P2/P3.
+    if SHORT_TF_EXCLUDE.search(seg):
+        return None
+    if action["time_ref"] == "conditional":
+        confirm = SHORT_TF_CONFIRM.search(seg)
+        if confirm:
+            return record("short_tf_confirm", confirm, "wide")
+    stop = action.get("stop") or {}
+    priced = [a for f, a in price_atoms(action) if f.startswith("entry.") and a is not None]
+    if priced and stop.get("kind") == "price" and stop.get("price") is not None:
+        starts = [s["start"] for s in action.get("spans") or [] if s["field"].startswith("entry.") and not s["field"].endswith("fraction")]
+        for label in SETUP_LABEL.finditer(seg):
+            end = lo + label.end()
+            if any(0 <= start - end <= 16 and "\n" not in text[end:start] for start in starts):
+                return record("setup_card", label, "main" if action["time_ref"] == "conditional" else "wide")
+    if action["time_ref"] == "conditional":
+        imminent = IMMINENT.search(seg)
+        if imminent:
+            return record("imminent", imminent, "main")
+    return None
+
+
+def effective_time_ref(checks):
+    """'now' for a promoted open (checks.time_ref_promoted), otherwise the recorded time_ref."""
+    if checks.get("time_ref_promoted"):
+        return "now"
+    return checks.get("time_ref")
+
+
 def parse_actions(payload, text):
     from .extract import ParseResult, canonical_symbol, gauls_second_entry
     clean = validate_response(payload, text)
@@ -314,16 +445,28 @@ def parse_actions(payload, text):
                  stop_move="stop_move", close="close_claimed", cancel="cancel", result="result_post", analysis="analysis", chatter="chatter", undecidable="undecidable")
     for action in clean["actions"]:
         kind = kinds[action["op"]]
+        promoted = None
         if action["op"] == "open" and action["time_ref"] != "now":
-            kind = "entry_claimed"  # description only; checks retain the actual op/time
+            promoted = promote_time_ref(action, text, [a for a in clean["actions"] if a is not action])
+            # Not promoted: description only; checks retain the actual op/time.
+            kind = "entry_proposal" if promoted else "entry_claimed"
         # The verbatim spelling stays in checks.action; the registry resolves the canonical code.
         res = ParseResult(kind=kind, branch_index=action["branch_index"], symbol_raw=canonical_symbol(action["symbol_raw"]), side=action["side"])
         res.checks = dict(llm_evidence_valid=action["op"] != "undecidable", schema_version=2,
                           op=action["op"], time_ref=action["time_ref"], action=action,
                           field_issues=action["field_issues"], batch_stats=clean["stats"])
+        if promoted:
+            res.checks["time_ref_promoted"] = promoted
         res.spans = action["spans"]
         entry = action["entry"]
         inherited, records = inherited_prices(action)
+        comma, comma_records = comma_decimal(action, skip=set(inherited))
+        if comma_records:
+            inherited = {**inherited, **comma}
+            res.checks["comma_decimal"] = comma_records
+            # lifecycle/validate rescale ladder legs and close-stop levels from checks.action by this factor list.
+            records = records + [dict(field=r["field"], quote=next(a["quote"] for f, a in price_atoms(action) if f == r["field"]),
+                                      factor="0.001", rule="comma_decimal") for r in comma_records]
         if records:
             res.checks["unit_inherited"] = records
         def value(atom, field):

@@ -122,7 +122,8 @@ def v2_lake(tmp_path, actions, text=TEXT):
 
 
 def test_multiaction_time_refs_only_now_open_decision_and_default_parser(tmp_path, monkeypatch):
-    actions = [action(), action(time_ref='past'), action(time_ref='conditional'), action(symbol_raw='ETH')]
+    # Without a stop the past/conditional opens are not F11 setup cards; promotion has its own tests.
+    actions = [action(), action(time_ref='past', stop=None), action(time_ref='conditional', stop=None), action(symbol_raw='ETH')]
     _, mv, ex, cp, report = v2_lake(tmp_path, actions)
     llm = ex.filter(pl.col('extractor').struct.field('name') == 'llm')
     assert llm['branch_index'].to_list() == [0, 1, 2, 3]
@@ -439,3 +440,113 @@ def test_inherited_close_stop_level_reaches_the_order_plan(tmp_path):
     assert row['scale_gate'] == 'ok' and json.loads(row['eligibility_by_estimand'])['execution']
     plan = lifecycle._order_plan(row, row['stop'], row['tps'], None)
     assert plan['stop'] == {'price': Decimal(61000), 'trigger': 'close', 'timeframe': '1d'}
+
+
+# ---------------------------------------------------------------- v8 F5a: X万Y, glued names/labels, comma decimals
+@pytest.mark.parametrize('literal,value', [('6万6', 66000), ('9万4', 94000), ('7万5千', 75000), ('5W6', 56000),
+                                          ('5w6', 56000), ('6w1', 61000), ('6万65', 66500)])
+def test_wan_y_shorthand_is_one_token(literal, value):
+    text = f'仿写 BTC {literal}附近接多'
+    cleaned, span = v2.exact_number(number(value, literal), text)
+    assert Decimal(cleaned['value']) == value and text[span['start']:span['end']] == literal
+    # The bare leading digit is not a separate price token.
+    with pytest.raises(ValueError):
+        v2.exact_number(number(literal[0], literal), text)
+
+
+@pytest.mark.parametrize('text,value', [('仿写 6万6月行情', 66000), ('仿写 2万5倍收益', 25000), ('仿写 1万2千人在线', 12000),
+                                        ('仿写 1万2千人在线', 10000)])
+def test_wan_y_dates_and_counts_are_not_prices(text, value):
+    assert all(v != value for v, *_ in v2.tokens(text))
+
+
+def test_wan_y_does_not_change_ranges():
+    values = {v for v, _, _, pct in v2.tokens('仿写 7.28-7.32万 区间') if not pct}
+    assert {Decimal('72800'), Decimal('73200')} <= values
+    values = {v for v, *_ in v2.tokens('仿写 9万-10万 区间')}
+    assert values == {Decimal(90000), Decimal(100000)}
+
+
+def test_glued_coin_names_and_labels():
+    text = '仿写 bnb812止损btc 113666损'
+    assert v2.exact_number(number(812, 'bnb812'), text)[0]['value'] == '812'
+    assert v2.exact_number(number(113666, 'btc 113666'), text)[0]['value'] == '113666'
+    assert v2.exact_number(number('0.2660', 'SL0.2660'), '仿写 空 SL0.2660')[0]['value'] == '0.2660'
+    for text, value in [('仿写 ETH2 开始', 2), ('仿写 EMA200 支撑', 200), ('仿写 TP1:130', 1)]:
+        assert all(v != value for v, *_ in v2.tokens(text)), text
+
+
+def test_comma_decimal_only_when_every_other_atom_agrees():
+    text = '仿写 XYZ 2.05 多，止损 2,188'
+    rows, _ = v2.parse_actions(envelope(action(symbol_raw='XYZ', entry=dict(kind='limit', price=number('2.05'), lo=None, hi=None, levels=[]),
+                                                stop=dict(kind='price', price=number(2188, '2,188'), condition=None), tps=[])), text)
+    assert rows[0].stop == Decimal('2.188')
+    assert rows[0].checks['comma_decimal'] == [{'field': 'stop.price', 'from': '2188', 'to': '2.188'}]
+    assert rows[0].checks['unit_inherited'][-1]['factor'] == '0.001'
+    text = '仿写 BTC 66000 多，止损 65,000'
+    rows, _ = v2.parse_actions(envelope(action(entry=dict(kind='limit', price=number(66000), lo=None, hi=None, levels=[]),
+                                                stop=dict(kind='price', price=number(65000, '65,000'), condition=None), tps=[])), text)
+    assert rows[0].stop == Decimal(65000) and 'comma_decimal' not in rows[0].checks
+
+
+# ---------------------------------------------------------------- v8 F11: deterministic promotion
+def promoted(text, **changes):
+    rows, _ = v2.parse_actions(envelope(action(**changes)), text)
+    return rows[0]
+
+
+SETUP = '仿写 ETH 交易策略：入场 3115-3070，止损 3010，回踩确认再进'
+
+
+def setup_action(time_ref):
+    return dict(symbol_raw='ETH', time_ref=time_ref, entry=dict(kind='zone', price=None, lo=number(3070), hi=number(3115), levels=[]),
+                stop=dict(kind='price', price=number(3010), condition=None), tps=[])
+
+
+def test_setup_card_promotes_conditional_to_main_and_past_to_wide():
+    row = promoted(SETUP, **setup_action('conditional'))
+    assert row.kind == 'entry_proposal' and row.checks['time_ref'] == 'conditional'
+    assert row.checks['time_ref_promoted']['rule'] == 'setup_card' and row.checks['time_ref_promoted']['scope'] == 'main'
+    assert row.checks['time_ref_promoted']['from'] == 'conditional' and v2.effective_time_ref(row.checks) == 'now'
+    row = promoted(SETUP, **setup_action('past'))
+    assert row.kind == 'entry_proposal' and row.checks['time_ref_promoted']['scope'] == 'wide'
+
+
+def test_short_timeframe_confirmation_is_wide_and_imminent_is_main():
+    text = '仿写 BTC 这根15分钟K线收阴就进空，防守114750'
+    row = promoted(text, side='short', time_ref='conditional', entry=dict(kind='market_ref', price=None, lo=None, hi=None, levels=[]),
+                   stop=dict(kind='price', price=number(114750), condition=None), tps=[])
+    assert row.checks['time_ref_promoted']['rule'] == 'short_tf_confirm' and row.checks['time_ref_promoted']['scope'] == 'wide'
+    row = promoted('仿写 BTC 准备中长线空一手', side='short', time_ref='conditional', entry=None, stop=None, tps=[])
+    assert row.checks['time_ref_promoted']['rule'] == 'imminent' and row.checks['time_ref_promoted']['scope'] == 'main'
+
+
+@pytest.mark.parametrize('text,time_ref', [('仿写 BTC 明天非农后收线确认再进 入场 100 止损 90', 'conditional'),
+                                           ('仿写 BTC 昨夜凌晨发布：现价100做多 止损90', 'past'),
+                                           ('仿写 BTC 已成交：入场100 止损90', 'past'),
+                                           ('仿写 BTC ✅ TP1 已达，入场100 止损90', 'past'),
+                                           ('仿写 BTC 等回踩再看，入场 100 止损 90', 'now')])
+def test_promotion_exclusions(text, time_ref):
+    row = promoted(text, time_ref=time_ref, entry=dict(kind='limit', price=number(100), lo=None, hi=None, levels=[]))
+    assert 'time_ref_promoted' not in row.checks
+    assert row.kind == ('entry_proposal' if time_ref == 'now' else 'entry_claimed')
+    assert v2.effective_time_ref(row.checks) == time_ref
+
+
+def test_result_words_are_shared():
+    for text in ('止盈了', '✅', 'TP1 已', '+12.5%', '3R ', '已平仓'):
+        assert v2.RESULT_WORDS.search(text), text
+    assert not v2.RESULT_WORDS.search('入场 3100 止损 3050')
+
+
+def test_promotion_mutant_is_killed(monkeypatch):
+    def invariant():
+        rows, _ = v2.parse_actions(envelope(action(**setup_action('conditional'))), SETUP)
+        assert rows[0].kind == 'entry_proposal'
+        rows, _ = v2.parse_actions(envelope(action(time_ref='past', entry=dict(kind='limit', price=number(100), lo=None, hi=None, levels=[]))),
+                                   '仿写 BTC 已成交：入场100 止损90')
+        assert rows[0].kind == 'entry_claimed'
+    invariant()
+    monkeypatch.setattr(v2, 'promote_time_ref', mutant(v2.promote_time_ref, 'if RESULT_WORDS.search(seg) or PROMOTE_EXCLUDE.search(seg):', 'if False:'))
+    with pytest.raises(AssertionError):
+        invariant()

@@ -49,7 +49,7 @@ def assert_filled(tmp_path):
     assert row['stop'] == 91000
     assert [t['level'] for t in row['tps']] == [111000, 121000]
     checks = json.loads(row['checks'])
-    assert checks['chart_fill'] == dict(fields=['stop', 'tps'], model='synthetic-vision', version='chart-read-v1')
+    assert checks['chart_fill'] == dict(fields=['stop', 'tps'], model='synthetic-vision', version='chart-read-v1', matched_by='single_open')
     assert 'fields_from_chart' in checks['notes']
     assert checks['sl_direction'] and checks['tp_direction']
     assert not any(i['reason'].startswith('evidence_rejected') for i in checks['field_issues'])
@@ -401,3 +401,66 @@ def test_mapping_version_changes_extractor_and_build_identity(tmp_path, monkeypa
     second_row = pl.read_parquet(layout.extracted_event).filter(pl.col('extractor').struct.field('name') == 'llm').row(0, named=True)
     assert first_row['extract_id'] != second_row['extract_id']
     assert first['build_id'] != second['build_id']
+
+
+# ---------------------------------------------------------------- v8 F10②④, F4 chart priority
+TWO_OPENS = '仿写 BTC 现价100做多；ETH 现价50做多'
+
+
+def two_open_actions(eth_price=50):
+    market = lambda v: dict(kind='market_ref', price=number(v), lo=None, hi=None, levels=[])
+    return [action(entry=market(100), stop=None, tps=[]), action(symbol_raw='ETH', entry=market(eth_price), stop=None, tps=[])]
+
+
+def llm_rows(ex):
+    return [dict(r, checks=json.loads(r['checks'])) for r in ex.filter(pl.col('extractor').struct.field('name') == 'llm').iter_rows(named=True)]
+
+
+def test_multi_open_chart_fills_the_one_opening_its_entry_matches(tmp_path):
+    _, _, ex, _, _ = build(tmp_path, two_open_actions(), text=TWO_OPENS, chart_changes=dict(entry=[100.5], stop=None, tps=[111]))
+    btc, eth = llm_rows(ex)
+    assert btc['checks']['chart_fill']['matched_by'] == 'price' and [t['level'] for t in btc['tps']] == [Decimal(111)]
+    assert 'chart_fill' not in eth['checks'] and eth['tps'] == []
+    # A stop on the correct side within ln1.5 also identifies the opening.
+    _, _, ex, _, _ = build(tmp_path / 'stop', two_open_actions(), text=TWO_OPENS, chart_changes=dict(entry=[], stop=95, tps=[]))
+    btc, eth = llm_rows(ex)
+    assert btc['stop'] == Decimal(95) and btc['checks']['chart_fill']['matched_by'] == 'price'
+    assert eth['stop'] is None
+
+
+def test_multi_open_chart_matching_both_is_skipped(tmp_path):
+    _, _, ex, _, _ = build(tmp_path, two_open_actions(98), text='仿写 BTC 现价100做多；ETH 现价98做多', chart_changes=dict(entry=[], stop=95, tps=[]))
+    for row in llm_rows(ex):
+        assert row['stop'] is None and row['checks']['chart_fill_skipped'] == 'multi_open'
+
+
+def test_chart_read_v2_loads_and_unknown_versions_fail(tmp_path):
+    path = tmp_path / 'chart.json'
+    path.write_text(json.dumps(dict(version='chart-read-v2', model='synthetic-vision',
+                                    items={'s0': dict(readable=True, entry=[], stop=91, tps=[], final_target=None, reader='risk-box', version='chart-read-v2')})))
+    chart = extract.load_chart_fixture(path)
+    assert chart['items']['s0']['reader'] == 'risk-box' and chart['items']['s0']['stop'] == 91
+    path.write_text(json.dumps(dict(version='chart-read-v3', model='synthetic-vision', items={})))
+    with pytest.raises(ValueError, match='version'):
+        extract.load_chart_fixture(path)
+
+
+def test_promoted_opening_receives_chart_values(tmp_path):
+    text = '仿写 BTC 交易策略：入场 100，止损 90，回踩确认再进'
+    conditional = action(time_ref='conditional', entry=dict(kind='limit', price=number(100), lo=None, hi=None, levels=[]), tps=[])
+    _, _, ex, _, _ = build(tmp_path, [conditional], text=text, chart_changes=dict(stop=None))
+    row = llm_rows(ex)[0]
+    assert row['kind'] == 'entry_proposal' and row['checks']['time_ref_promoted']['rule'] == 'setup_card'
+    assert [t['level'] for t in row['tps']] == [Decimal(111), Decimal(121)] and row['checks']['chart_fill']['matched_by'] == 'single_open'
+
+
+def test_chart_stop_takes_priority_over_wording(tmp_path):
+    text = '仿写 BTC 现价100做多，小幅跌破就止损'
+    _, _, ex, _, _ = build(tmp_path, [action(stop=None, tps=[])], text=text, chart_changes=dict(tps=[]))
+    row = llm_rows(ex)[0]
+    assert row['stop'] == Decimal(91) and row['checks']['stop_rule']['rule'] == 'chart' and row['checks']['stop_rule']['widened'] == '0'
+    # Without the chart the same wording derives rule 9 from the entry.
+    layout, mv, fixture = prepare(tmp_path / 'no-chart', [action(stop=None, tps=[])], text)
+    extract.run(layout, llm_fixture=fixture, ingested_at=T0)
+    row = llm_rows(pl.read_parquet(layout.extracted_event))[0]
+    assert row['stop'] == Decimal('99.7') and row['checks']['stop_rule']['rule'] == 'r9_fuzzy_break'

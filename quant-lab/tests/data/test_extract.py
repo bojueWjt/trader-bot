@@ -298,3 +298,24 @@ def test_u01_ocr_size_validation_and_s06_cross_symbol_anchor():
     assert valid_size([8, 8]) and RecordedOcr({"h": {"size": [8, 8], "text": "x", "numbers": [{"value": 1, "bbox": [0, 0, 1, 1]}]}}).read("h").numbers
     r = parse_message("FIL 做多 入场 6 止损 5 止盈 7 BTC 阻力 6.5万")
     assert r.entry["lo"] == 6.0 and r.stop == 5.0 and [t["level"] for t in r.tps] == [7.0] and r.symbol_raw == "FIL"
+
+
+def test_reply_context_uses_only_original_time_versions():
+    """v8 F7: export and build share this rule; H1/U/H2 clocks never supply a parent."""
+    from datetime import timedelta
+    t0 = datetime(2024, 7, 1, tzinfo=UTC)
+
+    def row(sid, grade, seconds, reply=None, version=1):
+        return dict(source_version_id=sid, channel_id=1, reply_to_message_id=reply, time_grade=grade, version_no=version,
+                    available_at=t0 + timedelta(seconds=seconds), text=f"仿写{sid}")
+
+    def context(child, *parents):
+        return extract.reply_context(child, {(1, 9): list(parents)})
+
+    assert context(row("c", "H1", 100, 9), row("p", "V", 0)) is None
+    assert context(row("c", "H0", 100, 9), row("p", "H1", 0)) is None
+    assert context(row("c", "H0", 100, 9), row("p", "H0", 90)) == "仿写p"
+    assert context(row("c", "H0", 100, 9), row("p", "H0", 110)) is None
+    assert context(row("c", "V", 100, 9), row("p1", "V", 10), row("p2", "H0", 20, version=2)) == "仿写p2"
+    assert context(row("c", "H0", 100), row("p", "H0", 0)) is None
+    assert extract.RULE_VERSION == "tg3-extract-v1.0"
