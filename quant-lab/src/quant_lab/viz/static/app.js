@@ -97,8 +97,16 @@ async function home() {
         cell.append(el('span', '未出', 'dim'));
       }
       else {
-        cell.append(el('strong', number(stats.mean_R) + ' R / 笔', signClass(stats.mean_R)));
+        const blocks = stats.blocks;
+        cell.append(el('strong', (blocks ? '有止损 ' : '') + number(stats.mean_R) + ' R / 笔', signClass(stats.mean_R)));
         cell.append(el('small', `${stats.n} 笔 · 胜率 ${percent(stats.win_rate)} · 合计 ${number(stats.sum_R)} R`));
+        if (blocks) {
+          // 无止损单按金额（U）单独成块，不进 R 均值、胜率与累计 R；合计只有金额。
+          const nostop = blocks.nostop;
+          cell.append(el('small', nostop.mean_U === undefined ? `无止损 ${nostop.n} 笔 · ${nostop.status}`
+            : `无止损 ${nostop.n} 笔 · ${number(nostop.mean_U, 1)} U / 笔 · 胜率 ${percent(nostop.win_rate)} · 合计 ${number(nostop.sum_U, 1)} U（仅内核 A）`));
+          cell.append(el('small', `金额合计 ${number(blocks.total.sum_net_U, 1)} U`));
+        }
         cell.append(el('small', stats.ci95 ? `95% [${number(stats.ci95[0])}, ${number(stats.ci95[1])}]` : `95% 区间不足（${stats.n_days} 天）`));
         let conclusionClass = 'dim';
         if (stats.conclusion === '正期望') {
@@ -134,6 +142,16 @@ async function home() {
     }
   });
   $('summary-table').append(summary.node);
+}
+// 无止损单的 R 只是金额等价（net_U / B）：列表里按 U 显示，不与有止损单的 R 混读。
+function resultText(result) {
+  return result.sizing_basis === 'nostop' ? number(result.net_U, 1) + ' U' : number(result.net_R);
+}
+function sizingText(result) {
+  if (result.sizing_basis !== 'nostop') {
+    return '按风险';
+  }
+  return '无止损 ' + (result.nostop_notional_U === null || result.nostop_notional_U === undefined ? '' : number(result.nostop_notional_U, 0) + 'U') + (result.legs_gt3 ? ' · >3腿' : '');
 }
 function entryText(entries) {
   return (entries || []).map(entry => {
@@ -192,14 +210,16 @@ async function channelPage() {
       return order === 'old' ? a.t_dec.localeCompare(b.t_dec) : b.t_dec.localeCompare(a.t_dec);
     });
     $('trade-count').textContent = `${rows.length} / ${data.trades.length} 笔信号 · 成交状态、出场方式与执行数按所选口径显示`;
-    const view = table(['决策时间（UTC）','币种 / 方向','入场','止损','止盈',...variants.map(([,v]) => v.name + ' R'),'成交状态','出场方式','老师指令执行数']);
+    const view = table(['决策时间（UTC）','币种 / 方向','入场','止损','止盈',...variants.map(([,v]) => v.name + ' R / U'),'定量','合并','成交状态','出场方式','老师指令执行数']);
     rows.forEach(row => {
       const result = row.variants[selected]; const fallback = Object.keys(row.variants)[0];
       const target = url('/trade', {channel:key, episode:row.episode_id, variant:result ? selected : fallback});
       const tr = el('tr', undefined, 'trade-row'); const date = el('td'); date.append(link(time(row.t_dec), target)); tr.append(date);
       tr.append(el('td', `${row.instrument} / ${row.side === 'long' ? '多' : '空'}`), el('td', entryText(row.entries)), el('td', number(row.stop)));
       tr.append(el('td', (row.targets || []).map(tp => number(tp.price) + (tp.fraction !== null && tp.fraction !== undefined ? ' (' + percent(tp.fraction) + ')' : '')).join(' / ') || '—', 'legs'));
-      variants.forEach(([v]) => { const r = row.variants[v]; tr.append(el('td', r ? number(r.net_R) : '未出', r ? signClass(r.net_R) : 'dim')); });
+      variants.forEach(([v]) => { const r = row.variants[v]; tr.append(el('td', r ? resultText(r) : '未出', r ? signClass(r.net_R) : 'dim')); });
+      tr.append(el('td', result ? sizingText(result) : '未出'));
+      tr.append(el('td', [result && result.plan_link_kind, row.n_dup_members ? `并入 ${row.n_dup_members} 条` : null].filter(Boolean).join(' · ') || '—'));
       tr.append(el('td', result ? fills[result.fill_status] || result.fill_status : '未出'), el('td', result ? outcomes[result.outcome_kind] || result.outcome_kind : '未出'), el('td', result ? String(result.n_teacher_actions_executed || 0) : '未出'));
       tr.addEventListener('click', event => { if (!event.target.closest('a') && !window.getSelection().toString()) {
         location.href = target;
@@ -352,7 +372,7 @@ async function detailPage() {
     throw new Error('未知单笔');
   }
   $('detail').hidden = false; crumbs(list.name,key,true);
-  options($('detail-variant'), Object.entries(list.variants).map(([key,v]) => [key,v.name + (row.variants[key] ? ' · ' + number(row.variants[key].net_R) + ' R' : '（未出）')]), params.get('variant'));
+  options($('detail-variant'), Object.entries(list.variants).map(([key,v]) => [key,v.name + (row.variants[key] ? ' · ' + resultText(row.variants[key]) + (row.variants[key].sizing_basis === 'nostop' ? '' : ' R') : '（未出）')]), params.get('variant'));
   for (const option of $('detail-variant').options) { option.disabled = !row.variants[option.value]; }
   async function render() {
     const sequence = ++detailSequence; $('loading').hidden = false; $('error').hidden = true;
@@ -379,12 +399,28 @@ async function detailPage() {
       if (data.trade.censor_reason) {
         const card = el('div',undefined,'card'); card.append(el('span','删失原因'),el('strong',data.trade.censor_reason)); $('cards').append(card);
       }
+      const sizing = data.sizing; const planLink = data.plan_link;
+      const extra = [['定量',sizingText(sizing)]];
+      if (sizing.sizing_basis === 'nostop') {
+        extra.push(['net_U',number(sizing.net_U,1)],['MAE (U)',number(sizing.mae_U,1)],['成交名义 (U)',number(sizing.entry_notional_U,0)]);
+        if (sizing.mtm_U_at_censor !== null && sizing.mtm_U_at_censor !== undefined) {
+          extra.push(['删失时浮动盈亏 (U)',number(sizing.mtm_U_at_censor,1)]);
+        }
+      }
+      [['合并方式',planLink.plan_link_kind],['重发家族',planLink.family_id],['并入本单的消息',data.dup_members.length ? data.dup_members.map(m => '#' + m.root_message_id + (m.plan_link_kind ? ' ' + m.plan_link_kind : '')).join(' / ') : null],
+        ['止损规则',planLink.stop_rule],['无止损类别',planLink.nostop_kind],['场所',planLink.venue_hint],['分诊',planLink.triage_verdict],['升级范围',planLink.promotion_scope],
+        ['信号年龄 (秒)',planLink.signal_age_s],['编辑延迟 (秒)',planLink.edit_delay_s],['第二遍判定',sizing.second_pass_decision]]
+        .forEach(([label,value]) => { if (value !== null && value !== undefined && value !== '') {
+          extra.push([label,value]);
+        } });
+      extra.forEach(([label,value]) => { const card = el('div',undefined,'card'); card.append(el('span',label),el('strong',String(value))); $('cards').append(card); });
+      $('sizing-note').textContent = sizing.note || '';
       timeline(data); renderChart(data);
     } catch (failure) {
       if (sequence === detailSequence) {
         error(failure);
         clearPriceChart();
-        $('chart').replaceChildren(); $('timeline').replaceChildren(); $('cards').replaceChildren();
+        $('chart').replaceChildren(); $('timeline').replaceChildren(); $('cards').replaceChildren(); $('sizing-note').textContent = '';
         $('range').textContent = ''; $('marker-legend').textContent = '';
         $('consistency').className = 'bad'; $('consistency').textContent = '复算不可用：' + failure.message;
       }

@@ -17,7 +17,7 @@
     <div id="loading" role="status">正在读取研究数据…</div>
     <section id="home" hidden>
       <h1>频道与口径</h1>
-      <p class="muted">仅统计已成交、未删失且行情／资金费／规则证据完整的单笔。区间按 UTC 决策日期聚类；累计 R 为信号累加。</p>
+      <p class="muted">仅统计已成交、未删失且行情／资金费／规则证据完整的单笔。区间按 UTC 决策日期聚类；累计 R 为信号累加。v8 口径按定量方式分块：R 只统计按风险定量（有止损）的单；无止损单（固定名义，仅内核 A）单独按金额 U 统计；合计只有金额。长期盈利判定见 scripts/v8_report.py 的报告，不以本页为准。</p>
       <div id="summary-table" class="table-wrap"></div>
       <div id="curves" class="grid"></div>
     </section>
@@ -38,6 +38,7 @@
       <h1 id="detail-title"></h1>
       <div class="toolbar"><label>回测口径<select id="detail-variant"></select></label><label>K线周期<select id="interval"><option value="auto">自动</option><option value="5m">5 分钟</option><option value="15m">15 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label><span id="range" class="muted"></span></div>
       <div id="consistency" role="status"></div>
+      <p id="sizing-note" class="muted"></p>
       <div id="cards" class="cards"></div>
       <div class="detail-grid">
         <div class="panel chart-panel"><div id="chart" aria-label="价格K线"></div><p id="chart-note" class="muted">蓝色：入场区间 · 红色：分段止损 · 绿色：止盈 · 灰色：标记价。点击右侧事件定位。</p><div id="marker-legend"></div></div>

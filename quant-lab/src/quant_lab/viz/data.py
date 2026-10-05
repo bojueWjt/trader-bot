@@ -28,9 +28,27 @@ from quant_lab.market.vision import LakePaths, partition_id, symbol_of
 VARIANTS = {"": "5天", "-be1": "保本", "-w14": "14天", "-w14-be1": "14天+保本", "-live": "让点",
             "-be1-live": "让点+保本", "-follow": "跟指令", "-live-follow": "让点+跟指令",
             "-w60": "60天", "-w60-be1": "60天+保本"}
+#: v8 runbook §8 第 7 步的目录（l0-v8<suffix>）。主口径放第一位（频道页默认口径）。无连字符的后缀是变体图
+#: （<ch>-v8e/-v8w/-v8nw，与主图同一个数据根），只按这里列出的精确名发现，不把任意 l0-v8xxx 目录当口径。
+TAG_VARIANTS = {
+    "v8": {"-w60lf-ns300": "主口径（60天·让点·跟指令·无止损300U）", "-w1-ns300": "无止损1天档", "-5d-ns300": "无止损5天档",
+           "-w14-ns300": "无止损14天档", "e": "编辑敏感性 v8e", "w": "宽口径 v8w", "nw": "不等待止损 v8nw"},
+}
 INTERVALS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14400}
 SAFE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 UTC = dt.timezone.utc
+SIZING_RISK, SIZING_NOSTOP = "risk", "nostop"
+#: L0 trades 的 v8 列（G2 产生或从 G1 透传）；旧报告没有这些列时为 None。
+V8_TRADE_FIELDS = ("sizing_basis", "nostop_notional_U", "legs_n", "legs_gt3", "mae_U", "mae_pct_notional", "entry_notional_U",
+                   "mtm_U_at_censor", "second_pass_decision", "nostop_kind", "venue_hint", "triage_verdict", "plan_link_kind",
+                   "family_id", "stop_rule", "time_ref_promoted", "promotion_scope", "signal_age_s", "edit_delay_s",
+                   "edit_may_contain_outcome")
+#: G1 v8 episode 列（方案 §4），详情页按「同一计划合并」展示；图里没有的列不出现。
+V8_EPISODE_FIELDS = ("plan_group_id", "family_id", "dup_of", "plan_link_kind", "repost_of", "amend_of", "reentry_of",
+                     "reentry_parent_stop", "stop_rule", "stop_base", "stop_source_version_id", "nostop_kind", "venue_hint",
+                     "triage_verdict", "triage_reason", "promotion_scope", "signal_age_s", "edit_delay_s", "signal_anchor",
+                     "edit_original_unavailable", "edit_may_contain_outcome", "entry_legs_n", "time_ref_promoted")
+NOSTOP_NOTE = "无止损仅内核 A：按固定名义定量（每腿 k×B）；R 只是金额等价（net_U / B），不与有止损单的 R 混算"
 
 
 # Everything the kernel reports about the trade except its identity stamps.
@@ -55,15 +73,25 @@ def evaluable(row: dict) -> bool:
             and all(row.get(key) is True for key in ("mark_ok", "funding_ok", "rules_ok", "bars_ok")))
 
 
-def statistics_for(rows: list[dict]) -> dict:
-    samples = sorted((r for r in rows if evaluable(r)), key=lambda r: (r["t_dec"], r["episode_id"]))
+def sizing_of(row: dict) -> str:
+    return row.get("sizing_basis") or SIZING_RISK      # v8 之前的报告没有该列，全部按风险定量
+
+
+def net_U(row: dict) -> Decimal | None:
+    """Money result: net_R × risk_budget (for a stopless row net_R is net_U / B). None when the budget is unknown."""
+    budget = row.get("risk_budget")
+    return None if budget is None or row.get("net_R") is None else Decimal(str(row["net_R"])) * Decimal(str(budget))
+
+
+def _clustered(samples: list[dict], value) -> dict:
+    """Per-trade point estimates; 95% interval over UTC t_dec day means (mean ± 1.96·sd/√days)."""
     days = defaultdict(list)
     curve, total = [], Decimal(0)
     for row in samples:
-        value = Decimal(str(row["net_R"]))
-        days[row["t_dec"].date()].append(float(value))
-        total += value
-        curve.append({"episode_id": row["episode_id"], "t_dec": row["t_dec"], "cumulative_R": float(total)})
+        number = value(row)
+        days[row["t_dec"].date()].append(float(number))
+        total += number
+        curve.append({"episode_id": row["episode_id"], "t_dec": row["t_dec"], "cumulative": float(total)})
     daily = [statistics.mean(values) for values in days.values()]
     interval = None
     if len(daily) >= 2:
@@ -76,9 +104,53 @@ def statistics_for(rows: list[dict]) -> dict:
             conclusion = "正期望"
         elif interval[1] < 0:
             conclusion = "负期望"
-    return {"n": len(samples), "n_days": len(days), "win_rate": sum(float(r["net_R"]) > 0 for r in samples) / len(samples) if samples else None,
-            "mean_R": float(total / len(samples)) if samples else None, "ci95": interval,
-            "sum_R": float(total), "conclusion": conclusion, "cumulative_R": curve}
+    return {"n": len(samples), "n_days": len(days),
+            "win_rate": sum(value(r) > 0 for r in samples) / len(samples) if samples else None,
+            "mean": float(total / len(samples)) if samples else None, "ci95": interval, "sum": float(total),
+            "conclusion": conclusion, "curve": curve}
+
+
+def statistics_for(rows: list[dict]) -> dict:
+    """R statistics over risk-sized rows only; stopless rows are a separate money (U) block; the total is money only.
+
+    v8 F1/§11-7: a stopless trade's R is a money equivalent, never mixed into mean R, win rate or the R curve.
+    """
+    ordered = sorted((r for r in rows if evaluable(r)), key=lambda r: (r["t_dec"], r["episode_id"]))
+    risk = [r for r in ordered if sizing_of(r) == SIZING_RISK]
+    nostop = [r for r in ordered if sizing_of(r) == SIZING_NOSTOP]
+    stats = _clustered(risk, lambda r: Decimal(str(r["net_R"])))
+    result = {"n": stats["n"], "n_days": stats["n_days"], "win_rate": stats["win_rate"], "mean_R": stats["mean"],
+              "ci95": stats["ci95"], "sum_R": stats["sum"], "conclusion": stats["conclusion"],
+              "cumulative_R": [{"episode_id": p["episode_id"], "t_dec": p["t_dec"], "cumulative_R": p["cumulative"]}
+                               for p in stats["curve"]]}
+    if not any(sizing_of(r) == SIZING_NOSTOP for r in rows):
+        return result          # 旧报告（全部按风险定量）：输出与 v8 之前相同
+    # 没有 risk_budget 的行不能换成金额：整块为空，而不是当成 0（无法比较 ≠ 相等）。
+    unknown = any(net_U(r) is None for r in ordered)
+    money = None if unknown else _clustered(nostop, net_U)
+    result["blocks"] = {
+        "nostop": ({"n": len(nostop), "status": "risk_budget 缺失"} if money is None else
+                   {"n": money["n"], "n_days": money["n_days"], "win_rate": money["win_rate"], "mean_U": money["mean"],
+                    "ci95": money["ci95"], "sum_U": money["sum"], "conclusion": money["conclusion"]}),
+        "total": {"sum_net_U": None if unknown else float(sum((net_U(r) for r in ordered), Decimal(0))),
+                  "note": "合计只有金额：不出合计均值与胜率"},
+        "note": NOSTOP_NOTE,
+    }
+    return result
+
+
+def dup_members(episodes: pl.DataFrame | None) -> dict[str, list[dict]]:
+    """kept episode → the episodes G1 merged into it (v8 dup_of); empty for graphs built before v8."""
+    if episodes is None or "dup_of" not in episodes.columns:
+        return {}
+    columns = [c for c in ("episode_id", "root_message_id", "root_source_version_id", "t_dec", "plan_link_kind", "dup_of")
+               if c in episodes.columns]
+    out = defaultdict(list)
+    for row in episodes.filter(pl.col("dup_of").is_not_null() & (pl.col("dup_of") != "")).select(columns).iter_rows(named=True):
+        out[row["dup_of"]].append(row)
+    # 按决策时刻排序，时刻未知（伴随帖并入后不单独决策）的置末。
+    return {key: sorted(rows, key=lambda r: (r.get("t_dec") is None, r.get("t_dec") or dt.datetime.min.replace(tzinfo=UTC),
+                                             r["episode_id"])) for key, rows in out.items()}
 
 
 def mixed_timeline(messages: list[dict], events: list[dict]) -> list[dict]:
@@ -159,17 +231,21 @@ class Dashboard:
         return self.channels[key]
 
     def variants(self) -> dict[str, dict]:
-        suffixes = dict(VARIANTS)
+        builtin = TAG_VARIANTS.get(self.tag, VARIANTS)
+        suffixes = dict(builtin)
         prefix = f"l0-{self.tag}"
         if self.reports.is_dir():
-            for directory in self.reports.iterdir():
+            for directory in sorted(self.reports.iterdir()):
                 if directory.is_dir() and directory.name.startswith(prefix):
                     suffix = directory.name[len(prefix):]
                     if suffix.startswith("-") and SAFE_KEY.fullmatch(suffix):
                         suffixes.setdefault(suffix, suffix)
         variants = {}
         for suffix, name in suffixes.items():
-            key = "base" if suffix == "" else suffix[1:]
+            if suffix and not suffix.startswith("-"):
+                key = f"{self.tag}{suffix}"      # 变体图目录 l0-v8e → 口径 v8e
+            else:
+                key = "base" if suffix == "" else suffix[1:]
             if suffix and key == "base":
                 key = "suffix:-base"  # Preserve an unknown -base without shadowing the default.
             variants[key] = {"suffix": suffix, "name": name}
@@ -189,7 +265,9 @@ class Dashboard:
             rows = pl.read_parquet(trades_path).to_dicts()
             after = [(p.stat().st_mtime_ns, p.stat().st_size) for p in (summary_path, trades_path)]
             # L0 publishes parquet before summary. Refuse mixed generations while running.
-            if before != after or before[0][0] < before[1][0] or summary["overall"]["n_trades"] != len(rows):
+            # v8 summaries count only risk-sized rows in overall; stopless rows are in blocks.nostop.
+            expected = summary["overall"]["n_trades"] + (summary["blocks"]["nostop"]["n_trades"] if "blocks" in summary else 0)
+            if before != after or before[0][0] < before[1][0] or expected != len(rows):
                 return None, []
             if summary["channel"] != self.channel(channel)["channel_id"]:
                 return None, []
@@ -223,25 +301,40 @@ class Dashboard:
                 if eid not in collected:
                     collected[eid] = {field: row.get(field) for field in ("episode_id", "t_dec", "instrument", "side", "entries", "stop", "targets")}
                     collected[eid]["variants"] = {}
-                collected[eid]["variants"][variant] = {field: row.get(field) for field in (
+                record = {field: row.get(field) for field in (
                     "net_R", "fill_status", "outcome_kind", "n_teacher_actions_executed", "censor_reason", "trace_hash")}
+                record.update({field: row.get(field) for field in V8_TRADE_FIELDS})
+                record["sizing_basis"] = sizing_of(row)
+                record["net_U"] = net_U(row)
+                collected[eid]["variants"][variant] = record
+        episodes = self.graph_episodes(channel)
+        members = dup_members(episodes)
+        for eid, row in collected.items():
+            row["n_dup_members"] = len(members.get(eid, []))
         return {"key": key, "name": channel["name"], "variants": variants, "statuses": statuses,
                 "trades": sorted(collected.values(), key=lambda r: (r["t_dec"], r["episode_id"])),
-                "teacher_episode_ids": self.teacher_episode_ids(channel)}
+                "teacher_episode_ids": self.teacher_episode_ids(channel, episodes), "nostop_note": NOSTOP_NOTE}
 
-    def teacher_episode_ids(self, channel: dict) -> list[str]:
+    def graph_episodes(self, channel: dict) -> pl.DataFrame | None:
+        """The configured graph's full (description) episode table for this channel; None when not published."""
+        layout = channel["layout"]
+        gv = resolve_alias(layout, channel["graph_version"])
+        if not layout.episode(gv).is_file():
+            return None
+        return load_episodes(gv, decision_graph=False, layout=layout).filter(pl.col("channel_id") == channel["channel_id"])
+
+    def teacher_episode_ids(self, channel: dict, episodes: pl.DataFrame | None = None) -> list[str]:
         paths = {channel["layout"].silver_dir / "followup_action.parquet"}
         for variant in self.variants():
             summary, _ = self.report(channel["key"], variant)
             if summary and summary.get("follow_teacher", {}).get("path"):
                 paths.add(Path(summary["follow_teacher"]["path"]).expanduser())
         ids = set()
-        layout = channel["layout"]
-        gv = resolve_alias(layout, channel["graph_version"])
         roots = defaultdict(list)
-        if layout.episode(gv).is_file():
-            episodes = load_episodes(gv, decision_graph=False, layout=layout)
-            for episode in episodes.filter(pl.col("channel_id") == channel["channel_id"]).iter_rows(named=True):
+        if episodes is None:
+            episodes = self.graph_episodes(channel)
+        if episodes is not None:
+            for episode in episodes.iter_rows(named=True):
                 roots[episode["root_message_id"]].append(episode["episode_id"])
         for path in paths:
             if path.is_file():
@@ -262,8 +355,10 @@ class Dashboard:
             raise LookupError("未知单笔或该口径未出")
         trade = matching[0]
         layout = channel["layout"]
-        gv = resolve_alias(layout, channel["graph_version"])
-        if gv != summary["graph_version"]:
+        # v8 变体图（v8e/v8w/v8nw）与主图在同一个数据根里，频道配置用 graph_aliases 显式列出才接受。
+        allowed = {resolve_alias(layout, name) for name in (channel["graph_version"], *channel.get("graph_aliases", []))}
+        gv = summary["graph_version"]
+        if gv not in allowed:
             raise ValueError("配置图版本与回测报告不一致")
         episodes = load_episodes(gv, layout=layout).filter(
             (pl.col("channel_id") == channel["channel_id"]) & (pl.col("episode_id") == episode_id)).to_dicts()
@@ -276,9 +371,12 @@ class Dashboard:
         lake = Path(summary.get("market_lake") or self.market_lake or "").expanduser().resolve()
         if not summary.get("market_lake") and self.market_lake is None:
             raise ValueError("未配置行情湖")
-        text = load_message_texts([episode["root_source_version_id"]], layout=layout).get(episode["root_source_version_id"])
+        # 同回放（l0_replay.replay）：止损可能在另一条消息里（补充止损），按 stop_source_version_id 另读原文传给 live v4。
+        stop_source = episode.get("stop_source_version_id")
+        texts = load_message_texts([episode["root_source_version_id"], stop_source], layout=layout)
+        text = texts.get(episode["root_source_version_id"])
         req, audit, why, _, _ = prepare_episode_request(episode, marks=LakeMarket(lake), lake=lake,
-            policy=policy, risk_budget=Decimal(summary["risk_budget"]), text=text)
+            policy=policy, risk_budget=Decimal(summary["risk_budget"]), text=text, stop_text=texts.get(stop_source))
         if req is None:
             raise ValueError(f"无法复算：{why}")
         follow_path = Path(summary.get("follow_teacher", {}).get("path") or layout.silver_dir / "followup_action.parquet").expanduser()
@@ -458,8 +556,17 @@ class Dashboard:
             at, price = move["ts"], move["price"]
         if price is not None:
             segments.append({"start": at, "end": req.horizon_end, "price": price})
+        graph = load_episodes(req.graph_version, decision_graph=False, layout=channel["layout"]).filter(
+            pl.col("channel_id") == channel["channel_id"])
+        sizing = {field: trade.get(field) for field in V8_TRADE_FIELDS if field in trade}
+        sizing.update({"sizing_basis": sizing_of(trade), "net_U": net_U(trade)})
+        if sizing["sizing_basis"] == SIZING_NOSTOP:
+            sizing["note"] = NOSTOP_NOTE
         return {"channel": {"key": key, "name": channel["name"]}, "variant": variant, "episode_id": episode_id,
                 "trade": trade, "plan": plan, "live_audit": audit, "horizon_end": req.horizon_end,
+                "sizing": sizing,
+                "plan_link": {field: episode[field] for field in V8_EPISODE_FIELDS if field in episode},
+                "dup_members": dup_members(graph).get(episode_id, []),
                 "consistency": {"ok": consistent, "label": label,
                                 "expected": trade["trace_hash"], "actual": result["trace_hash"],
                                 "expected_kernel": trade.get("kernel_version"), "actual_kernel": result.get("kernel_version")},

@@ -68,13 +68,29 @@ scripts/hackintosh.sh dash /synthetic/research/dashboard.json 8876 8765
 | -w60 | 60天 |
 | -w60-be1 | 60天+保本 |
 
+### v8 口径（`"tag": "v8"`）
+
+`tag` 为 `v8` 时不显示上表的 v7 内置口径，改用 runbook §8 第 7 步的目录：
+
+| 目录 | API key | 名称 |
+| --- | --- | --- |
+| l0-v8-w60lf-ns300 | w60lf-ns300 | 主口径（60天·让点·跟指令·无止损300U），频道页默认 |
+| l0-v8-w1-ns300 / -5d-ns300 / -w14-ns300 | w1-ns300 / 5d-ns300 / w14-ns300 | 无止损持有期档 |
+| l0-v8e / l0-v8w / l0-v8nw | v8e / v8w / v8nw | 变体图：编辑敏感性 / 宽口径 / 不等待止损 |
+
+其他 `l0-v8-*` 目录（S、C 批次）照常按后缀发现；不带连字符的目录只认上表三个，不把任意 `l0-v8xxx` 当口径。变体图（`<ch>-v8e` 等）与主图在同一个数据根，频道配置里用 `"graph_aliases": ["<ch>-v8e", "<ch>-v8w", "<ch>-v8nw"]` 显式列出后，详情页才接受这些报告的图版本；没列出的仍按「配置图版本与回测报告不一致」拒绝。
+
+**分块**（方案 F1、§11 第 7 条）：v8 summary 的 `overall` 只统计 `sizing_basis=risk` 的行，无止损行在 `blocks.nostop`；看板判断 parquet 与 summary 是否成对时按 `overall.n_trades + blocks.nostop.n_trades` 核对笔数。首页的均值 R、胜率、95% 区间和累计 R 曲线只用按风险定量（有止损）的单；无止损单（固定名义，仅内核 A）单独按金额 U 统计（n、均值 U、胜率、合计 U、按日聚类区间）；两块的合计只给金额 `sum_net_U = Σ net_R × risk_budget`，不出合计均值和胜率。任一可评估行缺 `risk_budget` 时金额为空（不当成 0）。旧报告没有 `sizing_basis` 列，全部视为按风险定量，统计输出与 v8 之前逐字段相同。频道列表里无止损单的结果列按 U 显示，另有「定量」（按风险 / 无止损名义 / >3腿）与「合并」（`plan_link_kind`、被并入本单的 dup 数）两列；详情卡片显示 `sizing_basis`、`net_U`、`mae_U`、成交名义、删失时浮动盈亏、G1 的合并方式、重发家族、并入本单的消息（`dup_of` 指向本单的 episode）、止损规则、无止损类别、场所、分诊、升级范围、信号年龄、编辑延迟和第二遍判定。图里没有这些列（B 组合入前）时不显示。
+
+长期是否盈利只看 `scripts/v8_report.py` 的冻结判定（方案 §10.4：周块 bootstrap、判定期止于 2026-06-30、四档持有期一致），看板的按日区间只作浏览。
+
 可评估样本同时要求：`fill_status ∈ {filled, partial}`、`censor_reason` 空、`net_R` 非空，且 `mark_ok/funding_ok/rules_ok/bars_ok` 严格为 true。胜率为 `net_R>0` 的比例；点估计为逐笔均值，合计 R 为逐笔累加。95% 区间以 UTC `t_dec` 日期分组的天均值计算：天均值的均值 ± `1.96 × sample_std / sqrt(n_days)`。少于两天区间为 null、显示不足；下沿 >0 正期望，上沿 <0 负期望，否则 ≈0。≈0 也包含证据不足的情况。
 
 **与旧 summary 的差异**：当前 `l0_replay.summarize()` 的 `overall.mean_net_R` 与累计曲线含未成交的零 R；看板按照本需求的可评估“已成交单”统计，对应 summary 的 `n_evaluable_filled` 和成交样本胜率。看板不修改 summary、不沿用包含未成交单的旧均值／曲线，也不改变 L0 输出。
 
 ## 单笔复算与事件线
 
-共享 `l0_replay.prepare_episode_request()` 按原顺序执行参考价补全／过时报价限价化、live profile、历史 tick 规则、`build_request`，使用 summary 中的策略版本和风险预算。follow 口径再读取 summary 的 `follow_teacher.path`，调用原 `attach_management`。随后原 `load_market_from_lake` + `simulate_batch(kernel="A")` 得到 canonical events。策略哈希与登记不一致、根不可执行或输入改变时拒绝复算。
+共享 `l0_replay.prepare_episode_request()` 按原顺序执行参考价补全／过时报价限价化、无止损近端单笔与固定名义定量、live profile、历史 tick 规则、`build_request`，使用 summary 中的策略版本和风险预算。与回放相同，episode 带 `stop_source_version_id` 时另读该止损消息的原文作为 `stop_text` 传入（live v4 按止损所在消息判 0.1% 放宽），而不是只传根原文。follow 口径再读取 summary 的 `follow_teacher.path`，调用原 `attach_management`。随后原 `load_market_from_lake` + `simulate_batch(kernel="A")` 得到 canonical events。策略哈希与登记不一致、根不可执行或输入改变时拒绝复算。
 
 只有复算 `trace_hash` 与该口径交易行完全一致才返回和展示成交事件；例外是内核版本不同（如 v0.5 批量结果、v0.6 复算）而成交、价格、时间、费用、R、覆盖标记等全部结果字段逐一相同，此时标「结果一致（内核版本不同）」并展示事件。否则显示「复算不一致」，保留回测行的数据卡片与原文，隐藏 canonical events；不将当前新模拟伪装成历史成交。指令“采用”是请求构造结果，“执行结果”来自 canonical management 事件；采用但未处理可能是仓位已结束。不跟指令的口径标 `policy_disabled`。`uncertain`、`episode_ambiguity`、超窗和其他丢弃原因单独展示；归属未确定但窗口内提及同币种的指令作为上下文展示，不因此采用。
 
