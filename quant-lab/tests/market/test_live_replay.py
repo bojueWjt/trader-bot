@@ -194,6 +194,11 @@ def test_l0_live_audit_and_summary_use_root_version_without_changing_source(buil
 
     monkeypatch.setattr(l0, "build_request", capture)
     before = original("l0-test")
+    # v8 集成：G1（B 组）的图每行都带 stop_rule 键 → live 走 v4、不再从原文推导止损。本测试守的是 v3 路径
+    # （v7 形状的图，没有这些键），所以重放时去掉 v8 止损列；v4 的同一输入见下一个测试。
+    v8_stop_columns = ("stop_rule", "stop_base", "stop_source_version_id")
+    monkeypatch.setattr(l0, "load_episodes", lambda *a, **k: (lambda frame: frame.drop(
+        [column for column in v8_stop_columns if column in frame.columns]))(original(*a, **k)))
     report = l0.replay(graph_version="l0-test", channel=CHANNEL, out=root / "live", policy_version=BASES[0] + "-live")
     table = pl.read_parquet(root / "live" / "trades.parquet")
     assert calls == [versions]
@@ -214,6 +219,24 @@ def test_l0_live_audit_and_summary_use_root_version_without_changing_source(buil
         content = (root / "live" / path).read_text()
         assert "live_execution_profile" in content and "BTC 做多" not in content
         assert "SKILL.md:27" in content
+
+
+def test_l0_live_v8_graph_reads_stop_rule_marks_not_root_wording(built, monkeypatch):
+    """同一根原文「止损略破90」在 v8 图（带 stop_rule 键、该行无第 9 条标记）上走 live v4：止损按图上的 90，
+    不从原文再外扩（F4：silver 是唯一推导点，live 只认标记）；入场让点照常。"""
+    root, _ = built
+    episodes = l0.load_episodes("l0-test").filter(pl.col("channel_id") == CHANNEL)
+    assert "stop_rule" in episodes.columns
+    versions = episodes["root_source_version_id"].to_list()
+    monkeypatch.setattr(l0, "load_message_texts",
+                        lambda ids: {versions[0]: "BTC 做多 入场100附近\n止损略破90\n目标110"} if versions[0] in ids else {})
+    report = l0.replay(graph_version="l0-test", channel=CHANNEL, out=root / "live-v4", policy_version=BASES[0] + "-live")
+    table = pl.read_parquet(root / "live-v4" / "trades.parquet")
+    applied = {a["source_version_id"]: a for a in map(json.loads, table["live_execution_json"])}[versions[0]]
+    assert applied["execution_plan"]["entries"][0]["price_lo"] == "100.1"
+    assert applied["execution_plan"]["stop"]["price"] == "90"
+    counts = report["live_execution_profile"]["rule_counts"]
+    assert counts["stop_breakout"] == 0 and counts["stop_widening"] == 0 and counts["entry_concession"] == 1
 
 
 def test_live_without_any_root_text_is_a_batch_error(built, monkeypatch):

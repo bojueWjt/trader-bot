@@ -160,6 +160,10 @@ FOREIGN_HITS: set[tuple[str, str]] = {
     ("P3_duration_div", "research/maxt.py:calendar_blocks"),
     # G1 followup 的可见会话分钟距离；不是市场观察窗/网格的重写。
     ("P3_duration_div", "data/followup.py:visible_conversation"),
+    # v8 D 组分诊提示里的 minutes_before（上文/候选距根消息的分钟数，只进提示文本）；
+    # 与 followup 同性质，不是市场观察窗/网格的重写。v8 集成时登记，待 G0 确认。
+    ("P2_int_total_seconds", "data/cx_triage.py:_minutes"),
+    ("P3_duration_div", "data/cx_triage.py:_minutes"),
 }
 PATTERN_WHY = {
     "P8_inline_force_close": "余仓 mark 减 entry_avg_price 估值只能由 force_close_net_R 表达",

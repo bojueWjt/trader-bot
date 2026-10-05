@@ -130,9 +130,14 @@ def test_channel_list_carries_v8_columns(v8):
     assert record["net_U"] == (None if record["net_R"] is None else record["net_R"] * Decimal("180"))
     risk = trade["variants"]["w60lf-ns300"]
     assert risk["sizing_basis"] == "risk" and "legs_n" in risk
-    # 合成图没有 G1 的 v8 列（B 组合入前）：报告里没有的列不写成空字段；没有 dup_of 不写合并数，而不是写 0。
-    assert "plan_link_kind" not in risk and "triage_verdict" not in risk
-    assert "n_dup_members" not in risk and "n_dup_members" not in trade and "内核 A" in data["nostop_note"]
+    # 报告里没有的列不写成空字段；图没有 dup_of 不写合并数，而不是写 0。
+    # 集成（B 组合入后）：合成图由 G1 建，带 v8 列与 dup_of；断言随报告/图的实际列走，两个方向都查。
+    columns = set(pl.read_parquet(v8["config_doc"]["reports"] + "/l0-v8-w60lf-ns300/demo/trades.parquet").columns)
+    for field in ("plan_link_kind", "triage_verdict"):
+        assert (field in risk) == (field in columns)
+    graph_counts = data_module.dup_counts(dashboard.channel("demo")["layout"], "viz-test", CHANNEL)
+    assert ("n_dup_members" in risk) == (graph_counts is not None)
+    assert "n_dup_members" not in trade and "内核 A" in data["nostop_note"]
 
 
 def test_trade_records_carry_only_the_reports_own_v8_columns(dashboard, tmp_path):
@@ -159,11 +164,15 @@ def test_trade_records_carry_only_the_reports_own_v8_columns(dashboard, tmp_path
     doc["reports"] = str(reports)
     path = tmp_path / "dashboard.json"
     path.write_text(json.dumps(doc))
-    records = [r for t in Dashboard(path).trades("demo")["trades"] for r in t["variants"].values()]
+    old = Dashboard(path)
+    records = [r for t in old.trades("demo")["trades"] for r in t["variants"].values()]
     assert records
+    # 合并数取自图的 dup_of，不取自报告：集成后合成图由 G1 v8 建、带 dup_of，此时合并数照写；图没有 dup_of 时不写。
+    graph_has_dup = data_module.dup_counts(old.channel("demo")["layout"], "viz-test", CHANNEL) is not None
     for record in records:
         assert not set(data_module.V8_TRADE_FIELDS) & set(record)
-        assert not {"sizing_basis", "net_U", "n_dup_members"} & set(record)
+        assert not {"sizing_basis", "net_U"} & set(record)
+        assert ("n_dup_members" in record) == graph_has_dup
 
 
 def test_dup_members_from_g1_dup_of():
