@@ -5,7 +5,7 @@ from decimal import Decimal as D
 import pytest
 
 from quant_lab.market.contract import ContractError, OrderPlan, canonical_json
-from quant_lab.market.live_profile import apply_live_profile, wording_flags
+from quant_lab.market.live_profile import apply_live_profile, v4_stop_anchor, wording_flags
 
 
 def plan(side="long", *, zone=False, pair=False):
@@ -353,6 +353,30 @@ def test_v4_anchors_wording_on_stop_base_in_stop_text():
     based, _ = apply_live_profile(v8_plan("long", "100", "79.5"), "入场100\n止损80附近", D("0.001"),
                                   stop_meta={"stop_rule": "plain_break", "stop_base": D(80)})
     assert based["stop"]["price"] == D("79.420")                     # base 80 carries 附近 → the stop 79.5 widens
+
+
+@pytest.mark.parametrize("base", [None, "3100"])
+def test_v4_relative_stop_is_not_widened_by_the_entry_wording(base):
+    # F9: the relative stop's reference is the entry, so stop_base may hold the entry price. The entry's 「附近」 must
+    # never widen the stop (3050 stays 3050, not 3046.95).
+    meta = {"stop_rule": "relative", "stop_base": None if base is None else D(base)}
+    out, audit = apply_live_profile(v8_plan("long", "3100", "3050", symbol="ETHUSDT"), "ETH 3100附近多 防守50点", D("0.01"),
+                                    stop_meta=meta)
+    assert out["stop"]["price"] == D("3050") and audit["stop_v4"]["decision"] == "exact"
+    assert out["entries"][0]["price_lo"] == D("3103.10")             # the entry itself still gets its 0.1%
+    assert v4_stop_anchor(v8_plan("long", "3100", "3050"), meta) == D("3050")
+    # A zone's reference is its midpoint, which is not an entry level: the relative rule alone keeps the stop exact.
+    zone = custom("long", ("3090", "3110"), "3050", [], symbol="ETHUSDT")      # a ladder
+    out, audit = apply_live_profile(zone, "ETH 3090-3110区间多，中枢3100附近，防守50点", D("0.01"), stop_meta=meta)
+    assert audit["stop_v4"]["decision"] == "exact" and v4_stop_anchor(zone, meta) == D("3050")
+    # Any other rule whose base coincides with an entry level (and not with the stop) is anchored on the stop too.
+    other = {"stop_rule": "inherited_amend", "stop_base": D("3100")}
+    kept, _ = apply_live_profile(v8_plan("long", "3100", "3050", symbol="ETHUSDT"), "ETH 3100附近多 止损3050", D("0.01"),
+                                 stop_meta=other)
+    assert kept["stop"]["price"] == D("3050")
+    near, _ = apply_live_profile(v8_plan("long", "3100", "3050", symbol="ETHUSDT"), "ETH 3100附近多 止损3050附近", D("0.01"),
+                                 stop_meta=other)
+    assert near["stop"]["price"] == D("3046.95")                    # wording on the stop itself still widens
 
 
 def test_stopless_plan_skips_the_stop_and_keeps_entry_and_target_wording():

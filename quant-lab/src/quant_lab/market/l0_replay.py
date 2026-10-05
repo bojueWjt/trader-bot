@@ -8,6 +8,7 @@ v8（F1/F4/§4 第二遍）：
 - 无止损计划只在无止损策略下执行：区间取近端单笔限价，按每腿固定名义定量（fixed_qty），规则取不到记 NOSTOP_RULES_UNRESOLVED；
 - live v4 读 episode 的 stop_rule/stop_base，并按 stop_source_version_id 加载止损所在消息的原文；
 - repost_of/amend_of 指向别单的 episode 在第二遍按「原单家族当时是否在场」判定（REPOST_OF_LIVE_PLAN / AMEND_*）；
+  家族成员删失、证据在 E.t_dec 前断掉时在场与否未知，单列 REPOST_TARGET_CENSORED / AMEND_TARGET_CENSORED；
 - overall/by/cumulative_R/censor_counts 只统计按风险定量的行；无止损行在 blocks.nostop 里按金额（U）统计，合计只有金额。
 """
 from __future__ import annotations
@@ -144,7 +145,7 @@ NOSTOP_GROUP_COLUMNS = ("nostop_kind", "venue_hint", "legs_gt3", "time_ref_promo
 
 
 def concurrency(rows: list[dict]) -> dict:
-    """无止损在场名义（成交量 × 均价 × 合约乘数）的峰值与时刻；未平仓的删失单按删失时刻结束。只作诊断。"""
+    """无止损在场名义（成交量 × 均价 × 合约乘数）的峰值与时刻；未平仓的删失单按删失时刻结束。只作诊断（上界，见 note）。"""
     edges = []
     for r in rows:
         if r["filled_qty"] <= 0 or r.get("entry_notional_U") is None or r["position_open_at"] is None:
@@ -160,7 +161,8 @@ def concurrency(rows: list[dict]) -> dict:
         if level > peak:
             peak, peak_at = level, at
     return {"peak_notional_U": float(peak), "peak_at": None if peak_at is None else peak_at.isoformat(),
-            "note": "单笔内核看不到组合层；按成交时刻叠加在场名义，只作诊断"}
+            "note": "单笔内核看不到组合层，只作诊断。近似：整笔成交名义在首次成交时刻计入（分腿先后成交时前段偏高），"
+                    "到平仓或删失时刻整笔移出（分批止盈时后段偏高），所以是上界"}
 
 
 def blocks(rows: list[dict]) -> dict:
@@ -235,7 +237,26 @@ def resolve_market_refs(row: dict, marks) -> tuple[dict | None, str | None]:
     if not has_market:
         return row, None
     fixed = [dict(e, price_lo=mark.price, price_hi=mark.price) if e.get("kind") == "market_ref" else e for e in entries]
-    return dict(row, order_plan=dict(plan, entries=fixed)), None
+    out = dict(row, order_plan=dict(plan, entries=fixed))
+    if stop is None:
+        # 无止损计划没有 0.25R 报价门（门以止损距离为尺）：按 t_dec 标记价成交，只记老师报价与标记价的最大相对偏离供报告计数。
+        quotes = [Decimal(str(e["price_lo"])) for e in entries if e.get("kind") == "market_ref" and e.get("price_lo") is not None]
+        if quotes:
+            out["nostop_quote_deviation"] = max(abs(q - mark.price) / mark.price for q in quotes)
+    return out, None
+
+
+NOSTOP_QUOTE_THRESHOLDS = (("0.5%", Decimal("0.005")), ("1%", Decimal("0.01")), ("2%", Decimal("0.02")), ("5%", Decimal("0.05")))
+
+
+def nostop_quote_report(infos: list[dict]) -> dict:
+    """Stopless plans whose market legs carried a teacher quote: how far the quote was from the t_dec mark they fill at."""
+    deviations = [i["nostop_quote_deviation"] for i in infos
+                  if i.get("sizing_basis") == SIZING_NOSTOP and i.get("nostop_quote_deviation") is not None]
+    return {"n": len(deviations),
+            "n_deviation_over": {label: sum(d > t for d in deviations) for label, t in NOSTOP_QUOTE_THRESHOLDS},
+            "max_deviation": None if not deviations else float(max(deviations)),
+            "note": "无止损计划没有 0.25R 过时报价门（门以止损距离为尺），市价腿一律按 t_dec 标记价成交；这里只计数，不改执行"}
 
 
 def stop_meta_of(row: dict) -> dict | None:
@@ -256,9 +277,43 @@ def prepare_execution(row: dict, *, policy, text: str | None = None, tick_size: 
                  "execution_plan": row["order_plan"]}
         return row, audit
     plan, audit = apply_live_profile(row["order_plan"], text, tick_size, stop_meta=stop_meta_of(row), stop_text=stop_text)
+    if "stop_v4" in audit:
+        # 「没有止损消息」与「有止损消息但原文读不到（退回根原文）」不能长得一样。
+        has_source = row.get("stop_source_version_id") is not None
+        audit["stop_v4"]["stop_message"] = "none" if not has_source else "resolved" if stop_text is not None else "unresolved"
     audit["source_version_id"] = row.get("root_source_version_id")
     audit["root_text_resolved"] = text is not None
     return dict(row, order_plan=plan), audit
+
+
+def load_message_available_at(source_version_ids, layout: Layout) -> dict[str, dt.datetime | None]:
+    """bronze available_at of exact versions; a version with conflicting duplicate times reads as unknown (None)."""
+    ids = sorted({value for value in source_version_ids if value is not None})
+    path = layout.message_version
+    if not ids or not path.exists():
+        return {}
+    rows = pl.scan_parquet(path).filter(pl.col("source_version_id").is_in(ids)).select(
+        "source_version_id", "available_at").collect()
+    seen: dict[str, set] = {}
+    for version, at in rows.iter_rows():
+        seen.setdefault(version, set()).add(at)
+    return {version: next(iter(times)) if len(times) == 1 else None for version, times in seen.items()}
+
+
+def stop_messages_after_t_dec(rows: list[dict], available: dict[str, dt.datetime | None]) -> list[str]:
+    """Episodes whose stop message is in bronze but not visible strictly before t_dec (unknown time counts as not visible).
+
+    G1 puts the stop message into deps(plan), so t_vis(stop) < t_dec by construction; anything else is look-ahead.
+    """
+    late = []
+    for row in rows:
+        version = row.get("stop_source_version_id")
+        if version is None or version not in available:
+            continue
+        at = available[version]
+        if at is None or row["t_dec"] is None or at >= row["t_dec"]:
+            late.append(row["episode_id"])
+    return late
 
 
 def load_followup_actions(path: Path) -> list[dict]:
@@ -419,7 +474,7 @@ def prepare_episode_request(row: dict, *, marks, lake: Path, policy, risk_budget
     rule_cache = {} if rule_cache is None else rule_cache
     legs = len(fixed["order_plan"].get("entries") or [])
     info.update({"sizing_basis": SIZING_RISK, "nostop_notional_U": None, "legs_n": legs, "legs_gt3": legs > 3,
-                 "multiplier": None})
+                 "multiplier": None, "nostop_quote_deviation": fixed.get("nostop_quote_deviation")})
 
     def decision_rule():
         inst = fixed["instrument_id"]
@@ -463,7 +518,11 @@ def prepare_episode_request(row: dict, *, marks, lake: Path, policy, risk_budget
 # ---------------------------------------------------------------------------
 # v8 §4 G2 第二遍：重发与改单按原单家族当时是否在场判定
 # ---------------------------------------------------------------------------
-SECOND_PASS_EXCLUSIONS = ("REPOST_OF_LIVE_PLAN", "AMEND_REQUIRES_FOLLOW", "AMEND_TARGET_FILLED")
+#: REPOST_TARGET_CENSORED / AMEND_TARGET_CENSORED: a family member (or the amend target) is censored and its evidence
+#: ends before E.t_dec while it was still live — whether it is live at E.t_dec is unknown, which is neither "live"
+#: nor "ended" (uncomparable ≠ equal), so the coverage gap gets its own code instead of hiding in a business one.
+SECOND_PASS_EXCLUSIONS = ("REPOST_OF_LIVE_PLAN", "REPOST_TARGET_CENSORED", "AMEND_REQUIRES_FOLLOW", "AMEND_TARGET_FILLED",
+                          "AMEND_TARGET_CENSORED")
 
 
 def link_of(row: dict) -> tuple[str | None, str | None]:
@@ -490,15 +549,37 @@ def entry_filled_before(events: list[dict], t: dt.datetime) -> bool:
     return any(e["kind"] in FILL_KINDS and e["leg"] == "entry" and e["ts"] < t for e in events)
 
 
+#: A result without a row (the runner returned nothing) has no evidence at all: read it as censored, never as ended.
+NO_RESULT = "NO_RESULT"
+
+
+def state_at(events: list[dict], censor: str | None, t: dt.datetime) -> str:
+    """live / ended / unknown at t from the events strictly before t.
+
+    A censored result has no evidence after its last event (none at all without events). If it was still live when
+    the evidence stopped and t lies beyond that, nobody knows whether it is live at t: ``unknown``, not ``live``.
+    """
+    evidence_short = censor is not None and (not events or max(e["ts"] for e in events) < t)
+    if alive_at(events, t):
+        return "unknown" if evidence_short else "live"
+    return "unknown" if censor is not None and not events else "ended"
+
+
 def second_pass(first: pl.DataFrame, pending: list[tuple[ExecutionRequest, str, str]], *, follow: bool,
                 run) -> tuple[list[pl.DataFrame], Counter, dict]:
     """Causal second pass over repost/amend requests in (t_dec, episode_id) order.
 
-    family(T) = {T} ∪ executed reposts of it. A target skipped here is replaced by its nearest executed
-    ancestor along the link chain; a target with no execution result (excluded in G1 or L0) makes E an
-    independent plan that starts a new family. ``run(request)`` simulates one request into a one-row frame.
+    family(T) = {T} ∪ executed reposts and executed amends of it (an amend replaces T's pending order: same plan).
+    A target skipped here is replaced by its nearest executed ancestor; a target with no execution result
+    (excluded in G1 or L0) makes E an independent plan that starts a new family. A member decided at the same t_dec
+    as E is live (it was just placed). A censored member whose evidence ends before E.t_dec while still live makes
+    the family state unknown → REPOST_TARGET_CENSORED (an amend: AMEND_TARGET_CENSORED). ``run(request)`` simulates
+    one request into a one-row frame.
     """
-    events = {r["episode_id"]: r["canonical_events"] for r in first.select("episode_id", "canonical_events").to_dicts()}
+    rows = first.select("episode_id", "t_dec", "canonical_events", "censor_reason").to_dicts()
+    events = {r["episode_id"]: r["canonical_events"] for r in rows}
+    censors = {r["episode_id"]: r["censor_reason"] for r in rows}
+    decided = {r["episode_id"]: r["t_dec"] for r in rows}
     family = {eid: eid for eid in events}
     members = {eid: [eid] for eid in events}
     skipped: dict[str, str] = {}
@@ -513,14 +594,20 @@ def second_pass(first: pl.DataFrame, pending: list[tuple[ExecutionRequest, str, 
         if target not in events:
             decision = "independent_no_target_result"
         elif kind == "repost":
-            if any(alive_at(events[m], req.t_dec) for m in members[family[target]]):
+            states = {"live" if decided[m] == req.t_dec else state_at(events[m], censors[m], req.t_dec)
+                      for m in members[family[target]]}
+            if "live" in states:
                 reason = "REPOST_OF_LIVE_PLAN"
+            elif "unknown" in states:
+                reason = "REPOST_TARGET_CENSORED"
             decision = "repost_family_ended"
         else:
             if not follow:
                 reason = "AMEND_REQUIRES_FOLLOW"
             elif entry_filled_before(events[target], req.t_dec):
                 reason = "AMEND_TARGET_FILLED"
+            elif state_at(events[target], censors[target], req.t_dec) == "unknown":
+                reason = "AMEND_TARGET_CENSORED"
             decision = "amend_target_unfilled"
         if reason is not None:
             excluded[reason] += 1
@@ -530,7 +617,10 @@ def second_pass(first: pl.DataFrame, pending: list[tuple[ExecutionRequest, str, 
         frame = run(req)
         parts.append(frame)
         events[eid] = frame["canonical_events"].to_list()[0] if frame.height else []
-        root = family[target] if kind == "repost" and decision == "repost_family_ended" else eid
+        censors[eid] = frame["censor_reason"].to_list()[0] if frame.height else NO_RESULT
+        decided[eid] = req.t_dec
+        # Executed reposts and amends join the target's family; an independent plan (no target result) starts its own.
+        root = eid if decision == "independent_no_target_result" else family[target]
         family[eid] = root
         members.setdefault(root, [])
         if eid not in members[root]:
@@ -603,7 +693,9 @@ def derived_columns(results: pl.DataFrame, requests: dict, sizing_info: dict, ma
             "legs_n": info.get("legs_n", len(req.order_plan.entries)),
             "legs_gt3": info.get("legs_gt3", len(req.order_plan.entries) > 3),
             "mae_U": _dec12(mae_U),
-            "mae_pct_notional": _dec12(mae_U * 100 / notional) if basis == SIZING_NOSTOP and mae_U is not None and notional else None,
+            # 分母是成交名义（只成交部分腿时，计划名义会把幅度低估）。
+            "mae_pct_notional": (_dec12(mae_U * 100 / entry_notional)
+                                 if basis == SIZING_NOSTOP and mae_U is not None and entry_notional else None),
             "entry_notional_U": _dec12(entry_notional), "censor_at": censor_at, "mtm_U_at_censor": _dec12(mtm),
         }
     return out
@@ -654,6 +746,14 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
             # 一条原文都读不到 = 数据根缺 bronze（构建常把它留在 _build/<hash>），不是「老师都写精确价」；
             # 静默按无原文跑会让让点口径一次都不让（10-02 所有 live 结果因此作废）。
             raise ContractError(f"live profile read no root message text; expected bronze at {layout.message_version}")
+        if stop_ids:
+            late = stop_messages_after_t_dec(
+                episodes.select("episode_id", "t_dec", "stop_source_version_id").to_dicts(),
+                load_message_available_at(stop_ids, layout))
+            if late:
+                # 止损消息晚于决策可见 = G1 图的前视错误，整图不可用，不能逐行静默跳过。
+                raise ContractError(f"{len(late)} stop messages not visible before t_dec (look-ahead), e.g. {sorted(late)[:3]}")
+    stop_text_unresolved = set()
     sizing_info, pending, rows_by_episode = {}, [], {}
     for row in episodes.iter_rows(named=True):
         info = {}
@@ -673,6 +773,9 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
         rows_by_episode[row["episode_id"]] = row
         if audit is not None:
             live_records[row["episode_id"]] = audit
+            if row.get("stop_source_version_id") is not None and row["stop_source_version_id"] not in root_texts:
+                # 有止损消息却读不到原文：v4 退回根原文判 0.1%，与「没有止损消息」不同，单独计数。
+                stop_text_unresolved.add(row["episode_id"])
     market_hashes = {}
     followup_report = None
     if policy.follow_teacher:
@@ -697,6 +800,7 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
     for eid, decision in second_decisions.items():
         if decision["decision"] in SECOND_PASS_EXCLUSIONS:
             live_records.pop(eid, None)
+            stop_text_unresolved.discard(eid)
     n_replayed = results.height
     by_request = {req.episode_id: req for req in requests}
     derived = derived_columns(results, by_request, sizing_info, marks)
@@ -740,7 +844,7 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
             "coverage_counts": "覆盖排除与删失可能重叠；各原因计数也可能重叠",
             "scope": "overall/by/cumulative_R/censor_counts 只统计 sizing_basis=risk 的行（按风险预算定量）；"
                      "无止损行见 blocks.nostop（金额 U = net_R × risk_budget）；blocks.total 只有金额合计，不出合计均值与胜率",
-            "nostop_adverse_excursion": "无止损块最大不利浮亏的幅度 −mae_U（U）及其占计划名义的百分比 −mae_pct_notional",
+            "nostop_adverse_excursion": "无止损块最大不利浮亏的幅度 −mae_U（U）及其占成交名义（成交量×均价×乘数）的百分比 −mae_pct_notional",
             "mtm_U_at_censor": "删失的无止损单在删失时刻（标签删失=观察窗或持仓上限终点，证据删失=最后一个事件时刻）"
                                "按 as-of 标记价计的净值：已实现 + 未实现 − 费用 + 资金费",
         },
@@ -754,7 +858,9 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
                         "decision_counts": dict(sorted(Counter(d["decision"] for d in second_decisions.values()).items()))},
         "market_ref_entries": {"n_resolved": len(market_ref_resolved), "reference_source": MARKET_REF_SOURCE,
                                "n_stale_quote_as_limit": len(stale_quote_limits),
-                               "note": "全部市价腿（含通过 0.25R 报价门的现价腿），参考价取 t_dec 时 as-of 标记价，仅用于定仓；成交由内核在 t_start 按市价撮合"},
+                               "note": "全部市价腿（含通过 0.25R 报价门的现价腿），参考价取 t_dec 时 as-of 标记价，仅用于定仓；成交由内核在 t_start 按市价撮合",
+                               "nostop_quoted": nostop_quote_report(
+                                   [sizing_info[eid] for eid in results["episode_id"].to_list()])},
         **summarize(table),
     }
     if policy.live_execution_profile:
@@ -763,6 +869,7 @@ def replay(*, graph_version: str, channel: int, out: str | Path, market_lake: st
             "n_applied": sum(a["status"] == "applied" for a in live_records.values()),
             "n_rules_unresolved": sum(a["status"] == "rules_unresolved" for a in live_records.values()),
             "n_root_text_unresolved": sum(a.get("root_text_resolved") is False for a in live_records.values()),
+            **({"n_stop_text_unresolved": len(stop_text_unresolved)} if "stop_source_version_id" in episodes.columns else {}),
             "rule_counts": {rule: sum(a["rule_counts"][rule] for a in live_records.values()) for rule in RULES},
             "count_units": "成功构造请求：入场/止盈按腿，止损按计划，zone/双明确点位按组，tick 按改变的价格",
             "allocation": "zone: qty ∝ risk_share / stop_distance；双明确点位: qty ∝ 1 / price；总风险和 lot 取整沿用内核 A",

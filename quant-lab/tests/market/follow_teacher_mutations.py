@@ -3,6 +3,7 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -87,13 +88,28 @@ CASES = [
     ("nostop-rules-merged-with-contract", L0, 'return None, None, "NOSTOP_RULES_UNRESOLVED", resolved, stale', 'return None, None, "PLAN_CONTRACT_INVALID:ValueError", resolved, stale', NS + "test_missing_rules_are_their_own_exclusion"),
     ("nostop-old-policy-executes", L0, 'if nostop and not policy.nostop_enabled:', 'if False:', NS + "test_old_policy_keeps_plan_no_stop"),
     ("summary-mixes-blocks", L0, 'rows = _risk_rows(all_rows)', 'rows = all_rows', NS + "test_summary_overall_is_risk_only_and_blocks_split"),
-    ("repost-family-ignored", L0, 'if any(alive_at(events[m], req.t_dec) for m in members[family[target]]):', 'if alive_at(events[target], req.t_dec):', NS + "test_second_pass_repost_family"),
+    ("repost-family-ignored", L0, 'for m in members[family[target]]}', 'for m in [target]}', NS + "test_second_pass_repost_family"),
+    ("repost-censored-counted-as-live", L0, 'return "unknown" if evidence_short else "live"', 'return "live"', NS + "test_second_pass_censored_target_is_not_counted_as_live"),
+    ("repost-censored-executes", L0, 'elif "unknown" in states:', 'elif False:', NS + "test_second_pass_censored_target_is_not_counted_as_live"),
+    ("censored-without-events-ended", L0, 'return "unknown" if censor is not None and not events else "ended"', 'return "ended"', NS + "test_state_at_separates_unknown_from_live_and_ended"),
+    ("amend-censored-target-executed", L0, 'elif state_at(events[target], censors[target], req.t_dec) == "unknown":', 'elif False:', NS + "test_second_pass_amend_with_censored_unfilled_target"),
+    ("amend-outside-family", L0, 'root = eid if decision == "independent_no_target_result" else family[target]', 'root = family[target] if kind == "repost" else eid', NS + "test_second_pass_executed_amend_joins_the_target_family"),
+    ("same-t-dec-member-not-live", L0, '"live" if decided[m] == req.t_dec else', '"live" if False else', NS + "test_second_pass_reposts_at_the_same_t_dec_execute_once"),
+    ("mae-pct-planned-notional", L0, 'mae_U * 100 / entry_notional)', 'mae_U * 100 / notional)', NS + "test_mae_in_U_is_mae_R_times_budget"),
     ("repost-skip-chain-ignored", L0, 'while target in skipped and target not in seen:', 'while False:', NS + "test_second_pass_repost_family"),
     ("alive-sees-equal-time", L0, 'prior = [e for e in events if e["ts"] < t]', 'prior = [e for e in events if e["ts"] <= t]', NS + "test_alive_at_only_sees_strictly_earlier_events"),
     ("amend-filled-target-executed", L0, 'elif entry_filled_before(events[target], req.t_dec):', 'elif False:', NS + "test_second_pass_amend"),
     ("amend-without-follow-executed", L0, 'if not follow:\n                reason = "AMEND_REQUIRES_FOLLOW"', 'if False:\n                reason = "AMEND_REQUIRES_FOLLOW"', NS + "test_second_pass_amend"),
     ("mtm-ignores-mark", L0, 'unrealized = (Decimal(str(mark_price)) - row["entry_avg_price"]) * residual * sign * mult', 'unrealized = Decimal(0)', NS + "test_censored_nostop_mark_to_market_uses_censor_time_mark"),
 ]
+
+
+def scrub(text: str, tmp: str) -> str:
+    """Evidence must not carry local absolute paths: worktree, temp dirs and the home directory become placeholders."""
+    for path, label in ((str(ROOT), "<quant-lab>"), (str(Path(tmp).resolve()), "<tmp>"), (tmp, "<tmp>"), (str(Path.home()), "~")):
+        text = text.replace(path, label)
+    text = re.sub(r"/(?:private/)?var/folders/[^/\s]+/[^/\s]+/T/", "<tmp>/", text)
+    return re.sub(r"pytest-of-[^/\s]+", "pytest-of-<user>", text)
 
 
 def main():
@@ -119,7 +135,7 @@ def main():
             killed = proc.returncode == 1 and " failed" in proc.stdout and "ERROR collecting" not in proc.stdout
             evidence["mutations"].append(dict(name=name, file=relative, before=before, after=after, test=selector,
                 source_sha256=hashlib.sha256(source.encode()).hexdigest(), returncode=proc.returncode,
-                killed=killed, output=proc.stdout + proc.stderr))
+                killed=killed, output=scrub(proc.stdout + proc.stderr, tmp)))
             print(f"{name}: {'KILLED' if killed else 'FAILED_CHECK'}", flush=True)
     for name, data in original.items():
         assert (ROOT / "src/quant_lab/market" / name).read_bytes() == data, f"working source changed: {name}"

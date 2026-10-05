@@ -1,6 +1,7 @@
 """v8 F1 stopless fixed-notional execution, kernel A v0.7, and the §4 G2 second pass (synthetic data only)."""
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal as D
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -86,7 +87,7 @@ def test_fixed_notional_btc_leg_has_no_stop_events():
     assert req.order_plan.stop is None
     assert req.order_plan.sizing == c.Sizing(mode="fixed_qty", qty=D("0.006000000000"))
     assert info == {"sizing_basis": "nostop", "nostop_notional_U": D("1.666666666667") * B, "legs_n": 1,
-                    "legs_gt3": False, "multiplier": D(1)}
+                    "legs_gt3": False, "multiplier": D(1), "nostop_quote_deviation": None}
     res = execution.simulate(short_horizon(req), market=market(["50100", "49990", "49000"]))
     assert [e.qty for e in events(res, "submitted", "entry")] == [D("0.006")]
     assert events(res, leg="sl") == []
@@ -115,10 +116,21 @@ def test_zone_becomes_near_end_single_limit(side, near):
 
 
 def test_market_reference_leg_is_sized_at_the_decision_mark():
-    req, _, why, _ = prepare(episode(legs=(("market_ref", None, None),)), mark="60000")
-    assert why is None
+    req, _, why, info = prepare(episode(legs=(("market_ref", None, None),)), mark="60000")
+    assert why is None and info["nostop_quote_deviation"] is None
     assert req.order_plan.entries[0].kind == "market_ref" and req.order_plan.entries[0].price_lo == D(60000)
     assert req.order_plan.sizing.qty == D("0.005000000000")
+
+
+def test_stopless_quoted_market_leg_fills_at_mark_and_its_quote_gap_is_counted():
+    # No stop → no 0.25R stale-quote gate: the leg is still a market order at the t_dec mark; the gap is only reported.
+    req, _, why, info = prepare(episode(legs=(("market_ref", "57000", "57000"),)), mark="60000")
+    assert why is None and req.order_plan.entries[0].kind == "market_ref" and req.order_plan.entries[0].price_lo == D(60000)
+    assert info["nostop_quote_deviation"] == D("0.05")
+    _, _, _, near = prepare(episode(legs=(("market_ref", "60300", "60300"),)), mark="60000")
+    report = l0.nostop_quote_report([info, near, {"sizing_basis": "risk", "nostop_quote_deviation": D(1)}])
+    assert report["n"] == 2 and report["n_deviation_over"] == {"0.5%": 1, "1%": 1, "2%": 1, "5%": 0}
+    assert report["max_deviation"] == pytest.approx(0.05)
 
 
 def test_whole_plan_third_splits_equally_across_legs():
@@ -302,7 +314,10 @@ def test_mae_in_U_is_mae_R_times_budget():
     row = results.to_dicts()[0]
     derived = l0.derived_columns(results, {req.episode_id: req}, {req.episode_id: info}, Marks())[req.episode_id]
     assert row["mae_R"] < 0 and derived["mae_U"] == (row["mae_R"] * B).quantize(D("1e-12"))
-    assert derived["mae_pct_notional"] == (row["mae_R"] * B * 100 / info["nostop_notional_U"]).quantize(D("1e-12"))
+    # Denominator = filled notional (qty × average × multiplier), not the planned notional.
+    filled = row["filled_qty"] * row["entry_avg_price"]
+    assert derived["entry_notional_U"] == filled.quantize(D("1e-12"))
+    assert derived["mae_pct_notional"] == (row["mae_R"] * B * 100 / filled).quantize(D("1e-12"))
     assert derived["sizing_basis"] == "nostop" and derived["mtm_U_at_censor"] is None and derived["censor_at"] is None
 
 
@@ -381,9 +396,15 @@ def ev(day, kind, leg="entry", qty=None, order="entry-0"):
             "trigger_basis": "none", "path_step": "none", "qty": None if qty is None else D(qty)}
 
 
-def frame(rows):
-    return pl.DataFrame({"episode_id": [eid for eid, _ in rows], "canonical_events": [e for _, e in rows]},
-                        schema={"episode_id": pl.Utf8, "canonical_events": pl.List(execution.EVENT_STRUCT)})
+def frame(rows, censors=None):
+    """One result row per (episode_id, events); t_dec = first event (T0 without events); censor_reason from ``censors``."""
+    censors = censors or {}
+    return pl.DataFrame({"episode_id": [eid for eid, _ in rows],
+                         "t_dec": [min((e["ts"] for e in evs), default=T0) for _, evs in rows],
+                         "canonical_events": [e for _, e in rows],
+                         "censor_reason": [censors.get(eid) for eid, _ in rows]},
+                        schema={"episode_id": pl.Utf8, "t_dec": pl.Datetime("us", "UTC"),
+                                "canonical_events": pl.List(execution.EVENT_STRUCT), "censor_reason": pl.Utf8})
 
 
 def life(open_day, close_day):
@@ -398,12 +419,12 @@ def pending_req(eid, day):
     return SimpleNamespace(episode_id=eid, t_dec=T0 + day * DAY)
 
 
-def runner(lives):
+def runner(lives, censors=None):
     ran = []
 
     def run(req):
         ran.append(req.episode_id)
-        return frame([(req.episode_id, lives[req.episode_id])])
+        return frame([(req.episode_id, lives[req.episode_id])], censors)
     return run, ran
 
 
@@ -447,6 +468,87 @@ def test_second_pass_amend():
     assert excluded == {"AMEND_REQUIRES_FOLLOW": 2}
 
 
+def test_state_at_separates_unknown_from_live_and_ended():
+    opened = life(0, None)
+    assert l0.state_at(opened, None, T0 + 40 * DAY) == "live"                     # uncensored: the events are complete
+    assert l0.state_at(opened, "MARK_STALE", T0 + 40 * DAY) == "unknown"          # evidence stopped while open
+    assert l0.state_at(opened + [ev(3, "funding", "funding", "1", "funding")], "BAR_GAP", T0 + 2 * DAY) == "live"
+    assert l0.state_at(opened, "LABEL_RIGHT_CENSORED", T0 + 40 * DAY) == "unknown"  # past the horizon nobody looked
+    assert l0.state_at([], "RULE_HISTORY_MISSING", T0 + DAY) == "unknown"         # censored before any event
+    assert l0.state_at([], None, T0 + DAY) == "ended"
+    expired = [ev(0, "submitted", qty="1"), ev(0, "accepted"), ev(1, "expired")]
+    assert l0.state_at(expired, "MARK_STALE", T0 + 40 * DAY) == "ended"           # already over when evidence stopped
+
+
+def test_second_pass_censored_target_is_not_counted_as_live():
+    # T filled on day 0, then its marks go stale (evidence censor, no closed event). A repost on day 40 cannot be
+    # judged against T: its own code, not REPOST_OF_LIVE_PLAN, and it does not execute.
+    first = frame([("T", life(0, None)), ("U", life(0, 1)), ("V", life(0, None))], {"T": "MARK_STALE"})
+    lives = {"E2": life(41, None)}
+    run, ran = runner(lives)
+    pending = [(pending_req("E1", 40), "repost", "T"), (pending_req("E2", 41), "repost", "E1"),
+               (pending_req("E3", 42), "repost", "V")]
+    _, excluded, decisions = l0.second_pass(first, pending, follow=False, run=run)
+    assert excluded == {"REPOST_TARGET_CENSORED": 2, "REPOST_OF_LIVE_PLAN": 1}
+    assert decisions["E1"] == {"kind": "repost", "target": "T", "decision": "REPOST_TARGET_CENSORED"}
+    assert decisions["E2"]["target"] == "T" and decisions["E2"]["decision"] == "REPOST_TARGET_CENSORED"
+    assert decisions["E3"]["decision"] == "REPOST_OF_LIVE_PLAN" and ran == []
+    assert "REPOST_TARGET_CENSORED" in l0.SECOND_PASS_EXCLUSIONS
+
+
+def test_second_pass_known_live_member_wins_over_a_censored_one():
+    # Family {T, E1}: E1 (executed repost) is censored while open, T ended. A live member decides first; otherwise unknown.
+    first = frame([("T", life(0, 1))])
+    lives = {"E1": life(2, None), "E3": life(30, None)}
+    run, ran = runner(lives, {"E1": "BAR_GAP"})
+    pending = [(pending_req("E1", 2), "repost", "T"), (pending_req("E2", 3), "repost", "T"),
+               (pending_req("E3", 30), "repost", "T")]
+    _, excluded, decisions = l0.second_pass(first, pending, follow=False, run=run)
+    # E1's evidence ends on day 2 → day 3 and day 30 are both unknown for E1 (and T has ended).
+    assert ran == ["E1"] and excluded == {"REPOST_TARGET_CENSORED": 2}
+    # Family {T, A}: T's working order loses evidence after day 5 (unknown on day 10), its amend A is open (live).
+    working = [ev(0, "submitted", qty="1"), ev(0, "accepted"), ev(5, "working")]
+    first = frame([("T", working)], {"T": "MARK_STALE"})
+    run, ran = runner({"A": life(1, None)})
+    pending = [(pending_req("A", 1), "amend", "T"), (pending_req("R", 10), "repost", "T")]
+    _, excluded, decisions = l0.second_pass(first, pending, follow=True, run=run)
+    assert ran == ["A"] and excluded == {"REPOST_OF_LIVE_PLAN": 1} and decisions["R"]["decision"] == "REPOST_OF_LIVE_PLAN"
+
+
+def test_second_pass_amend_with_censored_unfilled_target():
+    working = [ev(0, "submitted", qty="1"), ev(0, "accepted")]
+    first = frame([("T", working)], {"T": "FUNDING_SCHEDULE_GAP"})
+    run, ran = runner({"A": life(2, None)})
+    _, excluded, decisions = l0.second_pass(first, [(pending_req("A", 2), "amend", "T")], follow=True, run=run)
+    assert ran == [] and excluded == {"AMEND_TARGET_CENSORED": 1}
+    assert decisions["A"]["decision"] == "AMEND_TARGET_CENSORED"
+
+
+def test_second_pass_executed_amend_joins_the_target_family():
+    # T's limit is cancelled by the synthetic cancel_pending on day 1; the amend A executes and stays open. A later
+    # repost of T must see A (same plan, replaced order) and not place the trade a second time.
+    cancelled = [ev(0, "submitted", qty="1"), ev(0, "accepted"), ev(1, "cancelled"), ev(1, "closed", "close", order="bracket-0")]
+    first = frame([("T", cancelled)])
+    run, ran = runner({"A": life(1.5, None), "R2": life(80, None)})
+    pending = [(pending_req("A", 1.5), "amend", "T"), (pending_req("R", 5), "repost", "T"),
+               (pending_req("R2", 80), "repost", "A")]
+    _, excluded, decisions = l0.second_pass(first, pending, follow=True, run=run)
+    assert decisions["A"] == {"kind": "amend", "target": "T", "decision": "amend_target_unfilled", "family": "T"}
+    assert decisions["R"]["decision"] == "REPOST_OF_LIVE_PLAN" and excluded == {"REPOST_OF_LIVE_PLAN": 2}
+    assert ran == ["A"]
+
+
+def test_second_pass_reposts_at_the_same_t_dec_execute_once():
+    # Both reposts are decided at the same instant; the first in (t_dec, episode_id) order is placed, the second sees it
+    # as live although none of its events is strictly earlier.
+    first = frame([("T", life(0, 1))])
+    run, ran = runner({"E1": life(3, None), "E2": life(3, None)})
+    pending = [(pending_req("E2", 3), "repost", "T"), (pending_req("E1", 3), "repost", "T")]
+    _, excluded, decisions = l0.second_pass(first, pending, follow=False, run=run)
+    assert ran == ["E1"] and excluded == {"REPOST_OF_LIVE_PLAN": 1}
+    assert decisions["E2"]["decision"] == "REPOST_OF_LIVE_PLAN"
+
+
 def test_link_of_reads_repost_then_amend():
     assert l0.link_of({"repost_of": "T", "amend_of": "U"}) == ("repost", "T")
     assert l0.link_of({"repost_of": "", "amend_of": "U"}) == ("amend", "U")
@@ -467,7 +569,7 @@ def patch_episodes(monkeypatch, edit):
             return frame_
         rows = sorted(frame_.filter(pl.col("channel_id") == CHANNEL).to_dicts(), key=lambda r: r["t_dec"])
         rows = [edit(i, dict(r)) for i, r in enumerate(rows)]
-        extra = {k: pl.Utf8 for k in ("repost_of", "venue_hint", "stop_rule")} | {"signal_age_s": pl.Int64}
+        extra = {k: pl.Utf8 for k in ("repost_of", "venue_hint", "stop_rule", "stop_source_version_id")} | {"signal_age_s": pl.Int64}
         return pl.DataFrame(rows, schema={**frame_.schema, **extra})
     monkeypatch.setattr(l0, "load_episodes", load)
     monkeypatch.setattr(l0, "load_message_texts", lambda ids: {value: "BTC 做多 入场 100 目标 110" for value in ids})
@@ -525,3 +627,27 @@ def test_replay_second_pass_judges_repost_against_the_live_family(built, monkeyp
         assert report["replay_exclusions"]["n_replayed"] == 1
     else:
         assert table.height == 2 and table["second_pass_decision"].to_list() == [None, "repost_family_ended"]
+
+
+def test_replay_counts_unreadable_stop_messages_and_rejects_stop_look_ahead(built, monkeypatch):
+    root, _ = built
+
+    def edit(i, row):
+        return dict(row, repost_of=None, venue_hint=None, stop_rule="plain_break", signal_age_s=None,
+                    stop_source_version_id="stop-unreadable" if i == 0 else None)
+
+    patch_episodes(monkeypatch, edit)
+    monkeypatch.setattr(l0, "load_message_texts",
+                        lambda ids: {value: "BTC 做多 入场 100 目标 110" for value in ids if value != "stop-unreadable"})
+    report = l0.replay(graph_version="l0-test", channel=CHANNEL, out=root / "stoptext",
+                       policy_version="base-v1-timeexit-w60-live", risk_budget=B)
+    assert report["live_execution_profile"]["n_stop_text_unresolved"] == 1
+    audits = [json.loads(v) for v in pl.read_parquet(root / "stoptext" / "trades.parquet")["live_execution_json"]]
+    assert sorted(a["stop_v4"]["stop_message"] for a in audits) == ["none", "unresolved"]
+    # A stop message visible only at or after t_dec is look-ahead in the graph: the whole run fails, nothing is written.
+    monkeypatch.setattr(l0, "load_message_available_at",
+                        lambda ids, layout: {"stop-unreadable": datetime(2100, 1, 1, tzinfo=UTC)})
+    with pytest.raises(c.ContractError, match="look-ahead"):
+        l0.replay(graph_version="l0-test", channel=CHANNEL, out=root / "lookahead",
+                  policy_version="base-v1-timeexit-w60-live", risk_budget=B)
+    assert not (root / "lookahead").exists()

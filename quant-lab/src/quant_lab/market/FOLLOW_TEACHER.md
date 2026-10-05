@@ -107,14 +107,25 @@ Live v4 (`trader-v3-live-v4`) applies only to rows carrying a `stop_rule` key:
 `r9_fuzzy_break` gets exactly one 0.1% (silver already widened 0.3%),
 `close_from_clause` none, every other rule 0.1% only when a fuzzy word sits on
 `stop_base` in the stop message (`stop_source_version_id`, else the root text),
-breakout wording off. Rows without the key keep v3.
+breakout wording off. A `relative` stop, and any base equal to an entry level
+rather than the stop, is anchored on the stop price itself, so the entry's
+「附近」 never widens it. Rows without the key keep v3. The audit's
+`stop_v4.stop_message` is none / resolved / unresolved, the summary counts
+`n_stop_text_unresolved`, and a stop message not visible strictly before t_dec
+fails the run (look-ahead in the graph).
 
 Episodes with `repost_of`/`amend_of` run in a causal second pass ordered by
 (t_dec, episode_id): a repost is skipped (`REPOST_OF_LIVE_PLAN`) while any member
-of the target's family (target plus executed reposts) is alive strictly before
-its t_dec; an amend needs a follow policy (`AMEND_REQUIRES_FOLLOW`) and an
-unfilled target (`AMEND_TARGET_FILLED`). A skipped target is replaced by its
-nearest executed ancestor; a target without a result makes the plan independent.
+of the target's family (target plus executed reposts and amends) is alive
+strictly before its t_dec, or was decided at the same t_dec; if no member is
+known live but a censored member's evidence ends while it was still live, the
+state is unknown and the repost gets `REPOST_TARGET_CENSORED`. An amend needs a
+follow policy (`AMEND_REQUIRES_FOLLOW`), an unfilled target
+(`AMEND_TARGET_FILLED`) and a target whose state is known
+(`AMEND_TARGET_CENSORED`). A skipped target is replaced by its nearest executed
+ancestor; a target without a result makes the plan independent.
+Stopless market legs have no 0.25R stale-quote gate (the gate is measured in
+stop distance); `market_ref_entries.nostop_quoted` counts their quote-to-mark gaps.
 
 Summary `overall/by/cumulative_R/censor_counts` cover `sizing_basis=risk` rows
 only (old policies: unchanged); `blocks.nostop` reports U metrics, MAE and

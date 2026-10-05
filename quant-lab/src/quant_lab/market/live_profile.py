@@ -203,6 +203,23 @@ def _widen_stop(stop: Decimal, long: bool) -> Decimal:
 #: v8 stop rules (silver checks.stop_rule.rule) that live v4 handles specially; all others are wording-only.
 STOP_RULE_R9 = "r9_fuzzy_break"
 STOP_RULE_CLOSE = "close_from_clause"
+STOP_RULE_RELATIVE = "relative"
+
+
+def v4_stop_anchor(plan: dict, stop_meta: dict) -> Decimal:
+    """The price the 0.1% wording must sit on: ``stop_base``, else the stop price itself.
+
+    A relative stop (F9: entry/mark ∓ points or %) has no stop level written in the text; its base, if any, is the
+    reference price, i.e. the entry. Anchoring there would let the entry's 「附近」 widen the stop, so a relative stop —
+    and any base that coincides with an entry level instead of the stop — is anchored on the stop price.
+    """
+    stop = D(plan["stop"]["price"])
+    base = stop_meta.get("stop_base")
+    if base in (None, "") or stop_meta.get("stop_rule") == STOP_RULE_RELATIVE:
+        return stop
+    base = D(base)
+    entry_levels = {D(e[k]) for e in plan["entries"] for k in ("price_lo", "price_hi") if e.get(k) is not None}
+    return stop if base != stop and base in entry_levels else base
 
 
 def v4_stop_widening(plan: dict, stop_meta: dict, text: str | None) -> tuple[bool, str]:
@@ -212,8 +229,7 @@ def v4_stop_widening(plan: dict, stop_meta: dict, text: str | None) -> tuple[boo
         return True, "r9_forced"
     if rule == STOP_RULE_CLOSE:
         return False, "close_trigger"
-    base = stop_meta.get("stop_base")
-    base = D(plan["stop"]["price"]) if base in (None, "") else D(base)
+    base = v4_stop_anchor(plan, stop_meta)
     probe = dict(plan, stop={"price": base})
     near = wording_flags(probe, text, breakouts=False)["stop_fuzzy"]
     return near, "near_wording" if near else "exact"

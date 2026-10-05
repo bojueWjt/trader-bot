@@ -8,6 +8,7 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -15,6 +16,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 UNIT = "tests/market/test_live_profile.py::"
 FLOW = "tests/market/test_live_replay.py::"
+NOSTOP = "tests/market/test_nostop.py::"
 PROFILE = "market/live_profile.py"
 CASES = [
     ("entry-concession-missing", PROFILE, 'factor = (Decimal("1.001") if long else Decimal("0.999")) if fuzzy else Decimal(1)',
@@ -82,6 +84,10 @@ CASES = [
      UNIT + "test_v4_close_and_wording_rules"),
     ("v4-base-ignored", PROFILE, 'probe = dict(plan, stop={"price": base})', 'probe = plan',
      UNIT + "test_v4_anchors_wording_on_stop_base_in_stop_text"),
+    ("v4-relative-anchored-on-base", PROFILE, 'if base in (None, "") or stop_meta.get("stop_rule") == STOP_RULE_RELATIVE:',
+     'if base in (None, ""):', UNIT + "test_v4_relative_stop_is_not_widened_by_the_entry_wording"),
+    ("v4-entry-level-base-kept", PROFILE, 'return stop if base != stop and base in entry_levels else base', 'return base',
+     UNIT + "test_v4_relative_stop_is_not_widened_by_the_entry_wording"),
     ("v4-stop-text-ignored", PROFILE, 'source = stop_text if stop_text is not None else text', 'source = text',
      UNIT + "test_v4_anchors_wording_on_stop_base_in_stop_text"),
     ("stopless-plan-stop-touched", PROFILE, 'if plan.get("stop") is not None:\n        stop = D(plan["stop"]["price"])',
@@ -92,7 +98,24 @@ CASES = [
      'apply_live_profile(row["order_plan"], text, tick_size, stop_meta=stop_meta_of(row), stop_text=stop_text)',
      'apply_live_profile(row["order_plan"], text, tick_size, stop_meta=stop_meta_of(row), stop_text=None)',
      FLOW + "test_v8_rows_use_v4_and_v7_rows_keep_v3"),
+    ("stop-message-state-collapsed", "market/l0_replay.py",
+     '"none" if not has_source else "resolved" if stop_text is not None else "unresolved"',
+     '"none" if stop_text is None else "resolved"', FLOW + "test_v8_rows_use_v4_and_v7_rows_keep_v3"),
+    ("stop-text-unresolved-not-counted", "market/l0_replay.py", 'stop_text_unresolved.add(row["episode_id"])', 'pass',
+     NOSTOP + "test_replay_counts_unreadable_stop_messages_and_rejects_stop_look_ahead"),
+    ("stop-look-ahead-accepted", "market/l0_replay.py", 'if late:\n', 'if False:\n',
+     NOSTOP + "test_replay_counts_unreadable_stop_messages_and_rejects_stop_look_ahead"),
+    ("stop-visible-at-t-dec", "market/l0_replay.py", 'at >= row["t_dec"]', 'at > row["t_dec"]',
+     FLOW + "test_stop_message_visibility_is_checked_against_t_dec"),
 ]
+
+
+def scrub(text: str, tmp: str) -> str:
+    """Evidence must not carry local absolute paths: worktree, temp dirs and the home directory become placeholders."""
+    for path, label in ((str(ROOT), "<quant-lab>"), (str(Path(tmp).resolve()), "<tmp>"), (tmp, "<tmp>"), (str(Path.home()), "~")):
+        text = text.replace(path, label)
+    text = re.sub(r"/(?:private/)?var/folders/[^/\s]+/[^/\s]+/T/", "<tmp>/", text)
+    return re.sub(r"pytest-of-[^/\s]+", "pytest-of-<user>", text)
 
 
 def main():
@@ -125,7 +148,7 @@ def main():
             killed = result.returncode == 1 and " failed" in result.stdout and "ERROR collecting" not in result.stdout
             record = {"name": name, "file": relative, "test": selector, "before": before, "after": after,
                       "source_sha256": hashlib.sha256(source.encode()).hexdigest(), "returncode": result.returncode,
-                      "killed": killed, "output": result.stdout + result.stderr}
+                      "killed": killed, "output": scrub(result.stdout + result.stderr, tmp)}
             evidence["mutations"].append(record)
             print(f"{name}: {'KILLED' if killed else 'FAILED_CHECK'}", flush=True)
         evidence["killed"] = sum(item["killed"] for item in evidence["mutations"])

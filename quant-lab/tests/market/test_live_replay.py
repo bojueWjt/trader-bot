@@ -1,6 +1,6 @@
 """Live registration, exact root-version reads, L0 audit, and kernel A acceptance."""
 from copy import deepcopy
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal as D
 import json
 
@@ -129,9 +129,34 @@ def test_v8_rows_use_v4_and_v7_rows_keep_v3():
     r9 = dict(row(), stop_rule="r9_fuzzy_break", stop_base=D("80.24"))
     fixed, audit = l0.prepare_execution(r9, policy=policy, text=text, tick_size=D("0.001"), stop_text="止损小幅跌破80.24")
     assert fixed["order_plan"]["stop"]["price"] == D("79.920")       # 80 × 0.999 only; no second 0.3%
-    assert audit["stop_v4"] == {"stop_rule": "r9_fuzzy_break", "decision": "r9_forced", "stop_text_resolved": True}
+    assert audit["stop_v4"] == {"stop_rule": "r9_fuzzy_break", "decision": "r9_forced", "stop_text_resolved": True,
+                                "stop_message": "none"}
     req = request(fixed, policy.version)
     assert simulate(req, market=market()).censor_reason is None
+    # A stop message that exists but cannot be read is not the same as no stop message (both fall back to the root text).
+    sourced = dict(r9, stop_source_version_id="stop-v1")
+    _, audit = l0.prepare_execution(sourced, policy=policy, text=text, tick_size=D("0.001"), stop_text="止损小幅跌破80.24")
+    assert audit["stop_v4"]["stop_message"] == "resolved"
+    _, audit = l0.prepare_execution(sourced, policy=policy, text=text, tick_size=D("0.001"))
+    assert audit["stop_v4"]["stop_message"] == "unresolved" and audit["stop_v4"]["stop_text_resolved"] is False
+
+
+def test_stop_message_visibility_is_checked_against_t_dec(tmp_path, monkeypatch):
+    monkeypatch.setenv("QUANT_LAB_DATA_ROOT", str(tmp_path))
+    layout = Layout.from_root(None)
+    layout.ensure()
+    t = datetime(2024, 1, 1, tzinfo=UTC)
+    pl.DataFrame({"source_version_id": ["early", "same", "late", "dup", "dup", "unknown"],
+                  "available_at": [t - timedelta(seconds=1), t, t + timedelta(seconds=1), t - timedelta(hours=1),
+                                   t - timedelta(hours=2), None]},
+                 schema={"source_version_id": pl.Utf8, "available_at": pl.Datetime("us", "UTC")}).write_parquet(layout.message_version)
+    available = l0.load_message_available_at(["early", "same", "late", "dup", "unknown", "absent"], layout)
+    assert set(available) == {"early", "same", "late", "dup", "unknown"} and available["dup"] is None
+    rows = [{"episode_id": name, "t_dec": t, "stop_source_version_id": name}
+            for name in ("early", "same", "late", "dup", "unknown", "absent")] + [
+           {"episode_id": "no-stop-message", "t_dec": t, "stop_source_version_id": None}]
+    # Visible strictly before t_dec only; an unknown or conflicting time is not "before". Absent text is counted elsewhere.
+    assert l0.stop_messages_after_t_dec(rows, available) == ["same", "late", "dup", "unknown"]
 
 
 def test_bronze_accessor_uses_exact_root_versions_and_rejects_ambiguity(tmp_path, monkeypatch):
