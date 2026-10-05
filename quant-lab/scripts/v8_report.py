@@ -17,6 +17,12 @@
   统计量 = 抽到的块的总和 / 抽到的块的计数（每单表：单数；合计表：周数）。每单表只抽有样本的周；
   合计表抽跨度内全部周（空周为 0）。稳健性：28 天块（自跨度首周起每 4 个 ISO 周一块）再算一遍，
   判定不同就标「对块长敏感」，判定本身仍取 7 天块。
+- 首尾不完整周按整周计入（不折算天数）：判定期首周 = 数据起点所在 ISO 周（只含起点之后的天），判定期末周 =
+  2026-06-29（周一）那一周，只含 06-29、06-30 两天；校准期首周也是 2026-06-29 那一周，只含 07-01 至 07-05。
+  同一个日历周在两个区间里各算一次，每单只按 t_dec 落进一个区间。
+- 空周按 0 计入时，「有行但没有可评估单」的周与真正没有信号的周同样算 0；合计表另列这类周数
+  （n_span_weeks_with_rows_but_no_evaluable，其中有成交却不可评估的 n_span_weeks_filled_not_evaluable）
+  与有成交却不可评估的单数（n_filled_not_evaluable），让「无法比较当成 0」的影响可见。
 - 判定：可评估单 < 30 或非空周 < 20 → 样本不足；下界 > 0 → 盈利；上界 < 0 → 亏损；其余 → 无显著优势。
 - 持有期：有止损块只用主口径 w60；无止损块分别用 w1 / 5 天 / w14 / w60 四档的结果，四档判定一致才给出该判定，
   否则写「依持有期而定」，缺档写「持有期档缺失」；合计表对四档无止损分别配 w60 有止损块，规则相同。
@@ -25,13 +31,18 @@
 - 可实现性敏感性（CA-12，只作说明）：按成交时间顺序，无止损在场总名义 + 新单 > 9,000U 时跳过新单，报告此时的合计；
   单频道各自计算，ALL 在六频道合并后计算（同一账户）。直接过滤 trades，不另跑。
 - 只有主口径参与判定。S、E、W、H、C 各批次（其余 l0-v8* 目录）以及 edit_may_contain_outcome 剔除，只报区间。
+  敏感性与头条的 v8e 用主口径的数据起点（两者取早）对齐周跨度与 28 天块原点。
+- 同代输入：主口径与各持有期档里，同一个 policy_version 只能有一个 policy_hash；主口径、持有期档与 v8e 的
+  kernel_version 只能有一个；持有期档的 follow_teacher.path 必须与同频道主口径相同。v8e 必须是主口径策略、
+  B=180、图版本不同于主图。不满足时拒绝出报告。其余敏感性批次不同代时该频道标「未出」并写原因。
 
 用法（研究机）：
   python scripts/v8_report.py --reports $R --out $R/final-report-v8 \
       [--channels fengge,titan,gauls,cash,shuqin,jianguo] [--main l0-v8-w60lf-ns300] \
       [--hold w1=l0-v8-w1-ns300 --hold 5d=l0-v8-5d-ns300 --hold w14=l0-v8-w14-ns300] \
       [--edit-variant l0-v8e] [--sensitivity NAME=DIR ...]
-产出 <out>.json 与 <out>.txt；输入不一致（策略、B、图版本、笔数、parquet 新于 summary）时拒绝出报告。
+产出 <out>.json 与 <out>.txt；输入不一致（策略、策略哈希、内核版本、跟单表、B、图版本、笔数、parquet 新于 summary）
+时拒绝出报告。
 本脚本只依赖 polars/numpy 与标准库，不 import quant_lab，以免判定随研究代码改动而漂移。
 """
 from __future__ import annotations
@@ -44,6 +55,7 @@ from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
+import platform
 import subprocess
 import sys
 
@@ -52,7 +64,10 @@ import polars as pl
 
 JUDGMENT_VERSION = "v8-report-1"
 CHANGELOG = [
-    {"version": "v8-report-1", "date": "2026-10-05", "change": "初版：§10.4 口径冻结（在任何 v8 L0 结果之前）"},
+    {"version": "v8-report-1", "date": "2026-10-05",
+     "change": "初版：§10.4 口径冻结（在任何 v8 L0 结果之前）。冻结前按审查补齐：同代输入校验（策略哈希、内核版本、"
+               "跟单表）、v8e 头条的策略/B/图版本校验与周跨度对齐、首尾不完整周写明、出场日累计曲线与回撤起止时刻、"
+               "不可评估周与单数、读不了的敏感性目录标未出、numpy/polars/python 版本入报告。判定口径本身不变。"},
 ]
 
 UTC = dt.timezone.utc
@@ -82,6 +97,7 @@ ALL = "ALL"
 PROFIT, LOSS, NO_EDGE, INSUFFICIENT = "盈利", "亏损", "无显著优势", "样本不足"
 DEPENDS_ON_HOLD, HOLD_MISSING = "依持有期而定", "持有期档缺失"
 BLOCK_SENSITIVE = "对块长敏感"
+SUMMARY_KEYS = ("graph_version", "policy_version", "policy_hash", "risk_budget")
 
 
 class ReportError(Exception):
@@ -154,7 +170,7 @@ def bootstrap_interval(sums, counts, *, n_boot: int = N_BOOT, seed: int = SEED) 
     rng = np.random.default_rng(seed)
     idx = rng.integers(0, k, size=(n_boot, k))
     stats = s[idx].sum(axis=1) / c[idx].sum(axis=1)
-    lo, hi = np.quantile(stats, [0.025, 0.975])
+    lo, hi = np.quantile(stats, [0.025, 0.975], method="linear")
     return [float(lo), float(hi)]
 
 
@@ -257,29 +273,105 @@ def load_run(directory: Path, channel: str, *, policy: str | None = None, budget
         return None
     if not summary_path.is_file() or not trades_path.is_file():
         raise ReportError(f"{folder}: summary.json and trades.parquet must both exist")
-    before = [(p.stat().st_mtime_ns, p.stat().st_size) for p in (summary_path, trades_path)]
-    summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    rows = pl.read_parquet(trades_path).to_dicts()
-    after = [(p.stat().st_mtime_ns, p.stat().st_size) for p in (summary_path, trades_path)]
+    # 读不了（写到一半的 summary.json、坏 parquet、不是 L0 产物的目录）一律是 ReportError：主口径因此拒绝出报告，
+    # 敏感性批次因此标「未出」，而不是让 JSONDecodeError / ComputeError / KeyError 把整份报告带崩。
+    try:
+        before = [(p.stat().st_mtime_ns, p.stat().st_size) for p in (summary_path, trades_path)]
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        rows = pl.read_parquet(trades_path).to_dicts()
+        after = [(p.stat().st_mtime_ns, p.stat().st_size) for p in (summary_path, trades_path)]
+    except (OSError, ValueError, pl.exceptions.PolarsError) as error:
+        raise ReportError(f"{folder}: unreadable L0 output ({type(error).__name__}: {error})") from error
     if before != after:
         raise ReportError(f"{folder}: changed while reading")
     if before[0][0] < before[1][0]:
         raise ReportError(f"{folder}: trades.parquet is newer than summary.json (run in progress or mixed generations)")
-    expected = summary["overall"]["n_trades"] + (summary["blocks"]["nostop"]["n_trades"] if "blocks" in summary else 0)
+    if not isinstance(summary, dict) or any(summary.get(key) in (None, "") for key in SUMMARY_KEYS):
+        raise ReportError(f"{folder}: summary.json is not an L0 summary (needs {', '.join(SUMMARY_KEYS)})")
+    try:
+        expected = int(summary["overall"]["n_trades"]) + (int(summary["blocks"]["nostop"]["n_trades"])
+                                                          if "blocks" in summary else 0)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ReportError(f"{folder}: summary lacks overall/blocks trade counts ({type(error).__name__}: {error})") from error
     if expected != len(rows):
         raise ReportError(f"{folder}: summary counts {expected} trades, parquet has {len(rows)}")
     for row in rows:
         if row.get("graph_version") != summary["graph_version"] or row.get("policy_hash") != summary["policy_hash"]:
             raise ReportError(f"{folder}: row {row.get('episode_id')} graph/policy differs from summary")
+    run = Run(folder, channel, summary, rows)
+    if policy is not None or budget is not None:
+        check_frozen(run, policy=policy, budget=budget)
+    follow = summary.get("follow_teacher")
+    run.identity = {"directory": str(folder), "policy_version": summary.get("policy_version"),
+                    "policy_hash": summary.get("policy_hash"), "graph_version": summary.get("graph_version"),
+                    "risk_budget": str(summary.get("risk_budget")), "n_rows": len(rows),
+                    "kernel_versions": kernel_versions(rows),
+                    "follow_teacher_path": follow.get("path") if isinstance(follow, dict) else None,
+                    "summary_sha256": _sha(summary_path), "trades_sha256": _sha(trades_path)}
+    return run
+
+
+def check_frozen(run: Run, *, policy: str | None, budget: Decimal | None) -> None:
+    """The frozen 口径 by name and budget (B is compared as a number: "180" == "180.0")."""
+    summary = run.summary
     if policy is not None and summary.get("policy_version") != policy:
-        raise ReportError(f"{folder}: policy {summary.get('policy_version')} is not the frozen {policy}")
-    if budget is not None and Decimal(str(summary.get("risk_budget"))) != budget:
-        raise ReportError(f"{folder}: risk_budget {summary.get('risk_budget')} is not the frozen {budget}")
-    identity = {"directory": str(folder), "policy_version": summary.get("policy_version"),
-                "policy_hash": summary.get("policy_hash"), "graph_version": summary.get("graph_version"),
-                "risk_budget": str(summary.get("risk_budget")), "n_rows": len(rows),
-                "summary_sha256": _sha(summary_path), "trades_sha256": _sha(trades_path)}
-    return Run(folder, channel, summary, rows, identity)
+        raise ReportError(f"{run.directory}: policy {summary.get('policy_version')} is not the frozen {policy}")
+    if budget is not None:
+        try:
+            same = Decimal(str(summary.get("risk_budget"))) == budget
+        except ArithmeticError:
+            same = False
+        if not same:
+            raise ReportError(f"{run.directory}: risk_budget {summary.get('risk_budget')} is not the frozen {budget}")
+
+
+def kernel_versions(rows: list[dict]) -> list:
+    """Distinct kernel_version values of the rows (None kept: a row without one is not the same generation)."""
+    return sorted({r.get("kernel_version") for r in rows}, key=lambda v: (v is not None, str(v)))
+
+
+class Generation:
+    """One code generation across main, the holding-period runs and v8e (S1): one policy_hash per policy_version,
+    one kernel_version, and each hold reads the same follow_teacher table as main for its channel."""
+
+    def __init__(self):
+        self.policy_hashes: dict[str, set] = defaultdict(set)
+        self.kernels: set = set()
+        self.follow_paths: dict[str, str | None] = {}
+
+    def add(self, run: Run, *, main: bool = False, follow_like_main: bool = False) -> None:
+        self.policy_hashes[run.summary["policy_version"]].add(run.summary["policy_hash"])
+        self.kernels.update(run.identity["kernel_versions"])
+        path = run.identity["follow_teacher_path"]
+        if main:
+            self.follow_paths[run.channel] = path
+        elif follow_like_main and path != self.follow_paths.get(run.channel):
+            raise ReportError(f"{run.directory}: follow_teacher.path {path} differs from main "
+                              f"{self.follow_paths.get(run.channel)}")
+
+    def check(self) -> None:
+        mixed = {pv: sorted(map(str, hashes)) for pv, hashes in self.policy_hashes.items() if len(hashes) > 1}
+        if mixed:
+            raise ReportError(f"policy_hash differs across runs of the same policy_version (mixed generations): {mixed}")
+        if len(self.kernels) > 1:
+            raise ReportError(f"kernel_version differs across main/hold/v8e runs (mixed generations): "
+                              f"{sorted(map(str, self.kernels))}")
+
+    def mismatch(self, run: Run) -> str | None:
+        """Why a sensitivity run is not of this generation (None when it is)."""
+        known = self.policy_hashes.get(run.summary["policy_version"])
+        if known and run.summary["policy_hash"] not in known:
+            return (f"{run.directory}: policy_hash {run.summary['policy_hash']} of {run.summary['policy_version']} "
+                    f"differs from main/hold {sorted(map(str, known))}")
+        extra = set(run.identity["kernel_versions"]) - self.kernels
+        if self.kernels and extra:
+            return f"{run.directory}: kernel_version {sorted(map(str, extra))} differs from main {sorted(map(str, self.kernels))}"
+        return None
+
+    def describe(self) -> dict:
+        return {"policy_hashes": {pv: sorted(map(str, hashes))[0] for pv, hashes in sorted(self.policy_hashes.items())},
+                "kernel_version": next(iter(self.kernels)) if len(self.kernels) == 1 else sorted(map(str, self.kernels)),
+                "follow_teacher_paths": dict(sorted(self.follow_paths.items()))}
 
 
 # ---------------------------------------------------------------------------
@@ -298,18 +390,44 @@ def span_for(period: str, data_start: dt.datetime | None) -> list[dt.datetime]:
     return weeks_between(JUDGMENT_END, CALIBRATION_END - dt.timedelta(microseconds=1))
 
 
+def block_rows(rows: list[dict], basis: str, period: str) -> list[dict]:
+    return [r for r in in_period(rows, period) if sizing_of(r) == basis]
+
+
 def block_samples(rows: list[dict], basis: str, period: str) -> list[dict]:
-    return [r for r in in_period(rows, period) if sizing_of(r) == basis and evaluable(r)]
+    return [r for r in block_rows(rows, basis, period) if evaluable(r)]
+
+
+def filled_not_evaluable(rows: list[dict]) -> list[dict]:
+    return [r for r in rows if r.get("fill_status") in FILLED and not evaluable(r)]
+
+
+def not_evaluable_gaps(rows: list[dict]) -> dict:
+    """M4: weeks the total table counts as 0 although they have rows, and filled trades that could not be evaluated.
+
+    Unfilled-only weeks are a real 0 (no position, no money); weeks whose filled trades are all censored or not covered
+    are 'cannot compare' counted as 0 — the spec keeps that 口径, these counts show how much it matters."""
+    with_rows = {week_start(r["t_dec"]) for r in rows}
+    with_sample = {week_start(r["t_dec"]) for r in rows if evaluable(r)}
+    unknown = filled_not_evaluable(rows)
+    return {"n_span_weeks_with_rows_but_no_evaluable": len(with_rows - with_sample),
+            "n_span_weeks_filled_not_evaluable": len({week_start(r["t_dec"]) for r in unknown} - with_sample),
+            "n_filled_not_evaluable": len(unknown)}
 
 
 def with_stop_table(rows, period, origin, *, judged) -> dict:
-    samples = [(r["t_dec"], float(r["net_R"])) for r in block_samples(rows, SIZING_RISK, period)]
-    return per_trade_table(samples, origin, judged=judged, unit="R/单")
+    chosen = block_rows(rows, SIZING_RISK, period)
+    samples = [(r["t_dec"], float(r["net_R"])) for r in chosen if evaluable(r)]
+    table = per_trade_table(samples, origin, judged=judged, unit="R/单")
+    table["n_filled_not_evaluable"] = len(filled_not_evaluable(chosen))
+    return table
 
 
 def nostop_table(rows, period, origin, *, judged) -> dict:
-    chosen = block_samples(rows, SIZING_NOSTOP, period)
+    block = block_rows(rows, SIZING_NOSTOP, period)
+    chosen = [r for r in block if evaluable(r)]
     table = per_trade_table([(r["t_dec"], float(net_U(r))) for r in chosen], origin, judged=judged, unit="U/单")
+    table["n_filled_not_evaluable"] = len(filled_not_evaluable(block))
     with_notional = [r for r in chosen if r.get("entry_notional_U") not in (None, 0)]
     total_notional = sum((Decimal(str(r["entry_notional_U"])) for r in with_notional), Decimal(0))
     table["net_U_over_notional"] = {
@@ -321,9 +439,10 @@ def nostop_table(rows, period, origin, *, judged) -> dict:
 
 
 def total_table(stop_rows, nostop_rows, period, span, *, judged) -> dict:
-    samples = [(r["t_dec"], float(net_U(r))) for r in block_samples(stop_rows, SIZING_RISK, period)]
-    samples += [(r["t_dec"], float(net_U(r))) for r in block_samples(nostop_rows, SIZING_NOSTOP, period)]
-    return weekly_total_table(samples, span, judged=judged)
+    block = block_rows(stop_rows, SIZING_RISK, period) + block_rows(nostop_rows, SIZING_NOSTOP, period)
+    table = weekly_total_table([(r["t_dec"], float(net_U(r))) for r in block if evaluable(r)], span, judged=judged)
+    table.update(not_evaluable_gaps(block))
+    return table
 
 
 def three_tables(stop_rows, nostop_rows, period, data_start, *, judged) -> dict:
@@ -381,11 +500,19 @@ def drawdown_curve(rows: list[dict]) -> dict:
     points = sorted(((r.get("position_close_at") or r["t_dec"], _key(r), float(net_U(r))) for r in rows),
                     key=lambda p: (p[0], p[1]))
     value, peak, worst = 0.0, 0.0, 0.0
-    for _, _, v in points:
+    running_peak_at = peak_at = trough_at = None          # None 峰值时刻 = 曲线起点（0）
+    curve, by_month = [], {}
+    for at, key, v in points:
         value += v
-        peak = max(peak, value)
-        worst = max(worst, peak - value)
-    return {"n": len(points), "final_U": value, "max_drawdown_U": worst}
+        if value > peak:
+            peak, running_peak_at = value, at
+        if peak - value > worst:
+            worst, peak_at, trough_at = peak - value, running_peak_at, at
+        curve.append([at, key, value])
+        by_month[at.strftime("%Y-%m")] = value
+    return {"n": len(points), "final_U": value, "max_drawdown_U": worst,
+            "drawdown_peak_at": peak_at, "drawdown_trough_at": trough_at,
+            "by_exit_month": by_month, "points": curve}
 
 
 def monthly(rows: list[dict]) -> dict:
@@ -464,17 +591,40 @@ def _data_start(rows: list[dict]) -> dt.datetime | None:
     return min(dated) if dated else None
 
 
+def _earliest(*starts: dt.datetime | None) -> dt.datetime | None:
+    known = [t for t in starts if t is not None]
+    return min(known) if known else None
+
+
+def _try_load(directory: Path, channel: str) -> tuple[Run | None, str | None]:
+    """A run that only reports intervals: unreadable or unfinished → (None, why) instead of refusing the whole report."""
+    try:
+        return load_run(directory, channel), None
+    except ReportError as error:
+        return None, str(error)
+
+
+def _batch_meta(runs: dict[str, Run]) -> dict:
+    """M7: what a sensitivity batch was run with, so ×100 and ×180 intervals are not read side by side unlabelled."""
+    return {"policy_versions": sorted({r.summary["policy_version"] for r in runs.values()}),
+            "risk_budgets": sorted({str(r.summary["risk_budget"]) for r in runs.values()}),
+            "graph_versions": {ch: r.summary["graph_version"] for ch, r in sorted(runs.items())}}
+
+
 def build_report(reports: Path, channels: list[str], *, main_dir: str = MAIN_DIR, hold_dirs: dict | None = None,
                  edit_dir: str = EDIT_DIR, sensitivities: dict | None = None) -> dict:
     hold_dirs = {**HOLD_DIRS, **(hold_dirs or {}), "w60": main_dir}
     if not channels:
         raise ReportError("no channels")
     inputs: dict[str, dict] = defaultdict(dict)
-    main_rows, hold_rows = {}, {h: {} for h in HOLDS}
+    generation = Generation()
+    main_runs, main_rows, hold_rows = {}, {}, {h: {} for h in HOLDS}
     for ch in channels:
         run = load_run(reports / main_dir, ch, policy=MAIN_POLICY, budget=B_MAIN)
         if run is None:
             raise ReportError(f"main 口径 missing for channel {ch}: {reports / main_dir / ch}")
+        generation.add(run, main=True)
+        main_runs[ch] = run
         main_rows[ch] = _tag(run.rows, ch)
         inputs["main"][ch] = run.identity
         for hold in HOLDS:
@@ -487,8 +637,27 @@ def build_report(reports: Path, channels: list[str], *, main_dir: str = MAIN_DIR
             if hrun.summary["graph_version"] != run.summary["graph_version"]:
                 raise ReportError(f"{hrun.directory}: graph {hrun.summary['graph_version']} differs from main "
                                   f"{run.summary['graph_version']}")
+            generation.add(hrun, follow_like_main=True)
             hold_rows[hold][ch] = _tag(hrun.rows, ch)
             inputs[f"hold:{hold}"][ch] = hrun.identity
+
+    # v8e（头条与主口径并列，§8 第 8 步）：没跑完只标未出；跑错口径（策略、B、图）或不同代则拒绝出报告。
+    edit_runs, edit_refused = {}, {}
+    if edit_dir and (reports / edit_dir).is_dir():
+        for ch in channels:
+            erun, why = _try_load(reports / edit_dir, ch)
+            if erun is None:
+                if why is not None:
+                    edit_refused[ch] = why
+                continue
+            check_frozen(erun, policy=MAIN_POLICY, budget=B_MAIN)
+            if erun.summary["graph_version"] == main_runs[ch].summary["graph_version"]:
+                raise ReportError(f"{erun.directory}: v8e graph {erun.summary['graph_version']} is the main graph; "
+                                  f"it must be the <ch>-v8e variant graph")
+            generation.add(erun)
+            edit_runs[ch] = erun
+    generation.check()
+    inputs["generation"] = generation.describe()
     scopes = [*channels, ALL]
 
     def rows_for(source: dict, scope: str) -> list[dict] | None:
@@ -552,43 +721,59 @@ def build_report(reports: Path, channels: list[str], *, main_dir: str = MAIN_DIR
                 named[directory] = directory
     if edit_dir and (reports / edit_dir).is_dir() and edit_dir not in named.values():
         named[edit_dir] = edit_dir
-    sensitivity_out = {}
-    sensitivity_rows = {}
+    sensitivity_out, sensitivity_starts = {}, {}
     for name, directory in sorted(named.items()):
-        per, loaded, refused = {}, {}, {}
+        per, loaded, runs, refused = {}, {}, {}, {}
         for ch in channels:
-            try:
-                srun = load_run(reports / directory, ch)
-            except ReportError as error:
+            if directory == edit_dir:
+                srun, why = edit_runs.get(ch), edit_refused.get(ch)
+            else:
+                srun, why = _try_load(reports / directory, ch)
+                if srun is not None:
+                    why = generation.mismatch(srun)       # 不同代：只这一频道标未出，不挡主口径
+                    srun = None if why else srun
+            if why is not None:
                 # 敏感性只报区间：一个批次没跑完不能挡住主口径的判定，但也不能拿半截结果出区间。
-                refused[ch] = str(error)
-                continue
+                refused[ch] = why
             if srun is None:
                 continue
+            runs[ch] = srun
             loaded[ch] = _tag(srun.rows, ch)
             inputs[f"sensitivity:{name}"][ch] = srun.identity
-        sensitivity_rows[directory] = loaded
         for scope in scopes:
             rows = rows_for(loaded, scope)
             if rows is None:
                 per[scope] = {"status": "未出", **({"refused": refused[scope]} if scope in refused else {})}
                 continue
-            start = _data_start(rows)
+            # 与主口径同一个周跨度与 28 天块原点（两者取早，敏感性的样本不会落到跨度之外）。
+            start = _earliest(starts[scope], _data_start(rows))
+            sensitivity_starts[(directory, scope)] = start
             per[scope] = {p: three_tables(rows, rows, p, start, judged=False) for p in ("judgment", "calibration")}
-        sensitivity_out[name] = {"directory": directory, "tables": per}
+        sensitivity_out[name] = {"directory": directory, **_batch_meta(runs), "tables": per}
 
     headline = {}
-    edit_rows = sensitivity_rows.get(edit_dir, {})
+    edit_name = next((name for name, directory in named.items() if directory == edit_dir), None)
     for scope in scopes:
-        entry = {"main": {"verdict": out["judgment"]["total"][scope].get("verdict"),
-                          "w60": out["judgment"]["total"][scope]["holds"]["w60"]}}
-        rows = rows_for(edit_rows, scope) if edit_rows else None
-        entry["v8e"] = (three_tables(rows, rows, "judgment", _data_start(rows), judged=False)["total"]
-                        if rows is not None else {"status": "未出"})
+        main_total = out["judgment"]["total"][scope]
+        entry = {"main": {"verdict": main_total.get("verdict"), "w60": main_total["holds"]["w60"]}}
+        v8e_tables = sensitivity_out[edit_name]["tables"][scope] if edit_name is not None else {"status": "未出"}
+        start = sensitivity_starts.get((edit_dir, scope), starts[scope])
+        if "judgment" not in v8e_tables:
+            entry["v8e"] = {"status": "未出", **({"refused": v8e_tables["refused"]} if "refused" in v8e_tables else {})}
+        else:
+            entry["v8e"] = v8e_tables["judgment"]["total"]
+            if start != starts[scope]:
+                # v8e 比主口径起得早：主口径在同一个跨度上再算一遍区间（只作并列，判定仍是上面的主口径判定）。
+                main = rows_for(main_rows, scope)
+                entry["main"]["w60_on_common_span"] = total_table(main, main, "judgment", span_for("judgment", start),
+                                                                  judged=False)
+        span = span_for("judgment", start)
+        entry["span"] = {"first_week": span[0] if span else None, "n_span_weeks": len(span)}
         headline[scope] = entry
 
     return {"judgment_version": JUDGMENT_VERSION, "changelog": CHANGELOG, "frozen_rules": frozen_rules(),
-            "channels": channels, "inputs": dict(inputs), "judgment": out["judgment"], "calibration": out["calibration"],
+            "channels": channels, "main_dir": main_dir, "hold_dirs": {h: hold_dirs[h] for h in HOLDS}, "edit_dir": edit_dir,
+            "inputs": dict(inputs), "judgment": out["judgment"], "calibration": out["calibration"],
             "monthly": monthly_tables, "headline": headline, "realizability": realizability,
             "edit_excluded": edit_excluded, "sensitivities": sensitivity_out}
 
@@ -597,16 +782,25 @@ def frozen_rules() -> dict:
     return {"sample": "fill_status∈{filled,partial} ∧ censor_reason 空 ∧ 四项覆盖为 true ∧ net_R 非空",
             "judgment_period": f"数据起点 ≤ t_dec < {JUDGMENT_END.isoformat()}",
             "calibration_period": f"{JUDGMENT_END.isoformat()} ≤ t_dec < {CALIBRATION_END.isoformat()}（不下结论）",
-            "bootstrap": {"blocks": "ISO 周（周一 00:00 UTC）；稳健性 28 天块", "n_boot": N_BOOT, "seed": SEED,
-                          "quantiles": [0.025, 0.975]},
+            "partial_weeks": ("首尾不完整周按整周计入、不折算天数：判定期首周为数据起点所在 ISO 周；判定期末周为 "
+                              "2026-06-29 那一周（只含 06-29、06-30）；校准期首周也是 2026-06-29 那一周（只含 07-01–07-05）。"
+                              "每单只按 t_dec 落进一个区间"),
+            "empty_weeks": ("合计表跨度内的空周按 0 计入，包括有行但没有可评估单的周；"
+                            "其周数与有成交却不可评估的单数另列（n_span_weeks_with_rows_but_no_evaluable 等）"),
+            "bootstrap": {"blocks": "ISO 周（周一 00:00 UTC）；稳健性 28 天块（自跨度首周起每 4 周）", "n_boot": N_BOOT,
+                          "seed": SEED, "quantiles": [0.025, 0.975], "quantile_method": "linear",
+                          "rng": "numpy.random.default_rng(seed).integers"},
             "verdict": {"insufficient": f"n<{MIN_TRADES} 或非空周<{MIN_WEEKS}", "profit": "下界>0", "loss": "上界<0",
                         "else": NO_EDGE},
             "holds": {"with_stop": "w60（主口径）", "nostop": list(HOLDS), "rule": "四档一致才给判定"},
+            "generation": ("同一 policy_version 只有一个 policy_hash；主口径/持有期档/v8e 只有一个 kernel_version；"
+                           "持有期档的 follow_teacher.path 与主口径相同；v8e = 主口径策略、B=180、非主图"),
             "risk_budget_B": str(B_MAIN), "account_U": str(ACCOUNT_U), "main_policy": MAIN_POLICY,
             "hold_policies": HOLD_POLICIES}
 
 
 def script_identity() -> dict:
+    """The frozen script and the numeric stack its bootstrap quantiles depend on (M6)."""
     path = Path(__file__).resolve()
     head = None
     try:
@@ -614,7 +808,8 @@ def script_identity() -> dict:
                               capture_output=True, text=True, timeout=10, check=True).stdout.strip() or None
     except (OSError, subprocess.SubprocessError):
         pass
-    return {"script_sha256": _sha(path), "script_last_commit": head}
+    return {"script_sha256": _sha(path), "script_last_commit": head,
+            "runtime": {"python": platform.python_version(), "numpy": np.__version__, "polars": pl.__version__}}
 
 
 def _fmt(value, digits=3) -> str:
@@ -626,15 +821,39 @@ def _ci(table: dict, key: str = "7d") -> str:
     return "—" if ci is None else f"[{_fmt(ci[0])}, {_fmt(ci[1])}]"
 
 
+def _when(value) -> str:
+    if value is None:
+        return "起点"
+    return value.isoformat() if isinstance(value, (dt.datetime, dt.date)) else str(value)
+
+
+def _batch_label(data: dict) -> str:
+    return (f"[策略 {'/'.join(data.get('policy_versions') or ['—'])} · B={'/'.join(data.get('risk_budgets') or ['—'])}]")
+
+
 def render_text(report: dict) -> str:
-    lines = [f"v8 盈利判定 {report['judgment_version']} · script sha256 {report.get('script_sha256', '—')}",
-             "合计只有金额；不出合计均值 R 与合计胜率。无止损块仅内核 A。", ""]
+    runtime = report.get("runtime") or {}
+    lines = [f"v8 盈利判定 {report['judgment_version']} · script sha256 {report.get('script_sha256', '—')} · "
+             f"last commit {report.get('script_last_commit') or '—'} · python {runtime.get('python', '—')} "
+             f"numpy {runtime.get('numpy', '—')} polars {runtime.get('polars', '—')}",
+             "合计只有金额；不出合计均值 R 与合计胜率。无止损块仅内核 A。"]
+    generation = (report.get("inputs") or {}).get("generation")
+    if generation:
+        lines.append(f"同代输入：kernel_version {generation['kernel_version']} · 策略哈希 "
+                     + ", ".join(f"{pv}={h[:12]}" for pv, h in generation["policy_hashes"].items()))
+    lines.append("")
 
     def row(scope, table, verdict_text=None):
         flags = ",".join(table.get("flags") or [])
+        gaps = ""
+        if "n_span_weeks_with_rows_but_no_evaluable" in table:
+            gaps = (f" 跨度周={table['n_span_weeks']} 有行无可评估周={table['n_span_weeks_with_rows_but_no_evaluable']}"
+                    f"（其中有成交不可评估 {table['n_span_weeks_filled_not_evaluable']}）")
+        if table.get("n_filled_not_evaluable"):
+            gaps += f" 成交不可评估={table['n_filled_not_evaluable']}单"
         return (f"  {scope:<10} n={table['n']:<5} 非空周={table['n_weeks']:<4} 点估计={_fmt(table['mean'])} "
                 f"7天块{_ci(table)} 28天块{_ci(table, '28d')} {verdict_text if verdict_text is not None else (table.get('verdict') or '')}"
-                f"{' ' + flags if flags else ''}")
+                f"{' ' + flags if flags else ''}{gaps}")
 
     for period, title in (("judgment", "判定期（数据起点 – 2026-06-30）"), ("calibration", "校准期（2026-07-01 – 09-30，不下结论）")):
         tables = report[period]
@@ -656,13 +875,23 @@ def render_text(report: dict) -> str:
                          f"无止损U={_fmt(m['nostop_U'], 1)} 合计U={_fmt(m['total_U'], 1)} 累计U={_fmt(m['cumulative_total_U'], 1)} "
                          f"在场名义峰值/9000={_fmt(m['peak_over_account'], 2)}")
         for period, p in data["periods"].items():
-            lines.append(f"  {period}: 亏损月占比={_fmt(p['loss_month_share'], 2)} 出场日累计U={_fmt(p['realized_by_exit']['final_U'], 1)} "
-                         f"最大回撤U={_fmt(p['realized_by_exit']['max_drawdown_U'], 1)}")
+            exit_curve = p["realized_by_exit"]
+            lines.append(f"  {period}: 亏损月占比={_fmt(p['loss_month_share'], 2)} 出场日累计U={_fmt(exit_curve['final_U'], 1)} "
+                         f"最大回撤U={_fmt(exit_curve['max_drawdown_U'], 1)}（{_when(exit_curve['drawdown_peak_at'])} → "
+                         f"{_when(exit_curve['drawdown_trough_at'])}）")
+            if exit_curve["by_exit_month"]:
+                lines.append("    出场月末累计U " + " ".join(f"{month}={_fmt(value, 1)}"
+                                                       for month, value in exit_curve["by_exit_month"].items()))
     lines += ["", "== 头条：主口径与 v8e 并列（v8e 只报区间） =="]
+    edit = next((data for data in report["sensitivities"].values()
+                 if data["directory"] == report.get("edit_dir")), None)
     for scope, entry in report["headline"].items():
         v8e = entry["v8e"]
-        lines.append(f"  {scope}: 主口径 {entry['main']['verdict']} · w60 {_ci(entry['main']['w60'])} · "
-                     f"v8e {_ci(v8e) if 'ci95' in v8e else v8e.get('status')}")
+        common = entry["main"].get("w60_on_common_span")
+        lines.append(f"  {scope}: 主口径 {entry['main']['verdict']} · w60 {_ci(entry['main']['w60'])}"
+                     f"{' · 同跨度 ' + _ci(common) if common else ''} · "
+                     f"v8e{' ' + _batch_label(edit) if edit else ''} {_ci(v8e) if 'ci95' in v8e else v8e.get('status')} · "
+                     f"跨度 {_when(entry['span']['first_week'])} 起 {entry['span']['n_span_weeks']} 周")
     lines += ["", "== 敏感性（只报区间，不判定） =="]
     for scope, info in report["realizability"].items():
         lines.append(f"  可实现性 {scope}: 跳过 {info['n_skipped']} 单 · 判定期合计 {_ci(info['judgment'])}")
@@ -672,9 +901,10 @@ def render_text(report: dict) -> str:
         else:
             lines.append(f"  剔除 edit 标记 {scope}: {info['status']}")
     for name, data in report["sensitivities"].items():
+        lines.append(f"  {name} {_batch_label(data)}")
         for scope, tables in data["tables"].items():
             text = tables.get("status") or _ci(tables["judgment"]["total"])
-            lines.append(f"  {name} {scope}: 判定期合计 {text}")
+            lines.append(f"    {scope}: 判定期合计 {text}")
     return "\n".join(lines) + "\n"
 
 

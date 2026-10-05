@@ -219,7 +219,7 @@ async function channelPage() {
       tr.append(el('td', (row.targets || []).map(tp => number(tp.price) + (tp.fraction !== null && tp.fraction !== undefined ? ' (' + percent(tp.fraction) + ')' : '')).join(' / ') || '—', 'legs'));
       variants.forEach(([v]) => { const r = row.variants[v]; tr.append(el('td', r ? resultText(r) : '未出', r ? signClass(r.net_R) : 'dim')); });
       tr.append(el('td', result ? sizingText(result) : '未出'));
-      tr.append(el('td', [result && result.plan_link_kind, row.n_dup_members ? `并入 ${row.n_dup_members} 条` : null].filter(Boolean).join(' · ') || '—'));
+      tr.append(el('td', [result && result.plan_link_kind, result && result.n_dup_members ? `并入 ${result.n_dup_members} 条` : null].filter(Boolean).join(' · ') || '—'));
       tr.append(el('td', result ? fills[result.fill_status] || result.fill_status : '未出'), el('td', result ? outcomes[result.outcome_kind] || result.outcome_kind : '未出'), el('td', result ? String(result.n_teacher_actions_executed || 0) : '未出'));
       tr.addEventListener('click', event => { if (!event.target.closest('a') && !window.getSelection().toString()) {
         location.href = target;

@@ -6,7 +6,9 @@ from decimal import Decimal
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
+import platform
 import sys
 
 import numpy as np
@@ -28,7 +30,8 @@ SCHEMA = {"episode_id": pl.String, "graph_version": pl.String, "policy_hash": pl
           "mark_ok": pl.Boolean, "funding_ok": pl.Boolean, "rules_ok": pl.Boolean, "bars_ok": pl.Boolean,
           "sizing_basis": pl.String, "filled_qty": DEC, "entry_notional_U": DEC,
           "position_open_at": pl.Datetime("us", "UTC"), "position_close_at": pl.Datetime("us", "UTC"),
-          "censor_at": pl.Datetime("us", "UTC"), "edit_may_contain_outcome": pl.Boolean}
+          "censor_at": pl.Datetime("us", "UTC"), "edit_may_contain_outcome": pl.Boolean, "kernel_version": pl.String}
+KERNEL = "A-test-0.7"
 
 
 def trade(eid, t, net_R, *, basis="risk", budget="180", fill="filled", censor=None, notional=None,
@@ -41,11 +44,18 @@ def trade(eid, t, net_R, *, basis="risk", budget="180", fill="filled", censor=No
             "entry_notional_U": None if notional is None else Decimal(str(notional)),
             "position_open_at": (open_at or t) if filled else None,
             "position_close_at": (close_at or (t + dt.timedelta(hours=6))) if filled and censor is None else None,
-            "censor_at": None, "edit_may_contain_outcome": edit, **extra}
+            "censor_at": None, "edit_may_contain_outcome": edit, "kernel_version": KERNEL, **extra}
+
+
+MAIN_GRAPH, EDIT_GRAPH = "ch-v8@abc", "ch-v8e@def"
+
+
+def follow_path(channel):
+    return f"/followup/{channel}/followup_action-v8.parquet"
 
 
 def publish(reports: Path, directory: str, channel: str, rows: list[dict], *, policy=rep.MAIN_POLICY, budget="180",
-            graph="ch-v8@abc", policy_hash="ph"):
+            graph=MAIN_GRAPH, policy_hash="ph", follow="main"):
     folder = reports / directory / channel
     folder.mkdir(parents=True, exist_ok=True)
     full = [dict(r, graph_version=graph, policy_hash=policy_hash) for r in rows]
@@ -54,8 +64,20 @@ def publish(reports: Path, directory: str, channel: str, rows: list[dict], *, po
     summary = {"channel": -100, "graph_version": graph, "policy_version": policy, "policy_hash": policy_hash,
                "risk_budget": budget, "overall": {"n_trades": len(rows) - n_nostop},
                "blocks": {"nostop": {"n_trades": n_nostop}}}
+    if follow is not None:
+        summary["follow_teacher"] = {"path": follow_path(channel) if follow == "main" else follow}
     (folder / "summary.json").write_text(json.dumps(summary))
     return folder
+
+
+def rewrite(folder: Path, *, summary=None, frame=None):
+    """Change a published run the way L0 publishes: parquet first, then summary (so summary is not older)."""
+    doc = json.loads((folder / "summary.json").read_text())
+    if frame is not None:
+        frame(pl.read_parquet(folder / "trades.parquet")).write_parquet(folder / "trades.parquet")
+    if summary is not None:
+        summary(doc)
+    (folder / "summary.json").write_text(json.dumps(doc))
 
 
 def weekly_series(prefix, weeks, values, *, basis="risk", start=MON, notional=None):
@@ -164,6 +186,43 @@ def test_per_trade_table_resamples_only_weeks_with_trades():
     assert table["verdict"] is None and table["flags"] == []                         # 不判定的表不给结论
 
 
+def test_boundary_week_is_a_whole_week_in_both_periods():
+    """M1：2026-06-29（周一）那一周在判定期只含 06-29/30，在校准期只含 07-01–07-05，两边都按整周计入；
+    首周从数据起点所在 ISO 周算起，同样按整周。每单只按 t_dec 落进一个区间。"""
+    boundary = dt.datetime(2026, 6, 29, tzinfo=UTC)
+    start = dt.datetime(2026, 5, 6, 15, tzinfo=UTC)                     # 周三
+    judgment = rep.span_for("judgment", start)
+    calibration = rep.span_for("calibration", None)
+    assert judgment[0] == dt.datetime(2026, 5, 4, tzinfo=UTC) and judgment[-1] == boundary
+    assert calibration[0] == boundary and calibration[-1] == dt.datetime(2026, 9, 28, tzinfo=UTC)
+    june30, july1 = dt.datetime(2026, 6, 30, 23, tzinfo=UTC), dt.datetime(2026, 7, 1, 1, tzinfo=UTC)
+    rows = [trade("j", june30, "1"), trade("c", july1, "-1")]
+    tables = {p: rep.three_tables(rows, rows, p, start, judged=False)["total"] for p in ("judgment", "calibration")}
+    assert (tables["judgment"]["n"], tables["judgment"]["sum"]) == (1, 180.0)
+    assert (tables["calibration"]["n"], tables["calibration"]["sum"]) == (1, -180.0)
+    assert tables["judgment"]["n_span_weeks"] == len(judgment) == 9          # 首周、末周都算一整周
+    assert tables["calibration"]["n_span_weeks"] == len(calibration) == 14
+    assert tables["judgment"]["mean"] == pytest.approx(180 / 9)
+    assert "06-29" in rep.frozen_rules()["partial_weeks"]
+
+
+def test_weeks_counted_as_zero_without_evaluable_trades_are_visible():
+    """M4：合计表把「有行但没有可评估单」的周也按 0 计入（口径不变），周数与不可评估的成交单另列。"""
+    span = rep.weeks_between(MON, MON + dt.timedelta(weeks=3))
+    rows = [trade("a", MON, "1"),
+            trade("cens", MON + dt.timedelta(weeks=1), "2", censor="LABEL_RIGHT_CENSORED"),     # 有成交，不能评估
+            trade("cov", MON + dt.timedelta(weeks=1, days=1), "1", cover=False),               # 有成交，覆盖失败
+            trade("none", MON + dt.timedelta(weeks=2), "0", fill="none"),                     # 没成交：真的 0
+            trade("cov2", MON, "1", cover=False)]                                               # 与可评估单同周
+    table = rep.total_table(rows, [], "judgment", span, judged=False)
+    assert table["n"] == 1 and table["n_span_weeks"] == 4 and table["mean"] == pytest.approx(180 / 4)
+    assert table["n_span_weeks_with_rows_but_no_evaluable"] == 2
+    assert table["n_span_weeks_filled_not_evaluable"] == 1
+    assert table["n_filled_not_evaluable"] == 3
+    per_trade = rep.with_stop_table(rows, "judgment", MON, judged=False)
+    assert per_trade["n"] == 1 and per_trade["n_filled_not_evaluable"] == 3
+
+
 def test_block_length_disagreement_is_flagged(monkeypatch):
     monkeypatch.setattr(rep, "bootstrap_interval", lambda sums, counts, **_: [0.1, 0.2] if len(sums) > 15 else [-0.1, 0.2])
     samples = [(MON + dt.timedelta(weeks=i), 1.0) for i in range(40)]
@@ -216,7 +275,15 @@ def test_monthly_table_drawdown_by_exit_date_and_concurrency_peak():
     assert months["2026-04"]["peak_nostop_notional_U"] == 0
     judgment = data["periods"]["judgment"]
     # 出场顺序：b(−180) → a(+180) → n2(−180) → n1(+90)：峰值 0 → −180 → 0 → −180 → −90，最大回撤 180。
-    assert judgment["realized_by_exit"] == {"n": 4, "final_U": pytest.approx(-90), "max_drawdown_U": pytest.approx(180)}
+    curve = judgment["realized_by_exit"]
+    assert (curve["n"], curve["final_U"], curve["max_drawdown_U"]) == (4, pytest.approx(-90), pytest.approx(180))
+    # 曲线本身（§10.4「按出场日期的累计已实现 U 曲线」）：按出场时刻排序的 (时刻, 单, 累计 U)。
+    assert [(p[1], p[2]) for p in curve["points"]] == [(":b", -180), (":a", 0), (":n2", -180), (":n1", -90)]
+    assert [p[0] for p in curve["points"]] == [jan + dt.timedelta(days=2), dt.datetime(2026, 1, 20, tzinfo=UTC),
+                                              dt.datetime(2026, 2, 12, tzinfo=UTC), dt.datetime(2026, 3, 2, tzinfo=UTC)]
+    # 最大回撤从起点（0，峰值时刻记 None）跌到 b 平仓时刻；与之后同深度的第二次回撤并列时取先到的。
+    assert curve["drawdown_peak_at"] is None and curve["drawdown_trough_at"] == jan + dt.timedelta(days=2)
+    assert curve["by_exit_month"] == {"2026-01": 0, "2026-02": -180, "2026-03": -90}
     assert judgment["n_active_months"] == 2 and judgment["loss_month_share"] == 0.5
     assert data["periods"]["calibration"]["loss_month_share"] == 1.0
 
@@ -251,8 +318,13 @@ def build_reports(reports: Path, channels=("alpha", "beta")):
             hold_nostop = weekly_series(f"{ch}-n", 44, [f"{sign}0.3", f"{sign}0.1"], basis="nostop",
                                         start=MON + dt.timedelta(days=1), notional=600)
             publish(reports, directory, ch, stop + hold_nostop, policy=rep.HOLD_POLICIES[hold])
-        publish(reports, "l0-v8e", ch, stop[:10], policy=rep.MAIN_POLICY)
+        # v8e：主口径策略、B=180、v8e 变体图、它自己的跟单表。
+        publish(reports, "l0-v8e", ch, stop[:10], policy=rep.MAIN_POLICY, graph=EDIT_GRAPH,
+                follow=f"/followup/{ch}/followup_action-v8e.parquet")
         publish(reports, "l0-v8-w60lf-ns100", ch, stop, policy="base-v1-timeexit-w60-live-follow-ns100")
+        # C 批次（与 v7 对照）：B=100，目录名在 l0-v8 之后没有连字符。
+        publish(reports, "l0-v8cmp-w60lf", ch, stop, policy="base-v1-timeexit-w60-live-follow", budget="100",
+                policy_hash="ph-cmp")
 
 
 def test_end_to_end_report(tmp_path):
@@ -263,6 +335,15 @@ def test_end_to_end_report(tmp_path):
     doc = json.loads(Path(f"{out}.json").read_text())
     assert doc["channels"] == ["alpha", "beta"]
     assert doc["script_sha256"] == hashlib.sha256(SCRIPT.read_bytes()).hexdigest()
+    # M6：区间依赖 numpy 的随机流与分位算法，版本随报告记下。
+    assert doc["runtime"] == {"python": platform.python_version(), "numpy": np.__version__, "polars": pl.__version__}
+    assert doc["frozen_rules"]["bootstrap"]["quantile_method"] == "linear"
+    # S1：同代输入写进 inputs。
+    generation = doc["inputs"]["generation"]
+    assert generation["kernel_version"] == KERNEL
+    assert generation["policy_hashes"][rep.MAIN_POLICY] == "ph"
+    assert generation["follow_teacher_paths"] == {"alpha": follow_path("alpha"), "beta": follow_path("beta")}
+    assert doc["inputs"]["hold:w1"]["alpha"]["follow_teacher_path"] == follow_path("alpha")
     judgment = doc["judgment"]
     alpha = judgment["with_stop"]["alpha"]
     assert alpha["n"] == 44 + 1 and alpha["verdict"] == "盈利"           # 带 edit 标记的单仍在主口径里
@@ -275,25 +356,39 @@ def test_end_to_end_report(tmp_path):
     total = judgment["total"]["alpha"]["holds"]["w60"]
     assert total["unit"] == "U/周" and total["n"] == 44 + 1 + 44
     assert not {"win_rate", "mean_R"} & set(total)
+    # M4：未成交单所在的周是真的 0，不算「有行无可评估」里有成交的那一类。
+    assert total["n_span_weeks_with_rows_but_no_evaluable"] == 0 and total["n_filled_not_evaluable"] == 0
     # 校准期单独出表、不给判定。
     calib = doc["calibration"]
     assert calib["with_stop"]["alpha"]["n"] == 3 and calib["with_stop"]["alpha"]["verdict"] is None
     assert "verdict" not in calib["total"]["alpha"]
-    # 敏感性只有区间：v8e 进头条，ns100 自动发现。
-    assert set(doc["sensitivities"]) == {"l0-v8-w60lf-ns100", "l0-v8e"}
+    # 敏感性只有区间：v8e 进头条，ns100 与 C 批次（l0-v8cmp*）自动发现，并标出各自的策略与 B。
+    assert set(doc["sensitivities"]) == {"l0-v8-w60lf-ns100", "l0-v8e", "l0-v8cmp-w60lf"}
     for data in doc["sensitivities"].values():
         assert data["tables"]["alpha"]["judgment"]["total"]["verdict"] is None
+    cmp_batch = doc["sensitivities"]["l0-v8cmp-w60lf"]
+    assert cmp_batch["risk_budgets"] == ["100"] and cmp_batch["policy_versions"] == ["base-v1-timeexit-w60-live-follow"]
+    assert doc["sensitivities"]["l0-v8e"]["graph_versions"] == {"alpha": EDIT_GRAPH, "beta": EDIT_GRAPH}
     assert doc["headline"]["alpha"]["main"]["verdict"] == "盈利"
     assert doc["headline"]["alpha"]["v8e"]["n"] == 10 and doc["headline"]["alpha"]["v8e"]["verdict"] is None
+    # S2：v8e 与主口径同一个周跨度（v8e 只到第 10 周，跨度仍从主口径的数据起点数到 06-30）。
+    assert doc["headline"]["alpha"]["v8e"]["n_span_weeks"] == total["n_span_weeks"]
+    assert doc["headline"]["alpha"]["span"]["n_span_weeks"] == total["n_span_weeks"]
+    assert "w60_on_common_span" not in doc["headline"]["alpha"]["main"]
     assert doc["edit_excluded"]["alpha"]["n_excluded"] == 1
     assert doc["edit_excluded"]["alpha"]["judgment"]["with_stop"]["n"] == 44
     assert doc["realizability"]["ALL"]["n_skipped"] == 0
     months = doc["monthly"]["alpha"]["months"]
     assert months[0]["month"] == "2025-09" and months[-1]["month"] == "2026-07"
+    assert doc["monthly"]["alpha"]["periods"]["judgment"]["realized_by_exit"]["points"]
     assert doc["frozen_rules"]["bootstrap"]["seed"] == 20261006
+    assert "06-29" in doc["frozen_rules"]["partial_weeks"]
     text = Path(f"{out}.txt").read_text()
     assert "判定期" in text and "校准期" in text and "依持有期而定" in text
     assert "合计胜率" not in text.replace("不出合计均值 R 与合计胜率", "")
+    assert "l0-v8cmp-w60lf [策略 base-v1-timeexit-w60-live-follow · B=100]" in text
+    assert f"v8e [策略 {rep.MAIN_POLICY} · B=180]" in text
+    assert f"numpy {np.__version__}" in text and f"kernel_version {KERNEL}" in text
 
 
 def test_missing_hold_gives_no_stopless_verdict(tmp_path):
@@ -307,46 +402,71 @@ def test_missing_hold_gives_no_stopless_verdict(tmp_path):
     assert doc["judgment"]["with_stop"]["alpha"]["verdict"] == "盈利"
 
 
-@pytest.mark.parametrize("break_it,message", [
-    ("policy", "is not the frozen"), ("budget", "risk_budget"), ("count", "summary counts"),
-    ("newer", "newer than summary"), ("graph", "differs from main"), ("row", "differs from summary"),
-    ("missing_main", "main 口径 missing"), ("half", "must both exist"),
-])
-def test_inconsistent_inputs_are_refused(tmp_path, break_it, message, capsys):
-    reports = tmp_path / "reports"
-    build_reports(reports, channels=("alpha",))
+def _break(reports: Path, break_it: str):
     main = reports / rep.MAIN_DIR / "alpha"
-    summary = json.loads((main / "summary.json").read_text())
+    hold = reports / rep.HOLD_DIRS["w14"] / "alpha"
+    edit = reports / rep.EDIT_DIR / "alpha"
     if break_it == "policy":
-        summary["policy_version"] = "base-v1-timeexit-w60-live-follow"
+        rewrite(main, summary=lambda s: s.update(policy_version="base-v1-timeexit-w60-live-follow"))
     elif break_it == "budget":
-        summary["risk_budget"] = "100"
+        rewrite(main, summary=lambda s: s.update(risk_budget="100"))
     elif break_it == "count":
-        summary["overall"]["n_trades"] += 1
+        rewrite(main, summary=lambda s: s["overall"].update(n_trades=s["overall"]["n_trades"] + 1))
     elif break_it == "graph":
-        hold = reports / rep.HOLD_DIRS["w14"] / "alpha"
-        hs = json.loads((hold / "summary.json").read_text())
-        frame = pl.read_parquet(hold / "trades.parquet").with_columns(pl.lit("ch-v8w@zzz").alias("graph_version"))
-        frame.write_parquet(hold / "trades.parquet")
-        hs["graph_version"] = "ch-v8w@zzz"
-        (hold / "summary.json").write_text(json.dumps(hs))
+        rewrite(hold, summary=lambda s: s.update(graph_version="ch-v8w@zzz"),
+                frame=lambda f: f.with_columns(pl.lit("ch-v8w@zzz").alias("graph_version")))
     elif break_it == "row":
         frame = pl.read_parquet(main / "trades.parquet")
         frame.with_columns(pl.when(pl.col("episode_id") == "alpha-s0").then(pl.lit("other")).otherwise(pl.col("policy_hash"))
                            .alias("policy_hash")).write_parquet(main / "trades.parquet")
-    if break_it not in ("newer", "missing_main", "half", "row"):
-        (main / "summary.json").write_text(json.dumps(summary))
-    if break_it in ("newer", "row"):
-        import os
         stat = (main / "summary.json").stat()
-        os.utime(main / "trades.parquet", ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9) if break_it == "newer"
-                 else (stat.st_atime_ns, stat.st_mtime_ns))
-    if break_it == "missing_main":
+        os.utime(main / "trades.parquet", ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    elif break_it == "newer":
+        stat = (main / "summary.json").stat()
+        os.utime(main / "trades.parquet", ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9))
+    elif break_it == "missing_main":
         for name in ("summary.json", "trades.parquet"):
             (main / name).unlink()
-    if break_it == "half":
+    elif break_it == "half":
         (main / "summary.json").unlink()
-    code = rep.main(["--reports", str(reports), "--out", str(tmp_path / "out"), "--channels", "alpha"])
+    elif break_it == "truncated":                       # L0 写 summary.json 不是原子的：写到一半
+        text = (main / "summary.json").read_text()
+        (main / "summary.json").write_text(text[: len(text) // 2])
+    elif break_it == "hash":                            # 审查探针：beta 主口径同名不同哈希（代码同步后部分重跑）
+        rewrite(reports / rep.MAIN_DIR / "beta", summary=lambda s: s.update(policy_hash="ph-new"),
+                frame=lambda f: f.with_columns(pl.lit("ph-new").alias("policy_hash")))
+    elif break_it == "kernel":
+        rewrite(reports / rep.HOLD_DIRS["w1"] / "alpha",
+                frame=lambda f: f.with_columns(pl.lit("A-test-0.6").alias("kernel_version")))
+    elif break_it == "follow":
+        rewrite(hold, summary=lambda s: s.update(follow_teacher={"path": "/followup/alpha/followup_action-v7.parquet"}))
+    elif break_it == "v8e_policy":
+        rewrite(edit, summary=lambda s: s.update(policy_version="base-v1-timeexit-w60-live-follow"))
+    elif break_it == "v8e_budget":
+        rewrite(edit, summary=lambda s: s.update(risk_budget="100"))
+    elif break_it == "v8e_graph":
+        rewrite(edit, summary=lambda s: s.update(graph_version=MAIN_GRAPH),
+                frame=lambda f: f.with_columns(pl.lit(MAIN_GRAPH).alias("graph_version")))
+    elif break_it == "v8e_hash":
+        rewrite(edit, summary=lambda s: s.update(policy_hash="ph-other"),
+                frame=lambda f: f.with_columns(pl.lit("ph-other").alias("policy_hash")))
+    else:
+        raise AssertionError(break_it)
+
+
+@pytest.mark.parametrize("break_it,message", [
+    ("policy", "is not the frozen"), ("budget", "risk_budget"), ("count", "summary counts"),
+    ("newer", "newer than summary"), ("graph", "differs from main"), ("row", "differs from summary"),
+    ("missing_main", "main 口径 missing"), ("half", "must both exist"), ("truncated", "unreadable L0 output"),
+    ("hash", "policy_hash differs across runs"), ("kernel", "kernel_version differs"),
+    ("follow", "follow_teacher.path"), ("v8e_policy", "is not the frozen"), ("v8e_budget", "risk_budget"),
+    ("v8e_graph", "is the main graph"), ("v8e_hash", "policy_hash differs across runs"),
+])
+def test_inconsistent_inputs_are_refused(tmp_path, break_it, message, capsys):
+    reports = tmp_path / "reports"
+    build_reports(reports)
+    _break(reports, break_it)
+    code = rep.main(["--reports", str(reports), "--out", str(tmp_path / "out"), "--channels", "alpha,beta"])
     assert code == 2
     assert message in capsys.readouterr().err
     assert not (tmp_path / "out.json").exists()
@@ -358,10 +478,59 @@ def test_unfinished_sensitivity_does_not_block_the_judgment(tmp_path):
     folder = reports / "l0-v8w" / "alpha"
     folder.mkdir(parents=True)
     (folder / "trades.parquet").write_bytes(b"in progress")
+    # M3：写到一半的 summary.json、坏 parquet、不是 L0 产物的目录都只让该批次标「未出」。
+    ns100 = reports / "l0-v8-w60lf-ns100" / "alpha" / "summary.json"
+    ns100.write_text(ns100.read_text()[:40])
+    junk = reports / "l0-v8-junk" / "alpha"
+    junk.mkdir(parents=True)
+    pl.DataFrame({"x": [1]}).write_parquet(junk / "trades.parquet")
+    (junk / "summary.json").write_text(json.dumps({"hello": 1}))
+    nocount = reports / "l0-v8-nocount" / "alpha"
+    nocount.mkdir(parents=True)
+    pl.DataFrame({"x": [1]}).write_parquet(nocount / "trades.parquet")
+    (nocount / "summary.json").write_text(json.dumps({"graph_version": "g", "policy_version": "p", "policy_hash": "h",
+                                                      "risk_budget": "180"}))
+    broken = reports / "l0-v8-broken" / "alpha"
+    broken.mkdir(parents=True)
+    (broken / "trades.parquet").write_bytes(b"PAR1 not really")
+    (broken / "summary.json").write_text(json.dumps({"graph_version": "g", "policy_version": "p", "policy_hash": "h",
+                                                     "risk_budget": "180", "overall": {"n_trades": 1}}))
+    # 不同代的敏感性批次（内核版本不同）只标未出并写原因。
+    publish(reports, "l0-v8-oldkernel", "alpha", [trade("o1", MON, "1", kernel_version="A-test-0.6")],
+            policy="base-v1-timeexit-w60-live-ns300")
+    # v8e 写到一半：头条的 v8e 标未出（不拒绝），主口径判定照出。
+    edit = reports / rep.EDIT_DIR / "alpha" / "summary.json"
+    edit.write_text(edit.read_text()[:10])
     doc = rep.build_report(reports, ["alpha"])
-    assert doc["sensitivities"]["l0-v8w"]["tables"]["alpha"]["status"] == "未出"
-    assert "refused" in doc["sensitivities"]["l0-v8w"]["tables"]["alpha"]
+    tables = {name: data["tables"]["alpha"] for name, data in doc["sensitivities"].items()}
+    assert tables["l0-v8w"]["status"] == "未出" and "must both exist" in tables["l0-v8w"]["refused"]
+    assert "unreadable L0 output" in tables["l0-v8-w60lf-ns100"]["refused"]
+    assert "not an L0 summary" in tables["l0-v8-junk"]["refused"]
+    assert "lacks overall/blocks" in tables["l0-v8-nocount"]["refused"]
+    assert "unreadable L0 output" in tables["l0-v8-broken"]["refused"]
+    assert "kernel_version" in tables["l0-v8-oldkernel"]["refused"]
+    assert "judgment" in tables["l0-v8cmp-w60lf"]                   # 完整的批次照出区间
+    assert doc["headline"]["alpha"]["v8e"]["status"] == "未出" and "unreadable" in doc["headline"]["alpha"]["v8e"]["refused"]
     assert doc["judgment"]["with_stop"]["alpha"]["verdict"] == "盈利"
+    assert "未出" in rep.render_text(doc)
+
+
+def test_v8e_starting_before_main_is_aligned_on_a_common_span(tmp_path):
+    reports = tmp_path / "reports"
+    build_reports(reports, channels=("alpha",))
+    early = [trade("alpha-early", MON - dt.timedelta(weeks=3), "1")]
+    stop = weekly_series("alpha-s", 10, ["1", "0.5", "-0.2", "0.8"])
+    publish(reports, "l0-v8e", "alpha", early + stop, graph=EDIT_GRAPH,
+            follow="/followup/alpha/followup_action-v8e.parquet")
+    doc = rep.build_report(reports, ["alpha"])
+    headline = doc["headline"]["alpha"]
+    main_weeks = doc["judgment"]["total"]["alpha"]["holds"]["w60"]["n_span_weeks"]
+    assert headline["v8e"]["n_span_weeks"] == main_weeks + 3 == headline["span"]["n_span_weeks"]
+    common = headline["main"]["w60_on_common_span"]
+    assert common["n_span_weeks"] == main_weeks + 3 and common["verdict"] is None
+    # 主口径的判定不因 v8e 改变。
+    assert headline["main"]["verdict"] == doc["judgment"]["total"]["alpha"]["verdict"]
+    assert headline["main"]["w60"]["n_span_weeks"] == main_weeks
 
 
 def test_too_few_trades_or_weeks_is_insufficient(tmp_path):

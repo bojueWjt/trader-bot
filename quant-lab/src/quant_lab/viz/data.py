@@ -16,7 +16,7 @@ import threading
 import polars as pl
 
 from quant_lab.data.api import load_episodes, load_episode_events_description, load_message_texts
-from quant_lab.data.graph import resolve_alias
+from quant_lab.data.graph import resolve_alias, stale_episodes
 from quant_lab.data.lake import Layout
 from quant_lab.data.market_lake import LakeMarket
 from quant_lab.market.contract import FILL_KINDS, resolve_policy
@@ -34,6 +34,8 @@ TAG_VARIANTS = {
     "v8": {"-w60lf-ns300": "主口径（60天·让点·跟指令·无止损300U）", "-w1-ns300": "无止损1天档", "-5d-ns300": "无止损5天档",
            "-w14-ns300": "无止损14天档", "e": "编辑敏感性 v8e", "w": "宽口径 v8w", "nw": "不等待止损 v8nw"},
 }
+#: 不带连字符、但按前缀发现的目录（都用主图）：runbook §8 第 7 步 C 批次 `l0-v8cmp*`（与 v7 对照，B=100）。
+TAG_BARE_PREFIXES = {"v8": ("cmp",)}
 INTERVALS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14400}
 SAFE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 UTC = dt.timezone.utc
@@ -139,12 +141,58 @@ def statistics_for(rows: list[dict]) -> dict:
     return result
 
 
+DUP_MEMBER_COLUMNS = ("episode_id", "root_message_id", "root_source_version_id", "t_dec", "plan_link_kind", "dup_of")
+
+
+def scan_episodes(layout: Layout, graph_version: str) -> pl.LazyFrame | None:
+    """Lazy description episode table of one immutable graph, stale episodes removed; None when not published.
+
+    Only for the dup_of lookups below: a filtered scan instead of loading the whole graph per request."""
+    path = layout.episode(graph_version)
+    if not path.is_file():
+        return None
+    frame = pl.scan_parquet(path)
+    stale = stale_episodes(layout, graph_version)
+    return frame.filter(~pl.col("episode_id").is_in(sorted(stale))) if stale else frame
+
+
+def dup_counts(layout: Layout, graph_version: str, channel_id: int) -> dict[str, int] | None:
+    """kept episode → how many episodes this graph merged into it; None when the graph has no dup_of (pre-v8)."""
+    frame = scan_episodes(layout, graph_version)
+    if frame is None or "dup_of" not in frame.collect_schema().names():
+        return None
+    merged = frame.filter((pl.col("channel_id") == channel_id) & pl.col("dup_of").is_not_null() & (pl.col("dup_of") != ""))
+    return dict(merged.group_by("dup_of").agg(pl.len()).collect().iter_rows())
+
+
+def dup_members_of(layout: Layout, graph_version: str, channel_id: int, episode_id: str) -> list[dict]:
+    """The episodes merged into one kept episode of this graph (filtered scan; [] for pre-v8 graphs)."""
+    frame = scan_episodes(layout, graph_version)
+    if frame is None:
+        return []
+    names = frame.collect_schema().names()
+    if "dup_of" not in names:
+        return []
+    members = frame.filter((pl.col("channel_id") == channel_id) & (pl.col("dup_of") == episode_id)).select(
+        [c for c in DUP_MEMBER_COLUMNS if c in names]).collect()
+    return dup_members(members).get(episode_id, [])
+
+
+def variant_graph_names(channel: dict, variant: str) -> list[str]:
+    """Graph names a variant-graph report (v8e/v8w/v8nw) may use: graph_aliases as {variant: name | [names]},
+    or a list matched by its '-<variant>' suffix ("<ch>-v8e" → v8e)."""
+    aliases = channel.get("graph_aliases") or []
+    if isinstance(aliases, dict):
+        value = aliases.get(variant, [])
+        return [value] if isinstance(value, str) else list(value)
+    return [name for name in aliases if name.endswith(f"-{variant}")]
+
+
 def dup_members(episodes: pl.DataFrame | None) -> dict[str, list[dict]]:
     """kept episode → the episodes G1 merged into it (v8 dup_of); empty for graphs built before v8."""
     if episodes is None or "dup_of" not in episodes.columns:
         return {}
-    columns = [c for c in ("episode_id", "root_message_id", "root_source_version_id", "t_dec", "plan_link_kind", "dup_of")
-               if c in episodes.columns]
+    columns = [c for c in DUP_MEMBER_COLUMNS if c in episodes.columns]
     out = defaultdict(list)
     for row in episodes.filter(pl.col("dup_of").is_not_null() & (pl.col("dup_of") != "")).select(columns).iter_rows(named=True):
         out[row["dup_of"]].append(row)
@@ -232,23 +280,26 @@ class Dashboard:
 
     def variants(self) -> dict[str, dict]:
         builtin = TAG_VARIANTS.get(self.tag, VARIANTS)
+        bare = TAG_BARE_PREFIXES.get(self.tag, ())
         suffixes = dict(builtin)
         prefix = f"l0-{self.tag}"
         if self.reports.is_dir():
             for directory in sorted(self.reports.iterdir()):
                 if directory.is_dir() and directory.name.startswith(prefix):
                     suffix = directory.name[len(prefix):]
-                    if suffix.startswith("-") and SAFE_KEY.fullmatch(suffix):
+                    if (suffix.startswith("-") or suffix.startswith(bare)) and SAFE_KEY.fullmatch(suffix):
                         suffixes.setdefault(suffix, suffix)
         variants = {}
         for suffix, name in suffixes.items():
+            # 变体图：内置表里不带连字符的目录（l0-v8e/-v8w/-v8nw），报告必须在该变体自己的图上。
+            graph = "variant" if suffix and not suffix.startswith("-") and suffix in builtin else "main"
             if suffix and not suffix.startswith("-"):
-                key = f"{self.tag}{suffix}"      # 变体图目录 l0-v8e → 口径 v8e
+                key = f"{self.tag}{suffix}"      # l0-v8e → 口径 v8e；l0-v8cmp-x → v8cmp-x
             else:
                 key = "base" if suffix == "" else suffix[1:]
             if suffix and key == "base":
                 key = "suffix:-base"  # Preserve an unknown -base without shadowing the default.
-            variants[key] = {"suffix": suffix, "name": name}
+            variants[key] = {"suffix": suffix, "name": name, "graph": graph}
         return variants
 
     def report(self, channel: str, variant: str) -> tuple[dict | None, list[dict]]:
@@ -293,9 +344,20 @@ class Dashboard:
         channel = self.channel(key)
         collected, statuses = {}, {}
         variants = self.variants()
+        counts_by_graph = {}
         for variant in variants:
             summary, rows = self.report(key, variant)
             statuses[variant] = "已出" if summary is not None else "未出"
+            # v8 列只在该报告有这些列时写入（v7 频道页不带一串空字段）。
+            columns = set(rows[0]) if rows else set()
+            v8_fields = [field for field in V8_TRADE_FIELDS if field in columns]
+            counts = None
+            if summary is not None:
+                # 合并数按该口径报告自己的图（v8e/v8w/v8nw 的合并与主图不同）。
+                gv = summary["graph_version"]
+                if gv not in counts_by_graph:
+                    counts_by_graph[gv] = dup_counts(channel["layout"], gv, channel["channel_id"])
+                counts = counts_by_graph[gv]
             for row in rows:
                 eid = row["episode_id"]
                 if eid not in collected:
@@ -303,14 +365,14 @@ class Dashboard:
                     collected[eid]["variants"] = {}
                 record = {field: row.get(field) for field in (
                     "net_R", "fill_status", "outcome_kind", "n_teacher_actions_executed", "censor_reason", "trace_hash")}
-                record.update({field: row.get(field) for field in V8_TRADE_FIELDS})
-                record["sizing_basis"] = sizing_of(row)
-                record["net_U"] = net_U(row)
+                record.update({field: row.get(field) for field in v8_fields})
+                if "sizing_basis" in columns:
+                    record["sizing_basis"] = sizing_of(row)
+                    record["net_U"] = net_U(row)
+                if counts is not None:
+                    record["n_dup_members"] = counts.get(eid, 0)
                 collected[eid]["variants"][variant] = record
         episodes = self.graph_episodes(channel)
-        members = dup_members(episodes)
-        for eid, row in collected.items():
-            row["n_dup_members"] = len(members.get(eid, []))
         return {"key": key, "name": channel["name"], "variants": variants, "statuses": statuses,
                 "trades": sorted(collected.values(), key=lambda r: (r["t_dec"], r["episode_id"])),
                 "teacher_episode_ids": self.teacher_episode_ids(channel, episodes), "nostop_note": NOSTOP_NOTE}
@@ -355,8 +417,13 @@ class Dashboard:
             raise LookupError("未知单笔或该口径未出")
         trade = matching[0]
         layout = channel["layout"]
-        # v8 变体图（v8e/v8w/v8nw）与主图在同一个数据根里，频道配置用 graph_aliases 显式列出才接受。
-        allowed = {resolve_alias(layout, name) for name in (channel["graph_version"], *channel.get("graph_aliases", []))}
+        # v8 变体图（v8e/v8w/v8nw）与主图在同一个数据根里：变体口径只认 graph_aliases 里它自己的图，
+        # 其余口径（主口径、持有期档、S/C 批次）只认频道配置的主图，放错目录的变体报告不会被当成主口径。
+        if self.variants()[variant]["graph"] == "variant":
+            names = variant_graph_names(channel, variant)
+        else:
+            names = [channel["graph_version"]]
+        allowed = {resolve_alias(layout, name) for name in names}
         gv = summary["graph_version"]
         if gv not in allowed:
             raise ValueError("配置图版本与回测报告不一致")
@@ -556,8 +623,6 @@ class Dashboard:
             at, price = move["ts"], move["price"]
         if price is not None:
             segments.append({"start": at, "end": req.horizon_end, "price": price})
-        graph = load_episodes(req.graph_version, decision_graph=False, layout=channel["layout"]).filter(
-            pl.col("channel_id") == channel["channel_id"])
         sizing = {field: trade.get(field) for field in V8_TRADE_FIELDS if field in trade}
         sizing.update({"sizing_basis": sizing_of(trade), "net_U": net_U(trade)})
         if sizing["sizing_basis"] == SIZING_NOSTOP:
@@ -566,7 +631,7 @@ class Dashboard:
                 "trade": trade, "plan": plan, "live_audit": audit, "horizon_end": req.horizon_end,
                 "sizing": sizing,
                 "plan_link": {field: episode[field] for field in V8_EPISODE_FIELDS if field in episode},
-                "dup_members": dup_members(graph).get(episode_id, []),
+                "dup_members": dup_members_of(channel["layout"], req.graph_version, channel["channel_id"], episode_id),
                 "consistency": {"ok": consistent, "label": label,
                                 "expected": trade["trace_hash"], "actual": result["trace_hash"],
                                 "expected_kernel": trade.get("kernel_version"), "actual_kernel": result.get("kernel_version")},

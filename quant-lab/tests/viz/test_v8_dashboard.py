@@ -1,8 +1,12 @@
 """v8 看板口径：按定量方式分块、v8 新列、变体图、单笔复算带止损消息原文。全部仿写数据。"""
 from datetime import timedelta
 from decimal import Decimal
+import importlib.util
 import json
 import os
+from pathlib import Path
+import shutil
+import sys
 
 import polars as pl
 import pytest
@@ -14,6 +18,17 @@ from tests.data.l0_fixtures import CHANNEL, T0
 
 MAIN = "base-v1-timeexit-w60-live-follow-ns300"
 W1 = "base-v1-timeexit-w1-live-follow-ns300"
+REPORT_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "v8_report.py"
+
+
+def load_v8_report():
+    """The frozen judgment script as its own module (it does not import quant_lab)."""
+    if "v8_report" not in sys.modules:
+        spec = importlib.util.spec_from_file_location("v8_report", REPORT_SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["v8_report"] = module            # dataclass 需要能按模块名找到自己
+        spec.loader.exec_module(module)
+    return sys.modules["v8_report"]
 
 
 def row(eid, net, day=0, **changes):
@@ -114,8 +129,41 @@ def test_channel_list_carries_v8_columns(v8):
     assert record["sizing_basis"] == "nostop"
     assert record["net_U"] == (None if record["net_R"] is None else record["net_R"] * Decimal("180"))
     risk = trade["variants"]["w60lf-ns300"]
-    assert risk["sizing_basis"] == "risk" and "legs_n" in risk and "plan_link_kind" in risk
-    assert trade["n_dup_members"] == 0 and "内核 A" in data["nostop_note"]
+    assert risk["sizing_basis"] == "risk" and "legs_n" in risk
+    # 合成图没有 G1 的 v8 列（B 组合入前）：报告里没有的列不写成空字段；没有 dup_of 不写合并数，而不是写 0。
+    assert "plan_link_kind" not in risk and "triage_verdict" not in risk
+    assert "n_dup_members" not in risk and "n_dup_members" not in trade and "内核 A" in data["nostop_note"]
+
+
+def test_trade_records_carry_only_the_reports_own_v8_columns(dashboard, tmp_path):
+    # M9：频道页的每个口径记录只带该报告真有的 v8 列；旧报告（v8 之前的 L0，没有这些列）不带一串空字段。
+    data = dashboard.trades("demo")
+    for variant in data["variants"]:
+        _, rows = dashboard.report("demo", variant)
+        columns = set(rows[0]) if rows else set()
+        for trade in data["trades"]:
+            record = trade["variants"].get(variant)
+            if record is not None:
+                assert set(record) & set(data_module.V8_TRADE_FIELDS) <= columns
+    # 仿一份 v8 之前的报告：去掉 v8 列后，记录里没有任何 v8 字段，也没有 sizing_basis/net_U/n_dup_members。
+    source = dashboard.reports / "l0-v7" / "demo"
+    reports = tmp_path / "reports"
+    folder = reports / "l0-v7" / "demo"
+    folder.mkdir(parents=True)
+    frame = pl.read_parquet(source / "trades.parquet")
+    frame.drop([c for c in frame.columns if c in data_module.V8_TRADE_FIELDS]).write_parquet(folder / "trades.parquet")
+    summary = json.loads((source / "summary.json").read_text())
+    summary.pop("blocks", None)
+    (folder / "summary.json").write_text(json.dumps(summary, default=str))
+    doc = json.loads(dashboard.config_path.read_text())
+    doc["reports"] = str(reports)
+    path = tmp_path / "dashboard.json"
+    path.write_text(json.dumps(doc))
+    records = [r for t in Dashboard(path).trades("demo")["trades"] for r in t["variants"].values()]
+    assert records
+    for record in records:
+        assert not set(data_module.V8_TRADE_FIELDS) & set(record)
+        assert not {"sizing_basis", "net_U", "n_dup_members"} & set(record)
 
 
 def test_dup_members_from_g1_dup_of():
@@ -128,25 +176,38 @@ def test_dup_members_from_g1_dup_of():
     assert dup_members(frame.drop("dup_of")) == {} and dup_members(None) == {}
 
 
+def g1_columns(frame, eid, stop_source, other, *, merged=True):
+    """仿 B 组 gold 新列（eager 或 lazy 都行）：本单的止损来自另一条消息；`merged` 时另几张单被并入本单。"""
+    into = pl.col("episode_id").is_in(other) if merged else pl.lit(False)
+    return frame.with_columns(
+        pl.when(pl.col("episode_id") == eid).then(pl.lit(stop_source)).otherwise(None).alias("stop_source_version_id"),
+        pl.when(pl.col("episode_id") == eid).then(pl.lit("root")).otherwise(pl.lit("companion")).alias("plan_link_kind"),
+        pl.when(into).then(pl.lit(eid)).otherwise(None).alias("dup_of"))
+
+
+def synthetic_graph(synthetic, eid):
+    layout = data_module.Layout.from_root(synthetic["root"])
+    graph = data_module.load_episodes("viz-test", decision_graph=False, layout=layout).filter(pl.col("channel_id") == CHANNEL)
+    other = [e for e in graph["episode_id"].to_list() if e != eid]
+    assert other                                   # 合成频道里还有别的单可以并入
+    return layout, other
+
+
 def test_detail_passes_stop_message_text_and_shows_plan_link(v8, synthetic, monkeypatch):
     eid = synthetic["episode"]["episode_id"]
-    layout = data_module.Layout.from_root(synthetic["root"])
+    layout, other = synthetic_graph(synthetic, eid)
     versions = pl.read_parquet(layout.message_version).to_dicts()
     stop_source = next(r["source_version_id"] for r in versions
                        if r["channel_id"] == CHANNEL and r["source_id"]["message_id"] == 10)
-    original_load, original_prepare = data_module.load_episodes, data_module.prepare_episode_request
-    graph = original_load("viz-test", decision_graph=False, layout=layout).filter(pl.col("channel_id") == CHANNEL)
-    other = [e for e in graph["episode_id"].to_list() if e != eid]
-    assert other                                   # 合成频道里还有别的单可以并入
+    original_load, original_scan = data_module.load_episodes, data_module.scan_episodes
+    original_prepare = data_module.prepare_episode_request
 
     def load(graph_version, *, decision_graph=True, layout=None):
-        frame = original_load(graph_version, decision_graph=decision_graph, layout=layout)
-        # 仿 B 组 gold 新列：本单的止损来自另一条消息；另一张单被并入本单。
-        frame = frame.with_columns(
-            pl.when(pl.col("episode_id") == eid).then(pl.lit(stop_source)).otherwise(None).alias("stop_source_version_id"),
-            pl.when(pl.col("episode_id") == eid).then(pl.lit("root")).otherwise(pl.lit("companion")).alias("plan_link_kind"),
-            pl.when(pl.col("episode_id").is_in(other)).then(pl.lit(eid)).otherwise(None).alias("dup_of"))
-        return frame
+        return g1_columns(original_load(graph_version, decision_graph=decision_graph, layout=layout), eid, stop_source, other)
+
+    def scan(layout, graph_version):
+        frame = original_scan(layout, graph_version)
+        return None if frame is None else g1_columns(frame, eid, stop_source, other)
 
     seen = {}
 
@@ -155,6 +216,7 @@ def test_detail_passes_stop_message_text_and_shows_plan_link(v8, synthetic, monk
         return original_prepare(row, **kwargs)
 
     monkeypatch.setattr(data_module, "load_episodes", load)
+    monkeypatch.setattr(data_module, "scan_episodes", scan)
     monkeypatch.setattr(data_module, "prepare_episode_request", prepare)
     dashboard = Dashboard(v8["config"])
     detail = dashboard.detail("demo", "w60lf-ns300", eid)
@@ -163,8 +225,45 @@ def test_detail_passes_stop_message_text_and_shows_plan_link(v8, synthetic, monk
     assert {m["episode_id"] for m in detail["dup_members"]} == set(other)
     assert detail["sizing"]["sizing_basis"] == "risk" and "note" not in detail["sizing"]
     assert detail["consistency"]["ok"] is True
-    listed = {t["episode_id"]: t["n_dup_members"] for t in dashboard.trades("demo")["trades"]}
-    assert listed[eid] == len(other)
+    listed = {t["episode_id"]: t["variants"]["w60lf-ns300"]["n_dup_members"] for t in dashboard.trades("demo")["trades"]}
+    assert listed[eid] == len(other) and all(listed[e] == 0 for e in listed if e != eid)
+
+
+def copy_report(source_reports, target_reports, directory, graph_version):
+    """A copy of a published L0 run moved onto another graph version (rows and summary), parquet before summary."""
+    folder = target_reports / directory / "demo"
+    folder.mkdir(parents=True)
+    pl.read_parquet(source_reports / directory / "demo" / "trades.parquet").with_columns(
+        pl.lit(graph_version).alias("graph_version")).write_parquet(folder / "trades.parquet")
+    summary = json.loads((source_reports / directory / "demo" / "summary.json").read_text())
+    summary["graph_version"] = graph_version
+    (folder / "summary.json").write_text(json.dumps(summary))
+
+
+def test_dup_count_follows_each_variants_own_graph(v8, synthetic, monkeypatch, tmp_path):
+    """M8：v8e/v8w/v8nw 的合并与主图不同；频道列表的合并数按该口径报告自己的图版本。"""
+    eid = synthetic["episode"]["episode_id"]
+    _, other = synthetic_graph(synthetic, eid)
+    reports = tmp_path / "reports"
+    copy_report(synthetic["reports"], reports, "l0-v8-w60lf-ns300", "viz-test")
+    copy_report(synthetic["reports"], reports, "l0-v8e", "viz-test-v8e")
+    original_scan = data_module.scan_episodes
+    asked = []
+
+    def scan(layout, graph_version):
+        asked.append(graph_version)
+        frame = original_scan(layout, "viz-test")           # 变体图与主图同一份合成数据，只是合并不同
+        return g1_columns(frame, eid, None, other, merged=graph_version == "viz-test")
+
+    monkeypatch.setattr(data_module, "scan_episodes", scan)
+    doc = json.loads(json.dumps(v8["config_doc"]))
+    doc["reports"] = str(reports)
+    path = tmp_path / "dashboard.json"
+    path.write_text(json.dumps(doc))
+    trades = {t["episode_id"]: t for t in Dashboard(path).trades("demo")["trades"]}
+    assert trades[eid]["variants"]["w60lf-ns300"]["n_dup_members"] == len(other)
+    assert trades[eid]["variants"]["v8e"]["n_dup_members"] == 0          # v8e 图上没有并入本单
+    assert sorted(set(asked)) == ["viz-test", "viz-test-v8e"]
 
 
 def test_variant_graph_needs_explicit_alias(v8, synthetic, tmp_path):
@@ -175,12 +274,83 @@ def test_variant_graph_needs_explicit_alias(v8, synthetic, tmp_path):
     path.write_text(json.dumps(doc))
     with pytest.raises(ValueError, match="配置图版本与回测报告不一致"):
         Dashboard(path).detail("demo", "v8e", eid)
+    # 列表形式按「-<口径>」后缀归属：viz-test 不是 v8e 的图名，不接受。
     doc["channels"][0]["graph_aliases"] = ["viz-test"]
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match="配置图版本与回测报告不一致"):
+        Dashboard(path).detail("demo", "v8e", eid)
+    doc["channels"][0]["graph_aliases"] = {"v8e": "viz-test"}
     path.write_text(json.dumps(doc))
     detail = Dashboard(path).detail("demo", "v8e", eid)
     assert detail["consistency"]["ok"] is True and detail["variant"] == "v8e"
+    # M11：别名只给它自己的变体口径；主口径目录里出现变体图的报告（放错目录）仍拒绝。
+    with pytest.raises(ValueError, match="配置图版本与回测报告不一致"):
+        Dashboard(path).detail("demo", "w60lf-ns300", eid)
+    with pytest.raises(ValueError, match="配置图版本与回测报告不一致"):
+        Dashboard(path).detail("demo", "w1-ns300", eid)
 
 
+def test_variant_graph_names_and_cmp_batch_discovery(v8, tmp_path):
+    channel = {"graph_aliases": ["demo-v8e", "demo-v8w", "demo-v8nw"]}
+    assert data_module.variant_graph_names(channel, "v8e") == ["demo-v8e"]
+    assert data_module.variant_graph_names(channel, "v8nw") == ["demo-v8nw"]
+    assert data_module.variant_graph_names({"graph_aliases": {"v8w": ["a", "b"]}}, "v8w") == ["a", "b"]
+    assert data_module.variant_graph_names({}, "v8e") == []
+    # M10：C 批次 l0-v8cmp*（目录名在 l0-v8 之后没有连字符）按前缀发现，用主图；其它无连字符目录不发现。
+    reports = tmp_path / "reports"
+    for name in ("l0-v8cmp-w60lf", "l0-v8cmpbase", "l0-v8xyz"):
+        (reports / name).mkdir(parents=True)
+    doc = json.loads(json.dumps(v8["config_doc"]))
+    doc["reports"] = str(reports)
+    path = tmp_path / "dashboard.json"
+    path.write_text(json.dumps(doc))
+    variants = Dashboard(path).variants()
+    assert variants["v8cmp-w60lf"] == {"suffix": "cmp-w60lf", "name": "cmp-w60lf", "graph": "main"}
+    assert "v8cmpbase" in variants and "v8xyz" not in variants
+    assert variants["v8e"]["graph"] == "variant" and variants["w60lf-ns300"]["graph"] == "main"
+
+
+def test_v8_report_reads_real_l0_output(v8, synthetic, tmp_path):
+    """M5：冻结判定脚本直接读 l0_replay.replay()/summarize() 的真实产物（键名、Decimal(38,12) 列、
+    kernel_version、follow_teacher.path），而不是只读手写的仿 summary。"""
+    report = load_v8_report()
+    reports = tmp_path / "reports"
+    for directory in ("l0-v8-w60lf-ns300", "l0-v8-w1-ns300", "l0-v8e"):
+        shutil.copytree(synthetic["reports"] / directory, reports / directory)      # copy2 保留 mtime 顺序
+    # 合成夹具的 v8e 跑在主图上：S2 要求 v8e 是变体图，拒绝出报告。
+    with pytest.raises(report.ReportError, match="is the main graph"):
+        report.build_report(reports, ["demo"])
+    shutil.rmtree(reports / "l0-v8e")
+    doc = report.build_report(reports, ["demo"])
+    main = pl.read_parquet(reports / "l0-v8-w60lf-ns300" / "demo" / "trades.parquet")
+    w1 = pl.read_parquet(reports / "l0-v8-w1-ns300" / "demo" / "trades.parquet")
+    assert main.schema["net_R"] == pl.Decimal(38, 12) and main["kernel_version"].n_unique() == 1
+    generation = doc["inputs"]["generation"]
+    assert generation["kernel_version"] == main["kernel_version"][0]
+    assert generation["follow_teacher_paths"] == {"demo": str(synthetic["follow_path"])}
+    assert set(generation["policy_hashes"]) == {MAIN, W1}
+
+    def evaluable_n(frame, basis):
+        # 独立按 §10.4 的样本定义数（不调用脚本里的函数）。
+        return frame.filter(pl.col("fill_status").is_in(["filled", "partial"]) & pl.col("censor_reason").is_null()
+                            & pl.col("net_R").is_not_null() & pl.col("mark_ok") & pl.col("funding_ok") & pl.col("rules_ok")
+                            & pl.col("bars_ok") & (pl.col("sizing_basis").fill_null("risk") == basis)
+                            & (pl.col("t_dec") < pl.datetime(2026, 7, 1, time_zone="UTC"))).height
+
+    judgment = doc["judgment"]
+    assert judgment["with_stop"]["demo"]["n"] == evaluable_n(main, "risk")
+    assert judgment["nostop"]["demo"]["holds"]["w1"]["n"] == evaluable_n(w1, "nostop")
+    assert judgment["nostop"]["demo"]["holds"]["w60"]["n"] == evaluable_n(main, "nostop")
+    assert judgment["with_stop"]["demo"]["verdict"] == "样本不足"
+    assert judgment["nostop"]["demo"]["verdict"] == "持有期档缺失"
+    total = judgment["total"]["demo"]["holds"]["w60"]
+    expected = sum(float(r["net_R"]) * float(r["risk_budget"]) for r in main.to_dicts()
+                   if r["fill_status"] in ("filled", "partial") and r["censor_reason"] is None and r["net_R"] is not None
+                   and all(r[k] for k in ("mark_ok", "funding_ok", "rules_ok", "bars_ok")))
+    assert total["sum"] == pytest.approx(expected)
+    assert doc["headline"]["demo"]["v8e"]["status"] == "未出"
+    assert doc["inputs"]["main"]["demo"]["n_rows"] == main.height
+    assert "判定期" in report.render_text(json.loads(json.dumps(doc, default=report._json_default)))
 def test_v7_dashboard_unchanged_by_v8_reports(dashboard, v8):
     # v8 目录与 v7 并存：v7 口径集合不变，没有 v8 口径混入。
     variants = dashboard.variants()
