@@ -1180,10 +1180,20 @@ def synthetic_rows(layout, graph_version, episodes, channels=()):
     """F13: plan_merge's synthetic instructions — late_stop → move_stop (always priced), amend → cancel_pending.
 
     available_at is the source message's t_vis; these rows are certain (uncertain=False) and unambiguous."""
+    from .graph import read_manifest
+    from .lifecycle import plan_link_signature
     path = Path(layout.gold_dir) / f"plan_link__{graph_version}.parquet"
     if not path.exists():
         return [], {"plan_link": "absent"}
     links = pl.read_parquet(path)
+    # The table must be the one this graph version published: a stale or foreign plan_link would otherwise turn into
+    # certain move_stop / cancel_pending rows without any error.
+    manifest = read_manifest(layout, graph_version)
+    expected = ((manifest or {}).get("assumptions") or {}).get("plan_link_signature")
+    if expected is None:
+        raise RuntimeError(f"plan_link__{graph_version}: manifest 没有 plan_link_signature，不能确认这张表属于该图版本")
+    if plan_link_signature(links) != expected:
+        raise RuntimeError(f"plan_link__{graph_version}: 内容签名与 manifest 不一致（表已过期或来自别的构建）")
     roots = {ep["episode_id"]: ep for ep in episodes}
     wanted = set(channels)
     rows, counts = [], {}

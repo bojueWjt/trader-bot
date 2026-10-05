@@ -111,13 +111,31 @@ def test_9_reentry_is_independent_without_parent_stop():
     assert links["c"].reentry_parent_stop == D(2865)
 
 
-def test_10_reply_at_market_far_from_limit_is_amend():
+def test_10_reply_at_market_past_the_limit_is_amend():
+    """The spec's own numbers: limit 2270, market 2285 (0.66% away) — the limit can no longer fill, so C amends T."""
     t = it("t", 1, 0, inst=ETH, side="long", legs=[2270], stop=2205, text="挂单 2270 做多 止损 2205")
-    c = it("c", 2, 58 * 60, inst=ETH, side="long", market=True, mark=2300, quote=2285, reply=1, text="现价 2285 入场")
+    c = it("c", 2, 58 * 60, inst=ETH, side="long", market=True, mark=2285, quote=2285, reply=1, text="现价 2285 入场")
     links, _ = merge([t, c])
     assert links["c"].kind == "amend" and links["c"].amend_of == "t"
     assert links["c"].stop == D(2205) and links["c"].stop_pid == "t"
     assert links["c"].synthetic == [{"action": "cancel_pending", "target": "t", "at": T0 + timedelta(minutes=58), "stop": None}]
+    # Only the quote is known (no as-of mark): still compared, still past the limit.
+    quoted = it("c", 2, 58 * 60, inst=ETH, side="long", market=True, quote=2285, reply=1, text="现价 2285 入场")
+    assert merge([t, quoted])[0]["c"].kind == "amend"
+
+
+@pytest.mark.parametrize("side,legs,stop,price,kind", [
+    ("long", [2270], 2205, 2265, "restatement"),   # below a long limit: T can still fill, not an amend
+    ("short", [2270], 2330, 2275, "restatement"),  # above a short limit: T can still fill
+    ("short", [2270], 2330, 2255, "amend"),        # below a short limit: past it
+])
+def test_10b_amend_needs_the_side_the_limit_cannot_fill(side, legs, stop, price, kind):
+    t = it("t", 1, 0, inst=ETH, side=side, legs=legs, stop=stop)
+    c = it("c", 2, 20 * 60, inst=ETH, side=side, market=True, mark=price, quote=price, reply=1, text=f"现价 {price} 入场")
+    assert merge([t, c])[0]["c"].kind == kind
+    # quote and mark must agree: one on each side is not an amend
+    split = it("c", 2, 20 * 60, inst=ETH, side=side, market=True, mark=2270, quote=price, reply=1)
+    assert merge([t, split])[0]["c"].kind != "amend"
 
 
 def test_11_identical_repost_two_days_later():
@@ -157,6 +175,28 @@ def test_14_supplement_window_edges(gap, window, kind):
         assert links["r"].stop == D(223)
 
 
+def test_14c_stop_linked_to_a_restatement_is_timed_from_the_original_post():
+    """T posted at t0, a restatement R at +1500 s (dup_of T), a stop linked by the linker to R at +3000 s: Δ is 3000 s
+    from T's post, so it is a late stop (move_stop), and T keeps its own t_dec (no provider added)."""
+    t = it("t", 1, 0, inst=SOL, legs=["216.4"], text="SOL 216.4 空")
+    r = it("r", 2, 1500, inst=SOL, legs=["216.4"], text="SOL 216.4 空")
+    s = it("s", 3, 3000, inst=SOL, stop=223, supplement_of="r", reply=2, text="止损:223")
+    links, _ = merge([t, r], [s])
+    assert links["r"].dup_of == "t" and links["r"].kind == "restatement"
+    assert links["s"].kind == "late_stop" and links["s"].gap_s == 3000 and links["s"].target_message_id == 1
+    assert links["t"].stop is None and set(links["t"].providers) == {"t"}
+    assert links["s"].synthetic == [{"action": "move_stop", "target": "t", "at": T0 + timedelta(seconds=3000), "stop": D(223)}]
+    within = it("s", 3, 1700, inst=SOL, stop=223, supplement_of="r", reply=2)
+    links, _ = merge([t, r], [within])
+    assert links["s"].kind == "supplement" and links["s"].gap_s == 1700 and links["t"].stop == D(223)
+
+
+def test_14d_supplement_without_a_reference_price_is_rejected():
+    root = it("r", 1, 0, inst=SOL, market=True, mark=None, text="SOL 现价空")
+    links, counts = merge([root], [it("s", 2, 6, inst=SOL, stop=100, supplement_of="r")])
+    assert links["s"].supplement_rejected == "no_reference" and links["r"].stop is None and counts["supplement_rejected"] == 1
+
+
 @pytest.mark.parametrize("stop,reason", [(210, "wrong_side"), (400, "too_far")])
 def test_14b_supplement_gates(stop, reason):
     root = it("r", 1, 0, inst=SOL, legs=["216.4"])
@@ -172,6 +212,17 @@ def test_16_same_message_split_without_stop():
     branch = it("x", 1, 0, side="long", market=True, mark=92300, branch=1, text="现在在 92300 附近")
     links, _ = merge([main, branch])
     assert links["x"].kind == "same_message_split" and links["x"].dup_of == "m"
+
+
+def test_17b_venue_sibling_of_a_merged_branch_never_reranks_an_older_plan():
+    """Branch s of message 2 is a restatement of the older spot post T; its contract-worded sibling C follows s into T's
+    group without re-ranking T's plan (keep, providers and stop source stay T's)."""
+    t = it("t", 1, 0, inst=SUI, side="long", legs=["3.90"], stop="3.70", text="SUI 现货 3.90 止损 3.70")
+    s = it("s", 2, 60, inst=SUI, side="long", legs=["3.90"], stop="3.70", branch=0, text="SUI 现货 3.90 止损 3.70")
+    c = it("c", 2, 60, inst=SUI, side="long", legs=["3.90"], stop="3.70", branch=1, text="SUI U本位 3.90 止损 3.70")
+    links, _ = merge([t, s, c])
+    assert links["t"].dup_of is None and links["t"].kept == "t" and links["t"].stop_pid == "t" and set(links["t"].providers) == {"t"}
+    assert links["s"].dup_of == "t" and links["c"].dup_of == "t" and links["c"].kind == links["s"].kind == "restatement"
 
 
 def test_17_venue_branches_keep_the_contract_one():
@@ -192,6 +243,19 @@ def test_18_conditional_confirmation_within_a_day():
     late = it("c", 2, 25 * 3600, inst=None, side=None, reply=1, market=True, text="进了", title=True)
     links, _ = merge([late], conditionals=[parent])
     assert links["c"].kind == "root" and links["c"].conditional_parent is None
+
+
+def test_18b_reply_to_an_ordinary_plan_is_not_a_confirmation_of_another_conditional():
+    """C replies to plan T; the same author's conditional P is within 1800 s. C is a restatement of T, never P's confirm."""
+    parent = it("p", 1, 0, inst=ETH, side="long", legs=[3000], stop=2950, conditional=True, text="回踩 3000 确认就进多，止损 2950")
+    t = it("t", 2, 60, inst=ETH, side="long", legs=[3050], stop=2990, text="ETH 3050 多 止损 2990")
+    c = it("c", 3, 600, inst=ETH, side="long", reply=2, market=True, text="上车", title=True)
+    links, _ = merge([t, c], conditionals=[parent])
+    assert links["c"].kind == "restatement" and links["c"].dup_of == "t" and links["c"].conditional_parent is None
+    # No reply at all: the same-author fallback still confirms P.
+    free = it("c", 3, 600, inst=None, side=None, market=True, text="进了", title=True)
+    links, _ = merge([free], conditionals=[parent])
+    assert links["c"].kind == "conditional_confirmed" and links["c"].conditional_parent == "p"
 
 
 def test_19_equal_time_without_sequence_never_merges():
@@ -229,10 +293,8 @@ def test_22_late_entry_supplement_without_stop_never_moves_a_stop_to_none():
     assert links["c"].kind == "repost" and not any(s["action"] == "move_stop" for link in links.values() for s in link.synthetic)
 
 
-def test_24_long_edit_removed_from_pool_leaves_commentary_alone():
-    """v8e removes the H1 formal card before merging (lifecycle does the removal); the commentary is then independent."""
-    links, _ = merge([commentary()])
-    assert links["c"].kind == "root" and links["c"].dup_of is None
+# Spec test 24 (v8e removes the long-edited H1 formal card from the pool before merging) is a lifecycle behaviour:
+# it is covered end to end by tests/data/test_v8_gold.py::test_v8e_moves_long_edit_out_of_the_pool.
 
 
 def test_unrelated_author_far_apart_stays_independent_and_ambiguity_is_counted():

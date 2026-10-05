@@ -402,3 +402,145 @@ def test_followup_synthetic_rows_and_dup_redirect(tmp_path):
     assert (episode_id, ambiguity, redirected) == (comment["episode_id"], None, formal["episode_id"])
     frame = followup._write_table(rows, tmp_path / "fu.parquet")
     assert frame.height == 1 and frame["mapping_version"][0] == followup.MAPPING_VERSION
+
+
+# ---------------------------------------------------------------- review fixes (v8/B-gold-fix)
+def test_d_sidecar_schema_rows_keep_missing_and_invalid_apart(tmp_path):
+    """Rows exactly as D's cx_triage writes them (status ok/invalid/missing, missing rows with verdict=None): MISSING and
+    INVALID are separate codes and separate counts; only the wide scope executes them."""
+    from v8_lake import d_sidecar, d_sidecar_row
+    msgs = [Msg(i, f"仿写 BTC 空 {62000 + i}", i * 7200, [open_action("BTC", entry=62000 + i)]) for i in range(1, 6)]
+    sv = lambda mid: f"sv{CHANNEL % 10}-{mid}"
+    tri = d_sidecar([d_sidecar_row(sv(1), "ok", "new_entry"), d_sidecar_row(sv(2), "ok", "not_entry", reason="result_post"),
+                     d_sidecar_row(sv(3), "ok", "uncertain"), d_sidecar_row(sv(4), "invalid", "uncertain"),
+                     d_sidecar_row(sv(5), "missing", None)])
+    expected = {1: None, 2: "TRIAGE_NOT_ENTRY", 3: "TRIAGE_UNCERTAIN", 4: "TRIAGE_INVALID", 5: "TRIAGE_MISSING"}
+    main = build(tmp_path / "main", msgs, triage=tri)
+    for mid, code in expected.items():
+        ep = episode(main, mid)
+        triage_codes = {c for c in ep["reason_codes"] if c.startswith("TRIAGE_")}
+        assert triage_codes == ({code} if code else set()), (mid, triage_codes)
+        assert ep["dec_eligibility"]["entry_decision"] is (code is None)
+    assert episode(main, 5)["triage_verdict"] == "missing" and episode(main, 4)["triage_verdict"] == "invalid"
+    counts = main["summary"]["v8"]["reason_codes"]
+    assert counts["TRIAGE_MISSING"] == 1 and counts["TRIAGE_INVALID"] == 1 and counts["TRIAGE_UNCERTAIN"] == 1
+    wide = build(tmp_path / "wide", msgs, triage=tri, wide=True)
+    assert [episode(wide, mid)["dec_eligibility"]["entry_decision"] for mid in range(1, 6)] == [True, False, True, True, True]
+
+
+@pytest.mark.parametrize("row,expected", [
+    ({"verdict": None, "status": "missing", "exclusion_code": "TRIAGE_MISSING"}, ("missing", "TRIAGE_MISSING")),
+    ({"verdict": "uncertain", "status": "invalid", "exclusion_code": "TRIAGE_INVALID"}, ("invalid", "TRIAGE_INVALID")),
+    ({"verdict": "new_entry", "status": "ok", "exclusion_code": None}, ("new_entry", None)),
+    ({"verdict": "not_entry", "status": "ok", "exclusion_code": "TRIAGE_NOT_ENTRY"}, ("not_entry", "TRIAGE_NOT_ENTRY")),
+    ({"verdict": None, "status": "missing"}, ("missing", "TRIAGE_MISSING")),
+    ({"verdict": "new_entry", "status": "ok", "exclusion_code": "TRIAGE_NOT_ENTRY"}, ("invalid", "TRIAGE_INVALID")),  # disagreement
+    ({"verdict": "new_entry", "status": "pending"}, ("invalid", "TRIAGE_INVALID")),  # unknown status
+    ({"verdict": "maybe"}, ("invalid", "TRIAGE_INVALID")),  # legacy frame without status
+])
+def test_triage_status_reads_status_before_verdict(row, expected):
+    label, reason = lifecycle.triage_status(row)
+    assert (label, reason) == (expected[0], None if expected[1] is None else lifecycle.Reason(expected[1]))
+
+
+def test_stop_linked_to_a_restatement_beyond_the_window_is_a_late_stop(tmp_path):
+    """T at t0, its restatement R at +1500 s, a stop replying to R at +3000 s: T keeps t_dec = t0 + 1 s and is not
+    stale; the stop only becomes a synthetic move_stop on T."""
+    msgs = [Msg(1, "仿写 SOL 216.4 空", 0, [open_action("SOL", entry="216.4")]),
+            Msg(2, "仿写 SOL 216.4 空", 1500, [open_action("SOL", entry="216.4")]),
+            Msg(3, "止损:223", 3000, [stop_action(223)], reply=2)]
+    r = build(tmp_path, msgs)
+    t, restated = episode(r, 1), episode(r, 2)
+    assert restated["dup_of"] == t["episode_id"]
+    assert t["t_dec"] == T0 + timedelta(seconds=1) and t["signal_age_s"] == 0 and "STALE_SIGNAL_30M" not in t["reason_codes"]
+    assert t["order_plan"]["stop"] is None and t["dec_eligibility"]["entry_decision"]
+    late = [row for row in r["summary"]["plan_link_rows"] if row["synthetic_action"] == "move_stop"]
+    assert len(late) == 1 and late[0]["plan_link_kind"] == "late_stop" and late[0]["supplement_status"] == "late_stop"
+    assert late[0]["kept_episode_id"] == t["episode_id"] and late[0]["gap_s"] == 3000 and late[0]["target_message_id"] == 1
+
+
+def test_supplement_rows_keep_plan_link_kind_in_the_frozen_enum(tmp_path):
+    msgs = [Msg(1, "仿写 SOL 216.4 空", 0, [open_action("SOL", entry="216.4")]), Msg(2, "止损:150", 6, [stop_action(150)])]
+    r = build(tmp_path, msgs)
+    rows = [row for row in r["summary"]["plan_link_rows"] if row["message_id"] == 2]
+    assert rows and rows[0]["plan_link_kind"] is None and rows[0]["supplement_status"].startswith("rejected:")
+    from quant_lab.data import plan_merge
+    kinds = {row["plan_link_kind"] for row in r["summary"]["plan_link_rows"]} - {None}
+    assert kinds <= set(plan_merge.KINDS)
+    assert r["summary"]["v8"]["supplement_status"] == {rows[0]["supplement_status"]: 1}
+
+
+def test_unknown_edit_delay_is_not_zero(tmp_path):
+    """An H1 version whose edit time is unknown: edit_delay_s is null (not 0), it is listed in the report, -v8e removes it
+    like a long edit, and an outcome word in it is flagged."""
+    msgs = [Msg(1, "仿写 BTC 空 入场 62000 止损 62200 ✅ TP1 已达", 0, [open_action("BTC", entry=62000, stop=62200)],
+                grade="H1", edit_unknown=True)]
+    main = build(tmp_path / "main", msgs)
+    ep = episode(main, 1)
+    assert ep["edit_delay_s"] is None and ep["edit_may_contain_outcome"] and ep["dec_eligibility"]["entry_decision"]
+    assert main["summary"]["v8"]["edit_delay_unknown_message_ids"] == [1]
+    assert main["summary"]["v8"]["merge_counters"]["edit_delay_unknown"] == 1
+    e = build(tmp_path / "e", msgs, max_edit_delay_s=1800)
+    assert "STALE_EDIT_30M" in episode(e, 1)["reason_codes"] and not episode(e, 1)["dec_eligibility"]["entry_decision"]
+
+
+def test_v8e_removes_a_long_edited_conditional_post_from_the_confirmation_pool(tmp_path):
+    cond = open_action("ETH", "long", entry=3000, stop=2950, time_ref="conditional")
+    msgs = [Msg(1, "仿写 回踩 3000 确认就进多，止损 2950", 0, [cond], grade="H1", edit_delay_s=7200),
+            Msg(2, "进了", 20 * 60, [open_action(None, None)], reply=1)]
+    main = build(tmp_path / "main", msgs, marks={"ETH": 3010})
+    assert episode(main, 2)["plan_link_kind"] == "conditional_confirmed"
+    e = build(tmp_path / "e", msgs, marks={"ETH": 3010}, max_edit_delay_s=1800)
+    assert episode(e, 2)["plan_link_kind"] != "conditional_confirmed" and not episode(e, 2)["dec_eligibility"]["entry_decision"]
+
+
+@pytest.mark.parametrize("text", ["仿写 BTC 空 62000，和上次的区别跟仓位大小有关", "仿写 BTC 空 62000，特别跟紧止损",
+                                  "仿写 BTC 空 62000，级别跟随大饼"])
+def test_dissuasion_word_inside_another_word_is_not_advice(text):
+    assert not lifecycle.CONTRACT_DISCOURAGED_RE.search(text)
+    assert lifecycle.CONTRACT_DISCOURAGED_RE.search("仿写 BTC 空 62000，别跟")
+    assert lifecycle.CONTRACT_DISCOURAGED_RE.search("仿写 BTC 空 62000，新手不要跟")
+
+
+def test_cash_watch_rule_uses_the_spec_wording_and_is_counted_per_channel(tmp_path):
+    r = build(tmp_path, [Msg(1, "仿写 BTC 关注区域 62000 附近，跌破 61000 失效", 0, [open_action("BTC", entry=62000)]),
+                         Msg(2, "仿写 BTC 关注区间 62000，跌破 61000 失效", 7200, [open_action("BTC", entry=62000)], author="x")])
+    assert "CASH_WATCH_POST" in episode(r, 1)["reason_codes"] and "CASH_WATCH_POST" not in episode(r, 2)["reason_codes"]
+    assert r["summary"]["v8"]["cash_watch_post_by_channel"] == {str(CHANNEL): 1}
+
+
+def test_close_clause_without_timeframe_never_becomes_an_intraday_stop():
+    root = {"instrument_id": "BTCUSDT-PERP", "side": "long", "entry": {"kind": "limit", "lo": D(70000), "hi": D(70000)}, "entries": None,
+            "entry_mode": "price", "checks": "{}"}
+    meta = {"rule": "close_from_clause", "timeframe": None}
+    assert lifecycle._order_plan(dict(root), D(68000), [], None, stop_meta=meta) is None
+    plan = lifecycle._order_plan(dict(root), D(68000), [], None, stop_meta=dict(meta, timeframe="1d"))
+    assert plan["stop"] == {"price": D(68000), "trigger": "close", "timeframe": "1d"}
+
+
+def test_staged_stop_is_counted_not_modelled(tmp_path):
+    r = build(tmp_path, [Msg(1, "仿写 BTC 空 62000，止损 62200，第二止损 62500", 0, [open_action("BTC", entry=62000, stop=62200)])])
+    assert episode(r, 1)["order_plan"]["stop"]["price"] == D(62200)
+    assert r["summary"]["v8"]["merge_counters"]["staged_stop_dropped"] == 1
+    assert not lifecycle.staged_stop("仿写 BTC 空 62000，止损 62200，盈利后止损上移至 62000")
+
+
+def test_plan_link_signature_ignores_ingested_at_and_followup_rejects_a_foreign_table(tmp_path):
+    from quant_lab.data import followup
+    msgs = [Msg(1, "仿写 ETH 空 3180-3200 看回落", 0, [open_action("ETH", lo=3180, hi=3200)]),
+            Msg(2, "仿写 ETH 3170-3190 空，小幅涨破3220一点止损", 3 * 3600, [open_action("ETH", lo=3170, hi=3190, stop=3220)])]
+    _, layout = _published(tmp_path, msgs)
+    lifecycle.run(layout, graph_version="f", plan_source="llm")
+    path = lifecycle.plan_link_path(layout, "f")
+    links = pl.read_parquet(path)
+    later = links.with_columns(pl.lit(T0 + timedelta(days=9)).cast(pl.Datetime("us", "UTC")).alias("ingested_at"))
+    assert lifecycle.plan_link_signature(later) == lifecycle.plan_link_signature(links)
+    assert lifecycle.plan_link_signature(links.reverse()) == lifecycle.plan_link_signature(links)
+    episodes = pl.read_parquet(layout.episode("f")).to_dicts()
+    assert followup.synthetic_rows(layout, "f", episodes)[1] == {"move_stop": 1}
+    links.with_columns(pl.col("synthetic_stop_price") * 2).write_parquet(path)
+    with pytest.raises(RuntimeError, match="签名"):
+        followup.synthetic_rows(layout, "f", episodes)
+    links.write_parquet(lifecycle.plan_link_path(layout, "other"))
+    with pytest.raises(RuntimeError, match="manifest"):
+        followup.synthetic_rows(layout, "other", episodes)

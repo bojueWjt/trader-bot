@@ -625,3 +625,12 @@ G3 用四审自身的反例脚本原样复跑，`ledger_code_version_equal` 由 
 - **§4 增原因码 `CASH_WATCH_POST`**：F3「关注区域 … 失效 …」观察帖。
 - **§4 增原因码 `CONTRACT_DISCOURAGED`**：F3/D4 合约劝阻词（合约先别做、不建议跟、不要跟 …）。
 - **§4 增原因码 `PROMOTED_WIDE_ONLY`**：F11 只进宽口径的升级根（来自 past 的 P1、P2）。
+
+### §9.12 v8 gold `plan_link__<gv>.parquet` 的补充止损状态列（B 组审查修复；待 G0 签字）
+
+- `plan_link_kind` 只取方案 §4 冻结枚举（root … late_stop）。补充止损行（linker 挂在根上的 stop_move/amend 成员）另有一列
+  `supplement_status`（String，入场分支行为空）：`merged`（kind=supplement）、`late_stop`（kind=late_stop，合成 move_stop）、
+  `stop_move`（根已有止损，属移损，交跟单；kind 空）、`rejected:<reason>`（F6 三道校验或上游换算不过，reason ∈
+  no_reference / wrong_side / too_far / scale_not_unique / symbol_unknown / other_symbol / side_unknown / root_not_merged；kind 空）。
+- manifest `assumptions.plan_link_signature` = 该表除 `ingested_at` 外全部列的内容签名（与行序无关）；followup 读表前重算并比对，
+  不一致或缺签名直接报错。

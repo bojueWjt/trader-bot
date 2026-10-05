@@ -8,7 +8,12 @@
   超过只合成一条 move_stop，不回填；
 - 不带参数的确认帖：回复/引用原单或 Δ ≤ 1800 s 永久 dup_of；其余以及 >1800 s 的 1% 内复述、完全相同的重发交 G2（repost）；
 - 同一条消息的分支先判场所合并（same_message_venue），再判拆分（same_message_split），否则独立；
-- 条件确认（C0）：不带参数的 C 回复条件帖 P（或同作者 Δ ≤ 1800 s），且 t_vis(C) − t_post(P) ≤ 86400 s → C 承接 P 的参数。
+- 条件确认（C0）：不带参数的 C 回复条件帖 P（或不回复任何已知计划、同作者 Δ ≤ 1800 s），且 t_vis(C) − t_post(P) ≤ 86400 s
+  → C 承接 P 的参数；
+- 改单（amend）：C 回复限价/区间单 T、现价入场、无止损，且 C 的报价与当时 mark 都在 T 已经成交不了的一侧
+  （多单高于 T 最高档、空单低于 T 最低档）→ 独立单，继承 T 的止损，合成 cancel_pending(T)；不要求价差 > 1%
+  （方案测试 10：2270 挂单、现价 2285，差 0.66%，是改单）。
+- 补充止损（F6）的 Δ 从该计划原帖（组内最早成员）算起，不从 linker 挂靠的那条复述算起；三道校验缺比较价时拒收（no_reference）。
 
 「可见截断」：目标组的所有成员都必须严格早于 C（Δ=0 时要求 sequence 能定先后），并且只用当时的字段。
 stage 2 才使用分诊 relation（amends / reenters 覆盖确定性判定），并在保留单本口径不可执行时把指向它的
@@ -261,13 +266,26 @@ def supplement_check(c: Item, root: Item, *, scale_conflict: bool = False) -> st
     ref = _cmp_legs(root)
     if root.side not in ("long", "short"):
         return "side_unknown"
-    if ref and not correct_side(c.stop, ref, root.side):
+    if not ref:
+        # A market_ref root without an as-of mark has no comparison price: neither the side nor the ln1.5 gate can be
+        # checked, and an unchecked gate is not a passed one (uncomparable is not equal).
+        return "no_reference"
+    if not correct_side(c.stop, ref, root.side):
         return "wrong_side"
-    if ref:
-        mid = sum(ref) / len(ref)
-        if c.stop <= 0 or mid <= 0 or abs(math.log(float(c.stop / mid))) >= SUPPLEMENT_LN:
-            return "too_far"
+    mid = sum(ref) / len(ref)
+    if c.stop <= 0 or mid <= 0 or abs(math.log(float(c.stop / mid))) >= SUPPLEMENT_LN:
+        return "too_far"
     return None
+
+
+def _past_the_limit(c: Item, t: Item) -> bool:
+    """A market entry replied to a pending limit/zone plan T amends T when C's price is on the side T can no longer fill:
+    a long above T's highest leg, a short below T's lowest. Both the quoted price and the as-of mark must agree; with
+    neither known nothing is compared (no amend)."""
+    prices = [x for x in (c.quote, c.mark) if x is not None]
+    if not prices or not t.legs or t.side not in ("long", "short"):
+        return False
+    return all(x > max(t.legs) for x in prices) if t.side == "long" else all(x < min(t.legs) for x in prices)
 
 
 def merge(roots: list[Item], supplements: list[Item] = (), *, conditionals: list[Item] = (), stage: int = 1,
@@ -359,6 +377,7 @@ def merge(roots: list[Item], supplements: list[Item] = (), *, conditionals: list
         link.kind, link.repost_of = "repost", t.kept
         link.gap_s, link.target_message_id = _ceil_s(gap), items[t.kept].message_id
 
+    plan_messages = {(i.channel, i.message_id) for i in roots}
     ordered = sorted(list(roots) + list(supplements), key=order)
     for c in ordered:
         # ---------------------------------------------------------------- S. stop supplement (F6)
@@ -370,7 +389,6 @@ def merge(roots: list[Item], supplements: list[Item] = (), *, conditionals: list
                 link.supplement_rejected = "root_not_merged"
                 continue
             g = groups[group_of[rid]]
-            r = items[rid]
             if g.stop is not None:
                 link.kind = "stop_move"  # R already has a stop: a move, left to followup
                 continue
@@ -379,8 +397,10 @@ def merge(roots: list[Item], supplements: list[Item] = (), *, conditionals: list
                 link.supplement_rejected = reason
                 counters["supplement_rejected"] += 1
                 continue
-            gap = (c.t_vis - (r.t_post or r.t_vis)).total_seconds()
-            link.gap_s, link.target_message_id, link.group = _ceil_s(gap), r.message_id, g.gid
+            # Δ is measured from the plan's original post (the group's first member), not from whichever member the
+            # linker attached the stop to: a stop linked to a later restatement is still Δ after the plan was posted.
+            gap = _gap(c, g)
+            link.gap_s, link.target_message_id, link.group = _ceil_s(gap), items[g.members[0]].message_id, g.gid
             if gap <= w_sup:
                 absorb(g, c, "supplement", stop_from_c=True)
                 g.members.remove(c.pid)  # a supplement is not a member episode
@@ -393,11 +413,16 @@ def merge(roots: list[Item], supplements: list[Item] = (), *, conditionals: list
         link = links[c.pid]
         # ---------------------------------------------------------------- C0. conditional confirmation
         if c.no_params:
+            # A reply to an ordinary plan is about that plan (section B), never a confirmation of some other conditional
+            # post by the same author: the same-author fallback only applies when C replies to no known plan message.
+            replies_to_plan = c.reply_to is not None and (c.channel, c.reply_to) in plan_messages \
+                and not any(p.channel == c.channel and p.message_id == c.reply_to for p in conditionals)
             parents = [p for p in conditionals if p.channel == c.channel and p.t_vis < c.t_vis
                        and (c.inst is None or p.inst == c.inst) and (c.side is None or p.side == c.side)
                        and (c.t_vis - (p.t_post or p.t_vis)).total_seconds() <= CONFIRM_S
                        and ((c.reply_to is not None and c.reply_to == p.message_id)
-                            or (c.author is not None and c.author == p.author and (c.t_vis - (p.t_post or p.t_vis)).total_seconds() <= LINK_S))]
+                            or (not replies_to_plan and c.author is not None and c.author == p.author
+                                and (c.t_vis - (p.t_post or p.t_vis)).total_seconds() <= LINK_S))]
             replied = [p for p in parents if c.reply_to is not None and c.reply_to == p.message_id]
             pick = replied or parents
             if len({p.pid for p in pick}) == 1:
@@ -418,6 +443,14 @@ def merge(roots: list[Item], supplements: list[Item] = (), *, conditionals: list
             stopped = [g for g in same if g.stop is not None and compatible(c, group_view(g))]
             if venue_groups:
                 g = venue_groups[0]
+                if items[g.kept].message_id != c.message_id:
+                    # The sibling was already merged into an older message's plan: C follows the sibling there and the
+                    # older kept plan (with its providers and stop source) is left as it is. Only branches of one message
+                    # are re-ranked against each other.
+                    sibling = next(m for m in g.members if m in root_ids and items[m].message_id == c.message_id)
+                    kind = links[sibling].kind if links[sibling].kind in COMPANION_KINDS | RESTATEMENT_KINDS else "same_message_venue"
+                    dup(c, g, kind, _gap(c, g))
+                    continue
                 contract = [m for m in g.members + [c.pid] if m in root_ids and items[m].venue == "unspecified"]
                 g.members.append(c.pid)
                 group_of[c.pid] = g.gid
@@ -493,8 +526,7 @@ def merge(roots: list[Item], supplements: list[Item] = (), *, conditionals: list
             view = group_view(t)
             replied = c.reply_to is not None and c.reply_to in member_messages(t)
             limit_target = items[t.entry_pid].priced and not items[t.entry_pid].market_ref
-            if (replied and c.market_ref and not c.no_params and c.stop is None and limit_target and c.mark is not None
-                    and all(_rel(c.mark, x) > REL_TOL for x in _cmp_legs(view))):
+            if replied and c.market_ref and not c.no_params and c.stop is None and limit_target and _past_the_limit(c, items[t.entry_pid]):
                 amend(t)
                 continue
             if compatible(c, view):

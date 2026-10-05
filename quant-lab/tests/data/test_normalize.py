@@ -309,3 +309,21 @@ def test_h1_edit_visible_at_post_is_the_v8_main_clock(tmp_path):
     assert unedited.equals(old.filter(pl.col("time_grade") != "H1").drop("ingested_at", "batch_id").sort("source_version_id"))
     with pytest.raises(ValueError):
         normalize.run(fx, Layout.flat(tmp_path / "both"), edit_visible_at_post=True, edit_visible_at_last_edit=True)
+
+
+def test_h1_edit_visible_at_post_with_unknown_edit_time_records_unknown_not_zero(tmp_path):
+    """v8 F8: an edited message whose edit time cannot be read still gets the post-time clock, but its edit delay is
+    unknown (edit_delay_s=None, edit_delay_unknown=True) — never 0, which would read as an edit made at the post."""
+    import dataclasses
+    msgs = list(read_all(FIX))
+    target = next(m for m in msgs if m.message_id == A["CE1_edited_sl"])
+    broken = dataclasses.replace(target, edited_unixtime=None, edit_time_problem="unparsable_edited_unixtime", first_seen_at=None)
+    msgs = [broken if m is target else m for m in msgs]
+    mv, *_ = normalize.normalize_messages(msgs, Layout.flat(tmp_path / "post"), ingested_at=datetime(2026, 9, 11, tzinfo=UTC),
+                                          edit_visible_at_post=True)
+    r = mv.filter((pl.col("source_id").struct.field("message_id") == A["CE1_edited_sl"])
+                  & (pl.col("channel_id") == target.channel_id)).row(0, named=True)
+    ta = json.loads(r["temporal_assumptions"])
+    assert r["time_grade"] == "H1" and ta["edit_visible_at_post"] is True
+    assert ta["edit_delay_s"] is None and ta["edit_delay_unknown"] is True
+    assert r["available_at"] == target.message_date + timedelta(seconds=60)

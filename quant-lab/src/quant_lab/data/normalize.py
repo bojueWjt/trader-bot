@@ -250,6 +250,10 @@ def normalize_messages(
             if edit_visible_at_post and m.message_date is not None:
                 if m.last_edit_at is not None and not m.edit_time_problem:
                     assumptions["edit_delay_s"] = math.ceil((m.last_edit_at - m.message_date).total_seconds())  # never shorter than it was
+                else:
+                    # 编辑时刻缺失或不可信：延迟未知，不是 0（event_time 此时是原帖时刻，不能拿来推编辑延迟）。
+                    assumptions["edit_delay_s"] = None
+                    assumptions["edit_delay_unknown"] = True
                 # v8 主口径（D5）：编辑后的最终版按原帖时刻可见（message_date + freeze_delay），event_time 取原帖时刻。
                 # 编辑内容的前视由 G1 变体图 -v8e（--max-edit-delay-s）并列报告，这里只写明假设与编辑延迟。
                 event_time = m.message_date

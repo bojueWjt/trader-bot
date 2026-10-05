@@ -41,11 +41,16 @@ TRIAGE_FILE = "nostop_triage.parquet"
 #: 冻结 sidecar schema（方案 §4 / F3）：主键 (source_version_id, branch_index)；其余列按名读取，不 import cx_triage。
 TRIAGE_KEY = ("source_version_id", "branch_index")
 TRIAGE_VERDICTS = ("new_entry", "not_entry", "uncertain")
-#: D4 劝阻词（§1）：「不要跟/别跟」后面紧跟 风/在/大/着 的不算
-CONTRACT_DISCOURAGED_RE = re.compile(r"合约先别做|合约先等|先别开合约|不建议跟|不许合约|(?:不要|别)跟(?![风在大着])")
-#: Cash 观察帖：「关注区域 …… 失效 ……」
-CASH_WATCH_RE = re.compile(r"关注(?:区域|区间)")
+#: D4 劝阻词（§1）：「不要跟/别跟」后面紧跟 风/在/大/着 的不算；「别」是词内字（区别跟、特别跟、级别跟、分别跟、识别跟）时也不算
+CONTRACT_DISCOURAGED_RE = re.compile(r"合约先别做|合约先等|先别开合约|不建议跟|不许合约|(?:不要|(?<![区特级分识鉴性派类])别)跟(?![风在大着])")
+#: Cash 观察帖：「关注区域 …… 失效 ……」（方案 F3/D6 的原词，与 D 组 cx_triage 的审计正则同一口径）。G1 不知道频道名，
+#: 规则对所有频道生效，各频道命中数写进构建报告（v8_report.cash_watch_post_by_channel），由 G0 核对是否只出现在 Cash。
+CASH_WATCH_RE = re.compile(r"关注区域")
 CASH_WATCH_INVALIDATION_RE = re.compile(r"失效")
+#: F12 分级止损（不建模，只计数 staged_stop_dropped）：同一段落里止损标签后紧跟两个以上不同价位，或明写分批/分级止损。
+#: 只认「止损/防守/SL 后面直接是数字」，「止损上移至 X」这类移损不算；这是计数上界，不改任何单。
+STAGED_STOP_VALUE_RE = re.compile(r"(?:止损|防守|SL|stop)\s*(?:位|价)?\s*[:：]?\s*(\d+(?:\.\d+)?)", re.I)
+STAGED_STOP_WORDS_RE = re.compile(r"分批止损|分级止损|第[一二三123]止损|止损[一二三123]\s*[:：]")
 LOW_LEVERAGE_RE = re.compile(r"1倍|一倍|低倍|不会爆仓|不设止损|不用止损")
 NOSTOP_HINT_KINDS = ("zero_distance_break", "reference_level", "ambiguous_break", "relative_ambiguous")
 EXECUTION_BLOCKING = frozenset({Reason.SAME_PLAN_COMPANION, Reason.SAME_PLAN_RESTATEMENT, Reason.STALE_SIGNAL_30M, Reason.STALE_EDIT_30M,
@@ -171,8 +176,20 @@ PLAN_LINK_SCHEMA: dict[str, Any] = {
     "episode_id": pl.String, "kept_episode_id": pl.String, "family_id": pl.String, "plan_link_kind": pl.String,
     "target_message_id": pl.Int64, "gap_s": pl.Int64, "synthetic_action": pl.String, "synthetic_at": pl.Datetime("us", "UTC"),
     "synthetic_stop_price": D12, "merge_version": pl.String,
+    "supplement_status": pl.String,
     "event_time": pl.Datetime("us", "UTC"), "available_at": pl.Datetime("us", "UTC"), "ingested_at": pl.Datetime("us", "UTC"),
 }
+#: plan_link.supplement_status（只在补充止损行上有值；plan_link_kind 只取 §4 冻结枚举）：
+#:   merged（kind=supplement）、late_stop（kind=late_stop，合成 move_stop）、stop_move（根已有止损，属移损，交跟单；kind 空）、
+#:   rejected:<reason>（F6 三道校验或上游换算不过；kind 空）
+
+
+def plan_link_signature(frame: pl.DataFrame) -> str:
+    """Content signature of a plan_link table: every column but ingested_at, independent of row order, so rebuilding the
+    same graph version gives the same signature and a stale or foreign table does not."""
+    cols = [c for c in frame.columns if c != "ingested_at"]
+    rows = sorted(json.dumps(r, sort_keys=True, ensure_ascii=False, default=str) for r in frame.select(cols).to_dicts())
+    return stable_id("plan-link", rows)
 EVENT_SCHEMA: dict[str, Any] = {
     "event_id": pl.String, "episode_id": pl.String, "graph_version": pl.String, "channel_id": pl.Int64, "kind": pl.String, "event_seq": pl.Int64,
     "extract_id": pl.String, "plan_id": pl.String, "source_version_id": pl.String, "supersedes_event_id": pl.String,
@@ -220,7 +237,9 @@ def _order_plan(root: dict[str, Any], stop: float | None, tps: list[dict], expir
         entries = [{"kind": "limit", "price_lo": e["lo"], "price_hi": e["hi"], "fraction": None, "tif": "GTC", "post_only": False}]
     stop_plan = {"price": stop, "trigger": "mark"} if stop is not None else None
     stop_meta = stop_meta or {}
-    if stop_plan is not None and stop_meta.get("rule") == "close_from_clause" and stop_meta.get("timeframe"):
+    if stop_plan is not None and stop_meta.get("rule") == "close_from_clause":
+        if not stop_meta.get("timeframe"):
+            return None  # a close condition without its timeframe is never turned into an intraday price: no plan
         stop_plan = {"price": stop, "trigger": "close", "timeframe": stop_meta["timeframe"]}
     checks = json.loads(root.get("checks") or "{}")
     # checks.action keeps the quoted values; a price whose unit was inherited (cx_v2.inherited_prices) is rescaled here.
@@ -309,22 +328,46 @@ def triage_index(triage: pl.DataFrame | None) -> dict[tuple[str, int], dict[str,
     return out
 
 
+#: frozen sidecar exclusion_code → (label, reason); None = an ok new_entry
+_TRIAGE_EXCLUSIONS = {"TRIAGE_NOT_ENTRY": ("not_entry", Reason.TRIAGE_NOT_ENTRY), "TRIAGE_UNCERTAIN": ("uncertain", Reason.TRIAGE_UNCERTAIN),
+                      "TRIAGE_INVALID": ("invalid", Reason.TRIAGE_INVALID), "TRIAGE_MISSING": ("missing", Reason.TRIAGE_MISSING)}
+
+
 def triage_status(row: dict[str, Any] | None) -> tuple[str, Reason | None]:
-    """(verdict label, blocking reason in the main scope). A row that failed the deterministic checks is uncertain/INVALID."""
+    """(verdict label, blocking reason in the main scope), read by the frozen sidecar schema (F3 / D cx_triage._sidecar_schema).
+
+    status decides first: missing (no recording, abstain, no prompt; verdict is null there) → TRIAGE_MISSING; invalid
+    (failed a deterministic check) → TRIAGE_INVALID. Only an ok row's verdict is read. MISSING and INVALID are never
+    folded into each other (uncomparable is not equal). When the row carries exclusion_code it must agree with what
+    status/verdict say; a disagreement or an unknown status/verdict is an invalid row."""
     if row is None:
         return "missing", Reason.TRIAGE_MISSING
     status = str(row.get("status") or "").lower()
-    invalid = status in ("invalid", "rejected") or row.get("invalid") is True or row.get("valid") is False
     verdict = row.get("verdict")
-    if invalid or verdict not in TRIAGE_VERDICTS:
-        return "invalid", Reason.TRIAGE_INVALID
     if status in ("missing", "abstain", "abstained"):
-        return "missing", Reason.TRIAGE_MISSING
-    if verdict == "new_entry":
-        return "new_entry", None
-    if verdict == "not_entry":
-        return "not_entry", Reason.TRIAGE_NOT_ENTRY
-    return "uncertain", Reason.TRIAGE_UNCERTAIN
+        out = ("missing", Reason.TRIAGE_MISSING)
+    elif status in ("invalid", "rejected") or row.get("invalid") is True or row.get("valid") is False:
+        out = ("invalid", Reason.TRIAGE_INVALID)
+    elif status not in ("", "ok") or verdict not in TRIAGE_VERDICTS:
+        return "invalid", Reason.TRIAGE_INVALID
+    elif verdict == "new_entry":
+        out = ("new_entry", None)
+    elif verdict == "not_entry":
+        out = ("not_entry", Reason.TRIAGE_NOT_ENTRY)
+    else:
+        out = ("uncertain", Reason.TRIAGE_UNCERTAIN)
+    if "exclusion_code" in row:
+        code = row.get("exclusion_code")
+        expected = _TRIAGE_EXCLUSIONS.get(code, ("new_entry", None)) if code is None or code in _TRIAGE_EXCLUSIONS else None
+        if expected != out:
+            return "invalid", Reason.TRIAGE_INVALID
+    return out
+
+
+def staged_stop(seg: str) -> bool:
+    """F12: the paragraph states more than one stop level (only the decision stop is modelled)."""
+    values = {Decimal(v) for v in STAGED_STOP_VALUE_RE.findall(seg or "")}
+    return len(values) >= 2 or bool(STAGED_STOP_WORDS_RE.search(seg or ""))
 
 
 def _decimal(v) -> Decimal | None:
@@ -379,16 +422,26 @@ def _merge_item(p: dict[str, Any], mvd: dict[str, dict], t_post: dict[tuple, dat
         supplement_of=supplement_of, conditional=conditional)
 
 
-def _edit_delay(row: dict[str, Any]) -> int:
-    """Edit delay of one H1 version: last_edit_at − message_date (0 for other grades or unknown clocks)."""
+def _edit_delay(row: dict[str, Any]) -> int | None:
+    """Edit delay of one H1 version: last_edit_at − message_date; 0 for other grades; None = unknown.
+
+    Under --edit-visible-at-post event_time is the original post time, so it says nothing about the edit: a row without
+    a recorded edit_delay_s there (edit time missing or inconsistent, edit_delay_unknown) is unknown, never 0."""
     if row.get("time_grade") != "H1":
         return 0
     ta = json.loads(row.get("temporal_assumptions") or "{}")
     if ta.get("edit_delay_s") is not None:
         return int(ta["edit_delay_s"])
+    if ta.get("edit_delay_unknown") or ta.get("edit_visible_at_post"):
+        return None
     if row.get("event_time") is not None and row.get("message_date") is not None:
         return max(0, _plan_merge.whole_seconds(row["event_time"] - row["message_date"]))
-    return 0
+    return None
+
+
+def _edit_too_late(delay: int | None, limit: int | None) -> bool:
+    """-v8e pool removal: over the limit, or an unknown delay (an unknown edit time is not a short one)."""
+    return limit is not None and (delay is None or delay > limit)
 
 
 def _stop_meta(src: dict[str, Any] | None, *, injected: bool) -> dict[str, Any]:
@@ -500,7 +553,7 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
             if verdict_reason is not None:
                 blocks.append(verdict_reason)
         edit_delay = _edit_delay(mvd.get(p["source_version_id"], {}))
-        stale_edit = max_edit_delay_s is not None and edit_delay > max_edit_delay_s
+        stale_edit = _edit_too_late(edit_delay, max_edit_delay_s)
         if stale_edit:
             blocks.append(Reason.STALE_EDIT_30M)
         # The wide scope (-v8w) executes uncertain, missing and invalid triage; the code is still recorded.
@@ -531,7 +584,7 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
             p = plans[pid]
             if p["kind"] not in ("stop_move", "amend") or p.get("stop") is None or sel[pid]["method"] == "same_source":
                 continue
-            if max_edit_delay_s is not None and _edit_delay(mvd.get(p["source_version_id"], {})) > max_edit_delay_s:
+            if _edit_too_late(_edit_delay(mvd.get(p["source_version_id"], {})), max_edit_delay_s):
                 continue
             it = _merge_item(p, mvd, t_post, supplement_of=rid)
             if it is None:
@@ -544,6 +597,8 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
         checks = json.loads(p.get("checks") or "{}")
         if p["kind"] == "entry_claimed" and checks.get("schema_version") == 2 and checks.get("op") == "open" \
                 and checks.get("time_ref") == "conditional" and not checks.get("time_ref_promoted") and p.get("instrument_id"):
+            if _edit_too_late(_edit_delay(mvd.get(p["source_version_id"], {})), max_edit_delay_s):
+                continue  # -v8e: a long-edited conditional post is out of the pool like any other H1 version
             it = _merge_item(p, mvd, t_post, conditional=True)
             if it is not None:
                 conditionals.append(it)
@@ -562,6 +617,8 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
         return None if pid is None else stable_id("ep", graph_version, pid)[:32]
 
     plan_link_rows: list[dict[str, Any]] = []
+    staged_stop_roots: list[int] = []
+    edit_unknown_roots: list[int] = []
 
     ep_rows: list[dict[str, Any]] = []
     ev_rows: list[dict[str, Any]] = []
@@ -837,11 +894,17 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
                 nostop_kind = "contract_no_stop"
         dep_versions = [root["source_version_id"]] + [plans[pid]["source_version_id"] for pid in used if pid in plans]
         dep_rows = [mvd.get(v, {}) for v in dep_versions]
-        edit_delay = max((_edit_delay(r) for r in dep_rows), default=0)
+        delays = [_edit_delay(r) for r in dep_rows]
+        edit_delay = None if any(d is None for d in delays) else max(delays, default=0)  # unknown → null, never 0
         h1_rows = [r for r in dep_rows if r.get("time_grade") == "H1"]
         edit_original_unavailable = any(json.loads(r.get("temporal_assumptions") or "{}").get("edit_original_unavailable") for r in h1_rows)
-        may_contain_outcome = any(_edit_delay(r) > EDIT_OUTCOME_S and _cx_v2.RESULT_WORDS.search(r.get("text") or "") for r in h1_rows)
+        # an unknown edit delay may hide an outcome as well as a long one does
+        may_contain_outcome = any(_edit_too_late(_edit_delay(r), EDIT_OUTCOME_S) and _cx_v2.RESULT_WORDS.search(r.get("text") or "") for r in h1_rows)
         meta = dec_stop_meta if plan_stop is not None else _stop_meta(None, injected=False)
+        if plan_stop is not None and staged_stop(seg):
+            staged_stop_roots.append(root["message_id"])  # F12: not modelled, counted
+        if edit_delay is None:
+            edit_unknown_roots.append(root["message_id"])
         v8_cols = {
             "plan_group_id": episode_of(link.group) if link else None, "family_id": episode_of(link.family) if link else None,
             "dup_of": episode_of(link.dup_of) if link else None, "plan_link_kind": link.kind if link else None,
@@ -903,10 +966,18 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
             continue
         owner = link.supplement_of or pid
         synth = link.synthetic[0] if link.synthetic else {}
+        kind, supplement_status = link.kind, None
+        if link.supplement_of is not None:
+            if link.supplement_rejected is not None:
+                kind, supplement_status = None, f"rejected:{link.supplement_rejected}"
+            elif link.kind == "stop_move":
+                kind, supplement_status = None, "stop_move"
+            else:
+                supplement_status = "merged" if link.kind == "supplement" else link.kind
         plan_link_rows.append({
             "channel_id": p["channel_id"], "message_id": p["message_id"], "source_version_id": p["source_version_id"], "branch_index": int(p.get("branch_index") or 0),
             "episode_id": episode_of(owner), "kept_episode_id": episode_of(synth.get("target") or link.kept or owner),
-            "family_id": episode_of(link.family) if link.family else None, "plan_link_kind": link.kind if link.supplement_rejected is None else "supplement_rejected",
+            "family_id": episode_of(link.family) if link.family else None, "plan_link_kind": kind, "supplement_status": supplement_status,
             "target_message_id": link.target_message_id, "gap_s": link.gap_s, "synthetic_action": synth.get("action"), "synthetic_at": synth.get("at"),
             "synthetic_stop_price": synth.get("stop"), "merge_version": _plan_merge.PLAN_MERGE_VERSION,
             "event_time": p["event_time"], "available_at": p["available_at"], "ingested_at": ingested_at})
@@ -1006,7 +1077,10 @@ def build_graph(cp: pl.DataFrame, mv: pl.DataFrame, cb: pl.DataFrame, jd: pl.Dat
     summary.update(plan_source=plan_source, episode_sources=episode_sources,
                    n_disagreements=len(conflicts), disagreements=conflicts,
                    n_disagreement_episodes=len(conflict_episodes), disagreement_episode_ids=sorted(conflict_episodes))
+    merge_counts = dict(merge_counts, staged_stop_dropped=len(staged_stop_roots), edit_delay_unknown=len(edit_unknown_roots))
     summary["v8"] = v8_report(episodes, plan_link_rows, merge_counts, stage=stage)
+    summary["v8"]["edit_delay_unknown_message_ids"] = sorted(set(edit_unknown_roots))
+    summary["v8"]["staged_stop_message_ids"] = sorted(set(staged_stop_roots))
     summary["plan_link_rows"] = plan_link_rows
     return episodes, events, qrows, ledgers, summary
 
@@ -1024,10 +1098,19 @@ def v8_report(episodes: pl.DataFrame, plan_link_rows: list[dict], merge_counts: 
             if code in EXECUTION_BLOCKING:
                 codes[code] = codes.get(code, 0) + 1
     kinds: dict[str, int] = {}
+    supplements: dict[str, int] = {}
     for row in plan_link_rows:
-        kinds[row["plan_link_kind"]] = kinds.get(row["plan_link_kind"], 0) + 1
+        if row["plan_link_kind"] is not None:
+            kinds[row["plan_link_kind"]] = kinds.get(row["plan_link_kind"], 0) + 1
+        if row.get("supplement_status") is not None:
+            supplements[row["supplement_status"]] = supplements.get(row["supplement_status"], 0) + 1
+    cash_watch: dict[str, int] = {}
+    for channel, row_codes in (episodes.select("channel_id", "reason_codes").iter_rows() if episodes.height else []):
+        if Reason.CASH_WATCH_POST in (row_codes or []):
+            cash_watch[str(channel)] = cash_watch.get(str(channel), 0) + 1
     decision = episodes.filter(pl.col("dec_eligibility").struct.field("entry_decision")) if episodes.height else episodes
     return {"stage": stage, "merge_version": _plan_merge.PLAN_MERGE_VERSION, "plan_link_kind": dict(sorted(kinds.items())),
+            "supplement_status": dict(sorted(supplements.items())), "cash_watch_post_by_channel": dict(sorted(cash_watch.items())),
             "merge_counters": {k: v for k, v in sorted(merge_counts.items()) if not k.startswith("kind:")},
             "triage_verdict": counts("triage_verdict"), "nostop_kind": counts("nostop_kind"), "stop_rule": counts("stop_rule"),
             "reason_codes": dict(sorted(codes.items())), "n_decision_entries": decision.height,
@@ -1163,7 +1246,7 @@ def run(layout: Layout, *, graph_version: str, ingested_at: datetime | None = No
     write_json(layout.gold_dir / f"plan_source__{graph_version}.json", summary)
     assumptions = {"processing_delay_s": summary["processing_delay_s"], "observation_end": summary["observation_end"], "horizon_s": kw.get("horizon_s", HORIZON_S),
                    "plan_source": kw.get("plan_source", "parser"), "registry_version": registry_version, "silver_signature": silver_signature(layout),
-                   "triage_sidecar_sha256": triage_sha, "plan_link_signature": stable_id("plan-link", links.to_dicts()),
+                   "triage_sidecar_sha256": triage_sha, "plan_link_signature": plan_link_signature(links),
                    "wide": bool(kw.get("wide", False)), "supplement_window_s": int(kw.get("supplement_window_s", _plan_merge.DEFAULT_SUPPLEMENT_S)),
                    "max_edit_delay_s": kw.get("max_edit_delay_s"), "variant_only": variant_only}
     publish_manifest(layout, graph_version, input_hash=input_hash, rule_versions=summary["rule_versions"], assumptions=assumptions,

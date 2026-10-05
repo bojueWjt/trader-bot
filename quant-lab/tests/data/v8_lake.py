@@ -58,6 +58,7 @@ class Msg:
     media: bool = False
     grade: str = "H0"
     edit_delay_s: int | None = None  # H1 under --edit-visible-at-post
+    edit_unknown: bool = False  # H1 whose edit time is missing or unusable (normalize writes edit_delay_unknown)
 
 
 def mv_frame(messages: list[Msg]) -> pl.DataFrame:
@@ -68,7 +69,9 @@ def mv_frame(messages: list[Msg]) -> pl.DataFrame:
         event_time = at
         if m.grade == "H1":
             ta = {"freeze_delay_s": 60, "clock": "message_date+freeze_delay:edit_at_post", "edit_visible_at_post": True,
-                  "edit_original_unavailable": True, "edit_delay_s": m.edit_delay_s or 0}
+                  "edit_original_unavailable": True, "edit_delay_s": None if m.edit_unknown else (m.edit_delay_s or 0)}
+            if m.edit_unknown:
+                ta["edit_delay_unknown"] = True
         rows.append(dict(source_id=dict(peer_id=m.channel, message_id=m.mid), channel_id=m.channel, channel_name="仿写频道",
                          source_version_id=f"sv{m.channel % 10}-{m.mid}", text=m.text, message_type="message", message_date=at,
                          event_time=event_time, available_at=at, ingested_at=at, version_no=1, sequence=None,
@@ -114,6 +117,39 @@ def llm_row(result, mid, channel=CHANNEL):
     frame = result["cp"].filter((pl.col("message_id") == mid) & (pl.col("channel_id") == channel) & (pl.col("extractor_name") == "llm"))
     assert frame.height == 1, (mid, frame.height)
     return frame.row(0, named=True)
+
+
+#: D's frozen sidecar columns (cx_triage._sidecar_schema in the D group), copied here because B reads the sidecar by
+#: schema and never imports cx_triage.
+D_SIDECAR_SCHEMA = {
+    "source_version_id": pl.String, "branch_index": pl.Int32, "channel_id": pl.Int64, "message_id": pl.Int64,
+    "source_plan_id": pl.String, "source_episode_id": pl.String, "selected_as": pl.List(pl.String),
+    "verdict": pl.String, "reason": pl.String, "venue_hint": pl.String, "relation": pl.String,
+    "relation_target_message_id": pl.Int64, "evidence_quote": pl.String, "evidence_start": pl.Int64, "evidence_end": pl.Int64,
+    "status": pl.String, "status_note": pl.String, "invalid_reasons": pl.List(pl.String), "model_verdict": pl.String,
+    "rule_code": pl.String, "rule_start": pl.Int64, "rule_end": pl.Int64, "exclusion_code": pl.String,
+    "prompt_key": pl.String, "response_hash": pl.String, "recording_version": pl.String, "recording_sha256": pl.String,
+    "triage_schema": pl.String, "triage_rules_version": pl.String, "source_graph_version": pl.String,
+    "event_time": pl.Datetime("us", "UTC"), "available_at": pl.Datetime("us", "UTC"), "ingested_at": pl.Datetime("us", "UTC"),
+}
+
+
+def d_sidecar_row(svid, status, verdict=None, **extra):
+    """One row as D writes it: ok rows carry the model verdict; invalid rows verdict=uncertain; missing rows verdict=None
+    (D cx_triage._empty_row); exclusion_code follows D's exclusion_code(status, verdict)."""
+    code = ("TRIAGE_MISSING" if status == "missing" else "TRIAGE_INVALID" if status == "invalid"
+            else {"new_entry": None, "not_entry": "TRIAGE_NOT_ENTRY"}.get(verdict, "TRIAGE_UNCERTAIN"))
+    row = {k: None for k in D_SIDECAR_SCHEMA}
+    row.update(source_version_id=svid, branch_index=0, channel_id=CHANNEL, selected_as=["no_stop"], verdict=verdict,
+               venue_hint="unspecified", relation="none", status=status, status_note=None if status == "ok" else "no_recording",
+               invalid_reasons=[], exclusion_code=code, prompt_key="k", recording_version="triage-rec-v1", triage_schema="cx.triage.v1",
+               available_at=T0, ingested_at=T0)
+    row.update(extra)
+    return row
+
+
+def d_sidecar(rows):
+    return pl.DataFrame(rows, schema=D_SIDECAR_SCHEMA)
 
 
 def triage_frame(rows):
