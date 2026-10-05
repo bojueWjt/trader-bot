@@ -26,10 +26,11 @@ from typing import Any
 import polars as pl
 
 from .lake import D12, LayerLedger, Layout, append_quarantine, cum_prev, loss_row_from_ledger, mapping_rows, now_utc, preserve_ingested_at, q12, quarantine_row, schema_hash, stable_id, write_loss, write_mapping, write_parquet_atomic
-from .llm import SCHEMA_NAME_EXTRACT, Abstention, GrokCliClient, LLMClient, NoOcr, OcrProvider, RecordedClient, RecordedOcr, build_extract_prompt, call_with_retry, extraction_client, gate, validate_evidence
+from .llm import SCHEMA_NAME_EXTRACT, Abstention, GrokCliClient, LLMClient, NoOcr, OcrProvider, RecordedClient, RecordedOcr, build_extract_prompt, call_with_retry, extraction_client, gate, record_key, validate_evidence
 from .reasons import Reason
+from . import cx_numfill, cx_v2, stop_rules
 
-RULE_VERSION = "tg3-extract-v0.9"  # Unit inheritance also covers quoted close-stop levels
+RULE_VERSION = "tg3-extract-v1.0"  # v8: reply parent only between original-time versions; numfill; rule-9 stops; promotion
 PARSER_VERSION = "parser-v0.6"
 
 KINDS = (
@@ -798,10 +799,14 @@ def llm_extract(text: str, *, client: LLMClient, channel_name: str, message_date
 
 
 # ---------------------------------------------------------------- 外部图表读数（不进入 LLM 文本证据通道）
+#: chart-read-v2 is the targeted re-read of position-tool risk boxes (v8 F10④); both merge into one fixture.
+CHART_VERSIONS = ("chart-read-v1", "chart-read-v2")
+
+
 def load_chart_fixture(path: str | os.PathLike) -> dict[str, Any]:
     raw = pathlib.Path(path).read_bytes()
     chart = json.loads(raw, parse_float=Decimal)
-    if not isinstance(chart, dict) or chart.get("version") != "chart-read-v1":
+    if not isinstance(chart, dict) or chart.get("version") not in CHART_VERSIONS:
         raise ValueError("invalid chart fixture version")
     if not isinstance(chart.get("model"), str) or not chart["model"] or not isinstance(chart.get("items"), dict):
         raise ValueError("chart fixture requires model and items")
@@ -834,7 +839,28 @@ def load_chart_fixture(path: str | os.PathLike) -> dict[str, Any]:
             raise ValueError("chart entry must be a list of prices")
         items[source_id] = dict(entry=[price(v) for v in entries], stop=price(item.get("stop")), tps=[price(v) for v in targets],
                                 final_target=price(item.get("final_target")))
+        for key in ("reader", "version"):
+            if key in item:
+                if not isinstance(item[key], str) or not item[key]:
+                    raise ValueError(f"chart item {key} must be a non-empty string")
+                items[source_id][key] = item[key]
     return dict(version=chart["version"], model=chart["model"], items=items, sha256=hashlib.sha256(raw).hexdigest())
+
+
+def _chart_matches(result: ParseResult, item: dict[str, Any]) -> bool:
+    """A chart entry within 1% of this opening's entry, or a chart stop on its correct side within ln1.5."""
+    entries = [Decimal(str(v)) for v in result.entries or []]
+    if not entries and result.entry:
+        entries = [Decimal(str(result.entry["lo"])), Decimal(str(result.entry["hi"]))]
+    if not entries:
+        return False
+    if any(abs(c - e) <= Decimal("0.01") * e for c in item.get("entry") or [] for e in entries):
+        return True
+    stop = item.get("stop")
+    if stop is None or result.side not in ("long", "short"):
+        return False
+    side_ok = all(stop < e for e in entries) if result.side == "long" else all(stop > e for e in entries)
+    return side_ok and all(abs(math.log(stop / e)) < math.log(1.5) for e in entries)
 
 
 def apply_chart_fill(results: list[ParseResult], source_id: str, chart: dict[str, Any]) -> None:
@@ -847,13 +873,18 @@ def apply_chart_fill(results: list[ParseResult], source_id: str, chart: dict[str
     if item is None:
         return
     opens = [r for r in results if r.kind == "entry_proposal" and r.checks.get("schema_version") == 2
-             and r.checks.get("op") == "open" and r.checks.get("time_ref") == "now"]
-    if len(opens) > 1:
-        for result in opens:
-            result.checks["chart_fill_skipped"] = "multi_open"
-        return
+             and r.checks.get("op") == "open" and cx_v2.effective_time_ref(r.checks) == "now"]
     if not opens:
         return
+    matched_by = "single_open"
+    if len(opens) > 1:
+        # v8 F10②: a chart belongs to the one opening its prices fit; none or several → still skipped.
+        matched = [r for r in opens if _chart_matches(r, item)]
+        if len(matched) != 1:
+            for result in opens:
+                result.checks["chart_fill_skipped"] = "multi_open"
+            return
+        opens, matched_by = matched, "price"
     result = opens[0]
     fields, conflicts = [], []
     chart_entry = sorted(item.get("entry", []))
@@ -901,7 +932,10 @@ def apply_chart_fill(results: list[ParseResult], source_id: str, chart: dict[str
     if conflicts:
         result.checks["chart_conflict"] = conflicts
     if fields:
-        result.checks["chart_fill"] = dict(fields=fields, model=chart["model"], version=chart["version"])
+        result.checks["chart_fill"] = dict(fields=fields, model=chart["model"], version=chart["version"], matched_by=matched_by)
+        for key in ("reader", "version"):
+            if key in item:
+                result.checks["chart_fill"]["item_" + key] = item[key]
         if replaced_percent_tps:
             result.checks["chart_fill"]["replaced_percent_tps"] = replaced_percent_tps
         result.notes.append("fields_from_chart")
@@ -951,8 +985,25 @@ def _row(base: dict[str, Any], res: ParseResult, extractor: dict[str, Any], inge
     }
 
 
+#: v8 F7: a reply parent is prompt context only when both versions are original-time (V/H0); an H1/U/H2 clock
+#: differs between the merged and the per-channel lake, which made export and build disagree about the key.
+ORIGINAL_TIME_GRADES = ("V", "H0")
+PROMPT_CONTEXT_RULE = "orig-time-only-v1"
+
+
+def reply_context(row: dict[str, Any], by_message: dict[tuple[Any, Any], list[dict[str, Any]]]) -> str | None:
+    """Parent text for one message version, shared by cx_batch.export_prompts and extract_frame."""
+    if row.get("time_grade") not in ORIGINAL_TIME_GRADES or row.get("available_at") is None or row.get("reply_to_message_id") is None:
+        return None
+    parents = by_message.get((row["channel_id"], row["reply_to_message_id"]), [])
+    parents = [p for p in parents if p.get("time_grade") in ORIGINAL_TIME_GRADES and p.get("available_at") is not None
+               and p["available_at"] <= row["available_at"] and p["source_version_id"] != row["source_version_id"]]
+    parent = max(parents, key=lambda p: (p["available_at"], p["version_no"]), default=None)
+    return parent["text"] if parent else None
+
+
 def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClient | None = None, ocr: OcrProvider | None = None, ingested_at: datetime | None = None,
-                  chart: dict[str, Any] | None = None) -> tuple[pl.DataFrame, list[dict], dict[tuple[int, str], LayerLedger], dict[str, Any]]:
+                  chart: dict[str, Any] | None = None, numfill: dict[str, Any] | None = None) -> tuple[pl.DataFrame, list[dict], dict[tuple[int, str], LayerLedger], dict[str, Any]]:
     ingested_at = ingested_at or now_utc()
     ocr = ocr or NoOcr()
     frame = mv.with_columns(pl.col("source_id").struct.field("message_id").alias("message_id"))
@@ -963,7 +1014,11 @@ def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClien
     batch_id = mv["batch_id"][0] if mv.height else "tg-empty"
     rows: list[dict[str, Any]] = []
     qrows: list[dict[str, Any]] = []
-    llm_stats = {"rows": 0, "abstain": 0, "rejected": 0, "skipped": 0, "model_uncertain": 0, "field_evidence_failed": 0, "whole_message_discarded": 0}
+    llm_stats = {"rows": 0, "abstain": 0, "rejected": 0, "skipped": 0, "model_uncertain": 0, "field_evidence_failed": 0, "whole_message_discarded": 0,
+                 "with_reply_parent": 0}
+    if numfill is not None:
+        llm_stats.update(numfill_applied=0, numfill_missing=0, numfill_abstain=0)
+    silver_marks: dict[str, int] = {}
     by_message = {}
     for message in mv.iter_rows(named=True):
         identity = (message["channel_id"], message["source_id"]["message_id"])
@@ -999,19 +1054,33 @@ def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClien
             llm_stats["skipped"] += 1
             continue
         if client is not None:
-            parents = by_message.get((r["channel_id"], r["reply_to_message_id"]), [])
-            parents = [p for p in parents if r["available_at"] is not None and p["available_at"] is not None
-                       and p["available_at"] <= r["available_at"] and p["source_version_id"] != r["source_version_id"]]
-            parent = max(parents, key=lambda p: (p["available_at"], p["version_no"]), default=None)
-            pr, ab, meta = llm_extract(r["text"], client=client, channel_name=r["channel_name"], message_date=r["message_date"].isoformat() if r["message_date"] else None, previous_text=parent["text"] if parent else None)
+            previous_text = reply_context(r, by_message)
+            prompt_context = {"parent": "reply_parent" if previous_text is not None else "none", "rule": PROMPT_CONTEXT_RULE}
+            llm_stats["with_reply_parent"] += int(previous_text is not None)
+            message_date = r["message_date"].isoformat() if r["message_date"] else None
+            pr, ab, meta = llm_extract(r["text"], client=client, channel_name=r["channel_name"], message_date=message_date, previous_text=previous_text)
             llm_ex = {"name": "llm", "version": getattr(client, "version", "?"), "model": getattr(client, "model", getattr(client, "name", "?"))}
             llm_ex["version"] += ":mapping:" + RULE_VERSION
             if chart is not None:
                 llm_ex["version"] += ":chart:" + chart["sha256"]
+            if numfill is not None:
+                llm_ex["version"] += ":numfill:" + numfill["sha256"]
             if pr is not None:
                 results = pr if isinstance(pr, list) else [pr]
+                for result in results:
+                    result.checks["prompt_context"] = dict(prompt_context)
+                if numfill is not None:
+                    v2_system, v2_user = cx_v2.build_prompt(r["text"], channel_name=r["channel_name"], message_date=message_date, previous_text=previous_text)
+                    outcome = cx_numfill.apply(results, r["text"], channel_name=r["channel_name"], message_date=message_date,
+                                               source_key=record_key(v2_system, v2_user, cx_v2.SCHEMA_NAME), fixture=numfill)
+                    if outcome in ("applied", "missing", "abstain"):
+                        llm_stats["numfill_" + outcome] += 1
                 if chart is not None:
                     apply_chart_fill(results, r["source_version_id"], chart)
+                stop_rules.derive_stops(results, r["text"])
+                for result in results:
+                    for label in _silver_mark_labels(result.checks):
+                        silver_marks[label] = silver_marks.get(label, 0) + 1
                 for result in results:
                     lrow = _row(r, result, llm_ex, ingested_at, inherited=inherited, meta=meta)
                     rows.append(lrow)
@@ -1020,7 +1089,7 @@ def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClien
                 for metric in ("model_uncertain", "field_evidence_failed", "whole_message_discarded"):
                     llm_stats[metric] += meta.get(metric, 0)
             elif ab is not None:
-                a = ParseResult(kind="undecidable", reason_codes=[ab.reason_code], notes=[ab.note])
+                a = ParseResult(kind="undecidable", reason_codes=[ab.reason_code], notes=[ab.note], checks={"prompt_context": prompt_context})
                 lrow = _row(r, a, llm_ex, ingested_at, inherited=inherited, meta=meta)
                 rows.append(lrow)
                 led.map(r["source_version_id"], lrow["extract_id"], "split", [ab.reason_code])
@@ -1059,6 +1128,12 @@ def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClien
         "kind_dist": {k: v for k, v in sorted(df.filter(pl.col("extractor").struct.field("name") == "parser").group_by("kind").len().iter_rows())} if df.height else {},
         "llm": llm_stats, "ocr_provider": ocr.name, "rule_version": RULE_VERSION,
     }
+    if client is not None:
+        # Build report counts (F4/F9/F11/F5a): zero-distance, reference, ambiguous and close-like stay separate.
+        summary["silver_marks"] = dict(sorted(silver_marks.items()))
+        summary["stop_rules_version"] = stop_rules.STOP_RULES_VERSION
+    if numfill is not None:
+        summary["numfill_fixture_sha256"] = numfill["sha256"]
     if isinstance(client, GrokCliClient):
         summary["llm"].update(client.budget_report())
     if chart is not None:
@@ -1069,6 +1144,25 @@ def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClien
     if client is not None and df.height:
         summary["co_error"] = co_error_report(df)
     return df, qrows, ledgers, summary
+
+
+def _silver_mark_labels(checks: dict[str, Any]) -> list[str]:
+    labels = []
+    rule = checks.get("stop_rule")
+    if rule:
+        labels.append("stop_rule:" + rule["rule"])
+    if checks.get("nostop_hint"):
+        labels.append("nostop_hint:" + checks["nostop_hint"])
+    if checks.get("stop_relative"):
+        labels.append("stop_relative:" + checks["stop_relative"]["kind"])
+    promoted = checks.get("time_ref_promoted")
+    if promoted:
+        labels.append(f"time_ref_promoted:{promoted['rule']}:{promoted['scope']}")
+    if checks.get("comma_decimal"):
+        labels.append("comma_decimal")
+    if checks.get("numfill"):
+        labels.append("numfill")
+    return labels
 
 
 def co_error_report(df: pl.DataFrame) -> dict[str, Any]:
@@ -1088,14 +1182,15 @@ def co_error_report(df: pl.DataFrame) -> dict[str, Any]:
 
 
 def run(layout: Layout, *, llm_fixture: str | os.PathLike | None = None, ocr_fixture: str | os.PathLike | None = None, ingested_at: datetime | None = None, llm: str | None = None,
-        chart_fixture: str | os.PathLike | None = None) -> dict[str, Any]:
+        chart_fixture: str | os.PathLike | None = None, numfill_fixture: str | os.PathLike | None = None) -> dict[str, Any]:
     ingested_at = ingested_at or now_utc()
     chart = load_chart_fixture(chart_fixture) if chart_fixture is not None else None
+    numfill = cx_numfill.load_fixture(numfill_fixture) if numfill_fixture is not None else None
     client = extraction_client(llm=llm, llm_fixture=llm_fixture)
     mv = pl.read_parquet(layout.message_version)
     dg = pl.read_parquet(layout.duplicate_group) if layout.duplicate_group.exists() else None
     ocr = RecordedOcr.from_file(ocr_fixture) if ocr_fixture else None
-    df, qrows, ledgers, summary = extract_frame(mv, dg, client=client, ocr=ocr, ingested_at=ingested_at, chart=chart)
+    df, qrows, ledgers, summary = extract_frame(mv, dg, client=client, ocr=ocr, ingested_at=ingested_at, chart=chart, numfill=numfill)
     layout.ensure()
     old = pl.read_parquet(layout.extracted_event) if layout.extracted_event.exists() else None
     write_parquet_atomic(preserve_ingested_at(df, old, "extract_id"), layout.extracted_event)
@@ -1246,6 +1341,8 @@ def main(argv: list[str] | None = None) -> int:
     providers.add_argument("--llm-fixture", help="录制 LLM 夹具 json（不给则不产生 LLM 行）")
     providers.add_argument("--llm", choices=["grok"], help="显式使用本机 grok；另需 QUANT_LAB_ALLOW_LLM=1")
     ap.add_argument("--ocr-fixture", help="录制 OCR 夹具 json（不给则 OCR not_run）")
+    ap.add_argument("--chart-fixture", help="读图夹具 json（chart-read-v1/v2）")
+    ap.add_argument("--numfill-fixture", help="cx.numfill.v1 录制（cx_batch import 输出）")
     a = ap.parse_args(argv)
     if a.bench:
         rep = run_bench(a.bench, results_path=a.results)
@@ -1255,7 +1352,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     layout = Layout.flat(a.out) if a.out else Layout.from_root(a.lake_root)
     try:
-        summary = run(layout, llm_fixture=a.llm_fixture, ocr_fixture=a.ocr_fixture, llm=a.llm)
+        summary = run(layout, llm_fixture=a.llm_fixture, ocr_fixture=a.ocr_fixture, llm=a.llm, chart_fixture=a.chart_fixture, numfill_fixture=a.numfill_fixture)
     except PermissionError as exc:
         ap.error(str(exc))
     print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))

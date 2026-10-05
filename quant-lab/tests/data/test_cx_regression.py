@@ -178,3 +178,16 @@ def test_second_scenario_scored_apart_and_counted(tmp_path):
     # Without an open on the gold side, nothing is aligned and the fields fail.
     responses.write_text(cx.dumps(dict(key=rows[0]['key'], response=envelope(other))) + '\n')
     assert not regression.check(truth, prompts, responses)['items'][0]['fields']['side']['correct']
+
+
+def test_promoted_open_is_a_separate_column(tmp_path):
+    # TEXT is a labelled setup card ("入场 100，止损 90"): a conditional open there is promoted (v8 F11).
+    truth, prompts, rows = corpus(tmp_path)
+    responses = tmp_path / 'responses'
+    responses.write_text(''.join(cx.dumps(dict(key=r['key'], response=envelope(action(time_ref='conditional')))) + '\n' for r in rows))
+    report = regression.check(truth, prompts, responses)
+    item = report['items'][0]
+    # The model's own classification stays the scored one.
+    assert item['predicted_open'] is False and item['predicted_open_promoted'] is True and item['promoted_open_actions'] == 1
+    assert report['overall']['metrics']['open_miss']['numerator'] == 3
+    assert report['overall']['open_after_promotion'] == dict(predicted=4, promoted_only=4, promoted_only_truth_open=3)
