@@ -83,7 +83,7 @@ FILLS = [dict(branch_index=0, field='entry.price', value=dict(value='63000', quo
 
 def test_export_fixture_and_extract_merge_then_rule_nine(tmp_path):
     layout, fixture, numfill, stats, rows = lake_with_numfill(tmp_path, [refused_action()], FILLS)
-    assert stats == dict(prompts=1, recorded=1, messages=1, targets=2, invalid_recording=0)
+    assert stats == dict(prompts=1, recorded=1, messages=1, targets=2, invalid_recording=0, unrecorded_wan=0)
     user = json.loads(rows[0]['user'])
     assert rows[0]['system'] == cx_numfill.RULES and user['schema_version'] == cx_numfill.SCHEMA_NAME and user['source_key']
     summary = extract.run(layout, llm_fixture=fixture, numfill_fixture=numfill, ingested_at=T0)
@@ -132,3 +132,47 @@ def test_prompt_key_follows_the_main_prompt(tmp_path):
     b = cx_numfill.build_prompt(TEXT, channel_name='仿写', message_date='2024-07-01', source_key='k2', targets=targets)
     assert record_key(*a, cx_numfill.SCHEMA_NAME) != record_key(*b, cx_numfill.SCHEMA_NAME)
     assert a == cx_numfill.build_prompt(TEXT, channel_name='仿写', message_date='2024-07-01', source_key='k1', targets=targets)
+
+
+def test_export_refuses_prompts_from_an_older_parent_rule(tmp_path):
+    layout, mv, fixture = prepare(tmp_path, [refused_action()], TEXT)
+    prompts = tmp_path / 'main.jsonl'
+    cx.export_prompts(layout, prompts)
+    row = next(cx.read_jsonl(prompts))
+    assert row['prompt_context_rule'] == extract.PROMPT_CONTEXT_RULE
+    recording = tmp_path / 'recorded-main.json'
+    recording.write_text(cx.dumps(dict(version='cx-batch-v2', items={row['key']: dict(response=envelope(refused_action()))})))
+    # A v7 export (no rule marker) would give numfill keys the v8 build never looks up: refused, not guessed.
+    legacy = tmp_path / 'v7.jsonl'
+    legacy.write_text(cx.dumps({k: v for k, v in row.items() if k != 'prompt_context_rule'}) + '\n')
+    with pytest.raises(ValueError, match='prompts_parent_rule_mismatch'):
+        cx_numfill.export(legacy, recording, tmp_path / 'l2.jsonl')
+    # Several per-channel files are accepted; a key exported twice counts once; an unrecorded X万Y prompt is counted.
+    other = dict(row, key='k-unrecorded', text='仿写 ETH 3千2附近多 止损3万1')
+    second = tmp_path / 'other.jsonl'
+    second.write_text(cx.dumps(other) + '\n' + cx.dumps(row) + '\n')
+    stats = cx_numfill.export([prompts, second], recording, tmp_path / 'l2.jsonl')
+    assert stats['prompts'] == 2 and stats['messages'] == 1 and stats['unrecorded_wan'] == 1
+    rows = list(cx.read_jsonl(tmp_path / 'l2.jsonl'))
+    assert len(rows) == 1 and json.loads(rows[0]['user'])['source_key'] == row['key']
+
+
+def test_all_abstain_side_pass_imports_with_its_schema(tmp_path):
+    responses = tmp_path / 'responses.jsonl'
+    responses.write_text(cx.dumps(dict(key='k1', abstain=dict(reason_code='INTENT_AMBIGUOUS', note='x'))) + '\n')
+    plain = tmp_path / 'plain.json'
+    cx.import_responses(responses, plain)
+    with pytest.raises(ValueError):
+        cx_numfill.load_fixture(plain)
+    labelled = tmp_path / 'numfill.json'
+    cx.import_responses(responses, labelled, schema=cx_numfill.SCHEMA_NAME)
+    assert cx_numfill.load_fixture(labelled)['version'] == cx_numfill.IMPORT_VERSION
+    with pytest.raises(ValueError):
+        cx.import_responses(responses, labelled, schema=cx_v2.SCHEMA_NAME)
+    mixed = tmp_path / 'mixed.jsonl'
+    mixed.write_text(cx.dumps(dict(key='k2', response=dict(schema_version=2, actions=[]))) + '\n')
+    with pytest.raises(ValueError):
+        cx.import_responses(mixed, labelled, schema=cx_numfill.SCHEMA_NAME)
+    labelled.unlink()
+    assert cx.main(['import', '--responses', str(responses), '--output', str(labelled), '--schema', cx_numfill.SCHEMA_NAME]) == 0
+    assert cx_numfill.load_fixture(labelled)['version'] == cx_numfill.IMPORT_VERSION

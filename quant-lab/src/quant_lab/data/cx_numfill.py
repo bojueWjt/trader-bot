@@ -10,8 +10,16 @@ this module through SIDE_PASSES (output_schema / RULES / contexts_from_user / va
 IMPORT_VERSION). The prompt carries the main prompt key (source_key), so a numfill answer belongs to one
 exact main recording; a changed main prompt is a different numfill key.
 
+Because the build recomputes the main key under the v8 reply-parent rule (extract.reply_context,
+orig-time-only-v1), export only reads prompts exported under that rule (rows carry prompt_context_rule).
+The v7 prompts (cx-batch/full-20260926/prompts.jsonl) are refused: messages whose parent context changed
+would have a numfill key the build never looks up. Use the per-channel v8 exports (runbook step 1b), and
+re-export after their missing keys are recorded when stats.unrecorded_wan > 0. A build reports
+llm.numfill_missing; a nonzero value means the fixture does not match the build's prompts.
+
 CLI:
-  python -m quant_lab.data.cx_numfill export --prompts <main prompts.jsonl> --recording <recorded.json> --output l2.jsonl
+  python -m quant_lab.data.cx_numfill export --prompts <v8 prompts-*.jsonl ...> --recording <recorded.json> --output l2.jsonl
+  python -m quant_lab.data.cx_batch import --responses <run>/responses.jsonl --output numfill.json --schema cx.numfill.v1
 """
 from __future__ import annotations
 
@@ -134,6 +142,7 @@ def validate_response(item, text, context):
         return {"abstain": {"reason_code": "INTENT_AMBIGUOUS", "note": "invalid_numfill_envelope"}}
     targets = (context or {}).get("targets") or []
     wanted = {(t["branch_index"], t["field"]): t for t in targets}
+    symbols = cx_v2.canonical_symbols(t.get("symbol") for t in targets)
     fills, spans, rejected, unfilled, seen = [], [], [], 0, set()
     for raw in item["fills"]:
         if not isinstance(raw, dict) or type(raw.get("branch_index")) is not int or not isinstance(raw.get("field"), str):
@@ -151,7 +160,7 @@ def validate_response(item, text, context):
             rejected.append(dict(branch_index=index, field=field, reason="duplicate_fill"))
             continue
         try:
-            atom, span = cx_v2.exact_number(raw["value"], text)
+            atom, span = cx_v2.exact_number(raw["value"], text, symbols=symbols)
         except (ValueError, TypeError):
             rejected.append(dict(branch_index=index, field=field, reason="evidence_rejected"))
             continue
@@ -168,18 +177,40 @@ def validate_response(item, text, context):
 
 
 # ---------------------------------------------------------------- export / fixture / apply
-def export(prompts: Path, recording: Path, output: Path):
-    """Numfill prompts for main prompts whose recorded answer has refused fields (no model call)."""
+def _prompt_rows(prompts):
+    """Main v2 prompt rows from one or more prompts.jsonl files; every row must carry the current reply-parent
+    rule, because the numfill key embeds the main key and extract_frame recomputes that key under this rule."""
+    from . import cx_batch
+    from .extract import PROMPT_CONTEXT_RULE
+    for path in [prompts] if isinstance(prompts, (str, Path)) else prompts:
+        for row in cx_batch.read_jsonl(path):
+            if row.get("schema_name") != cx_v2.SCHEMA_NAME:
+                continue
+            if row.get("prompt_context_rule") != PROMPT_CONTEXT_RULE:
+                raise ValueError(f"prompts_parent_rule_mismatch: {path} was not exported with {PROMPT_CONTEXT_RULE} "
+                                 "(export the v8 prompts with cx_batch export and pass those)")
+            yield row
+
+
+def export(prompts, recording: Path, output: Path):
+    """Numfill prompts for main prompts whose recorded answer has refused fields (no model call).
+
+    prompts: one path or several (the per-channel cx_batch export files of the v8 build). Rows exported under
+    an older reply-parent rule are refused: their key would not be the one extract_frame looks up."""
     from . import cx_batch
     from .llm import record_key
     items = json.loads(Path(recording).read_text(encoding="utf-8"), parse_float=Decimal)["items"]
-    rows, counts = [], dict(prompts=0, recorded=0, messages=0, targets=0, invalid_recording=0)
-    for row in cx_batch.read_jsonl(prompts):
-        if row.get("schema_name") != cx_v2.SCHEMA_NAME:
+    rows, counts = [], dict(prompts=0, recorded=0, messages=0, targets=0, invalid_recording=0, unrecorded_wan=0)
+    seen = set()
+    for row in _prompt_rows(prompts):
+        if row["key"] in seen:
             continue
+        seen.add(row["key"])
         counts["prompts"] += 1
         record = items.get(row["key"]) or {}
         if "response" not in record:
+            # An unrecorded main prompt with X万Y wording may still need a numfill once it is recorded.
+            counts["unrecorded_wan"] += int("abstain" not in record and bool(WAN_HINT.search(row["text"] or "")))
             continue
         counts["recorded"] += 1
         try:
@@ -207,7 +238,7 @@ def load_fixture(path):
     raw = Path(path).read_bytes()
     doc = json.loads(raw, parse_float=Decimal)
     if not isinstance(doc, dict) or doc.get("version") != IMPORT_VERSION or not isinstance(doc.get("items"), dict):
-        raise ValueError("invalid numfill fixture version")
+        raise ValueError("invalid numfill fixture version (import side-pass responses with --schema cx.numfill.v1)")
     return dict(version=doc["version"], model=doc.get("model"), items=doc["items"], sha256=hashlib.sha256(raw).hexdigest())
 
 
@@ -322,7 +353,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="command", required=True)
     p = sub.add_parser("export")
-    p.add_argument("--prompts", type=Path, required=True, help="main cx.actions.v2 prompts.jsonl")
+    p.add_argument("--prompts", type=Path, nargs="+", required=True,
+                   help="main cx.actions.v2 prompts.jsonl exported by the current cx_batch export (v8 reply-parent rule); "
+                        "several files allowed, e.g. the six per-channel L1 exports")
     p.add_argument("--recording", type=Path, required=True, help="imported main recording (cx_batch import output)")
     p.add_argument("--output", type=Path, required=True)
     args = ap.parse_args(argv)

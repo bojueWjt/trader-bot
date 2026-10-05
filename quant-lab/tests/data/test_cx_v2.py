@@ -469,11 +469,28 @@ def test_wan_y_does_not_change_ranges():
 
 def test_glued_coin_names_and_labels():
     text = '仿写 bnb812止损btc 113666损'
-    assert v2.exact_number(number(812, 'bnb812'), text)[0]['value'] == '812'
-    assert v2.exact_number(number(113666, 'btc 113666'), text)[0]['value'] == '113666'
+    coins = v2.canonical_symbols(['bnb', 'BTC'])
+    assert v2.exact_number(number(812, 'bnb812'), text, symbols=coins)[0]['value'] == '812'
+    assert v2.exact_number(number(113666, 'btc 113666'), text, symbols=coins)[0]['value'] == '113666'
     assert v2.exact_number(number('0.2660', 'SL0.2660'), '仿写 空 SL0.2660')[0]['value'] == '0.2660'
+    # A coin prefix glues only when the answer names that coin.
+    with pytest.raises(ValueError):
+        v2.exact_number(number(812, 'bnb812'), text, symbols=v2.canonical_symbols(['BTC']))
+    rows, _ = v2.parse_actions(envelope(action(symbol_raw='bnb', side='short', entry=dict(kind='market_ref', price=None, lo=None, hi=None, levels=[]),
+                                                stop=dict(kind='price', price=number(812, 'bnb812'), condition=None), tps=[])), text)
+    assert rows[0].stop == Decimal(812)
     for text, value in [('仿写 ETH2 开始', 2), ('仿写 EMA200 支撑', 200), ('仿写 TP1:130', 1)]:
-        assert all(v != value for v, *_ in v2.tokens(text)), text
+        assert all(v != value for v, *_ in v2.tokens(text, coins | {'ETH'})), text
+
+
+@pytest.mark.parametrize('text,value', [('仿写 SMA200 支撑', 200), ('仿写 FIB0.618 回撤', '0.618'), ('仿写 MACD12 金叉', 12),
+                                        ('仿写 BOLL20 中轨', 20), ('仿写 ATR14 波动', 14), ('仿写 RR10 盈亏比', 10),
+                                        ('仿写 Vol300 放量', 300), ('仿写 ETH20 倍', 20), ('仿写 BTCUSDT65000 附近', 65000),
+                                        ('仿写 TP23100 目标', 23100), ('仿写 TP23100 目标', 3100), ('仿写 TP3100 目标', 3100)])
+def test_glued_indicator_parameters_and_tp_labels_are_not_prices(text, value):
+    # Even with every plausible coin named, indicator parameters, pair spellings and TP-glued digits give no token.
+    coins = v2.canonical_symbols(['SMA', 'ETH', 'BTC', 'BTCUSDT']) - {'SMA'}
+    assert all(v != Decimal(str(value)) for v, *_ in v2.tokens(text, coins)), text
 
 
 def test_comma_decimal_only_when_every_other_atom_agrees():
@@ -531,6 +548,25 @@ def test_promotion_exclusions(text, time_ref):
     assert 'time_ref_promoted' not in row.checks
     assert row.kind == ('entry_proposal' if time_ref == 'now' else 'entry_claimed')
     assert v2.effective_time_ref(row.checks) == time_ref
+
+
+def test_news_words_block_p2_but_not_a_setup_card():
+    row = promoted('仿写 ETH 交易策略：入场 3115-3070，止损 3010，利空出尽回踩再进', **setup_action('conditional'))
+    assert row.checks['time_ref_promoted']['rule'] == 'setup_card' and row.checks['time_ref_promoted']['scope'] == 'main'
+    # A candle-close wait next to news wording is neither P2 nor a main-scope setup card.
+    row = promoted('仿写 ETH 交易策略：入场 3115-3070，止损 3010，利好落地1小时收线确认再进', **setup_action('conditional'))
+    assert 'time_ref_promoted' not in row.checks and row.kind == 'entry_claimed'
+    row = promoted('仿写 ETH 交易策略：入场 3115-3070，止损 3010，今晚CPI后再进', **setup_action('conditional'))
+    assert 'time_ref_promoted' not in row.checks
+
+
+def test_promoted_action_leaves_its_unpromoted_siblings_descriptive():
+    text = '仿写 ETH 交易策略：入场 3115-3070，止损 3010\nBTC 回踩100再看多'
+    btc = action(time_ref='conditional', entry=dict(kind='limit', price=number(100), lo=None, hi=None, levels=[]), stop=None, tps=[])
+    rows, _ = v2.parse_actions(envelope(action(**setup_action('conditional')), btc), text)
+    assert rows[0].kind == 'entry_proposal' and rows[0].checks['time_ref_promoted']['scope'] == 'main'
+    assert rows[1].kind == 'entry_claimed' and 'time_ref_promoted' not in rows[1].checks
+    assert v2.effective_time_ref(rows[1].checks) == 'conditional'
 
 
 def test_result_words_are_shared():

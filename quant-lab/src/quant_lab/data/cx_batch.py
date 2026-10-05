@@ -129,7 +129,7 @@ def stratified(rows, n, seed, key):
 
 def export_prompts(layout, output: Path, *, channels=(), sample=None, seed=0, exclude_prompts=()):
     import polars as pl
-    from .extract import reply_context
+    from .extract import PROMPT_CONTEXT_RULE, reply_context
     from .llm import record_key
     from .sources import canonical_peer_id
 
@@ -163,7 +163,7 @@ def export_prompts(layout, output: Path, *, channels=(), sample=None, seed=0, ex
                         "schema_name": cx_v2.SCHEMA_NAME, "source_version_id": row["source_version_id"],
                         "channel_id": row["channel_id"], "channel_name": row["channel_name"], "message_time": date,
                         "text": row["text"], "has_image": any(re.search(r"photo|image", k, re.I) for k in row["media_kinds"] or []),
-                        "previous_text": previous_text})
+                        "previous_text": previous_text, "prompt_context_rule": PROMPT_CONTEXT_RULE})
     _atomic_text(output, "".join(dumps(p) + "\n" for p in prompts))
     counts.update(eligible=len(eligible), exported=len(prompts), unique_keys=len({p["key"] for p in prompts}), seed=seed)
     write_json(Path(output).with_suffix(".stats.json"), counts)
@@ -596,7 +596,12 @@ def revalidate_raw(prompts: Path, run_dir: Path, output_dir: Path):
     return report
 
 
-def import_responses(responses: Path, output: Path):
+def import_responses(responses: Path, output: Path, schema: str | None = None):
+    """responses.jsonl -> recorded fixture. schema (a SIDE_PASSES name) labels a side-pass recording explicitly:
+    a file whose answers are all abstains carries no schema_version and would otherwise import as cx-batch-v1.
+    Every answer is checked against it."""
+    if schema is not None and schema not in SIDE_PASSES:
+        raise ValueError("schema_must_be_a_side_pass")
     items = {}
     for row in read_jsonl(responses):
         key = row["key"]
@@ -610,7 +615,11 @@ def import_responses(responses: Path, output: Path):
     from . import followup
     if _single_schema_kinds(set(versions)):
         raise ValueError("mixed_schema")
-    if versions and all(version == followup.SCHEMA_NAME for version in versions):
+    if schema is not None:
+        if any(version != schema for version in versions):
+            raise ValueError("mixed_schema")
+        version = side_pass(schema).IMPORT_VERSION
+    elif versions and all(version == followup.SCHEMA_NAME for version in versions):
         version = followup.SCHEMA_NAME
     elif versions and versions[0] in SIDE_PASSES:
         version = side_pass(versions[0]).IMPORT_VERSION
@@ -712,6 +721,7 @@ def main(argv=None):
     parser = sub.add_parser("import")
     parser.add_argument("--responses", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--schema", choices=sorted(SIDE_PASSES), help="side-pass schema of these responses (needed when all abstained)")
     parser = sub.add_parser("revalidate", help="re-apply current validators to a run's raw model output (no model call)")
     parser.add_argument("--prompts", type=Path, required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -722,7 +732,7 @@ def main(argv=None):
                              max_chars=args.max_chars, concurrency=args.concurrency, retries=args.retries, timeout=args.timeout,
                              backoff=args.backoff, model=args.model)
     elif args.command == "import":
-        report = import_responses(args.responses, args.output)
+        report = import_responses(args.responses, args.output, args.schema)
     elif args.command == "revalidate":
         report = revalidate_raw(args.prompts, args.run_dir, args.output_dir)
     else:

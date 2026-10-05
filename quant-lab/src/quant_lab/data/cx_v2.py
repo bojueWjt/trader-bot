@@ -99,23 +99,32 @@ def _scale(unit):
 # F5a. "6万6" / "5W6" / "6万65" / "7万5千": x万 plus a trailing y that fills the next places (6万65 = 66500).
 # A following 月/日/号/年/倍/人/个/次/%/天/周 makes it a count or a date, never a price; with 千 only one y digit.
 WAN_Y = re.compile(r"(?<![\w.,万])(?P<x>\d+)\s*[万wW]\s*(?P<y>\d{1,4})(?P<qian>\s*千)?(?!\d|\.\d)(?!\s*[千月日号年倍人个次%天周])", re.ASCII)
-# F5a. A price glued to a coin name or an SL/TP label ("bnb812", "SL0.2660"). Python lookbehinds are fixed-width,
-# so this is a separate pass. A coin name followed by one digit ("ETH2") is a name, not a price.
+# F5a. A price glued to a coin name or the SL label ("bnb812", "SL0.2660"). Python lookbehinds are fixed-width,
+# so this is a separate pass. The prefix must be SL, or a coin this message's actions name (the model's own
+# symbol_raw, canonical or an alias spelling): indicator parameters (SMA200, FIB0.618, MACD12, ATR14, RR10,
+# Vol300) and pair spellings (BTCUSDT65000) are never prices. A glued coin price needs three digits or a
+# decimal point ("ETH2", "ETH20" are names/counts). TP is never a glued label: "TP23100" may be TP2 3100.
 GLUED = re.compile(r"(?<![A-Za-z0-9_])(?P<prefix>[A-Za-z]{2,10})(?P<num>\d+(?:\.\d+)?)(?:\s*(?P<unit>万|[wWkK]))?(?:[uU](?![A-Za-z]))?(?![\w万]|[.,]\d)(?!\s*[:：])", re.ASCII)
-GLUED_LABELS = {"SL", "TP"}
-GLUED_NOT_COINS = {"CMP", "DCA", "ENTRY", "STOP", "TARGET", "LOSS", "PROFIT", "LEV", "X"}
+GLUED_LABELS = {"SL"}
 
 
-def _glued_prefix_ok(prefix, number):
+def canonical_symbols(raw_symbols):
+    """Canonical codes of the actions' symbol_raw values: the coins a glued price may follow."""
+    from .extract import canonical_symbol
+    return frozenset(filter(None, (canonical_symbol(s) for s in raw_symbols if isinstance(s, str))))
+
+
+def _glued_prefix_ok(prefix, number, symbols):
     upper = prefix.upper()
     if len(number.replace(".", "")) < 2:
         return False
     if upper in GLUED_LABELS:
         return True
-    from .extract import SYMBOL_STOP
-    if upper in SYMBOL_STOP or upper in GLUED_NOT_COINS:
+    from .extract import SYMBOL_ALIASES, SYMBOL_STOP, canonical_symbol
+    code = canonical_symbol(prefix)
+    if upper in SYMBOL_STOP or code not in symbols or (upper != code and upper not in SYMBOL_ALIASES):
         return False
-    return True
+    return "." in number or len(number) >= 3
 
 
 def wan_y_value(x, y, qian=False):
@@ -126,14 +135,16 @@ def wan_y_value(x, y, qian=False):
     return Decimal(x) * 10000 + Decimal(y) * Decimal(10) ** (4 - len(y))
 
 
-def tokens(text):
+def tokens(text, symbols=frozenset()):
+    """(value, start, end, is_percent) for every number token. symbols: canonical coin codes a glued price may
+    follow (canonical_symbols of the message's actions); without them only SL0.2660-style labels glue."""
     norm, offsets = normalized(text)
     for match in WAN_Y.finditer(norm):
         value = wan_y_value(match["x"], match["y"], bool(match["qian"]))
         if value is not None:
             yield value, offsets[match.start()], offsets[match.end() - 1] + 1, False
     for match in GLUED.finditer(norm):
-        if _glued_prefix_ok(match["prefix"], match["num"]):
+        if _glued_prefix_ok(match["prefix"], match["num"], symbols):
             value = Decimal(match["num"])
             if match["unit"]:
                 value *= _scale(match["unit"])
@@ -156,7 +167,7 @@ def tokens(text):
             yield ranged, span[0], offsets[following.end() - 1] + 1, bool(following["pct"])
 
 
-def exact_number(atom, text, *, percent=False):
+def exact_number(atom, text, *, percent=False, symbols=frozenset()):
     if not isinstance(atom, dict) or set(atom) != {"value", "quote"}:
         raise ValueError("invalid_numeric_object")
     value, quote = atom["value"], atom["quote"]
@@ -173,7 +184,7 @@ def exact_number(atom, text, *, percent=False):
     positions = [m.start() for m in re.finditer(re.escape(quote), text)]
     if not positions:
         raise ValueError("quote_not_in_current_text")
-    for value, start, end, is_percent in tokens(text):
+    for value, start, end, is_percent in tokens(text, symbols):
         if value == number and is_percent == percent and any(p <= start and end <= p + len(quote) for p in positions):
             return {"value": str(number), "quote": quote}, {"start": start, "end": end, "source": "text"}
     raise ValueError("number_or_unit_mismatch_or_partial_token")
@@ -184,6 +195,8 @@ def validate_response(payload, text):
     if not isinstance(payload, dict) or payload.get("schema_version") != 2 or not isinstance(payload.get("actions"), list):
         raise ValueError("invalid_v2_envelope")
     actions, rejected, uncertain = [], 0, 0
+    # Coins this answer names: the only prefixes a glued price may follow ("bnb812").
+    symbols = canonical_symbols(a.get("symbol_raw") for a in payload["actions"] if isinstance(a, dict))
     for index, raw in enumerate(payload["actions"]):
         issues, spans = [], []
         action = deepcopy(raw) if isinstance(raw, dict) else {}
@@ -203,7 +216,7 @@ def validate_response(payload, text):
                 issue(field, "missing")
                 return None
             try:
-                cleaned, span = exact_number(atom, text, percent=percent)
+                cleaned, span = exact_number(atom, text, percent=percent, symbols=symbols)
                 spans.append(dict(field=field, **span))
                 return cleaned
             except (ValueError, TypeError) as exc:
@@ -321,6 +334,7 @@ def price_atoms(action):
 def inherited_prices(action):
     """Infer omitted units only from validated price atoms in this action."""
     atoms = price_atoms(action)
+    symbols = canonical_symbols([action.get("symbol_raw")])
     anchors, bare = [], []
     for field, atom in atoms:
         if atom is None:
@@ -332,7 +346,7 @@ def inherited_prices(action):
         units = {_scale(m["unit"]) for m in matches if m["unit"]}
         literals = [Decimal(re.sub(r"[,\s]", "", m["num"])) for m in matches if not m["pct"]]
         # tokens also supplies the left end of an explicitly suffixed range.
-        proved = any(v == number and not pct for v, _, _, pct in tokens(quote))
+        proved = any(v == number and not pct for v, _, _, pct in tokens(quote, symbols))
         factors = {factor for factor in units if proved and any(number == literal * factor for literal in literals)}
         if factors:
             anchors.extend((number, factor) for factor in factors)
@@ -383,6 +397,7 @@ PROMOTE_EXCLUDE = re.compile(r"已成交|已触及|已触发|回顾|昨天|昨�
 SETUP_LABEL = re.compile(r"入场|进场|买入区|首次入场|限价|Entry|买入设置|交易策略|潜在限价单", re.I)
 SHORT_TF_CONFIRM = re.compile(r"收线|收阴|收阳|这根[Kk]线|\d+\s*(?:分钟|min)\s*[Kk]?线?\s*收|收下去")
 SHORT_TF_EXCLUDE = re.compile(r"明天|今晚|今夜|非农|CPI|议息|美联储|利好|利空|下周|周末|开盘后", re.I)
+SCHEDULED_EVENT = re.compile(r"明天|今晚|今夜|非农|CPI|议息|美联储|下周|周末|开盘后", re.I)
 IMMINENT = re.compile(r"(?:准备|打算|这里|现在)\S{0,6}(?:空|多)\s*一手")
 PROMOTION_RULES_VERSION = "promote-v1"
 
@@ -409,12 +424,15 @@ def promote_time_ref(action, text, siblings=()):
                 "version": PROMOTION_RULES_VERSION}
 
     # A wait for a scheduled event (明天/非农/CPI...) is a future plan under every rule, not only P2/P3.
-    if SHORT_TF_EXCLUDE.search(seg):
+    # 利好/利空 only blocks P2/P3: a setup card that mentions news (「利空出尽回踩再进」) is still a setup card.
+    if SCHEDULED_EVENT.search(seg):
         return None
+    timed = bool(SHORT_TF_EXCLUDE.search(seg))
     if action["time_ref"] == "conditional":
         confirm = SHORT_TF_CONFIRM.search(seg)
         if confirm:
-            return record("short_tf_confirm", confirm, "wide")
+            # A candle-close wait next to news wording is neither P2 nor a main-scope setup card.
+            return None if timed else record("short_tf_confirm", confirm, "wide")
     stop = action.get("stop") or {}
     priced = [a for f, a in price_atoms(action) if f.startswith("entry.") and a is not None]
     if priced and stop.get("kind") == "price" and stop.get("price") is not None:
@@ -423,7 +441,7 @@ def promote_time_ref(action, text, siblings=()):
             end = lo + label.end()
             if any(0 <= start - end <= 16 and "\n" not in text[end:start] for start in starts):
                 return record("setup_card", label, "main" if action["time_ref"] == "conditional" else "wide")
-    if action["time_ref"] == "conditional":
+    if action["time_ref"] == "conditional" and not timed:
         imminent = IMMINENT.search(seg)
         if imminent:
             return record("imminent", imminent, "main")

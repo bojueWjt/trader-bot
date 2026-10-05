@@ -119,6 +119,57 @@ def test_paragraph_rules(text, side, expected):
         assert rule['rule'] == 'r9_fuzzy_break'
 
 
+@pytest.mark.parametrize('text,side', [('仿写 BTC 7万多，回踩小幅跌破68000是上车机会', 'long'),
+                                       ('仿写 BTC 7万多，小幅跌破68000再补一单', 'long'),
+                                       ('仿写 BTC 7万空，策略突破72000再看', 'short'),
+                                       ('仿写 BTC 7万空，战略上略突破72000也不慌', 'short')])
+def test_fuzzy_break_that_is_not_about_a_stop_derives_nothing(text, side):
+    # No stop wording in the clause and no v3 stop clause: an entry or add-on level, never a fabricated stop.
+    assert one(text, act('BTC', side, limit(70000, '7万'))) == (None, None, None)
+
+
+def test_lue_inside_a_word_is_not_slightly():
+    # 策略 is not 略 ('slightly'): the stop is a plain break at 72000, not a widened r9.
+    stop, rule, _ = one('仿写 BTC 7万空，按策略突破72000就止损', act('BTC', 'short', limit(70000, '7万')))
+    assert stop == Decimal(72000) and rule['rule'] == 'plain_break'
+    for word in ('策略', '战略', '忽略', '省略'):
+        assert not stop_rules.FUZZY_BREAK.search(word + '突破72000'), word
+    assert stop_rules.FUZZY_BREAK.search('略突破72000') and stop_rules.FUZZY_BREAK.search('略破72000')
+
+
+def test_fuzzy_break_inside_a_v3_stop_clause_counts_without_a_stop_word_nearby():
+    stop, rule, _ = one('仿写 BTC 7.2万多\n止损：回落时，稍微跌破7万', act('BTC', 'long', limit(72000, '7.2万')))
+    assert stop == Decimal('69790') and rule['rule'] == 'r9_fuzzy_break' and rule['base'] == '70000'
+
+
+def test_fuzzy_wording_on_another_number_does_not_widen_the_stop():
+    # The fuzzy phrase belongs to 65000 (an add-on), not to the 68000 stop in the same v3 clause.
+    stop, rule, hint = one('仿写 BTC 7万多，止损68000，小幅跌破65000加仓', act('BTC', 'long', limit(70000, '7万'), price_stop(68000)))
+    assert (stop, rule, hint) == (Decimal(68000), None, None)
+    # A numberless fuzzy phrase, or one carrying the stop itself (with units), still marks this stop.
+    stop, rule, _ = one('仿写 BTC 7万多，止损6.8万，小幅跌破6.8万就走', act('BTC', 'long', limit(70000, '7万'), price_stop(68000, '6.8万')))
+    assert stop == Decimal('67796') and rule['rule'] == 'r9_fuzzy_break'
+
+
+@pytest.mark.parametrize('text,hint', [('仿写 BTC 7万多，跌破就止损', 'zero_distance_break'),
+                                       ('仿写 BTC 7万多，止损7万', 'zero_distance_break'),
+                                       ('仿写 BTC 7万多，日线收盘跌破就止损', 'close_like')])
+def test_zero_distance_model_stop_that_derives_nothing_is_no_stop(text, hint):
+    stop, rule, got = one(text, act('BTC', 'long', limit(70000, '7万'), price_stop(70000, '7万')))
+    assert stop is None and rule is None and got == hint
+
+
+def test_analysis_acronyms_do_not_cut_the_paragraph():
+    stop, rule, _ = one('仿写 BTC 7万多 FOMC 前小幅跌破就止损', act('BTC', 'long', limit(70000, '7万')))
+    assert stop == Decimal('69790') and rule['rule'] == 'r9_fuzzy_break'
+
+
+def test_priced_condition_without_a_break_verb_keeps_the_condition_path():
+    stop, rule, hint = one('仿写 BTC 7万多，止损看68000附近的反应',
+                           act('BTC', 'long', limit(70000, '7万'), condition_stop('止损看68000附近的反应', 68000)))
+    assert (stop, rule, hint) == (None, None, None)
+
+
 def test_x_wan_y_stop_from_the_model_is_widened_by_the_clause():
     stop, rule, _ = one('仿写 BTC 7.6万多，小幅跌破前低7万4就止损', act('BTC', 'long', limit(76000, '7.6万'), price_stop(74000, '7万4')))
     assert stop == Decimal('73778') and rule['base'] == '74000' and rule['base_source'] == 'quoted_number'
@@ -254,6 +305,26 @@ def test_relative_leverage_and_distance_rules():
     assert rel['value'] == '3.5'
     rel, hint = relative('仿写 SUI 3.90 多，止损30%', act('SUI', 'long', limit('3.90')))
     assert rel is None and hint == 'relative_ambiguous'
+
+
+def test_relative_spec_form_without_a_keyword_is_out_of_scope():
+    # The bare spec wording 「就0.90%。或者用3倍杠杆是-3.45%」 has no 止损/SL/stop/最大损失 keyword, which the
+    # F9 word form requires; detection needs the keyword (see the 最大损失 form above).
+    rel, hint = relative('仿写 SUI 3.90 多，就0.90%。或者用3倍杠杆是-3.45%', act('SUI', 'long', limit('3.90')))
+    assert rel is None and hint is None
+
+
+def test_mark_referenced_points_are_gated_when_resolved():
+    # 「止损65000u」 against the mark is a price, not 65000 points: resolution refuses the 35% distance.
+    rel, _ = relative('仿写 BTC 现价多，止损65000u', act('BTC', 'long', market()))
+    assert rel['ref'] == 'mark' and stop_rules.resolve_relative(rel, 'long', Decimal(100000)) is None
+    assert stop_rules.resolve_relative(dict(kind='points', value='10'), 'long', Decimal(100000)) is None  # 0.01% < 0.2%
+    assert stop_rules.resolve_relative(dict(kind='pct', value='20'), 'short', Decimal(100)) is None
+    assert stop_rules.resolve_relative(dict(kind='points', value='1000'), 'short', Decimal(100000)) == Decimal(101000)
+    # 「带500u」 is a margin size; 带 needs a points unit.
+    assert relative('仿写 BTC 现价多，带500u', act('BTC', 'long', market())) == (None, None)
+    rel, _ = relative('仿写 BTC 现价多，带500点', act('BTC', 'long', market()))
+    assert rel['kind'] == 'points' and rel['value'] == '500'
 
 
 def test_relative_binds_to_each_coin():

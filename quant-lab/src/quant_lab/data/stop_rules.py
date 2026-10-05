@@ -7,6 +7,11 @@ The stop clause and price anchoring are copied from the live v3 profile
 _BREAK_BEFORE, _BREAK_AFTER, _BREAKOUT) so the data layer and live read the same clause. Runtime code
 does not import across layers; tests/data/test_stop_rules.py and the G2 tests compare the two copies.
 
+Fuzzy wording is tied to the stop it modifies: step 1 counts a fuzzy phrase that carries a number only when
+that number is the stop (v3 scales or the inherited unit), and step 3 counts a fuzzy phrase only when stop
+wording sits in its comma clause or the phrase lies in a v3 stop clause. A model stop equal to an entry that
+derives nothing is cleared (stop None + nostop_hint), never kept at the entry.
+
 derive_stop records, on the ParseResult:
   checks.stop_rule = {rule, base, base_source, widened, span, version}
       rule ∈ r9_fuzzy_break / plain_break / chart / close_from_clause
@@ -144,8 +149,10 @@ REFERENCE = r"前低|前高|新高|新低|针尖|颈线|趋势线|均线|上沿|
 REFERENCE_WORDS = re.compile(REFERENCE)
 _LONG_BREAK = {"跌破", "跌穿", "破位", "破"}
 _SHORT_BREAK = {"涨破", "突破", "升破", "超过", "破"}
+# 略 inside a word (策略/战略/忽略/省略...) is not the adverb 'slightly'.
+_SLIGHTLY = r"(?:小幅|(?<![策战忽省攻谋侵粗概简领约])略微?|稍微?|一点点?)"
 FUZZY_BREAK = re.compile(
-    rf"(?:小幅|略微?|稍微?|一点点?)\s*(?P<verb>跌破|跌穿|破位|涨破|突破|升破|超过|破)\s*(?:的)?\s*(?:{REFERENCE})?\s*(?P<n>{NUM})?"
+    rf"{_SLIGHTLY}\s*(?P<verb>跌破|跌穿|破位|涨破|突破|升破|超过|破)\s*(?:的)?\s*(?:{REFERENCE})?\s*(?P<n>{NUM})?"
     rf"|(?P<verb2>跌破|涨破|突破|破)\s*(?P<n2>{NUM})\s*(?:万|[wWkK])?\s*一点")
 PLAIN_BREAK_STOP = re.compile(
     rf"(?P<verb>跌破|跌穿|涨破|突破|升破|破)\s*(?:{REFERENCE})?\s*(?P<n>{NUM})?\s*(?:附近|左右|一带|上下|一线)?\s*(?:就|则|后)?\s*"
@@ -156,6 +163,11 @@ CLOSE_COND = re.compile(r"收盘|收线|收于|收在|收回|收不回|站不回
 INDICATOR = re.compile(r"均线|EMA|MA\d+|布林|趋势线", re.I)
 TIMEFRAME = re.compile(r"日线|周线|小时线|\d+\s*(?:分钟|小时|min|h|H|d|D)\s*(?:K|k)?线?")
 _CLAUSE_SPLIT = re.compile(r"[，,。；;！!？?\n]")
+# Step 3 counts a fuzzy break only when it is about a stop: stop wording in its comma clause, or inside a v3
+# stop clause. 「回踩小幅跌破68000是上车机会」「小幅跌破68000再补一单」 are entries, not stops.
+STOP_ANCHOR = re.compile(r"止损|停损|离场|走人|认错|出局|防守|小损|(?:就|则|后|即|直接)\s*走(?![势强弱高低到出向完])")
+# Step 2 derives from a priced condition only when the clause says the level breaks (「止损看68000附近的反应」 does not).
+BREAK_VERB = re.compile(r"跌破|跌穿|破位|涨破|突破|升破|超过|破")
 
 
 def _comma_clause(text: str, start: int, end: int) -> tuple[int, int]:
@@ -177,9 +189,60 @@ def _number(raw: str | None) -> Decimal | None:
     return best[2] if best else None
 
 
+def _inherit(n: Decimal, quote: str, action) -> Decimal:
+    """A phrase number with this action's inherited unit (cx_v2.inherited_prices), else itself."""
+    if not action:
+        return n
+    from . import cx_v2
+    probe = dict(action, stop={"kind": "price", "price": {"value": str(n), "quote": quote.replace("$", "").strip()}, "condition": None})
+    try:
+        inherited, _ = cx_v2.inherited_prices(probe)
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        inherited = {}
+    return inherited.get("stop.price", n)
+
+
+def _phrase_values(raw: str, action) -> set[Decimal]:
+    """Every price one phrase number can stand for: v3 _SCALES and the action's inherited unit."""
+    n = _number(raw)
+    if n is None:
+        return set()
+    return {n * k for k in _SCALES} | {_inherit(n, raw, action)}
+
+
+def _fuzzy_on_stop(clause: str, stop: Decimal, action) -> bool:
+    """Fuzzy break wording in this stop clause that is about this stop: numberless, or its number is the stop.
+    「止损68000，小幅跌破65000加仓」: the fuzzy wording belongs to 65000, not to the 68000 stop."""
+    for m in FUZZY_BREAK.finditer(clause):
+        raw = m["n"] or m["n2"]
+        if raw is None or stop in _phrase_values(raw, action):
+            return True
+    return False
+
+
+def _breakout_on_stop(stop: Decimal, text: str, symbol, cl, action) -> bool:
+    """live v3 breakout_on, except that a labelled clause's breakout word carrying a different number is not
+    about this stop (v3 reads 「止损68000，小幅跌破65000加仓」 as a fuzzy 68000; silver does not)."""
+    if cl and _fuzzy_on_stop(cl["text"], stop, action):
+        return True
+    if not breakout_on(stop, text, symbol=symbol):
+        return False
+    labelled = [c for c in _v3_clauses(text, symbol) if c["role"] == "stop" and stop in c["numbers"]]
+    if len(labelled) != 1:
+        return True  # v3 found it in the mention pool, which is anchored to the stop's own number group
+    c = labelled[0]
+    if any(stop in values and broke for values, _, broke in c["mentions"]):
+        return True
+    return _fuzzy_on_stop(c["text"], stop, action)
+
+
 # ---------------------------------------------------------------- action paragraph
 _SYMBOL_TOKEN = re.compile(r"(?<![A-Za-z])[#$]?([A-Z]{2,10})(?![A-Za-z])")
-_NOT_SYMBOLS = {"CMP", "DCA", "ENTRY", "STOP", "TARGET", "BTCD", "USDC", "BUSD", "OI", "KDJ", "MACD", "BOLL", "VWAP", "LONG", "SHORT"}
+_NOT_SYMBOLS = {"CMP", "DCA", "ENTRY", "STOP", "TARGET", "BTCD", "USDC", "BUSD", "OI", "KDJ", "MACD", "BOLL", "VWAP", "LONG", "SHORT",
+                # analysis vocabulary, not coins: it must not cut a paragraph (「BTC 7万多 FOMC 前小幅跌破就止损」)
+                "FOMC", "OB", "FVG", "IFVG", "BOS", "SMC", "ICT", "CHOCH", "MSS", "MSB", "BPR", "OTE", "POC", "VAH", "VPVR",
+                "SR", "RR", "ATR", "SMA", "FIB", "BB", "HH", "HL", "LH", "LL", "EQH", "EQL", "PDH", "PDL", "PWH", "PWL",
+                "DXY", "SPX", "NY", "US", "CN", "EU", "UK", "NO", "YES", "KOL", "CEO", "PPI"}
 
 
 def symbol_mentions(text: str) -> list[tuple[int, int, str]]:
@@ -264,8 +327,9 @@ def _price_clause(text: str, price: Decimal, symbol: str | None) -> dict | None:
     joins the clause holding the number with the stop clause that follows on the same line."""
     from . import cx_v2
     clauses = _v3_clauses(text, symbol)
+    symbols = cx_v2.canonical_symbols([symbol])
     for c in clauses:
-        c["numbers"] |= {v for v, _, _, pct in cx_v2.tokens(c["text"]) if not pct}
+        c["numbers"] |= {v for v, _, _, pct in cx_v2.tokens(c["text"], symbols) if not pct}
     labelled = [c for c in clauses if c["role"] == "stop" and price in c["numbers"]]
     if len(labelled) == 1:
         c = labelled[0]
@@ -307,12 +371,14 @@ def derive_stop(result, text: str, siblings=()) -> None:
     entries = _entry_values(result)
     sibling_actions = [s.checks.get("action") or {} for s in siblings if s is not result and s.checks.get("schema_version") == 2]
     symbol = result.symbol_raw
+    zero_distance = False
     if result.stop is not None:
         stop = Decimal(str(result.stop))
         if "stop" in (result.checks.get("chart_fill") or {}).get("fields", []):
             _record(result, "chart", stop, "chart", False, None)
             return
-        if stop not in entries:
+        zero_distance = stop in entries
+        if not zero_distance:
             cl = _price_clause(text, stop, symbol)
             span = (cl["start"], cl["start"] + len(cl["text"])) if cl else None
             if cl and CLOSE_COND.search(cl["text"]):
@@ -323,7 +389,7 @@ def derive_stop(result, text: str, siblings=()) -> None:
                 else:
                     _hint(result, "close_like_kept_price")
                 return
-            if breakout_on(stop, text, symbol=symbol) or (cl and FUZZY_BREAK.search(cl["text"])):
+            if _breakout_on_stop(stop, text, symbol, cl, action):
                 result.stop = _widen(stop, long)
                 _record(result, "r9_fuzzy_break", stop, "quoted_number", True, span)
                 return
@@ -343,6 +409,8 @@ def derive_stop(result, text: str, siblings=()) -> None:
             return
         atom = source_stop.get("price")
         if atom is not None:
+            if not BREAK_VERB.search(clause):
+                return  # a priced condition with no break verb keeps the existing condition mapping (v7)
             factor = {u["field"]: Decimal(u["factor"]) for u in result.checks.get("unit_inherited", [])}
             base = Decimal(atom["value"]) * factor.get("stop.price", 1)
             fuzzy = bool(FUZZY_BREAK.search(condition) or _BREAKOUT.search(condition))
@@ -354,6 +422,11 @@ def derive_stop(result, text: str, siblings=()) -> None:
             _record(result, "r9_fuzzy_break" if fuzzy else "plain_break", base, "quoted_number", fuzzy, span)
             return
     _derive_from_paragraph(result, text, action, sibling_actions, entries, long)
+    if zero_distance and "stop_rule" not in result.checks:
+        # The model's stop equals an entry and the wording derived nothing: that is no stop, not a stop at the
+        # entry, so gold can send the row down the F1 no-stop path instead of a direction-check rejection.
+        result.stop = None
+        result.checks.setdefault("nostop_hint", "zero_distance_break")
 
 
 def _derive_from_paragraph(result, text, action, siblings, entries, long):
@@ -372,8 +445,18 @@ def _derive_from_paragraph(result, text, action, siblings, entries, long):
         if condition_like(m.start(), m.end()):
             _hint(result, "close_like")
             return
+    stop_spans = [(c["start"], c["start"] + len(c["text"])) for c in stop_clauses(text)]
+
+    def anchored(start, end):
+        a, b = _comma_clause(text, lo + start, lo + end)
+        if STOP_ANCHOR.search(text[max(a, lo):min(b, hi)]):
+            return True
+        return any(s <= lo + start and lo + end <= e for s, e in stop_spans)
+
     hits = []
     for m in FUZZY_BREAK.finditer(seg):
+        if not anchored(m.start(), m.end()):
+            continue
         verb = m["verb"] or m["verb2"]
         raw = m["n"] or m["n2"]
         hits.append(dict(start=m.start(), end=m.end(), verb=verb, raw=raw, fuzzy=True,
@@ -425,15 +508,7 @@ def _derive_from_paragraph(result, text, action, siblings, entries, long):
         return
     span = (lo + h["start"], lo + h["end"])
     if source == "phrase_number":
-        base = n
-        if h["n_span"] is not None and action:
-            from . import cx_v2
-            probe = dict(action, stop={"kind": "price", "price": {"value": str(n), "quote": seg[h["n_span"][0]:h["n_span"][1]].replace("$", "").strip()}, "condition": None})
-            try:
-                inherited, _ = cx_v2.inherited_prices(probe)
-            except (KeyError, TypeError, ValueError, ArithmeticError):
-                inherited = {}
-            base = inherited.get("stop.price", n)
+        base = _inherit(n, seg[h["n_span"][0]:h["n_span"][1]], action) if h["n_span"] is not None else n
         base_source = "phrase_number"
     else:
         if not fuzzy:
@@ -465,7 +540,10 @@ def derive_stops(results, text: str) -> None:
 
 
 # ---------------------------------------------------------------- F9 relative stops
-RELATIVE_POINTS = re.compile(r"(?:带|防守|止损|SL)\s*(?P<v>\d+(?:\.\d+)?)\s*(?:个?点|点位|刀|u|U|美金)", re.I)
+# 「带500u」 is usually a margin size, so 带 counts only with a points unit; 防守/止损/SL also take a currency unit.
+RELATIVE_POINTS = re.compile(r"(?:防守|止损|SL)\s*(?P<v>\d+(?:\.\d+)?)\s*(?:个?点|点位|刀|u|U|美金)"
+                             r"|带\s*(?P<vb>\d+(?:\.\d+)?)\s*(?:个?点|点位)", re.I)
+RELATIVE_MIN, RELATIVE_MAX = Decimal("0.002"), Decimal("0.15")
 RELATIVE_PCT = re.compile(r"(?:止损|SL|stop|最大损失)\D{0,6}?(?P<v>\d+(?:\.\d+)?)\s*%?(?:\s*(?:至|到|-|~|～)\s*(?P<v2>\d+(?:\.\d+)?))?\s*%", re.I)
 LEVERAGE = re.compile(r"\d+\s*(?:倍|x|X)|杠杆")
 _RELATIVE_SPLIT = re.compile(r"[。；;，,\n]")
@@ -484,7 +562,8 @@ def detect_relative(result, text: str, siblings=()) -> None:
     found = []
     for kind, pattern in (("points", RELATIVE_POINTS), ("pct", RELATIVE_PCT)):
         for m in pattern.finditer(text, lo, hi):
-            value = Decimal(m["v"])
+            groups = m.groupdict()
+            value = Decimal(groups["v"] if groups["v"] is not None else groups["vb"])
             if kind == "pct" and m["v2"]:
                 value = max(value, Decimal(m["v2"]))
             a = max((x.end() for x in _RELATIVE_SPLIT.finditer(text, 0, m.start())), default=0)
@@ -505,18 +584,28 @@ def detect_relative(result, text: str, siblings=()) -> None:
     elif entries:
         distance = found["value"] / entries[0]
     else:
-        distance = None
-    if distance is not None and not (Decimal("0.002") <= distance <= Decimal("0.15")):
+        distance = None  # points against the mark: resolve_relative applies the same gate once the mark is known
+    if distance is not None and not (RELATIVE_MIN <= distance <= RELATIVE_MAX):
         _hint(result, "relative_ambiguous")
         return
     result.checks["stop_relative"] = {"kind": found["kind"], "value": str(found["value"]), "quote": found["quote"],
                                       "span": found["span"], "ref": ref, "version": STOP_RULES_VERSION}
 
 
-def resolve_relative(relative: dict, side: str, ref: Decimal) -> Decimal:
-    """Price of a detected relative stop once its reference (entry or as-of mark) is known."""
+def resolve_relative(relative: dict, side: str, ref: Decimal) -> Decimal | None:
+    """Price of a detected relative stop once its reference (entry or as-of mark) is known.
+
+    None when the distance from ref is outside [0.2%, 15%] (or ref is not positive): the caller records
+    relative_ambiguous. The gate lives here so a mark-referenced points value (「止损65000u」 read as 65000
+    points) cannot be priced by a caller that skips it."""
     value, ref = Decimal(relative["value"]), Decimal(str(ref))
+    if ref <= 0:
+        return None
     long = side == "long"
     if relative["kind"] == "points":
-        return ref - value if long else ref + value
-    return ref * (Decimal(1) - value / 100) if long else ref * (Decimal(1) + value / 100)
+        stop = ref - value if long else ref + value
+    else:
+        stop = ref * (Decimal(1) - value / 100) if long else ref * (Decimal(1) + value / 100)
+    if not (RELATIVE_MIN <= abs(ref - stop) / ref <= RELATIVE_MAX):
+        return None
+    return stop
