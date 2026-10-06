@@ -426,14 +426,19 @@ def select(episodes, plans, versions, links):
     return [chosen[k] for k in sorted(chosen)], counts
 
 
-def _context_pools(versions, episodes, plans):
-    """Per channel: visible message versions and entry-root candidates, each sorted by t_vis."""
+def message_pools(versions):
+    """Per channel: (t_vis list, message versions with text and a clock), sorted by t_vis (also used by cx_symfill)."""
     messages = defaultdict(list)
     for v in versions:
         if v.get("message_type") == "message" and (v.get("text") or "").strip() and v.get("available_at") is not None:
             messages[v["channel_id"]].append(v)
     for rows in messages.values():
         rows.sort(key=lambda v: (v["available_at"], v.get("version_no") or 0, v["source_version_id"]))
+    return {c: ([v["available_at"] for v in rows], rows) for c, rows in messages.items()}
+
+
+def _context_pools(versions, episodes, plans):
+    """Per channel: visible message versions and entry-root candidates, each sorted by t_vis."""
     by_svid = {v["source_version_id"]: v for v in versions}
     candidates = defaultdict(dict)
     for episode in episodes:
@@ -448,24 +453,28 @@ def _context_pools(versions, episodes, plans):
     for channel, rows in candidates.items():
         ordered = sorted(rows.values(), key=lambda r: (r[0], _message_id(r[2]) or 0, _branch(r[1]), r[1]["plan_id"]))
         pools[channel] = ([r[0] for r in ordered], ordered)
-    return {c: ([v["available_at"] for v in rows], rows) for c, rows in messages.items()}, pools
+    return message_pools(versions), pools
 
 
 def _minutes(delta: timedelta) -> int:
     return int(delta.total_seconds() // 60)
 
 
-def previous_messages(pool, root_version):
+def previous_messages(pool, root_version, *, n=PREVIOUS_N, chars=PREVIOUS_CHARS, window_s=None):
+    """The last n other messages with t_vis strictly before the root (latest visible version each), oldest first;
+    window_s (cx_symfill) also drops those more than window_s seconds before the root."""
     times, rows = pool
     t_root, mid = root_version["available_at"], _message_id(root_version)
     out, seen = [], set()
     for row in reversed(rows[:bisect.bisect_left(times, t_root)]):
+        if window_s is not None and (t_root - row["available_at"]).total_seconds() > window_s:
+            break
         other = _message_id(row)
         if other == mid or other in seen:
             continue
         seen.add(other)
-        out.append(dict(message_id=other, minutes_before=_minutes(t_root - row["available_at"]), text=(row["text"] or "")[:PREVIOUS_CHARS]))
-        if len(out) == PREVIOUS_N:
+        out.append(dict(message_id=other, minutes_before=_minutes(t_root - row["available_at"]), text=(row["text"] or "")[:chars]))
+        if len(out) == n:
             break
     return out[::-1]
 

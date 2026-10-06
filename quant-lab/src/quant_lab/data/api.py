@@ -132,12 +132,13 @@ def build(fixture_dir: str | os.PathLike | None, layout: Layout, *, graph_versio
           export_dir: str | os.PathLike | None = None, channel: int | None = None, plan_source: str = "parser",
           edit_visible_at_last_edit: bool = False, chart_fixture: str | os.PathLike | None = None, edit_visible_at_post: bool = False,
           numfill_fixture: str | os.PathLike | None = None, triage_sidecar: str | os.PathLike | None = None,
-          supplement_window_s: int | None = None) -> dict[str, Any]:
+          supplement_window_s: int | None = None, symfill_fixture: str | os.PathLike | None = None) -> dict[str, Any]:
     """端到端：归一 → 去重 → 抽取 → 行情校验 → 链接 → 生命周期 + 发布。
     仅显式 market=real 或 market_lake 启用真实行情，默认保持夹具行为。
     alias=True：把 graph_version 当别名，实际发布不可变版本 `<alias>@<input_hash[:8]>` 并把别名指过去；旧版本原样保留，不删除（T04）。
     v8：edit_visible_at_post（H1 按原帖时刻可见，D5 主口径）、numfill_fixture（F5b 录制）、triage_sidecar（F3 sidecar，复制进 silver）、
-    supplement_window_s（F2 补止损窗口，默认 1800）。"""
+    supplement_window_s（F2 补止损窗口，默认 1800）、symfill_fixture（cx.symfill.v1 录制：缺币种的开仓按上下文补币种，
+    可解析判定用与 validate 相同的品种登记）。"""
     from . import dedup, extract, lifecycle, linker, normalize, validate
     from .graph import set_alias
     from .lake import sha256_file
@@ -147,6 +148,7 @@ def build(fixture_dir: str | os.PathLike | None, layout: Layout, *, graph_versio
         raise ValueError("--edit-visible-at-last-edit 与 --edit-visible-at-post 互斥")
     chart = extract.load_chart_fixture(chart_fixture) if chart_fixture is not None else None
     numfill_sha = sha256_file(pathlib.Path(numfill_fixture)) if numfill_fixture is not None else None
+    symfill_sha = sha256_file(pathlib.Path(symfill_fixture)) if symfill_fixture is not None else None
     triage_sha = sha256_file(pathlib.Path(triage_sidecar)) if triage_sidecar is not None else None
     from .plan_source import MODES
     if plan_source not in MODES:
@@ -182,13 +184,14 @@ def build(fixture_dir: str | os.PathLike | None, layout: Layout, *, graph_versio
             allowed = frozenset({selected})
         normalize_kwargs = {"source_messages": list(read_all(source, allowed_peer_ids=allowed))}
     # 使用独立派生工作集，避免累计 harvest 湖或前一次其他老师构建混入本次图。
-    if real or export_dir is not None or allowed is not None or chart is not None or numfill_sha or triage_sha or edit_visible_at_post:
+    if real or export_dir is not None or allowed is not None or chart is not None or numfill_sha or triage_sha or edit_visible_at_post or symfill_sha:
         scope = stable_id("build-scope", sorted(allowed) if allowed is not None else [], str(source.resolve()),
                           *(["edit-visible"] if edit_visible_at_last_edit else []),
                           *(["edit-at-post"] if edit_visible_at_post else []),
                           *(["chart", chart["sha256"]] if chart is not None else []),
                           *(["numfill", numfill_sha] if numfill_sha else []),
-                          *(["triage", triage_sha] if triage_sha else []))[:16]
+                          *(["triage", triage_sha] if triage_sha else []),
+                          *(["symfill", symfill_sha] if symfill_sha else []))[:16]
         work = layout.gold_dir.parent / "_build" / scope
         scoped = Layout(work / "bronze", work / "silver", layout.gold_dir,
                         work / "_loss", layout.quarantine_path)
@@ -201,13 +204,18 @@ def build(fixture_dir: str | os.PathLike | None, layout: Layout, *, graph_versio
         from .market_lake import LakeMarket
         provider = LakeMarket(market_lake if market_lake is not None else root / "lake" / "market")
         lifecycle_kwargs["registry_version"] = provider.registry.version
+    symfill_registry = None
+    if symfill_fixture is not None:
+        from .market_stub import fixture_registry
+        symfill_registry = provider.registry if provider is not None else fixture_registry()  # the registry validate uses below
     out: dict[str, Any] = {}
     out["normalize"] = normalize.run(source, layout, ingested_at=ingested_at, edit_visible_at_last_edit=edit_visible_at_last_edit,
                                      edit_visible_at_post=edit_visible_at_post, **normalize_kwargs)
     out["dedup"] = dedup.run(layout, ingested_at=ingested_at)
     out["extract"] = extract.run(layout, llm_fixture=llm_fixture, ocr_fixture=ocr_fixture, ingested_at=ingested_at, llm=llm,
                                  **({"chart_fixture": chart_fixture} if chart_fixture is not None else {}),
-                                 **({"numfill_fixture": numfill_fixture} if numfill_fixture is not None else {}))
+                                 **({"numfill_fixture": numfill_fixture} if numfill_fixture is not None else {}),
+                                 **({"symfill_fixture": symfill_fixture, "registry": symfill_registry} if symfill_fixture is not None else {}))
     if triage_sidecar is not None:
         # F3: v8 and its variants read the same sidecar from their own silver (frozen schema, keyed by svid+branch).
         import shutil
@@ -249,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
     edits.add_argument("--edit-visible-at-post", action="store_true",
                        help="v8 主口径（D5）：编辑过的历史消息按原帖时刻 message_date+60s 可见；编辑敏感性另用 lifecycle --max-edit-delay-s 出 -v8e")
     ap.add_argument("--numfill-fixture", help="F5b cx.numfill.v1 录制（只补 null 字段）")
+    ap.add_argument("--symfill-fixture", help="cx.symfill.v1 录制（只给缺币种或币种不可解析的开仓补币种）")
     ap.add_argument("--triage-sidecar", help="F3 nostop_triage sidecar parquet（冻结 schema），复制进本根 silver")
     ap.add_argument("--supplement-window-s", type=int, default=None, help="F2 补止损合并窗口，默认 1800；0 = -v8nw")
     providers = ap.add_mutually_exclusive_group()
@@ -274,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
                         market_lake=a.market_lake, market=a.market, export_dir=a.export_dir, channel=a.channel, plan_source=a.plan_source,
                         edit_visible_at_last_edit=a.edit_visible_at_last_edit, chart_fixture=a.chart_fixture,
                         edit_visible_at_post=a.edit_visible_at_post, numfill_fixture=a.numfill_fixture, triage_sidecar=a.triage_sidecar,
-                        supplement_window_s=a.supplement_window_s)
+                        supplement_window_s=a.supplement_window_s, symfill_fixture=a.symfill_fixture)
         except (PermissionError, ValueError) as exc:
             ap.error(str(exc))
         print(json.dumps({k: {kk: vv for kk, vv in v.items() if kk not in ("paths", "inputs", "raw_hashes", "items")} for k, v in res.items()}, ensure_ascii=False, indent=2, default=str))

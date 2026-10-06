@@ -743,7 +743,7 @@ def test_side_pass_rows_never_mix(tmp_path, fake_side_codex):
 
 
 def test_side_pass_answers_are_checked_against_their_schema():
-    assert set(cx.SIDE_PASSES) == {"cx.triage.v1", "cx.numfill.v1"}
+    assert set(cx.SIDE_PASSES) == {"cx.triage.v1", "cx.numfill.v1", "cx.symfill.v1"}
     assert all(isinstance(v, str) for v in cx.SIDE_PASSES.values())
     context = {"targets": [dict(branch_index=0, field="entry.price", known=[])]}
     good = dict(schema_version="cx.numfill.v1", fills=[dict(branch_index=0, field="entry.price", value=dict(value="66000", quote="6万6"))])

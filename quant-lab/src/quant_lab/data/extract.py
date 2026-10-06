@@ -28,7 +28,7 @@ import polars as pl
 from .lake import D12, LayerLedger, Layout, append_quarantine, cum_prev, loss_row_from_ledger, mapping_rows, now_utc, preserve_ingested_at, q12, quarantine_row, schema_hash, stable_id, write_loss, write_mapping, write_parquet_atomic
 from .llm import SCHEMA_NAME_EXTRACT, Abstention, GrokCliClient, LLMClient, NoOcr, OcrProvider, RecordedClient, RecordedOcr, build_extract_prompt, call_with_retry, extraction_client, gate, record_key, validate_evidence
 from .reasons import Reason
-from . import cx_numfill, cx_v2, stop_rules
+from . import cx_numfill, cx_symfill, cx_v2, stop_rules
 
 RULE_VERSION = "tg3-extract-v1.0"  # v8: reply parent only between original-time versions; numfill; rule-9 stops; promotion
 PARSER_VERSION = "parser-v0.6"
@@ -1003,7 +1003,11 @@ def reply_context(row: dict[str, Any], by_message: dict[tuple[Any, Any], list[di
 
 
 def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClient | None = None, ocr: OcrProvider | None = None, ingested_at: datetime | None = None,
-                  chart: dict[str, Any] | None = None, numfill: dict[str, Any] | None = None) -> tuple[pl.DataFrame, list[dict], dict[tuple[int, str], LayerLedger], dict[str, Any]]:
+                  chart: dict[str, Any] | None = None, numfill: dict[str, Any] | None = None,
+                  symfill: dict[str, Any] | None = None, registry: Any = None) -> tuple[pl.DataFrame, list[dict], dict[tuple[int, str], LayerLedger], dict[str, Any]]:
+    """symfill (cx_symfill.load_fixture) needs registry: the instrument registry validate will use for this build."""
+    if symfill is not None and registry is None:
+        raise ValueError("symfill_needs_registry: pass the instrument registry the build validates with")
     ingested_at = ingested_at or now_utc()
     ocr = ocr or NoOcr()
     frame = mv.with_columns(pl.col("source_id").struct.field("message_id").alias("message_id"))
@@ -1018,11 +1022,14 @@ def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClien
                  "with_reply_parent": 0}
     if numfill is not None:
         llm_stats.update(numfill_applied=0, numfill_missing=0, numfill_abstain=0)
+    if symfill is not None:
+        llm_stats.update(symfill_applied=0, symfill_missing=0, symfill_abstain=0)
     silver_marks: dict[str, int] = {}
     by_message = {}
     for message in mv.iter_rows(named=True):
         identity = (message["channel_id"], message["source_id"]["message_id"])
         by_message.setdefault(identity, []).append(message)
+    symfill_pools = cx_symfill.pools([m for versions in by_message.values() for m in versions]) if symfill is not None else None
     parser_ex = {"name": "parser", "version": PARSER_VERSION, "model": None}
     ledgers: dict[tuple[int, str], LayerLedger] = {}
     for r in frame.filter(pl.col("is_canonical")).iter_rows(named=True):
@@ -1065,16 +1072,28 @@ def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClien
                 llm_ex["version"] += ":chart:" + chart["sha256"]
             if numfill is not None:
                 llm_ex["version"] += ":numfill:" + numfill["sha256"]
+            if symfill is not None:
+                llm_ex["version"] += cx_symfill.version_tag(symfill, registry)
             if pr is not None:
                 results = pr if isinstance(pr, list) else [pr]
                 for result in results:
                     result.checks["prompt_context"] = dict(prompt_context)
-                if numfill is not None:
+                # symfill branches and summaries are read before numfill fills anything (its export never applies numfill).
+                symfill_targets = cx_symfill.targets_for(results, at=r["available_at"], registry=registry) if symfill is not None else []
+                if numfill is not None or symfill_targets:
                     v2_system, v2_user = cx_v2.build_prompt(r["text"], channel_name=r["channel_name"], message_date=message_date, previous_text=previous_text)
+                    source_key = record_key(v2_system, v2_user, cx_v2.SCHEMA_NAME)
+                if numfill is not None:
                     outcome = cx_numfill.apply(results, r["text"], channel_name=r["channel_name"], message_date=message_date,
-                                               source_key=record_key(v2_system, v2_user, cx_v2.SCHEMA_NAME), fixture=numfill)
+                                               source_key=source_key, fixture=numfill)
                     if outcome in ("applied", "missing", "abstain"):
                         llm_stats["numfill_" + outcome] += 1
+                if symfill_targets:
+                    outcome = cx_symfill.apply(results, symfill_targets, r, by_message=by_message, message_pools=symfill_pools,
+                                               channel_name=r["channel_name"], message_date=message_date, source_key=source_key,
+                                               fixture=symfill, registry=registry)
+                    if outcome in ("applied", "missing", "abstain"):
+                        llm_stats["symfill_" + outcome] += 1
                 if chart is not None:
                     apply_chart_fill(results, r["source_version_id"], chart)
                 stop_rules.derive_stops(results, r["text"])
@@ -1134,6 +1153,8 @@ def extract_frame(mv: pl.DataFrame, dg: pl.DataFrame | None, *, client: LLMClien
         summary["stop_rules_version"] = stop_rules.STOP_RULES_VERSION
     if numfill is not None:
         summary["numfill_fixture_sha256"] = numfill["sha256"]
+    if symfill is not None:
+        summary.update(symfill_fixture_sha256=symfill["sha256"], symfill_version=cx_symfill.SYMFILL_VERSION, symfill_registry_version=registry.version)
     if isinstance(client, GrokCliClient):
         summary["llm"].update(client.budget_report())
     if chart is not None:
@@ -1162,6 +1183,8 @@ def _silver_mark_labels(checks: dict[str, Any]) -> list[str]:
         labels.append("comma_decimal")
     if checks.get("numfill"):
         labels.append("numfill")
+    if checks.get("symfill"):
+        labels.append("symfill:" + checks["symfill"]["source"])
     return labels
 
 
@@ -1182,15 +1205,21 @@ def co_error_report(df: pl.DataFrame) -> dict[str, Any]:
 
 
 def run(layout: Layout, *, llm_fixture: str | os.PathLike | None = None, ocr_fixture: str | os.PathLike | None = None, ingested_at: datetime | None = None, llm: str | None = None,
-        chart_fixture: str | os.PathLike | None = None, numfill_fixture: str | os.PathLike | None = None) -> dict[str, Any]:
+        chart_fixture: str | os.PathLike | None = None, numfill_fixture: str | os.PathLike | None = None,
+        symfill_fixture: str | os.PathLike | None = None, registry: Any = None) -> dict[str, Any]:
+    """symfill_fixture (cx.symfill.v1 recording) needs registry: the instrument registry validate uses for this build."""
     ingested_at = ingested_at or now_utc()
     chart = load_chart_fixture(chart_fixture) if chart_fixture is not None else None
     numfill = cx_numfill.load_fixture(numfill_fixture) if numfill_fixture is not None else None
+    symfill = cx_symfill.load_fixture(symfill_fixture) if symfill_fixture is not None else None
+    if symfill is not None and registry is None:
+        raise ValueError("symfill_needs_registry: pass the instrument registry the build validates with")
     client = extraction_client(llm=llm, llm_fixture=llm_fixture)
     mv = pl.read_parquet(layout.message_version)
     dg = pl.read_parquet(layout.duplicate_group) if layout.duplicate_group.exists() else None
     ocr = RecordedOcr.from_file(ocr_fixture) if ocr_fixture else None
-    df, qrows, ledgers, summary = extract_frame(mv, dg, client=client, ocr=ocr, ingested_at=ingested_at, chart=chart, numfill=numfill)
+    extra = dict(symfill=symfill, registry=registry) if symfill is not None else {}
+    df, qrows, ledgers, summary = extract_frame(mv, dg, client=client, ocr=ocr, ingested_at=ingested_at, chart=chart, numfill=numfill, **extra)
     layout.ensure()
     old = pl.read_parquet(layout.extracted_event) if layout.extracted_event.exists() else None
     write_parquet_atomic(preserve_ingested_at(df, old, "extract_id"), layout.extracted_event)
@@ -1343,6 +1372,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ocr-fixture", help="录制 OCR 夹具 json（不给则 OCR not_run）")
     ap.add_argument("--chart-fixture", help="读图夹具 json（chart-read-v1/v2）")
     ap.add_argument("--numfill-fixture", help="cx.numfill.v1 录制（cx_batch import 输出）")
+    ap.add_argument("--symfill-fixture", help="cx.symfill.v1 录制（cx_batch import --schema cx.symfill.v1 输出）")
+    ap.add_argument("--market-lake", help="symfill 用该行情湖的品种登记判定可解析；不给时用合成登记（与 validate CLI 的夹具模式一致）")
     a = ap.parse_args(argv)
     if a.bench:
         rep = run_bench(a.bench, results_path=a.results)
@@ -1351,8 +1382,17 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({k: v for k, v in rep.items() if k != "items"}, ensure_ascii=False, indent=2))
         return 0
     layout = Layout.flat(a.out) if a.out else Layout.from_root(a.lake_root)
+    extra = {}
+    if a.symfill_fixture:
+        if a.market_lake:
+            from .market_lake import LakeMarket
+            registry = LakeMarket(a.market_lake).registry
+        else:
+            from .market_stub import fixture_registry
+            registry = fixture_registry()
+        extra = dict(symfill_fixture=a.symfill_fixture, registry=registry)
     try:
-        summary = run(layout, llm_fixture=a.llm_fixture, ocr_fixture=a.ocr_fixture, llm=a.llm, chart_fixture=a.chart_fixture, numfill_fixture=a.numfill_fixture)
+        summary = run(layout, llm_fixture=a.llm_fixture, ocr_fixture=a.ocr_fixture, llm=a.llm, chart_fixture=a.chart_fixture, numfill_fixture=a.numfill_fixture, **extra)
     except PermissionError as exc:
         ap.error(str(exc))
     print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))

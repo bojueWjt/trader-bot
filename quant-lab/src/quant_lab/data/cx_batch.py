@@ -21,7 +21,7 @@ rules, schema and that row's candidates. A file that mixes them with v1/v2
 is rejected. v2 prompt text, hash, RULES, output schema and wire shape stay
 unchanged.
 
-Side passes (SIDE_PASSES: cx.triage.v1, cx.numfill.v1) are independent schemas
+Side passes (SIDE_PASSES: cx.triage.v1, cx.numfill.v1, cx.symfill.v1) are independent schemas
 with their own recordings. Each module exports SCHEMA_NAME, RULES,
 IMPORT_VERSION, output_schema(), contexts_from_user(user) and
 validate_response(item, text, context) -> {"response"} | {"abstain"}; the
@@ -56,7 +56,8 @@ from . import cx_v2
 
 BATCH_RULES = cx_v2.RULES
 #: schema_name -> module path. Imported lazily, so a registered module may land later than this table.
-SIDE_PASSES = {"cx.triage.v1": "quant_lab.data.cx_triage", "cx.numfill.v1": "quant_lab.data.cx_numfill"}
+SIDE_PASSES = {"cx.triage.v1": "quant_lab.data.cx_triage", "cx.numfill.v1": "quant_lab.data.cx_numfill",
+               "cx.symfill.v1": "quant_lab.data.cx_symfill"}
 
 
 def side_pass(schema_name):
