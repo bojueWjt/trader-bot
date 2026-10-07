@@ -14,6 +14,8 @@
 # -------------------------------------------------------------------------------------------------
 
 import asyncio
+import os
+import time
 from asyncio import TaskGroup
 from decimal import Decimal
 
@@ -25,6 +27,8 @@ from nautilus_trader.adapters.binance.common.enums import BinanceAccountType
 from nautilus_trader.adapters.binance.common.enums import BinanceEnvironment
 from nautilus_trader.adapters.binance.common.enums import BinanceErrorCode
 from nautilus_trader.adapters.binance.common.enums import BinanceExecutionType
+from nautilus_trader.adapters.binance.common.enums import BinanceFuturesPositionSide
+from nautilus_trader.adapters.binance.common.symbol import BinanceSymbol
 from nautilus_trader.adapters.binance.config import BinanceExecClientConfig
 from nautilus_trader.adapters.binance.execution import BinanceCommonExecutionClient
 from nautilus_trader.adapters.binance.futures.enums import BinanceFuturesEnumParser
@@ -51,6 +55,7 @@ from nautilus_trader.common.enums import LogColor
 from nautilus_trader.core.correctness import PyCondition
 from nautilus_trader.core.datetime import millis_to_nanos
 from nautilus_trader.core.datetime import secs_to_millis
+from nautilus_trader.core.nautilus_pyo3 import HttpMethod
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.execution.messages import BatchCancelOrders
 from nautilus_trader.execution.messages import CancelAllOrders
@@ -59,6 +64,7 @@ from nautilus_trader.execution.messages import GenerateOrderStatusReport
 from nautilus_trader.execution.messages import GenerateOrderStatusReports
 from nautilus_trader.execution.reports import OrderStatusReport
 from nautilus_trader.execution.reports import PositionStatusReport
+from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.enums import OrderType
 from nautilus_trader.model.enums import order_type_to_str
 from nautilus_trader.model.enums import time_in_force_to_str
@@ -169,11 +175,104 @@ class BinanceFuturesExecutionClient(BinanceCommonExecutionClient):
         self._leverages = config.futures_leverages
         self._margin_types = config.futures_margin_types
 
+        self._min_open_leverage: int | None = None
+        minimum = os.environ.get("BINANCE_MIN_OPEN_LEVERAGE", "").strip()
+        if minimum:
+            try:
+                if not minimum.isascii() or not minimum.isdecimal() or int(minimum) <= 0:
+                    raise ValueError("expected a positive integer")
+                self._min_open_leverage = int(minimum)
+            except ValueError as e:
+                self._log.error(f"Invalid BINANCE_MIN_OPEN_LEVERAGE={minimum!r}: {e}; disabled")
+        self._leverage_locks: dict[str, asyncio.Lock] = {}
+        self._leverage_caps: dict[str, int] = {}
+        self._leverage_retry_after: dict[str, float] = {}
+
         self._decoder_futures_user_msg = msgspec.json.Decoder(BinanceFuturesUserMsgData)
         self._decoder_futures_order_update = msgspec.json.Decoder(BinanceFuturesOrderUpdateMsg)
         self._decoder_futures_account_update = msgspec.json.Decoder(BinanceFuturesAccountUpdateMsg)
         self._decoder_futures_trade_lite = msgspec.json.Decoder(BinanceFuturesTradeLiteMsg)
         self._decoder_futures_algo_update = msgspec.json.Decoder(BinanceFuturesAlgoUpdateMsg)
+
+    async def _submit_order_inner(
+        self,
+        order: Order,
+        position_side: BinanceFuturesPositionSide | None,
+        params: dict[str, object] | None = None,
+    ) -> None:
+        if (
+            self._min_open_leverage is not None
+            and self._binance_account_type == BinanceAccountType.USDT_FUTURES
+            and not order.is_closed
+            and order.order_type not in BINANCE_FUTURES_ALGO_ORDER_TYPES
+        ):
+            if position_side in (None, BinanceFuturesPositionSide.BOTH):
+                is_open = not order.is_reduce_only
+            else:
+                is_open = (
+                    order.side == OrderSide.BUY
+                    and position_side == BinanceFuturesPositionSide.LONG
+                ) or (
+                    order.side == OrderSide.SELL
+                    and position_side == BinanceFuturesPositionSide.SHORT
+                )
+            if is_open:
+                await self._ensure_min_open_leverage(order.instrument_id)
+        await super()._submit_order_inner(order, position_side, params)
+
+    async def _ensure_min_open_leverage(self, instrument_id: InstrumentId) -> None:
+        symbol = str(BinanceSymbol(instrument_id.symbol.value))
+        lock = self._leverage_locks.setdefault(symbol, asyncio.Lock())
+        async with lock:
+            current = None
+            target = self._min_open_leverage
+            if time.monotonic() < self._leverage_retry_after.get(symbol, 0):
+                return
+            try:
+                account: MarginAccount = self.get_account()
+                current = account.leverage(instrument_id)
+                if current >= target:
+                    return
+                cap = self._leverage_caps.get(symbol)
+                if cap is None:
+                    raw = await self._http_client.sign_request(
+                        http_method=HttpMethod.GET,
+                        url_path="/fapi/v1/leverageBracket",
+                        payload={
+                            "symbol": symbol,
+                            "recvWindow": str(self._recv_window),
+                            "timestamp": str(self._clock.timestamp_ms()),
+                        },
+                        ratelimiter_keys=["binance:/fapi/v1/leverageBracket", "binance:global"],
+                    )
+                    brackets = msgspec.json.decode(raw)
+                    bracket = next(item for item in brackets if item["symbol"] == symbol)
+                    cap = int(bracket["brackets"][0]["initialLeverage"])
+                    if cap <= 0:
+                        raise ValueError(f"Invalid initialLeverage {cap}")
+                    self._leverage_caps[symbol] = cap
+                target = min(target, cap)
+                # A user-stream update may have arrived while querying the bracket.
+                current = account.leverage(instrument_id)
+                if current >= target:
+                    return
+                result = await self._futures_http_account.set_leverage(
+                    symbol,
+                    target,
+                    recv_window=str(self._recv_window),
+                )
+                account.set_leverage(instrument_id, Decimal(result.leverage))
+                self._log.info(
+                    f"Raised open leverage {symbol}: current={current}X target={target}X "
+                    f"exchange={result.leverage}X",
+                    LogColor.BLUE,
+                )
+            except Exception as e:
+                self._leverage_retry_after[symbol] = time.monotonic() + 300
+                self._log.warning(
+                    f"Cannot ensure open leverage {symbol}: current={current}X "
+                    f"target={target}X error={e!r}; submitting order unchanged",
+                )
 
     async def _update_account_state(self) -> None:
         account_info: BinanceFuturesAccountInfo = (
@@ -742,7 +841,20 @@ class BinanceFuturesExecutionClient(BinanceCommonExecutionClient):
         self._log.warning("MARGIN CALL received")  # Implement
 
     def _handle_account_config_update(self, raw: bytes) -> None:
-        self._log.info("Account config updated", LogColor.BLUE)  # Implement
+        self._log.info("Account config updated", LogColor.BLUE)
+        config = msgspec.json.decode(raw)
+        ac = config.get("ac")
+        if ac is None:
+            return
+        try:
+            instrument_id = self._get_cached_instrument_id(ac["s"])
+        except KeyError:
+            return
+        # The common lookup can synthesize an ID for an unloaded symbol.
+        if self._cache.instrument(instrument_id) is None:
+            return
+        account: MarginAccount = self.get_account()
+        account.set_leverage(instrument_id, Decimal(ac["l"]))
 
     def _handle_listen_key_expired(self, raw: bytes) -> None:
         self._log.warning("Listen key expired")

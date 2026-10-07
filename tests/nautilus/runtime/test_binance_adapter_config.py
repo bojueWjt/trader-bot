@@ -40,8 +40,11 @@ EXPECTED_SIGNED_ACCOUNT_CALLS = Counter(
         "binance_futures_execution.py:_futures_http_account.query_futures_position_risk": 2,
         "binance_futures_execution.py:_futures_http_account.query_futures_symbol_config": 1,
         "binance_futures_execution.py:_futures_http_account.query_open_algo_orders": 1,
-        "binance_futures_execution.py:_futures_http_account.set_leverage": 1,
+        # Startup defaults plus the optional pre-open leverage increase.
+        "binance_futures_execution.py:_futures_http_account.set_leverage": 2,
         "binance_futures_execution.py:_futures_http_account.set_margin_type": 1,
+        # leverageBracket has no account API wrapper; it uses the signed HTTP client.
+        "binance_futures_execution.py:_http_client.sign_request": 1,
     }
 )
 sys.path.insert(0, str(SERVICE_ROOT))
@@ -310,6 +313,8 @@ def _account_method_name(node: ast.AST) -> str | bool:
         return False
     if root.id != "self":
         return False
+    if owner.attr == "_http_client" and node.attr == "sign_request":
+        return f"{owner.attr}.{node.attr}"
     if owner.attr not in {"_http_account", "_futures_http_account"}:
         return False
     return f"{owner.attr}.{node.attr}"
@@ -317,6 +322,11 @@ def _account_method_name(node: ast.AST) -> str | bool:
 
 def _has_configured_recv_window(node: ast.Call) -> bool:
     for keyword in node.keywords:
+        # Direct sign_request takes the exchange spelling in its inline payload.
+        if keyword.arg == "payload" and isinstance(keyword.value, ast.Dict):
+            for key, value in zip(keyword.value.keys, keyword.value.values):
+                if isinstance(key, ast.Constant) and key.value == "recvWindow":
+                    return _is_configured_recv_window(value)
         if keyword.arg != "recv_window":
             continue
         return _is_configured_recv_window(keyword.value)
