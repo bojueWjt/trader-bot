@@ -1,0 +1,5 @@
+# watcher-app-crew-app-executor — Grok 硬纪律: 一律 grok-4.6, effort 仅 high/xhigh (2026-08-30 拍板)
+description = "watcher-app-crew app 执行者。在 alert-personal 隔离 worktree 实现平板基础设施（T-0）、信号/交易配置/价格提醒（A-0..A-3）与存量页平板改造（A-T）。可多实例并发。"
+model = "grok-4.6"
+reasoning_effort = "high"
+default_capability_mode = "all"

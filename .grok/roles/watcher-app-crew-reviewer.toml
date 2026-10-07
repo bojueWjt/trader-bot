@@ -1,0 +1,5 @@
+# watcher-app-crew-reviewer — Grok 硬纪律: 一律 grok-4.6, effort 仅 high/xhigh (2026-08-30 拍板)
+description = "watcher-app-crew 代码与信任边界质量门。审查执行者 diff，对照鉴权、凭据、网关隔离、契约、记账红线，PASS 合入集成分支，FAIL 退回。只出报告不改代码。"
+model = "grok-4.6"
+reasoning_effort = "xhigh"
+default_capability_mode = "all"

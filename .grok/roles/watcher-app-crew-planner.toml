@@ -1,0 +1,5 @@
+# watcher-app-crew-planner — Grok 硬纪律: 一律 grok-4.6, effort 仅 high/xhigh (2026-08-30 拍板)
+description = "watcher-app-crew 团队 Lead / 技术 PM（编排者）。按 watcher-to-app-migration v0.6 拆里程碑与原子任务、派发两仓库执行者、处理失败回流、守生产授权闸门。不写业务代码。"
+model = "grok-4.6"
+reasoning_effort = "xhigh"
+default_capability_mode = "all"
