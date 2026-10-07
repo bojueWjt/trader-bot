@@ -95,7 +95,7 @@ TG_CHAT_ID = "8545234287"
 BRAIN_PROBES = (
     # (name, url, key_env, style, model)
     ("primary", "https://api.balenw.cloud/v1/chat/completions", "CLIPROXYAPI_API_KEY",
-     "openai", "deepseek-v4-flash"),
+     "openai", "gpt-6.1-sol"),
     ("fallback", "https://open.bigmodel.cn/api/anthropic/v1/messages", "BIGMODEL_API_KEY",
      "anthropic", "glm-5.2"),
 )
