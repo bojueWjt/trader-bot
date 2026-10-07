@@ -1,4 +1,5 @@
 from dataclasses import replace
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import UUID
@@ -39,14 +40,17 @@ def batch_fixture(tmp_path):
     return strategy, intent, context
 
 
-def test_batch_maps_exact_two_legs_and_rejects_existing_position(tmp_path):
+def test_batch_maps_exact_two_legs_and_allows_same_side_position(tmp_path):
     strategy, intent, context = batch_fixture(tmp_path)
     plans = strategy._zone_ladder_order_plans(intent, intent.order_plan, context, 'open_position')
     assert isinstance(plans, tuple)
     assert [plan.order_type for plan in plans] == ['MARKET', 'LIMIT']
     assert plans[1].price == '90.00'
     occupied = replace(context, position=PositionSnapshot(intent.instrument_id, 'LONG', '5'))
-    denial = strategy._zone_ladder_order_plans(intent, intent.order_plan, occupied, 'open_position')
+    again = strategy._zone_ladder_order_plans(intent, intent.order_plan, occupied, 'open_position')
+    assert isinstance(again, tuple)
+    opposite = replace(context, position=PositionSnapshot(intent.instrument_id, 'SHORT', '5'))
+    denial = strategy._zone_ladder_order_plans(intent, intent.order_plan, opposite, 'open_position')
     assert isinstance(denial, OrderDenied)
     assert denial.reason == 'position_exists'
 
@@ -159,8 +163,10 @@ def test_later_unrelated_plan_cannot_replace_batch_context(tmp_path):
     second = _live_zone_ladder_intent(max_notional='200')
     other_plans = strategy._zone_ladder_order_plans(second, second.order_plan, context, 'open_position')
     assert isinstance(other_plans, tuple)
-    assert not strategy._stage_entry_protection(second, other_plans[0])
+    assert strategy._stage_entry_protection(second, other_plans[0])
     assert str(intent.intent_id) in strategy._entry_protection_stash
+    assert str(second.intent_id) in strategy._entry_protection_stash
+    assert strategy._entry_protection_stash[str(intent.intent_id)]['batch_entry_ids']
 
 
 @pytest.mark.parametrize('halt_after_first', [False, True])
@@ -221,13 +227,41 @@ def test_management_context_limits_parent_to_owned_quantity(tmp_path):
     assert context.position.quantity == '6'
 
 
-def test_second_fill_rebuilds_stop_for_batch_not_combined_position(tmp_path):
+@pytest.mark.parametrize('extra_leg', [
+    None,
+    {'seq': 3, 'type': 'limit', 'quantity': '1', 'price': '85', 'sizing_price': '85'},
+])
+def test_second_fill_rebuilds_stop_for_batch_not_combined_position(tmp_path, extra_leg):
     strategy, intent, context = batch_fixture(tmp_path)
+    if extra_leg is not None:
+        intent.order_plan['tranches'].append(dict(extra_leg))
     plans = strategy._zone_ladder_order_plans(intent, intent.order_plan, context, 'open_position')
+    assert isinstance(plans, tuple)
     strategy._stage_entry_protection(intent, plans[0])
-    for index, plan in enumerate(plans):
-        strategy._record_batch_fill(SimpleNamespace(client_order_id=plan.client_order_id,
-                                                   last_qty=plan.quantity, trade_id=str(index)))
+    # Fill recording queues an async stash write. A direct save below must be
+    # the copy that is reloaded, not an earlier snapshot from that queue.
+    with patch.object(strategy, '_queue_entry_protection_stash_persist', return_value=True):
+        for index, plan in enumerate(plans):
+            strategy._record_batch_fill(SimpleNamespace(client_order_id=plan.client_order_id,
+                                                       last_qty=plan.quantity, trade_id=str(index)))
+    if extra_leg is not None:
+        assert len(plans) == 3
+        assert plans[2].order_type == 'LIMIT'
+        assert plans[2].price == '85.00'
+        assert strategy._persist_entry_protection_stash()
+        reloaded = _LiveEntrySubmitStrategy(
+            inventory=(('BTCUSDT-PERP.BINANCE', '12000'),), state_dir=tmp_path,
+        )
+        reloaded._entry_protection_stash = reloaded._load_entry_protection_stash()
+        stash = reloaded._entry_protection_stash[str(intent.intent_id)]
+        assert stash['batch_entry_ids'] == [plan.client_order_id for plan in plans]
+        assert len(stash['batch_entry_ids']) == 3
+        for plan in plans:
+            evidence = stash['batch_fills'][plan.client_order_id]
+            assert evidence['role'] == 'entry'
+            assert Decimal(evidence['filled']) == Decimal(plan.quantity)
+            assert evidence['trades']
+        strategy = reloaded
     with patch.object(strategy, '_has_authorized_protection_parent', return_value=True), patch.object(
         strategy, '_protection_position', return_value={'quantity': '7.11', 'entry_price': '95'},
     ), patch.object(strategy, '_queue_entry_protection_stash_persist') as persist:
@@ -236,5 +270,223 @@ def test_second_fill_rebuilds_stop_for_batch_not_combined_position(tmp_path):
     assert continuation['kind'] == 'protection_submit_revision'
     stops = [plan for plan in continuation['plans'] if plan.order_type == 'STOP_MARKET']
     assert len(stops) == 1
-    assert stops[0].quantity == '2.11'
     assert stops[0].trigger_price == '80.00'
+    assert stops[0].quantity != '7.11'
+    if extra_leg is None:
+        assert len(plans) == 2
+        assert stops[0].quantity == '2.11'
+    else:
+        assert stops[0].quantity == '3.11'
+
+
+def _three_leg_intent(strategy):
+    intent = _live_zone_ladder_intent(max_notional='1000')
+    intent.order_plan.update({
+        'type': 'entry_batch', 'batch_version': '1', 'side': 'sell',
+        'stop_loss': '3167', 'estimated_stop_risk': '20',
+        'tranches': [
+            {'seq': 1, 'type': 'limit', 'quantity': '0.03', 'price': '2877', 'sizing_price': '2877'},
+            {'seq': 2, 'type': 'limit', 'quantity': '0.03', 'price': '2967', 'sizing_price': '2967'},
+            {'seq': 3, 'type': 'limit', 'quantity': '0.03', 'price': '3067', 'sizing_price': '3067'},
+        ],
+    })
+    context = PlannerContext(
+        account_id=intent.account_id, trading_state='ACTIVE', now=strategy._now(),
+        instrument=strategy._instrument_spec(intent.instrument_id), position=None,
+        existing_intent_ids=frozenset(),
+    )
+    return intent, context
+
+
+def test_eth_three_limits_map_exact_prices_and_reject_bad_shapes(tmp_path):
+    strategy = _LiveEntrySubmitStrategy(
+        inventory=(('ETHUSDT-PERP.BINANCE', '3000'),), state_dir=tmp_path,
+    )
+    intent, context = _three_leg_intent(strategy)
+    plans = strategy._zone_ladder_order_plans(intent, intent.order_plan, context, 'open_position')
+    assert [plan.order_type for plan in plans] == ['LIMIT', 'LIMIT', 'LIMIT']
+    assert [plan.price for plan in plans] == ['2877.00', '2967.00', '3067.00']
+    assert [plan.client_order_id[-2:] for plan in plans] == ['01', '02', '03']
+    assert strategy._stage_entry_protection(intent, plans[0])
+    stash = strategy._entry_protection_stash[str(intent.intent_id)]
+    assert stash['batch_entry_ids'] == [plan.client_order_id for plan in plans]
+
+    mixed_plan = {
+        **intent.order_plan,
+        'side': 'buy', 'stop_loss': '70',
+        'tranches': [
+            {'seq': 1, 'type': 'market', 'quantity': '0.5', 'price': '100', 'sizing_price': '100'},
+            {'seq': 2, 'type': 'limit', 'quantity': '0.5', 'price': '90', 'sizing_price': '90'},
+            {'seq': 3, 'type': 'limit', 'quantity': '0.5', 'price': '80', 'sizing_price': '80'},
+        ],
+    }
+    mixed = strategy._zone_ladder_order_plans(intent, mixed_plan, context, 'open_position')
+    assert [plan.order_type for plan in mixed] == ['MARKET', 'LIMIT', 'LIMIT']
+
+    third_market = {
+        **intent.order_plan,
+        'tranches': [
+            {**intent.order_plan['tranches'][0]},
+            {**intent.order_plan['tranches'][1]},
+            {**intent.order_plan['tranches'][2], 'type': 'market'},
+        ],
+    }
+    denial = strategy._zone_ladder_order_plans(intent, third_market, context, 'open_position')
+    assert denial.reason == 'unsupported_order_spec'
+    assert denial.detail == 'entry_batch.type'
+    for count in (1, 4):
+        broken = {
+            **intent.order_plan,
+            'tranches': intent.order_plan['tranches'][:1] * count,
+        }
+        if count == 4:
+            broken['tranches'] = [
+                {'seq': index, 'type': 'limit', 'quantity': '0.03', 'price': '2877', 'sizing_price': '2877'}
+                for index in range(1, 5)
+            ]
+        denial = strategy._zone_ladder_order_plans(intent, broken, context, 'open_position')
+        assert denial.detail == 'entry_batch.tranches'
+    between = {**intent.order_plan, 'stop_loss': '3000'}
+    denial = strategy._zone_ladder_order_plans(intent, between, context, 'open_position')
+    assert denial.detail == 'entry_batch.stop_or_expiry'
+    add = strategy._zone_ladder_order_plans(intent, intent.order_plan, context, 'add_position')
+    assert add.detail == 'entry_batch.version_or_action'
+
+
+def test_third_fill_is_owned_and_stop_or_expiry_cancels_remaining_legs(tmp_path):
+    strategy = _LiveEntrySubmitStrategy(
+        inventory=(('ETHUSDT-PERP.BINANCE', '3000'),), state_dir=tmp_path,
+    )
+    intent, context = _three_leg_intent(strategy)
+    plans = strategy._zone_ladder_order_plans(intent, intent.order_plan, context, 'open_position')
+    assert strategy._stage_entry_protection(intent, plans[0])
+    stash = strategy._entry_protection_stash[str(intent.intent_id)]
+    strategy._record_batch_fill(SimpleNamespace(
+        client_order_id=plans[2].client_order_id, last_qty='0.03', trade_id='e3',
+    ))
+    strategy._record_batch_fill(SimpleNamespace(
+        client_order_id=plans[2].client_order_id, last_qty='0.03', trade_id='e3',
+    ))
+    assert strategy._protection_quantity(stash, {'quantity': '9'}) == '0.03'
+
+    resting = [
+        SimpleNamespace(client_order_id=plans[0].client_order_id, status='ACCEPTED'),
+        SimpleNamespace(client_order_id=plans[1].client_order_id, status='ACCEPTED'),
+    ]
+    manual = SimpleNamespace(client_order_id='aos_manual', status='ACCEPTED')
+    cancelled = []
+
+    def cancel(order):
+        cancelled.append(order.client_order_id)
+        order.status = 'PENDING_CANCEL'
+
+    with patch.object(strategy, '_cache_orders_all', return_value=(*resting, manual)), patch.object(
+        strategy, '_has_authorized_protection_parent', return_value=True,
+    ), patch.object(strategy, '_cancel_order_object', side_effect=cancel):
+        exit_id = f'B{intent.intent_id.hex}11'
+        strategy._record_batch_fill(SimpleNamespace(
+            client_order_id=exit_id, last_qty='0.03', trade_id='x1',
+        ))
+        strategy._sync_protection(str(intent.intent_id))
+        assert stash['batch_closing']
+        assert cancelled == [plans[0].client_order_id, plans[1].client_order_id]
+
+    strategy._entry_protection_stash[str(intent.intent_id)]['batch_closing'] = False
+    strategy._entry_protection_stash[str(intent.intent_id)]['batch_fills'] = {}
+    strategy._entry_protection_stash[str(intent.intent_id)]['batch_expires_at'] = '2020-01-01T00:00:00+00:00'
+    expired_orders = [
+        SimpleNamespace(client_order_id=plan.client_order_id, status='ACCEPTED')
+        for plan in plans
+    ]
+    cancelled.clear()
+    with patch.object(strategy, '_cache_orders_all', return_value=(*expired_orders, manual)), patch.object(
+        strategy, '_has_authorized_protection_parent', return_value=True,
+    ), patch.object(strategy, '_cancel_order_object', side_effect=cancel):
+        strategy._sync_protection(str(intent.intent_id))
+        assert cancelled == [plan.client_order_id for plan in plans]
+        assert manual.client_order_id not in cancelled
+
+
+def test_rejected_third_leg_is_terminal_and_missing_third_is_not_resubmitted(tmp_path):
+    strategy = _LiveEntrySubmitStrategy(
+        inventory=(('BTCUSDT-PERP.BINANCE', '3000'),), state_dir=tmp_path,
+    )
+    intent, context = _three_leg_intent(strategy)
+    plans = strategy._zone_ladder_order_plans(intent, intent.order_plan, context, 'open_position')
+    assert strategy._stage_entry_protection(intent, plans[0])
+
+    class OrderRejected:
+        def __init__(self, client_order_id):
+            self.client_order_id = client_order_id
+
+    strategy.on_order_rejected(OrderRejected(plans[2].client_order_id))
+    stash = strategy._entry_protection_stash[str(intent.intent_id)]
+    assert plans[2].client_order_id in stash['batch_terminal_ids']
+
+    assert strategy._stash_entry_protection(intent, plans[0])
+    identity = _durable_identity(intent)
+    strategy._intent_execution_inbox.register_received(identity, _durable_payload(intent))
+    strategy._intent_execution_inbox.begin_dispatch(identity, tuple(plan.client_order_id for plan in plans))
+    restarted = _LiveEntrySubmitStrategy(
+        inventory=(('BTCUSDT-PERP.BINANCE', '3000'),), state_dir=tmp_path,
+    )
+    restarted._entry_protection_stash = restarted._load_entry_protection_stash()
+    visible = {plans[0].client_order_id, plans[1].client_order_id}
+    with patch.object(restarted, '_client_order_id_exists', side_effect=lambda instrument, cid: cid in visible):
+        restarted._handle_zone_ladder(
+            intent, intent.order_plan, context, 'open_position', intent_execution=identity,
+        )
+    assert restarted.submitted_orders == []
+    assert restarted.denials[-1].reason == 'intent_exchange_confirmation_required'
+    assert len(restarted._entry_protection_stash[str(intent.intent_id)]['batch_entry_ids']) == 3
+
+
+def test_third_submit_failure_cancels_legs_already_sent(tmp_path):
+    strategy = _LiveEntrySubmitStrategy(
+        inventory=(('BTCUSDT-PERP.BINANCE', '3000'),), state_dir=tmp_path,
+    )
+    intent, context = _three_leg_intent(strategy)
+    plans = strategy._zone_ladder_order_plans(intent, intent.order_plan, context, 'open_position')
+    assert [plan.client_order_id[-2:] for plan in plans] == ['01', '02', '03']
+    calls = {'n': 0}
+    cancelled = []
+    identity = _durable_identity(intent)
+    strategy._intent_execution_inbox.register_received(identity, _durable_payload(intent))
+
+    def submit(plan, *args, **kwargs):
+        del args, kwargs
+        calls['n'] += 1
+        if calls['n'] == 3:
+            strategy._record_denial(OrderDenied('order_submit_failed', plan.client_order_id))
+            return False
+        strategy.submitted_orders.append(plan.client_order_id)
+        return True
+
+    with patch.object(strategy, '_submit_order_plan', side_effect=submit), patch.object(
+        strategy, '_cancel_order_by_client_order_id',
+        side_effect=lambda instrument, cid: cancelled.append(cid) or True,
+    ):
+        strategy._handle_zone_ladder(
+            intent, intent.order_plan, context, 'open_position', intent_execution=identity,
+        )
+    assert calls['n'] == 3
+    assert cancelled == [plans[0].client_order_id, plans[1].client_order_id]
+
+
+def test_durable_three_leg_submits_once(tmp_path):
+    strategy = _LiveEntrySubmitStrategy(
+        inventory=(('BTCUSDT-PERP.BINANCE', '3000'),), state_dir=tmp_path,
+    )
+    strategy.set_live_open_gate_getter(_normal_live_open_gate)
+    intent, _context = _three_leg_intent(strategy)
+    intent.order_plan['rollout_phase'] = 'fleet_complete'
+    intent.order_plan['live_open_gate'] = _normal_live_open_gate()
+    strategy._intent_execution_inbox.register_received(_durable_identity(intent), _durable_payload(intent))
+    try:
+        strategy._handle_intent_ready(intent, exchange_state_ready=False, durable_async=True)
+        assert _pump_durable_until(strategy, lambda: len(strategy.submitted_orders) == 3, timeout=1)
+        strategy._handle_intent_ready(intent, exchange_state_ready=False, durable_async=True)
+        _pump_durable_until(strategy, lambda: not strategy._durable_entry_prepare_active, timeout=1)
+        assert len(strategy.submitted_orders) == 3
+    finally:
+        strategy.on_stop()

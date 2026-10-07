@@ -924,40 +924,63 @@ def _zone_boundary_price(order_plan: dict[str, Any], instrument: InstrumentSpec)
     return _round_to_increment(boundary, instrument.price_increment, "price")
 
 
+def _book_side(side: str) -> str:
+    return "LONG" if side == "BUY" else "SHORT"
+
+
+def _nonzero_book_snapshots(
+    context: PlannerContext,
+    instrument_id: str,
+    book: str,
+) -> tuple[PositionSnapshot, ...]:
+    """Nonzero snapshots on one book from positions, then context.position."""
+    found: list[PositionSnapshot] = []
+    seen: set[int] = set()
+    candidates = tuple(context.positions or ())
+    if context.position is not None:
+        candidates = candidates + (context.position,)
+    for position in candidates:
+        marker = id(position)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        if position.instrument_id != instrument_id:
+            continue
+        if Decimal(str(position.quantity)) == Decimal("0"):
+            continue
+        if position.side.upper() != book:
+            continue
+        found.append(position)
+    return tuple(found)
+
+
 def _validate_position(
     action: str,
     side: str,
     context: PlannerContext,
     instrument_id: str,
 ) -> Optional[OrderDenied]:
-    position = context.position
-    cache_empty = position is None or Decimal(str(position.quantity)) == Decimal("0")
-    if (
-        cache_empty
-        and action == OPEN_POSITION
-        and context.reconciled_state is not None
-    ):
-        # Cache blindness on an open: venue evidence restores the legacy
-        # position_exists guard the empty cache lost. Advisory-only beyond
-        # that (owner-operated account, 2026-08-28 operator directive):
-        # UNKNOWN/CONFLICTED fall through to legacy behavior instead of
-        # blocking the owner's order.
-        expected_side = "LONG" if side == "BUY" else "SHORT"
-        assessment = _reconciled_assessment(context, instrument_id, expected_side)
-        if assessment is not None and assessment.state == "known_open":
-            return OrderDenied("position_exists", assessment.detail)
+    """OPEN may add an independent same-side plan.
+
+    A nonzero same-side snapshot in context.positions or context.position is
+    enough, even when the first snapshot is the opposite book. Opposite-only
+    evidence still denies. ADD still requires a same-side nonzero snapshot.
+    """
+    expected = _book_side(side)
+    opposite = "SHORT" if expected == "LONG" else "LONG"
+    same_side = _nonzero_book_snapshots(context, instrument_id, expected)
+    other_side = _nonzero_book_snapshots(context, instrument_id, opposite)
     if action == OPEN_POSITION:
-        if position is not None and Decimal(str(position.quantity)) != Decimal("0"):
+        if same_side:
+            return None
+        if other_side:
             return OrderDenied("position_exists", instrument_id)
         return None
 
-    if position is None or Decimal(str(position.quantity)) == Decimal("0"):
+    if not same_side:
+        if other_side:
+            return OrderDenied("position_side_mismatch", other_side[0].side.upper())
         return OrderDenied("position_required", instrument_id)
-
-    position_side = position.side.upper()
-    expected = "LONG" if side == "BUY" else "SHORT"
-    if position_side != expected:
-        return OrderDenied("position_side_mismatch", position_side)
     return None
 
 

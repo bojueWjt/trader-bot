@@ -249,9 +249,38 @@ class IntentExecutionPlannerTest(unittest.TestCase):
             plan_intent_execution(_intent(), _context(instrument=None)),
             OrderDenied(reason="instrument_not_found", detail=INSTRUMENT_ID),
         )
+        same_side_open = plan_intent_execution(
+            open_with_position,
+            _context(position=_position("LONG")),
+        )
+        self.assertIsInstance(same_side_open, OrderPlan)
+        opposite_open = _intent(
+            action="open_position",
+            order_plan={"type": "market", "side": "sell", "quantity": "1"},
+        )
         self.assertEqual(
-            plan_intent_execution(open_with_position, _context(position=_position("LONG"))),
+            plan_intent_execution(opposite_open, _context(position=_position("LONG"))),
             OrderDenied(reason="position_exists", detail=INSTRUMENT_ID),
+        )
+        mixed = _context(
+            position=_position("SHORT"),
+            positions=(_position("SHORT"), _position("LONG")),
+        )
+        mixed_open = plan_intent_execution(open_with_position, mixed)
+        self.assertIsInstance(mixed_open, OrderPlan)
+        self.assertEqual(
+            plan_intent_execution(
+                open_with_position,
+                _context(position=_position("SHORT"), positions=(_position("SHORT"),)),
+            ),
+            OrderDenied(reason="position_exists", detail=INSTRUMENT_ID),
+        )
+        self.assertEqual(
+            plan_intent_execution(
+                _intent(action="add_position"),
+                mixed,
+            ).side,
+            "BUY",
         )
         self.assertEqual(
             plan_intent_execution(add_without_position, _context(position=None)),

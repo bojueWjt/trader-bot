@@ -535,7 +535,7 @@ def test_missing_resume_issued_at_stays_halted_and_returns_failed_ack(
     actor.on_stop()
 
 
-def test_expired_restored_resume_rewrites_completed_ack_as_failed(
+def test_expired_restored_resume_replays_completed_ack_without_applying(
     tmp_path: Path,
 ) -> None:
     journal_path = tmp_path / "commands.json"
@@ -570,15 +570,86 @@ def test_expired_restored_resume_rewrites_completed_ack_as_failed(
     restarted.on_start()
 
     assert _wait_until(lambda: len(control_plane.acks) == 1)
-    assert restarted_lifecycle.applied_states == [TradingState.HALTED]
+    assert restarted_lifecycle.applied_states == []
     assert control_plane.acks == [
         (
             "expired-restored-resume",
-            CommandAckStatus.FAILED,
-            "resume command expired: age 31.000s exceeds 30.000s",
+            CommandAckStatus.COMPLETED,
+            None,
         )
     ]
     restarted.on_stop()
+
+
+def test_acked_expired_resume_startup_is_silent_and_redelivery_completes(
+    tmp_path: Path,
+) -> None:
+    journal_path = tmp_path / "commands.json"
+    command = NodeCommand(
+        command_id="acked-expired-resume",
+        type=CommandType.RESUME,
+        issued_at=NOW,
+    )
+    first_lifecycle = _Lifecycle("runtime-a")
+    first_control_plane = _ControlPlane()
+    first = _actor(
+        journal_path,
+        first_lifecycle,
+        first_control_plane,
+        command_now=lambda: NOW,
+        resume_command_max_age_seconds=30.0,
+    )
+    first._pending_commands = (command,)
+    assert first._apply_pending_commands() == 1
+    assert first_lifecycle.applied_states == [TradingState.ACTIVE]
+    first._submit_acks()
+    assert _wait_until(
+        lambda: first._ack_future is not None and first._ack_future.done()
+    )
+    first._harvest_acks()
+    assert first_control_plane.acks == [
+        ("acked-expired-resume", CommandAckStatus.COMPLETED, None)
+    ]
+    first.on_stop()
+
+    startup_lifecycle = _Lifecycle("runtime-b")
+    startup_control_plane = _ControlPlane()
+    restarted = _actor(
+        journal_path,
+        startup_lifecycle,
+        startup_control_plane,
+        command_now=lambda: NOW + timedelta(seconds=31),
+        resume_command_max_age_seconds=30.0,
+    )
+    restarted._tick_watchdog = _Watchdog()
+    restarted.on_start()
+    time.sleep(0.05)
+    assert startup_control_plane.acks == []
+    assert startup_lifecycle.applied_states == []
+    restarted.on_stop()
+
+    redelivery_lifecycle = _Lifecycle("runtime-c")
+    redelivery_control_plane = _ControlPlane()
+    redelivery = _actor(
+        journal_path,
+        redelivery_lifecycle,
+        redelivery_control_plane,
+        command_now=lambda: NOW + timedelta(seconds=31),
+        resume_command_max_age_seconds=30.0,
+    )
+    redelivery._pending_commands = (command,)
+    assert redelivery._apply_pending_commands() == 0
+    assert redelivery_lifecycle.applied_states == []
+    redelivery._submit_acks()
+    assert _wait_until(
+        lambda: redelivery._ack_future is not None
+        and redelivery._ack_future.done()
+    )
+    redelivery._harvest_acks()
+    assert redelivery_control_plane.acks == [
+        ("acked-expired-resume", CommandAckStatus.COMPLETED, None)
+    ]
+    redelivery.on_stop()
 
 
 def test_received_resume_with_unknown_outcome_becomes_failed_ack_after_restart(

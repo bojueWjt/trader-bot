@@ -1,12 +1,7 @@
-"""WP-C open-path tests: venue evidence restores the position_exists guard.
+"""Same-side OPEN is allowed for a cached book and for venue-only KNOWN_OPEN.
 
-Contract: docs/plans/2026-08-28-execution-state-arch-migration.md (WP-C),
-softened per the 2026-08-28 operator directive (owner-operated account,
-advisory beyond legacy parity). With an empty cache view, entry actions
-consult reconciled_state: KNOWN_OPEN -> position_exists (restores the guard
-the blind cache lost on 8-26); UNKNOWN/CONFLICTED -> legacy pass-through (no
-new blocking while evidence is unavailable); KNOWN_FLAT -> allowed.
-reconciled_state=None keeps legacy behavior.
+UNKNOWN/CONFLICTED stay non-blocking. KNOWN_FLAT and reconciled_state=None
+still plan. The opposite cached book remains position_exists. ADD is unchanged.
 """
 
 from __future__ import annotations
@@ -52,8 +47,8 @@ STALE_FETCHED_AT = NOW - timedelta(seconds=120)
 
 
 class ReconciledStateOpenPlannerTest(unittest.TestCase):
-    def test_duplicate_open_denied_when_venue_reports_same_side_position(self) -> None:
-        """8-26 regression: cache empty + venue LONG -> open buy denies position_exists."""
+    def test_open_allowed_when_venue_reports_same_side_position(self) -> None:
+        """Cache empty + venue LONG is an independent same-side OPEN, not a denial."""
         intent = _open_intent(side="buy")
 
         result = plan_intent_execution(
@@ -63,9 +58,9 @@ class ReconciledStateOpenPlannerTest(unittest.TestCase):
             ),
         )
 
-        self.assertIsInstance(result, OrderDenied)
-        assert isinstance(result, OrderDenied)
-        self.assertEqual(result.reason, "position_exists")
+        self.assertIsInstance(result, OrderPlan)
+        assert isinstance(result, OrderPlan)
+        self.assertEqual(result.side, "BUY")
 
     def test_open_proceeds_legacy_when_venue_evidence_is_blind(
         self,
@@ -132,8 +127,7 @@ class ReconciledStateOpenPlannerTest(unittest.TestCase):
         assert isinstance(result, OrderPlan)
         self.assertEqual(result.side, "BUY")
 
-    def test_open_cache_fast_path_unchanged_when_cache_holds_position(self) -> None:
-        """Non-empty cache view keeps today's position_exists denial untouched."""
+    def test_open_cache_same_side_is_allowed(self) -> None:
         position = PositionSnapshot(
             instrument_id=INSTRUMENT_ID,
             side="LONG",
@@ -151,10 +145,9 @@ class ReconciledStateOpenPlannerTest(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(
-            result,
-            OrderDenied(reason="position_exists", detail=INSTRUMENT_ID),
-        )
+        self.assertIsInstance(result, OrderPlan)
+        assert isinstance(result, OrderPlan)
+        self.assertEqual(result.side, "BUY")
 
 
 def _venue_long_snapshot() -> dict[str, Any]:

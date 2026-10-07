@@ -131,6 +131,7 @@ class CommandJournalResourcesNodeConfig:
 @dataclass(frozen=True)
 class StrategyDurableIoResourcesNodeConfig:
     queue_capacity: int = 128
+    # Historical release-manifest field only; it does not limit the strategy worker.
     task_timeout_seconds: float = 1.0
     shutdown_timeout_seconds: float = 2.0
 
