@@ -2855,7 +2855,7 @@ def test_resume_rejects_durable_entry_without_explicit_reduce_only_false(
     )
 
 
-def test_resume_rejects_durable_entry_with_exchange_quantity_drift(
+def test_resume_uses_venue_quantity_when_projection_drifts(
     client: TestClient,
     migrated_db: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -2879,10 +2879,7 @@ def test_resume_rejects_durable_entry_with_exchange_quantity_drift(
         json=_resume_body(None),
     )
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == (
-        "robot-owned orders are not terminal"
-    )
+    assert response.status_code == 200, response.text
 
 
 def test_resume_rejects_durable_entry_with_intent_instrument_drift(
@@ -4344,7 +4341,7 @@ def test_permit_consumption_allows_non_owned_baseline_change(
 ) -> None:
     _seed_heartbeat(
         migrated_db,
-        positions=[{"symbol": "XAUUSDT", "quantity": "1"}],
+        positions=[{"symbol": "XAUUSDT", "quantity": "1", "mark_price": "1"}],
     )
     permit_id = _seed_reviewed_release_and_permit(migrated_db)
     resume = client.post(
@@ -4357,7 +4354,7 @@ def test_permit_consumption_allows_non_owned_baseline_change(
     _seed_heartbeat(
         migrated_db,
         trading_state="ACTIVE",
-        positions=[{"symbol": "XAUUSDT", "quantity": "2"}],
+        positions=[{"symbol": "XAUUSDT", "quantity": "2", "mark_price": "1"}],
         heartbeat_sequence=HEARTBEAT_SEQUENCE + 1,
     )
     response = client.post(
@@ -4671,3 +4668,90 @@ def test_node_command_ack_preserves_progress_states_and_rejects_unknown(
             (failed_command_id,),
         )
         assert cur.fetchone()[0] == "failed"
+
+
+@pytest.mark.parametrize(
+    'case,expected_status',
+    [
+        ('fresh', 200), ('absent', 409), ('different_symbol', 409),
+        ('stale_regular', 409), ('stale_algo', 409), ('stale_positions', 409),
+        ('stale_reconciliation', 409), ('degraded', 409), ('incomplete', 409),
+        ('duplicate_cid', 409), ('risk_increasing_venue_order', 409), ('naive_proof_time', 409),
+    ],
+)
+def test_resume_projection_shell_uses_only_same_fresh_venue_protection(
+    client, migrated_db, case, expected_status,
+):
+    cid = 'B' + 'f' * 32 + '02'
+    order = {
+        'symbol': SYMBOL, 'clientOrderId': cid, 'type': 'STOP_MARKET',
+        'order_kind': 'algo', 'reduceOnly': True,
+    }
+    if case == 'different_symbol':
+        order['symbol'] = 'ETHUSDT'
+    if case == 'risk_increasing_venue_order':
+        order['reduceOnly'] = False
+    orders = [] if case == 'absent' else [order]
+    if case == 'duplicate_cid':
+        orders.append(dict(order))
+    _seed_heartbeat(migrated_db, algo_orders=orders,
+                    reconciliation_state='degraded' if case == 'degraded' else 'healthy')
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO orders_projection
+               (order_projection_id,account_id,instrument_id,client_order_id,status,side,payload,updated_at)
+               VALUES (%s,%s,%s,%s,'accepted','short',%s,clock_timestamp())""",
+            (str(uuid4()), ACCOUNT_A, 'BTCUSDT-PERP.BINANCE', cid,
+             Json({'instrument_id': 'BTCUSDT-PERP.BINANCE'})),
+        )
+        timestamp_fields = {
+            'stale_regular': 'regular_orders_snapshot_at',
+            'stale_algo': 'algo_orders_snapshot_at',
+            'stale_positions': 'positions_snapshot_at',
+            'stale_reconciliation': 'reconciliation_completed_at',
+        }
+        if case in timestamp_fields:
+            cur.execute(f"UPDATE node_heartbeats SET {timestamp_fields[case]}=clock_timestamp()-interval '5 minutes' WHERE node_id=%s", (NODE_A,))
+        if case == 'incomplete':
+            cur.execute('UPDATE node_heartbeats SET regular_orders_snapshot_at=NULL WHERE node_id=%s', (NODE_A,))
+        if case == 'naive_proof_time':
+            cur.execute("UPDATE node_heartbeats SET payload=jsonb_set(payload,'{ts}',%s) WHERE node_id=%s",
+                        (Json(datetime.now().isoformat()), NODE_A))
+    permit_id = _seed_reviewed_release_and_permit(migrated_db)
+    response = client.post('/v1/commands', headers=_risk_headers(str(uuid4())), json=_resume_body(permit_id))
+    assert response.status_code == expected_status, response.text
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        cur.execute('SELECT status,order_type,reduce_only,payload FROM orders_projection WHERE account_id=%s AND client_order_id=%s', (ACCOUNT_A,cid))
+        assert cur.fetchone() == ('accepted', None, None, {'instrument_id':'BTCUSDT-PERP.BINANCE'})
+        if expected_status == 200:
+            cur.execute("SELECT status FROM node_heartbeats WHERE node_id=%s", (NODE_A,))
+            assert cur.fetchone() == ('HALTED',)
+
+
+@pytest.mark.parametrize("projection_state", ["thin", "mismatch", "terminal"])
+def test_resume_preserves_live_ladder_despite_projection_shape(
+    client: TestClient, migrated_db: str, monkeypatch: pytest.MonkeyPatch,
+    projection_state: str,
+) -> None:
+    monkeypatch.setattr(read_api, "_binance_mark_price", lambda _symbol: 102)
+    intent, orders = _seed_exchange_accepted_durable_entry_ladder(client, migrated_db)
+    with _connect(migrated_db) as conn, conn.cursor() as cur:
+        if projection_state == "thin":
+            cur.execute("UPDATE orders_projection SET quantity=NULL, price=NULL, order_type=NULL, reduce_only=NULL WHERE intent_id=%s", (intent,))
+        elif projection_state == "mismatch":
+            cur.execute("UPDATE orders_projection SET quantity=999, price=1 WHERE intent_id=%s", (intent,))
+        else:
+            cur.execute("UPDATE orders_projection SET status='canceled' WHERE intent_id=%s", (intent,))
+        cur.execute("SELECT order_plan FROM trade_intents WHERE intent_id=%s", (intent,))
+        persisted = cur.fetchone()[0]
+        assert persisted["type"] == "zone_ladder"
+        assert [leg["seq"] for leg in persisted["tranches"]] == [1, 2, 3]
+        assert all(Decimal(leg["notional"]) > 0 for leg in persisted["tranches"])
+    # Polling after the market moves must use the exact approved legs.
+    monkeypatch.setattr(read_api, "_binance_mark_price", lambda _symbol: 90)
+    downlink = read_api._execution_order_plan(persisted, {"max_notional": 12}, SYMBOL, "open_position")
+    assert downlink["tranches"] == persisted["tranches"]
+    _seed_heartbeat(migrated_db, regular_orders=orders)
+    _seed_reviewed_release_and_permit(migrated_db)
+    response = client.post("/v1/commands", headers=_risk_headers(str(uuid4())), json=_resume_body(None))
+    assert response.status_code == 200, response.text

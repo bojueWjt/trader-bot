@@ -126,7 +126,7 @@ test_hardening_deploy_contract_is_fail_closed() {
   assert_contains "$text" '"operator_query_projection_reads",'
   assert_contains "$text" 'release migration metadata mismatch: steps'
   assert_contains "$text" \
-    'release migration metadata lacks four-account files'
+    'release migration metadata lacks canonical files'
   assert_contains "$text" 'apply_and_verify_database_migration'
   assert_contains "$text" 'VALUES (%s, %s, %s)'
   assert_contains "$text" 'for version, name, sql, digest in migrations'
@@ -433,7 +433,7 @@ test_hardening_deploy_contract_is_fail_closed() {
   assert_not_contains "$text" '/Users/balen'
   assert_not_contains "$text" 'TELEGRAM_WATCHER_PM2'
   assert_not_contains "$text" 'pm2 '
-  assert_not_contains "$text" 'host/order_lifecycle_monitor.py'
+  assert_contains "$text" 'host/order_lifecycle_monitor.py'
   assert_not_contains "$text" 'host/trader-v3-trade-outcomes.service'
   assert_contains "$text" 'require_release_matches_bundle'
   assert_contains "$text" 'sha256sum -c SHA256SUMS'

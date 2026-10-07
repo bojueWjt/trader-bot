@@ -59,11 +59,30 @@ class TradeEventNotifierTests(unittest.TestCase):
     def test_intent_message_contains_required_fields(self):
         text = notifier.format_intent_message(_intent_row())
 
-        self.assertIn("Intent 已批准", text)
+        self.assertIn("Intent 已受理，待执行", text)
         self.assertIn("account-a", text)
         self.assertIn("MUUSDT", text)
         self.assertIn("做多", text)
         self.assertIn("1859.01 USDT", text)
+        self.assertNotIn("已批准", text)
+
+    def test_same_cycle_accepted_then_rejected_enqueues_only_rejection(self):
+        accepted = _intent_row("intent_ack.accepted")
+        accepted["source_id"] = "audit-accepted"
+        rejected = _intent_row("intent_ack.rejected")
+        rejected["source_id"] = "audit-rejected"
+        rejected["payload"] = {"detail": "denied:position_exists"}
+        state = _state()
+        count = notifier._process_audit_rows(
+            state,
+            [accepted, rejected],
+            10.0,
+        )
+        pending = state.get("pending") or []
+        self.assertEqual(count, 1)
+        self.assertEqual(len(pending), 1)
+        self.assertIn("已拒绝", pending[0]["text"])
+        self.assertNotIn("已受理", pending[0]["text"])
 
     def test_rejection_reason_and_semantic_dedupe(self):
         row = _intent_row("intent_ack.rejected")

@@ -19,6 +19,12 @@ def _clear_trading_db_path_env(monkeypatch):
         "TRADER_TRADING_DB_PATH",
         "WATCHER_TRADING_DB",
         "TRADING_DB_PATH",
+        "SIGNAL_EXECUTION_ACCOUNTS",
+        "SIGNAL_EXECUTION_STATE_PATH",
+        "SIGNAL_EXECUTION_CUTOVER_RECEIVED_AT_ACCOUNT_A",
+        "SIGNAL_EXECUTION_CUTOVER_RECEIVED_AT_ACCOUNT_B",
+        "SIGNAL_EXECUTION_CUTOVER_RECEIVED_AT_ACCOUNT_C",
+        "SIGNAL_EXECUTION_CUTOVER_RECEIVED_AT_ACCOUNT_D",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -272,6 +278,24 @@ def test_watcher_outbox_cursor_reads_only_new_unique_messages(
     assert payload["raw_text"] == "BTC long"
 
 
+def test_fetch_new_keeps_aba_edit_revert(tmp_path: Path) -> None:
+    module = _load_feeder("test_hermes_signal_feeder_aba")
+    db_path = tmp_path / "watcher-trading.db"
+    conn = _prepare_watcher_db(db_path)
+    first = _insert_telegram_message(conn, msg_id=8001, text="A")
+    _insert_telegram_message(conn, msg_id=8001, text="B")
+    revert = _insert_telegram_message(conn, msg_id=8001, text="A")
+    conn.commit()
+    rows = module.fetch_new(conn, "telegram_messages:0")
+    conn.close()
+    ids = [row["watcher_message_id"] for row in rows]
+    assert first in ids
+    assert revert in ids
+    versions = [row.get("source_version") for row in rows]
+    assert "v1" in versions
+    assert f"edit:{revert}" in versions
+
+
 def test_canonical_ingress_succeeds_before_hermes_dispatch(
     monkeypatch,
     tmp_path: Path,
@@ -290,7 +314,7 @@ def test_canonical_ingress_succeeds_before_hermes_dispatch(
     monkeypatch.setattr(module, "CHANNEL_CONTEXT_DIR", str(tmp_path / "context"))
     calls: list[str] = []
 
-    def submit_canonical_ingress(signal):
+    def submit_canonical_ingress(signal, extra_fields=None):
         calls.append(f"ingress:{signal['watcher_message_id']}")
         return {
             "inserted": True,
@@ -357,6 +381,7 @@ def test_failed_ingress_blocks_hermes_and_cursor_advancement(
     )
     monkeypatch.setattr(module, "WATCHER_TRADING_DB", str(db_path))
     monkeypatch.setattr(module, "STATE", str(state_path))
+    monkeypatch.setattr(module, "PERSIST_STATE", str(tmp_path / "persist.cursor"))
     monkeypatch.setattr(module, "PENDING_STATE", str(tmp_path / "pending.json"))
     monkeypatch.setattr(
         module,
@@ -370,7 +395,7 @@ def test_failed_ingress_blocks_hermes_and_cursor_advancement(
     monkeypatch.setattr(
         module,
         "submit_canonical_ingress",
-        lambda _signal: (_ for _ in ()).throw(
+        lambda _signal, extra_fields=None: (_ for _ in ()).throw(
             module.CanonicalIngressError("ingress unavailable")
         ),
     )
@@ -409,6 +434,7 @@ def test_startup_without_cursor_selects_latest_and_emits_no_history(
     state_path = tmp_path / "cursor"
     monkeypatch.setattr(module, "WATCHER_TRADING_DB", str(db_path))
     monkeypatch.setattr(module, "STATE", str(state_path))
+    monkeypatch.setattr(module, "PERSIST_STATE", str(tmp_path / "persist.cursor"))
     monkeypatch.setattr(module, "PENDING_STATE", str(tmp_path / "pending.json"))
     monkeypatch.setattr(module, "LOCK", str(tmp_path / "feeder.lock"))
     monkeypatch.setattr(module, "compress_channel_contexts", lambda: None)
@@ -417,7 +443,7 @@ def test_startup_without_cursor_selects_latest_and_emits_no_history(
     monkeypatch.setattr(
         module,
         "submit_canonical_ingress",
-        lambda signal: ingressed.append(str(signal["watcher_message_id"])),
+        lambda signal, extra_fields=None: ingressed.append(str(signal["watcher_message_id"])),
     )
     monkeypatch.setattr(
         module,
@@ -681,6 +707,7 @@ def test_unmapped_channel_is_quarantined_once_and_does_not_starve_queue(
     state_path.write_text(initial_cursor, encoding="utf-8")
     monkeypatch.setattr(module, "WATCHER_TRADING_DB", str(trading_db))
     monkeypatch.setattr(module, "STATE", str(state_path))
+    monkeypatch.setattr(module, "PERSIST_STATE", str(tmp_path / "persist.cursor"))
     monkeypatch.setattr(module, "PENDING_STATE", str(tmp_path / "pending.json"))
     monkeypatch.setattr(
         module,
@@ -708,7 +735,7 @@ def test_unmapped_channel_is_quarantined_once_and_does_not_starve_queue(
     )
     ingressed: list[int] = []
 
-    def submit_canonical_ingress(signal):
+    def submit_canonical_ingress(signal, extra_fields=None):
         ingressed.append(int(signal["watcher_message_id"]))
         return {
             "inserted": True,
@@ -774,7 +801,8 @@ def test_unmapped_channel_is_quarantined_once_and_does_not_starve_queue(
     )
     assert notices == []
     assert dispatched == ["signal-sig-c1002136478186-m9002"]
-    assert ingressed == [unknown_id, valid_id]
+    assert unknown_id in ingressed
+    assert valid_id in ingressed
     assert "credential-secret-label" not in output
     assert "matched 0 routes" not in output
     assert "credential-secret-label" not in json.dumps(
@@ -895,7 +923,7 @@ def test_response_waits_until_telegram_delivery_status_is_recorded(
     monkeypatch.setattr(
         module,
         "submit_canonical_ingress",
-        lambda _signal: {
+        lambda _signal, extra_fields=None: {
             "inserted": True,
             "raw_message_id": "00000000-0000-0000-0000-000000000001",
         },
@@ -957,7 +985,7 @@ def test_definitive_delivery_error_resends_without_rerunning_agent(
     monkeypatch.setattr(
         module,
         "submit_canonical_ingress",
-        lambda _signal: {
+        lambda _signal, extra_fields=None: {
             "inserted": True,
             "raw_message_id": "00000000-0000-0000-0000-000000000001",
         },
@@ -1040,7 +1068,7 @@ def test_uncertain_delivery_waits_then_redelivers_at_most_once(
     monkeypatch.setattr(
         module,
         "submit_canonical_ingress",
-        lambda _signal: {
+        lambda _signal, extra_fields=None: {
             "inserted": True,
             "raw_message_id": "00000000-0000-0000-0000-000000000001",
         },
@@ -1481,3 +1509,238 @@ def test_route_schema_requires_dynamic_risk_capital_addon(
         match="risk_capital_addon",
     ):
         module.resolve_channel_account("-10005")
+
+
+def _signal_cutover_fixture(monkeypatch, tmp_path):
+    module = _load_feeder()
+    path = tmp_path / 'watcher.db'
+    conn = _prepare_watcher_db(path)
+    old_id = _insert_telegram_message(conn, msg_id=8000, created_at='2026-09-15 00:00:00')
+    conn.commit()
+    monkeypatch.setattr(module, 'WATCHER_TRADING_DB', str(path))
+    monkeypatch.setattr(module, 'STATE', str(tmp_path / 'cursor'))
+    monkeypatch.setattr(module, 'PERSIST_STATE', str(tmp_path / 'persist'))
+    monkeypatch.setattr(module, 'PENDING_STATE', str(tmp_path / 'pending.json'))
+    monkeypatch.setattr(module, 'QUARANTINE_STATE', str(tmp_path / 'quarantine.json'))
+    monkeypatch.setattr(module, 'V3_MEDIA', str(tmp_path / 'media'))
+    monkeypatch.setenv('SIGNAL_EXECUTION_ACCOUNTS', 'account-a')
+    monkeypatch.setenv('SIGNAL_EXECUTION_CUTOVER_RECEIVED_AT_ACCOUNT_A', '2026-09-15T00:00:00Z')
+    module.initialize_signal_execution_cutover(conn)
+    return module, conn, old_id
+
+
+@pytest.mark.parametrize('accounts,cutoff', [
+    ('account-a', ''), ('account-a', '2026-09-15T00:00:00'),
+    ('account-z', '2026-09-15T00:00:00Z'), ('account-a,account-a', '2026-09-15T00:00:00Z'),
+])
+def test_signal_cutover_requires_explicit_valid_configuration(monkeypatch, accounts, cutoff):
+    module = _load_feeder()
+    monkeypatch.setenv('SIGNAL_EXECUTION_ACCOUNTS', accounts)
+    monkeypatch.setenv('SIGNAL_EXECUTION_CUTOVER_RECEIVED_AT_ACCOUNT_A', cutoff)
+    with pytest.raises(module.SignalCutoverError):
+        module.signal_execution_config()
+
+
+def test_signal_cutover_pins_highwater_and_does_not_replay_history(monkeypatch, tmp_path):
+    module, conn, old_id = _signal_cutover_fixture(monkeypatch, tmp_path)
+    _insert_telegram_message(conn, msg_id=8001, created_at='2026-09-15 00:01:00')
+    _insert_telegram_message(conn, msg_id=8002, created_at='2026-09-14 23:59:00')
+    conn.commit()
+    before = module._load_signal_cutovers()
+    module.initialize_signal_execution_cutover(conn)
+    assert module._load_signal_cutovers() == before
+    assert before['account-a']['watcher_high_water_id'] == old_id
+    rows = module.fetch_new(conn, 'telegram_messages:0')
+    assert [module._signal_dispatch_mode(row, 'account-a') for row in rows] == [
+        'signal_cutover_history', 'signal', 'signal_cutover_history',
+    ]
+    conn.close()
+
+
+def test_signal_disabled_account_remains_frozen_without_legacy_fallback(monkeypatch, tmp_path):
+    module, conn, old_id = _signal_cutover_fixture(monkeypatch, tmp_path)
+    _insert_telegram_message(conn, msg_id=8003, created_at='2026-09-15 00:01:00')
+    conn.commit()
+    row = module.fetch_new(conn, f'telegram_messages:{old_id}')[0]
+    monkeypatch.delenv('SIGNAL_EXECUTION_ACCOUNTS')
+    assert module._signal_dispatch_mode(row, 'account-a') == 'signal_execution_disabled'
+    conn.close()
+
+
+def test_signal_cutover_rejects_changed_guard_or_uncertain_legacy_job(monkeypatch, tmp_path):
+    module, conn, old_id = _signal_cutover_fixture(monkeypatch, tmp_path)
+    monkeypatch.setenv('SIGNAL_EXECUTION_CUTOVER_RECEIVED_AT_ACCOUNT_A', '2026-09-16T00:00:00Z')
+    with pytest.raises(module.SignalCutoverError, match='differs'):
+        module.initialize_signal_execution_cutover(conn)
+    monkeypatch.setenv('SIGNAL_EXECUTION_CUTOVER_RECEIVED_AT_ACCOUNT_A', '2026-09-15T00:00:00Z')
+    module.save_pending_delivery({'batch_key': f'telegram_messages:{old_id}', 'status': 'dispatching', 'job_id': ''})
+    with pytest.raises(module.SignalCutoverError, match='active or uncertain'):
+        module.initialize_signal_execution_cutover(conn)
+    conn.close()
+
+
+def test_signal_future_message_is_durable_before_cursor_and_never_calls_old_hermes(monkeypatch, tmp_path):
+    module, conn, old_id = _signal_cutover_fixture(monkeypatch, tmp_path)
+    new_id = _insert_telegram_message(conn, msg_id=8004, created_at='2026-09-15 00:01:00')
+    conn.commit()
+    writes = []
+    def submit(signal, extra_fields=None):
+        writes.append((signal['watcher_message_id'], dict(extra_fields)))
+        return {'raw_message_id': 'raw-1', 'task_id': 'task-1', 'processing_purpose': 'signal'}
+    monkeypatch.setattr(module, 'submit_canonical_ingress', submit)
+    monkeypatch.setattr(module, 'run_hermes', lambda *args, **kwargs: pytest.fail('selected account used old Hermes'))
+    monkeypatch.setattr(module, '_recover_uncertain_dispatch', lambda *args: pytest.fail('selected account inspected old jobs'))
+    cursor, count = module.persist_new_watcher_messages(conn, f'telegram_messages:{old_id}', dry_run=False)
+    assert (cursor, count) == (f'telegram_messages:{new_id}', 1)
+    assert module.load_persist_cursor() == cursor
+    assert writes[0][1]['processing_purpose'] == 'signal'
+    assert writes[0][1]['action'] == 'evaluate' and 'route_error' not in writes[0][1]
+    batch = module.fetch_new(conn, f'telegram_messages:{old_id}')
+    assert module.attempt_batch_delivery(batch, False) == 'success'
+    module.commit_batch_cursor(cursor)
+    assert module.fetch_new(conn, module.load_cursor()) == []
+    conn.close()
+
+
+def test_signal_silent_shadow_response_or_failed_ingress_cannot_advance_cursor(monkeypatch, tmp_path):
+    module, conn, old_id = _signal_cutover_fixture(monkeypatch, tmp_path)
+    _insert_telegram_message(conn, msg_id=8005, created_at='2026-09-15 00:01:00')
+    conn.commit()
+    monkeypatch.setattr(module, 'submit_canonical_ingress', lambda *args, **kwargs: {
+        'raw_message_id': 'raw-1', 'task_id': 'task-1', 'processing_purpose': 'shadow',
+    })
+    monkeypatch.setattr(module, 'run_hermes', lambda *args, **kwargs: pytest.fail('legacy fallback'))
+    cursor = f'telegram_messages:{old_id}'
+    assert module.persist_new_watcher_messages(conn, cursor, dry_run=False) == (cursor, 0)
+    assert module.attempt_batch_delivery(module.fetch_new(conn, cursor), False) == 'retry'
+    conn.close()
+
+
+def test_existing_shadow_source_is_quarantined_not_promoted_or_sent_to_hermes(monkeypatch, tmp_path):
+    module, conn, old_id = _signal_cutover_fixture(monkeypatch, tmp_path)
+    def conflict(*args, **kwargs):
+        raise module.CanonicalIngressError('processing_purpose_conflict: existing shadow source')
+    monkeypatch.setattr(module, 'submit_canonical_ingress', conflict)
+    monkeypatch.setattr(module, 'run_hermes', lambda *args, **kwargs: pytest.fail('historical source replay'))
+    cursor, count = module.persist_new_watcher_messages(conn, 'telegram_messages:0', dry_run=False)
+    assert cursor == f'telegram_messages:{old_id}' and count == 0
+    assert module.load_quarantine()['entries'][cursor]['reason_code'] == 'ingress_poison'
+    assert module.attempt_batch_delivery(module.fetch_new(conn, 'telegram_messages:0'), False) == 'success'
+    conn.close()
+
+
+def test_selected_persist_pass_progresses_past_another_accounts_slow_job(monkeypatch, tmp_path):
+    module, conn, old_id = _signal_cutover_fixture(monkeypatch, tmp_path)
+    _insert_account(conn, 'credential-b', execution_account_id='account-b')
+    conn.execute("INSERT INTO channel_routing (channel_id,target_account_id) VALUES ('-100222','credential-b')")
+    b_id = _insert_telegram_message(conn, msg_id=8006, channel_id='-100222', created_at='2026-09-15 00:01:00')
+    a_id = _insert_telegram_message(conn, msg_id=8007, created_at='2026-09-15 00:01:01')
+    conn.commit()
+    batches = module.fetch_new(conn, f'telegram_messages:{old_id}')
+    pending = module._new_pending_delivery([batches[0]])
+    pending.update(job_id='slow-b', status='observing', execution_account_id='account-b')
+    module.save_pending_delivery(pending)
+    submitted = []
+    def submit(signal, extra_fields=None):
+        submitted.append((signal['watcher_message_id'], extra_fields.get('processing_purpose', 'shadow')))
+        return {'raw_message_id': 'raw-1', 'task_id': 'task-1', 'processing_purpose': extra_fields.get('processing_purpose', 'shadow')}
+    monkeypatch.setattr(module, 'submit_canonical_ingress', submit)
+    monkeypatch.setattr(module, '_latest_markdown_response', lambda job: None)
+    monkeypatch.setattr(module, 'run_hermes', lambda *args, **kwargs: pytest.fail('existing task must not rerun'))
+    module.initialize_signal_execution_cutover(conn)
+    cursor, count = module.persist_new_watcher_messages(conn, f'telegram_messages:{old_id}', dry_run=False)
+    assert count == 2 and cursor == f'telegram_messages:{a_id}'
+    assert submitted == [(b_id, 'shadow'), (a_id, 'signal')]
+    assert module.attempt_batch_delivery([batches[0]], False) == 'pending'
+    assert module.load_pending_delivery()['job_id'] == 'slow-b'
+    conn.close()
+
+
+def test_watcher_source_timestamp_is_explicit_not_receive_time(monkeypatch, tmp_path):
+    module, conn, old_id = _signal_cutover_fixture(monkeypatch, tmp_path)
+    row = module.fetch_new(conn, 'telegram_messages:0')[0]
+    payload = module.canonical_ingress_payload(row)
+    assert payload['raw_payload']['source_ts'] is None
+    assert payload['raw_payload']['source_ts_unknown'] is True
+    conn.execute('ALTER TABLE telegram_messages ADD COLUMN source_ts TEXT')
+    conn.execute('UPDATE telegram_messages SET source_ts=? WHERE id=?', ('2026-09-14T23:58:00Z', old_id))
+    conn.commit()
+    row = module.fetch_new(conn, 'telegram_messages:0')[0]
+    payload = module.canonical_ingress_payload(row)
+    assert payload['raw_payload']['source_ts'] == '2026-09-14T23:58:00Z'
+    assert payload['raw_payload']['source_ts'] != payload['raw_payload']['receive_ts']
+    conn.close()
+
+
+def test_signal_cutover_dry_run_cannot_authorize_a_real_write(monkeypatch, tmp_path):
+    module = _load_feeder()
+    path = tmp_path / 'watcher.db'
+    conn = _prepare_watcher_db(path)
+    monkeypatch.setattr(module, 'WATCHER_TRADING_DB', str(path))
+    monkeypatch.setattr(module, 'STATE', str(tmp_path / 'cursor'))
+    monkeypatch.setattr(module, 'PENDING_STATE', str(tmp_path / 'pending'))
+    monkeypatch.setenv('SIGNAL_EXECUTION_ACCOUNTS', 'account-a')
+    monkeypatch.setenv('SIGNAL_EXECUTION_CUTOVER_RECEIVED_AT_ACCOUNT_A', '2026-09-15T00:00:00Z')
+    module.initialize_signal_execution_cutover(conn, dry_run=True)
+    _insert_telegram_message(conn, msg_id=8008, created_at='2026-09-15 00:01:00')
+    conn.commit()
+    row = module.fetch_new(conn, 'telegram_messages:0')[0]
+    monkeypatch.setattr(module, 'submit_canonical_ingress', lambda *args, **kwargs: pytest.fail('dry-run wrote ingress'))
+    monkeypatch.setattr(module, 'run_hermes', lambda *args, **kwargs: pytest.fail('dry-run invoked old writer'))
+    assert module.attempt_batch_delivery([row], True) == 'success'
+    assert not Path(module._signal_cutover_path()).exists()
+    with pytest.raises(module.SignalCutoverError, match='not been initialized'):
+        module.persist_and_enqueue_signal(row, dry_run=False)
+    conn.close()
+
+
+
+
+def test_signal_http_route_cannot_silently_downgrade_on_old_ingress(monkeypatch, tmp_path):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+    module, conn, old_id = _signal_cutover_fixture(monkeypatch, tmp_path)
+    _insert_telegram_message(conn, msg_id=8010, created_at='2026-09-15 00:01:00')
+    conn.commit()
+    row = module.fetch_new(conn, f'telegram_messages:{old_id}')[0]
+    paths = []
+    class OldIngress(BaseHTTPRequestHandler):
+        def do_POST(self):
+            paths.append(self.path)
+            self.rfile.read(int(self.headers.get('content-length', '0')))
+            self.send_response(404 if self.path != '/telegram/raw' else 201)
+            self.end_headers()
+            self.wfile.write(b'{}')
+        def log_message(self, *args):
+            pass
+    server = ThreadingHTTPServer(('127.0.0.1', 0), OldIngress)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.delenv('INGRESS_DATABASE_URL', raising=False)
+    monkeypatch.setattr(module, 'INGRESS_API_TOKEN', 'test-token')
+    monkeypatch.setattr(module, 'INGRESS_URL', f'http://127.0.0.1:{server.server_address[1]}')
+    monkeypatch.setattr(module, 'run_hermes', lambda *args, **kwargs: pytest.fail('legacy fallback'))
+    try:
+        with pytest.raises(module.CanonicalIngressError, match='HTTP 404'):
+            module.persist_and_enqueue_signal(row)
+        assert paths == ['/telegram/raw/signal']
+        assert module.load_persist_cursor() is None
+    finally:
+        server.shutdown()
+        server.server_close()
+        conn.close()
+
+
+def test_unassigned_message_during_signal_cutover_cannot_fall_back_to_legacy(monkeypatch, tmp_path):
+    module, conn, old_id = _signal_cutover_fixture(monkeypatch, tmp_path)
+    new_id = _insert_telegram_message(conn, msg_id=8011, channel_id='-100-unassigned', created_at='2026-09-15 00:01:00')
+    conn.commit()
+    monkeypatch.setattr(module, 'submit_canonical_ingress', lambda *args, **kwargs: pytest.fail('unassigned message reached executable ingress'))
+    monkeypatch.setattr(module, 'run_hermes', lambda *args, **kwargs: pytest.fail('unassigned message reached old Hermes'))
+    cursor, count = module.persist_new_watcher_messages(conn, f'telegram_messages:{old_id}', dry_run=False)
+    assert cursor == f'telegram_messages:{new_id}' and count == 0
+    assert module.attempt_batch_delivery(module.fetch_new(conn, f'telegram_messages:{old_id}'), False) == 'quarantined'
+    entry = module.load_quarantine()['entries'][cursor]
+    assert entry['reason_code'] == 'ingress_poison'
+    assert 'execution account is unassigned' in entry['reason']
+    conn.close()

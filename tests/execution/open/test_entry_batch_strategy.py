@@ -20,7 +20,9 @@ def _durable_payload(intent):
 
 def batch_fixture(tmp_path):
     strategy = _LiveEntrySubmitStrategy(
-        inventory=(('BTCUSDT-PERP.BINANCE', '12000'),), state_dir=tmp_path,
+        inventory=(('BTCUSDT-PERP.BINANCE', '12000'),),
+        state_dir=tmp_path,
+        environment='testnet',
     )
     strategy.set_live_open_gate_getter(_normal_live_open_gate)
     intent = _live_zone_ladder_intent(max_notional='200')
@@ -36,6 +38,7 @@ def batch_fixture(tmp_path):
         account_id=intent.account_id, trading_state='ACTIVE', now=strategy._now(),
         instrument=strategy._instrument_spec(intent.instrument_id), position=None,
         existing_intent_ids=frozenset(),
+        simulation=True,
     )
     return strategy, intent, context
 
@@ -49,10 +52,11 @@ def test_batch_maps_exact_two_legs_and_allows_same_side_position(tmp_path):
     occupied = replace(context, position=PositionSnapshot(intent.instrument_id, 'LONG', '5'))
     again = strategy._zone_ladder_order_plans(intent, intent.order_plan, occupied, 'open_position')
     assert isinstance(again, tuple)
+    # Hedge mode: an opposite book is independent and does not block the open.
     opposite = replace(context, position=PositionSnapshot(intent.instrument_id, 'SHORT', '5'))
-    denial = strategy._zone_ladder_order_plans(intent, intent.order_plan, opposite, 'open_position')
-    assert isinstance(denial, OrderDenied)
-    assert denial.reason == 'position_exists'
+    hedged = strategy._zone_ladder_order_plans(intent, intent.order_plan, opposite, 'open_position')
+    assert isinstance(hedged, tuple)
+    assert len(hedged) == 2
 
 
 def test_batch_budget_handles_market_and_keeps_total_cap(tmp_path):
@@ -294,6 +298,7 @@ def _three_leg_intent(strategy):
         account_id=intent.account_id, trading_state='ACTIVE', now=strategy._now(),
         instrument=strategy._instrument_spec(intent.instrument_id), position=None,
         existing_intent_ids=frozenset(),
+        simulation=True,
     )
     return intent, context
 

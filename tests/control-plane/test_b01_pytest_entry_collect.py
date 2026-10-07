@@ -1,22 +1,25 @@
-"""B-01: lock GOAL-1 pytest entries to a real .venv-arch collect."""
+"""B-01: lock GOAL-1 pytest entries to a real collect of this interpreter.
+
+`.venv-arch` is an optional frozen lock, not the gate. Collection must run
+with the current `sys.executable`.
+"""
 
 from __future__ import annotations
 
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-VENV_PY = ROOT / ".venv-arch" / "bin" / "python"
 REPORT_ENTRY = "services/report/tests"
 CONTROL_PLANE_ENTRY = "tests/control-plane"
 
 
 def _collect_only(target: str) -> subprocess.CompletedProcess[str]:
-    assert VENV_PY.is_file(), f"missing frozen interpreter {VENV_PY}"
     return subprocess.run(
-        [str(VENV_PY), "-m", "pytest", target, "--collect-only", "-q"],
+        [sys.executable, "-m", "pytest", target, "--collect-only", "-q"],
         cwd=ROOT,
         capture_output=True,
         text=True,

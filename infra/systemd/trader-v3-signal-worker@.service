@@ -1,0 +1,27 @@
+[Unit]
+Description=Trader v3 scoped signal worker for %i
+After=network-online.target trader-v3-ingress.service
+Wants=network-online.target
+
+[Service]
+# Future-message enrollment is configured on the single feeder, never here.
+# See trader-v3-hermes-feeder-signal-cutover.conf and the durable cutover guard.
+Type=simple
+User=trader-signal-%i
+Group=trader-signal-%i
+WorkingDirectory=/srv/trader-v3
+EnvironmentFile=/srv/trader-v3/secrets/signal-workers/%i.env
+Environment=HERMES_HOME=/srv/hermes/profiles/trader-%i
+Environment=HERMES_PROFILE=trader-%i
+Environment=PYTHONUNBUFFERED=1
+UnsetEnvironment=RISK_ADMIN_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_TOKEN TG_BOT_TOKEN TG_TOKEN
+ExecStart=/srv/trader-v3/.venv-cp/bin/python /srv/trader-v3/services/hermes-worker/worker.py --mode signal --account-id %i --loop --projection-adapters --media-root ${HERMES_MEDIA_ROOT} --worker-id hermes-signal
+Restart=always
+RestartSec=5
+TimeoutStopSec=90
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

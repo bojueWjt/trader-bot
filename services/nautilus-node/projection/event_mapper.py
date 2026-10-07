@@ -19,6 +19,7 @@ ORDER_EVENT_TYPES = frozenset(
         "OrderFilled",
         "OrderCanceled",
         "OrderRejected",
+        "OrderDenied",
         "OrderExpired",
         "OrderUpdated",
         "OrderPendingUpdate",
@@ -315,12 +316,23 @@ def _optional_str(value: Any) -> str | None:
 
 
 def _attr(event: Any, *names: str) -> Any:
+    nested = None
+    if isinstance(event, dict):
+        nested = event.get("payload")
+    else:
+        nested = getattr(event, "payload", None)
     for name in names:
         if isinstance(event, dict) and name in event:
-            return event[name]
+            value = event[name]
+            if value is not None:
+                return value
         value = getattr(event, name, None)
         if value is not None:
             return value
+        if isinstance(nested, dict) and name in nested:
+            nested_value = nested[name]
+            if nested_value is not None:
+                return nested_value
     return None
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import sys
 import time
 from pathlib import Path
@@ -11,19 +12,55 @@ from uuid import uuid4
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SERVICE_ROOT = REPO_ROOT / "services" / "nautilus-node"
 EXECUTION_DOMAIN_ROOT = REPO_ROOT / "packages" / "execution-domain"
-sys.path.insert(0, str(SERVICE_ROOT))
-sys.path.insert(0, str(EXECUTION_DOMAIN_ROOT))
 
-from app.node import (  # noqa: E402
-    _build_denial_reporter,
-    _build_live_canary_risk_reporter,
-    _build_protection_event_reporter,
-    _build_terminal_exchange_worker,
-    _stop_background_workers,
-)
-from runtime.exchange_cancel_adapter import (  # noqa: E402
-    TerminalExchangeRequest,
-)
+
+def _load_isolated_nautilus():
+    saved_path = list(sys.path)
+    saved_app = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "app" or name.startswith("app.")
+    }
+    sys.path.insert(0, str(EXECUTION_DOMAIN_ROOT))
+    sys.path.insert(0, str(SERVICE_ROOT))
+    try:
+        from runtime.exchange_cancel_adapter import (  # noqa: E402
+            TerminalExchangeRequest,
+        )
+
+        spec = importlib.util.spec_from_file_location(
+            "_g1_nautilus_node_reporter",
+            SERVICE_ROOT / "app" / "node.py",
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError("nautilus node.py is unavailable")
+        node_mod = importlib.util.module_from_spec(spec)
+        sys.modules["_g1_nautilus_node_reporter"] = node_mod
+        spec.loader.exec_module(node_mod)
+        return SimpleNamespace(
+            TerminalExchangeRequest=TerminalExchangeRequest,
+            build_denial_reporter=node_mod._build_denial_reporter,
+            build_live_canary_risk_reporter=node_mod._build_live_canary_risk_reporter,
+            build_protection_event_reporter=node_mod._build_protection_event_reporter,
+            build_terminal_exchange_worker=node_mod._build_terminal_exchange_worker,
+            stop_background_workers=node_mod._stop_background_workers,
+        )
+    finally:
+        for name in list(sys.modules):
+            if name == "app" or name.startswith("app."):
+                if name not in saved_app:
+                    sys.modules.pop(name, None)
+        sys.modules.update(saved_app)
+        sys.path[:] = saved_path
+
+
+_nautilus = _load_isolated_nautilus()
+TerminalExchangeRequest = _nautilus.TerminalExchangeRequest
+_build_denial_reporter = _nautilus.build_denial_reporter
+_build_live_canary_risk_reporter = _nautilus.build_live_canary_risk_reporter
+_build_protection_event_reporter = _nautilus.build_protection_event_reporter
+_build_terminal_exchange_worker = _nautilus.build_terminal_exchange_worker
+_stop_background_workers = _nautilus.stop_background_workers
 
 
 class _Lifecycle:
@@ -66,11 +103,15 @@ class _Projection:
         self.ingested: list[object] = []
         self.flush_count = 0
 
-    def ingest_event(self, event: object) -> str:
+    def ingest_event(self, event: object) -> object:
         self.started.set()
         self.release.wait(timeout=1.0)
         self.ingested.append(event)
-        return str(getattr(event, "event_id"))
+        if isinstance(event, dict):
+            event_id = event.get("event_id") or event.get("event_key") or "raw"
+        else:
+            event_id = getattr(event, "event_id", None) or "raw"
+        return SimpleNamespace(outcome="DURABLE", event_id=str(event_id))
 
     def flush(self) -> list[str]:
         self.flush_count += 1
@@ -174,6 +215,7 @@ def test_protection_reporter_moves_spool_and_network_work_off_callback() -> None
         worker = runtime.background_workers[0]
         assert worker.wait_empty(timeout_seconds=1.0)
         assert len(projection.ingested) == 1
+        assert isinstance(projection.ingested[0], dict)
         assert projection.flush_count == 1
     finally:
         projection.release.set()

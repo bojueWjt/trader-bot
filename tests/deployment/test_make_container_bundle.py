@@ -251,6 +251,14 @@ EXPECTED_BUNDLE_FILES = {
     ),
 }
 DEPENDENCY_CLOSURE_FILES = {
+    "/app/projection/event_mapper.py": (
+        "event_mapper.py",
+        "services/nautilus-node/projection/event_mapper.py",
+    ),
+    "/app/execution_domain/order_ownership.py": (
+        "order_ownership.py",
+        "packages/execution-domain/execution_domain/order_ownership.py",
+    ),
     "/app/projection/actor.py": (
         "projection_actor.py",
         "services/nautilus-node/projection/actor.py",

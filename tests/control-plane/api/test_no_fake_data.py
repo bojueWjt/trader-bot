@@ -6,11 +6,26 @@ from pathlib import Path
 import pytest
 
 BRIDGE_API = Path(__file__).resolve().parents[3] / "bridge" / "apps" / "api"
-if str(BRIDGE_API) not in sys.path:
-    sys.path.insert(0, str(BRIDGE_API))
+
+
+def _prefer_bridge_app() -> None:
+    bridge = str(BRIDGE_API)
+    if bridge in sys.path:
+        sys.path.remove(bridge)
+    sys.path.insert(0, bridge)
+    app_mod = sys.modules.get("app")
+    app_file = str(getattr(app_mod, "__file__", "") or "")
+    if app_mod is not None and not app_file.startswith(bridge):
+        for name in list(sys.modules):
+            if name == "app" or name.startswith("app."):
+                sys.modules.pop(name, None)
+
+
+_prefer_bridge_app()
 
 
 def _reimport_provider():
+    _prefer_bridge_app()
     for mod in ("app.services.dashboard_provider", "app.services.dashboard_fake_adapter"):
         sys.modules.pop(mod, None)
 

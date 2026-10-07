@@ -7,7 +7,7 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from .service import IngressValidationError, ingest_raw_telegram_update
+from .service import IngressValidationError, ingest_raw_telegram_update, ingest_signal_telegram_update
 
 
 class IngressHTTPHandler(BaseHTTPRequestHandler):
@@ -18,13 +18,16 @@ class IngressHTTPHandler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._write_json(401, {"error": "unauthorized"})
             return
-        if self.path != "/telegram/raw":
+        if self.path not in {"/telegram/raw", "/telegram/raw/signal"}:
             self._write_json(404, {"error": "not_found"})
             return
 
         try:
             payload = self._read_json()
-            result = ingest_raw_telegram_update(payload, self.database_url)
+            if self.path == "/telegram/raw/signal":
+                result = ingest_signal_telegram_update(payload, self.database_url)
+            else:
+                result = ingest_raw_telegram_update(payload, self.database_url)
         except IngressValidationError as exc:
             self._write_json(400, {"error": "invalid_payload", "message": str(exc)})
             return

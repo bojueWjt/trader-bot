@@ -2393,42 +2393,20 @@ def _build_protection_event_reporter(
     from runtime.bounded_task_worker import BoundedTaskWorker
 
     def handle(event: dict[str, Any]) -> None:
-        from projection.contracts import ExecutionEventEnvelopeV1
-
-        event_type = str(event["event_type"])
-        event_key = str(event["event_key"])
-        material = json.dumps(
-            {
-                "account_id": runtime.config.account_id,
-                "node_id": runtime.config.node_id,
-                "event_type": event_type,
-                "event_key": event_key,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        event_id = "strategy-" + sha256(material.encode("utf-8")).hexdigest()
-        ts_event = event.get("ts_event")
-        if not isinstance(ts_event, datetime):
-            ts_event = datetime.now(timezone.utc)
-        if ts_event.tzinfo is None:
-            ts_event = ts_event.replace(tzinfo=timezone.utc)
         payload = dict(event.get("payload") or {})
-        payload["event_key"] = event_key
-        payload["instrument_id"] = str(event.get("instrument_id") or "")
-        intent_id = UUID(str(event["intent_id"]))
-        envelope = ExecutionEventEnvelopeV1(
-            event_id=event_id,
-            node_id=runtime.config.node_id,
-            account_id=runtime.config.account_id,
-            intent_id=intent_id,
-            client_order_id=event.get("client_order_id"),
-            event_type=event_type,
-            ts_event=ts_event,
-            ts_ingest=datetime.now(timezone.utc),
-            payload=payload,
-        )
-        runtime.projection_actor.ingest_event(envelope)
+        if event.get("event_key") is not None:
+            payload.setdefault("event_key", str(event.get("event_key")))
+        if event.get("instrument_id") is not None:
+            payload.setdefault("instrument_id", str(event.get("instrument_id") or ""))
+        if event.get("reason") is not None:
+            payload.setdefault("reason", event.get("reason"))
+        source = dict(event)
+        source["payload"] = payload
+        result = runtime.projection_actor.ingest_event(source)
+        outcome = getattr(result, "outcome", None)
+        halted = getattr(outcome, "value", outcome)
+        if str(halted).upper() == "HALTED":
+            raise RuntimeError("projection ingest halted")
         runtime.projection_actor.flush()
 
     worker = BoundedTaskWorker(

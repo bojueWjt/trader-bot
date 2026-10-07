@@ -74,6 +74,14 @@ MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP="$STAGING/db/migrations/0017_operat
 MIGRATION_OPERATOR_QUERY_PROJECTION_READS_DOWN="$STAGING/db/migrations/0017_operator_query_projection_reads.down.sql"
 MIGRATION_PROJECTION_RELIABILITY_UP="$STAGING/db/migrations/0018_projection_reliability.up.sql"
 MIGRATION_PROJECTION_RELIABILITY_DOWN="$STAGING/db/migrations/0018_projection_reliability.down.sql"
+MIGRATION_ACCOUNT_EQUITY_SAMPLES_UP="$STAGING/db/migrations/0019_account_equity_samples.up.sql"
+MIGRATION_ACCOUNT_EQUITY_SAMPLES_DOWN="$STAGING/db/migrations/0019_account_equity_samples.down.sql"
+MIGRATION_SIGNAL_DISPATCH_QUEUE_UP="$STAGING/db/migrations/0020_signal_dispatch_queue_g2.up.sql"
+MIGRATION_SIGNAL_DISPATCH_QUEUE_DOWN="$STAGING/db/migrations/0020_signal_dispatch_queue_g2.down.sql"
+MIGRATION_SIGNAL_EXECUTION_UP="$STAGING/db/migrations/0021_signal_execution_g3.up.sql"
+MIGRATION_SIGNAL_EXECUTION_DOWN="$STAGING/db/migrations/0021_signal_execution_g3.down.sql"
+MIGRATION_POSITION_REVISION_UP="$STAGING/db/migrations/0022_position_revision_g3.up.sql"
+MIGRATION_POSITION_REVISION_DOWN="$STAGING/db/migrations/0022_position_revision_g3.down.sql"
 JP24_REDIS_DEAD_INSTANCE_JANITOR="$STAGING/jp24_redis_dead_instance_janitor.py"
 CONTROL_PLANE_ISOLATION_SCRIPT="$STAGING/hk-control-plane-isolation.sh"
 CONTROL_PLANE_ISOLATION_MODE="${CONTROL_PLANE_ISOLATION_MODE:-require}"
@@ -178,6 +186,16 @@ FILES_INSTALLED=0
 HOST_RUNTIME_INSTALL_COMPLETE=0
 CONTROL_PLANE_RESTARTED=0
 HERMES_RESTART_REQUIRED=0
+DASHBOARD_INSTALLED=0
+OPERATOR_JWT_ENV_INSTALLED=0
+OPERATOR_JWT_ENV_TARGET="$T/secrets/control-plane/dashboard-jwt.env"
+OPERATOR_JWT_DROPIN_TARGET="${SYSTEMD_UNIT_ROOT:-/etc/systemd/system}/trader-v3-controlplane-operator-query.service.d/90-dashboard-jwt-environment.conf"
+DASHBOARD_ISSUER_CONTAINER="${DASHBOARD_ISSUER_CONTAINER:-trader-api-1}"
+HERMES_CLI_ENV_INSTALLED=0
+HERMES_CLI_ENV_TARGET="$T/secrets/hermes-cli.env"
+HERMES_CLI_DROPIN_TARGET="${SYSTEMD_UNIT_ROOT:-/etc/systemd/system}/hermes-gateway-trader.service.d/90-trader-cli-environment.conf"
+SIGNAL_RUNTIME_RESTART_REQUIRED=0
+SIGNAL_RUNTIME_RESTARTED_UNITS=()
 HERMES_RESTARTED=0
 WATCHER_RESTART_REQUIRED=0
 WATCHER_RESTARTED=0
@@ -223,7 +241,7 @@ LEGACY_RECREATE_BOOTSTRAP_EVIDENCE="$BACKUP_ROOT/legacy-recreate-bootstrap.json"
 LEGACY_RECREATE_GENERATED_LIST="$BACKUP_ROOT/legacy-recreate-generated.tsv"
 LEGACY_RECREATE_RECORDS="$BACKUP_ROOT/legacy-recreate-records.tsv"
 LEGACY_RECREATE_SNAPSHOT_ROOT="$BACKUP_ROOT/legacy-recreate-snapshots"
-MIGRATION_COMMIT_MARKER="$BACKUP_ROOT/0018-migration-committed.json"
+MIGRATION_COMMIT_MARKER="$BACKUP_ROOT/0021-migration-committed.json"
 MAINTENANCE_FENCE_STATE="$BACKUP_ROOT/maintenance-fence.json"
 MAINTENANCE_FENCE_ID=""
 MAINTENANCE_FENCE_ACQUIRED=0
@@ -3002,9 +3020,20 @@ restore_installed_runtime_files() {
       fi
     done < "$BACKUP_ROOT/new-files.txt"
   fi
+  if [ "${DASHBOARD_INSTALLED:-0}" = "1" ]; then
+    restore_dashboard_payload || restore_failed=1
+  fi
   return "$restore_failed"
 }
 rollback_restart_changed_runtimes() {
+  local unit
+  if [ "${HERMES_CLI_ENV_INSTALLED:-0}" = "1" ] || [ "${OPERATOR_JWT_ENV_INSTALLED:-0}" = "1" ]; then
+    systemctl daemon-reload || return 1
+  fi
+  for unit in "${SIGNAL_RUNTIME_RESTARTED_UNITS[@]:-}"; do
+    [ -n "$unit" ] || continue
+    systemctl restart "$unit" || return 1
+  done
   if [ "$WATCHER_RESTARTED" = "1" ]; then
     rollback_restart_watcher_runtime || true
   fi
@@ -3018,7 +3047,8 @@ rollback_restart_changed_runtimes() {
 install_payload_atomically() {
   local source="$1"
   local target="$2"
-  python3 - "$source" "$target" <<'PY'
+  local target_mode="${3:-}"
+  python3 - "$source" "$target" "$target_mode" <<'PY'
 from __future__ import annotations
 
 import os
@@ -3046,6 +3076,8 @@ else:
     target_mode = 0o644
     target_uid = 0
     target_gid = 0
+if len(sys.argv) > 3 and sys.argv[3]:
+    target_mode = int(sys.argv[3], 8)
 descriptor, temporary_raw = tempfile.mkstemp(
     prefix=f".{target.name}.deploy.",
     dir=target.parent,
@@ -3073,6 +3105,415 @@ finally:
         pass
 PY
 }
+dashboard_payload_action() {
+  python3 - "$1" "$STAGING" "$T" "$BACKUP_ROOT" <<'PY'
+import hashlib
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+action, staging_raw, target_raw, backup_raw = sys.argv[1:]
+staging, target_root, backup_root = map(Path, (staging_raw, target_raw, backup_raw))
+sys.path.insert(0, str(staging))
+from release_manifest import validate_dashboard_manifest
+
+target = target_root / "dashboard" / "dist"
+backup = backup_root / "dashboard-dist"
+absent = backup_root / "dashboard-dist.absent"
+for path in (target, *target.parents):
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        continue
+    if not stat.S_ISDIR(mode):
+        raise SystemExit(f"unsafe dashboard target: {path}")
+
+
+def validate(root):
+    source = json.loads((staging / "release-source-manifest.json").read_text())
+    reference = source.get("dashboard", {})
+    manifest = staging / "dashboard-manifest.json"
+    if reference.get("manifest") != manifest.name or reference.get("manifest_sha256") != hashlib.sha256(manifest.read_bytes()).hexdigest():
+        raise SystemExit("dashboard manifest provenance hash mismatch")
+    return validate_dashboard_manifest(
+        manifest, payload_root=root,
+        source_commit=source["source_commit"], source_tree=source["source_tree"],
+    )
+
+
+def capture_backup():
+    if backup.exists() or absent.exists():
+        return
+    backup_root.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        # Reject symlinks throughout the live tree rather than dereference outside it.
+        if any(path.is_symlink() for path in target.rglob("*")):
+            raise SystemExit("dashboard live tree contains symlink")
+        shutil.copytree(target, backup)
+    else:
+        absent.touch(mode=0o600)
+
+
+def replace_tree(source):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=".dist-deploy-", dir=target.parent))
+    replacement = temporary / "new"
+    previous = temporary / "previous"
+    try:
+        shutil.copytree(source, replacement)
+        # Source was validated; copying preserves the exact bytes and relative tree.
+        if target.exists():
+            os.replace(target, previous)
+        try:
+            os.replace(replacement, target)
+        except BaseException:
+            if previous.exists():
+                os.replace(previous, target)
+            raise
+        directory_fd = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        shutil.rmtree(temporary)
+
+
+if action == "verify":
+    validate(staging)
+elif action == "backup":
+    capture_backup()
+elif action == "install":
+    validate(staging)
+    capture_backup()
+    replace_tree(staging / "dashboard" / "dist")
+    validate(target_root)
+elif action == "live":
+    document = validate(target_root)
+    for relative, expected_digest in document["files"].items():
+        asset_path = relative.removeprefix("dashboard/dist/")
+        url = "https://jp-bot.balen.wang/" + ("" if asset_path == "index.html" else asset_path)
+        response = subprocess.run([
+            "curl", "--fail", "--silent", "--show-error", "--max-time", "10",
+            "--connect-timeout", "5", "--resolve", "jp-bot.balen.wang:443:127.0.0.1", url,
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15, check=False)
+        if response.returncode or hashlib.sha256(response.stdout).hexdigest() != expected_digest:
+            raise SystemExit(f"dashboard HTTP readback mismatch: {relative}")
+elif action == "restore":
+    if backup.is_dir():
+        replace_tree(backup)
+    elif absent.is_file() and target.exists():
+        shutil.rmtree(target)
+else:
+    raise SystemExit("invalid dashboard deployment action")
+PY
+}
+verify_dashboard_payload() {
+  dashboard_payload_action verify
+}
+backup_dashboard_payload() {
+  dashboard_payload_action backup
+}
+install_dashboard_payload() {
+  DASHBOARD_INSTALLED=1
+  dashboard_payload_action install
+}
+verify_dashboard_live() {
+  dashboard_payload_action live
+}
+restore_dashboard_payload() {
+  dashboard_payload_action restore
+}
+
+verify_signal_runtime_payload() {
+  python3 - "$STAGING" "${SIGNAL_RUNTIME_FILE_MAP[@]}" <<'PY'
+import ast
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+staging = Path(sys.argv[1])
+for mapping in sys.argv[2:]:
+    source, target = mapping.split("|", 1)
+    payload = staging / source
+    if not payload.is_file() or payload.is_symlink():
+        raise SystemExit(f"signal runtime payload missing or unsafe: {source}")
+    if payload.suffix == ".py":
+        ast.parse(payload.read_text(), filename=source)
+    elif payload.suffix == ".json":
+        json.loads(payload.read_text())
+    destination = Path(target)
+    for path in (destination, *destination.parents):
+        try:
+            metadata = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        expected = stat.S_ISREG if path == destination else stat.S_ISDIR
+        if not expected(metadata.st_mode):
+            raise SystemExit(f"signal runtime target is unsafe: {path}")
+PY
+}
+verify_signal_runtime_installed() {
+  local mapping source target
+  for mapping in "${SIGNAL_RUNTIME_FILE_MAP[@]}"; do
+    source="${mapping%%|*}"; target="${mapping#*|}"
+    cmp -s "$STAGING/$source" "$target" \
+      || die "post-install mismatch: $source"
+  done
+}
+verify_signal_credential_contract() {
+  HERMES_CLI_ENV_STAGED="$(mktemp "$(dirname "$STAGING")/.trader-credential.XXXXXX")"
+  HERMES_CLI_DROPIN_STAGED="$(mktemp "$(dirname "$STAGING")/.trader-credential.XXXXXX")"
+  OPERATOR_JWT_ENV_STAGED="$(mktemp "$(dirname "$STAGING")/.trader-credential.XXXXXX")"
+  OPERATOR_JWT_DROPIN_STAGED="$(mktemp "$(dirname "$STAGING")/.trader-credential.XXXXXX")"
+  TEMP_FILES+=("$HERMES_CLI_ENV_STAGED" "$HERMES_CLI_DROPIN_STAGED" "$OPERATOR_JWT_ENV_STAGED" "$OPERATOR_JWT_DROPIN_STAGED")
+  "$T/.venv-cp/bin/python" - "$STAGING/host" "$T/.env.v3" \
+    "${CONTROL_PLANE_ROLE_BOOTSTRAP_REQUIRED:-0}" \
+    "$HERMES_CLI_ENV_STAGED" "$HERMES_CLI_DROPIN_STAGED" \
+    "$HERMES_CLI_ENV_TARGET" "$HERMES_CLI_DROPIN_TARGET" \
+    "$OPERATOR_JWT_ENV_STAGED" "$OPERATOR_JWT_DROPIN_STAGED" \
+    "$OPERATOR_JWT_ENV_TARGET" "$OPERATOR_JWT_DROPIN_TARGET" \
+    "$DASHBOARD_ISSUER_CONTAINER" <<'PY'
+import json
+import os
+import stat
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from security.principal import assert_token_catalog_unique, SIGNAL_TOKEN_ENV
+from security.permissions import TOKEN_ENV_VARS
+
+
+def read_env(path):
+    values = {}
+    for raw in Path(path).read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise SystemExit("unsupported credential environment file syntax")
+        name, value = line.split("=", 1)
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[name.strip()] = value
+    return values
+
+
+def validate_catalog(env, label):
+    try:
+        assert_token_catalog_unique(env)
+    except PermissionError:
+        names = list(TOKEN_ENV_VARS) + list(SIGNAL_TOKEN_ENV)
+        groups = {}
+        for name in names:
+            value = str(env.get(name, "")).strip()
+            if value:
+                groups.setdefault(value, []).append(name)
+        try:
+            nodes = json.loads(env.get("NAUTILUS_NODE_AUTH_JSON") or "{}")
+            for name, binding in nodes.items():
+                value = str(binding.get("token", "")).strip()
+                if value:
+                    groups.setdefault(value, []).append("NAUTILUS_NODE_AUTH_JSON:" + name)
+        except (ValueError, TypeError, AttributeError):
+            raise SystemExit(f"invalid NAUTILUS_NODE_AUTH_JSON: {label}") from None
+        collisions = [", ".join(names) for names in groups.values() if len(names) > 1]
+        raise SystemExit(f"credential catalog rejected ({label}): {'; '.join(collisions)}") from None
+
+# Validate the environment systemd will actually supply after restart.
+def property_value(unit, name):
+    return subprocess.check_output([
+        "systemctl", "show", unit, "--property=" + name, "--value",
+    ], text=True).strip()
+
+
+def unit_environment(unit):
+    values = {}
+    for assignment in shlex.split(property_value(unit, "Environment")):
+        name, value = assignment.split("=", 1)
+        values[name] = value
+    files = property_value(unit, "EnvironmentFiles")
+    matches = re.findall(r'(\S+)\s+\(ignore_errors=(yes|no)\)', files)
+    if files and not matches:
+        raise SystemExit(f"unsupported EnvironmentFiles contract: {unit}")
+    for filename, optional in matches:
+        if not Path(filename).is_file() and optional == "yes":
+            continue
+        values.update(read_env(filename))
+    for name in shlex.split(property_value(unit, "UnsetEnvironment")):
+        if "=" in name:
+            key, value = name.split("=", 1)
+            if values.get(key) == value:
+                values.pop(key)
+        else:
+            values.pop(name, None)
+    return values
+
+base = None
+for role in ("operator-query", "node-control", "event-ingest"):
+    unit = f"trader-v3-controlplane-{role}.service"
+    effective = unit_environment(unit)
+    if not effective:
+        if sys.argv[3] != "1":
+            raise SystemExit(f"control-plane effective environment unavailable: {unit}")
+        # Bootstrap installs generated role environments from this checked source.
+        effective = read_env(sys.argv[2])
+    validate_catalog(effective, unit)
+    if role == "operator-query":
+        base = effective
+gateway = unit_environment("hermes-gateway-trader.service")
+operator = str(base.get("RISK_ADMIN_TOKEN", "")).strip()
+if not operator:
+    raise SystemExit("operator-query RISK_ADMIN_TOKEN is required for Hermes CLI injection")
+# Reject multiline / shell-special credential syntax instead of changing the token.
+if not re.fullmatch(r"[A-Za-z0-9_.~+/=-]+", operator):
+    raise SystemExit("RISK_ADMIN_TOKEN cannot be represented safely in systemd environment file")
+reader = gateway.get("V3_READ_TOKEN") or operator
+readers = {str(base.get(name, "")).strip() for name in (
+    "RISK_ADMIN_TOKEN", "VIEWER_TOKEN", "REVIEWER_TOKEN", "SYSTEM_OBSERVER_TOKEN"
+)} - {""}
+if str(reader).strip() not in readers:
+    raise SystemExit("Hermes gateway V3_READ_TOKEN/read fallback is not a control-plane reader")
+gateway_unset = shlex.split(property_value("hermes-gateway-trader.service", "UnsetEnvironment"))
+if any(entry.split("=", 1)[0] in {"RISK_ADMIN_TOKEN", "V3_CONTROL_PLANE_URL"} for entry in gateway_unset):
+    raise SystemExit("Hermes gateway UnsetEnvironment blocks CLI credential or control-plane URL injection")
+url = gateway.get("V3_CONTROL_PLANE_URL", "http://127.0.0.1:8183")
+if not re.fullmatch(r"https?://[A-Za-z0-9.:-]+(?:/[A-Za-z0-9_./-]*)?", url):
+    raise SystemExit("Hermes V3_CONTROL_PLANE_URL is invalid")
+for raw in (*sys.argv[6:8], *sys.argv[10:12]):
+    target = Path(raw)
+    for path in (target, *target.parents):
+        try:
+            mode = os.lstat(path).st_mode
+        except FileNotFoundError:
+            continue
+        expected = stat.S_ISREG if path == target else stat.S_ISDIR
+        if not expected(mode):
+            raise SystemExit(f"unsafe Hermes CLI environment target: {path}")
+Path(sys.argv[4]).write_text(f"RISK_ADMIN_TOKEN={operator}\nV3_CONTROL_PLANE_URL={url}\n")
+os.chmod(sys.argv[4], 0o600)
+Path(sys.argv[5]).write_text(f"[Service]\nEnvironmentFile={sys.argv[6]}\n")
+os.chmod(sys.argv[5], 0o600)
+# The existing bridge issuer remains the sole source of the JWT signing key.
+inspected = subprocess.run(
+    ["docker", "inspect", sys.argv[12]], capture_output=True, text=True, timeout=15,
+)
+if inspected.returncode:
+    raise SystemExit("dashboard JWT issuer container inspection failed")
+try:
+    containers = json.loads(inspected.stdout)
+    if len(containers) != 1 or containers[0].get("State", {}).get("Running") is not True:
+        raise ValueError("issuer unavailable")
+    issuer_values = [entry.split("=", 1)[1] for entry in containers[0]["Config"]["Env"]
+                     if entry.startswith("AUTH_SECRET_KEY=")]
+    if len(issuer_values) != 1:
+        raise ValueError("ambiguous key")
+    issuer_key = issuer_values[0]
+except (ValueError, TypeError, KeyError, AttributeError):
+    raise SystemExit("dashboard JWT issuer AUTH_SECRET_KEY configuration is invalid") from None
+if not re.fullmatch(r"[A-Za-z0-9_.~+/=-]+", issuer_key):
+    raise SystemExit("dashboard JWT issuer AUTH_SECRET_KEY is empty or unsafe for environment injection")
+cp_key = base.get("AUTH_SECRET_KEY", "")
+if cp_key and cp_key != issuer_key:
+    raise SystemExit("operator-query AUTH_SECRET_KEY differs from dashboard issuer; refusing session key replacement")
+jwt_target = Path(sys.argv[10])
+if jwt_target.is_file():
+    installed_key = read_env(jwt_target).get("AUTH_SECRET_KEY", "")
+    if installed_key != issuer_key:
+        raise SystemExit("operator-query dashboard-jwt.env AUTH_SECRET_KEY differs from issuer")
+unset = shlex.split(property_value("trader-v3-controlplane-operator-query.service", "UnsetEnvironment"))
+if "AUTH_SECRET_KEY" in unset or "AUTH_SECRET_KEY=" + issuer_key in unset:
+    raise SystemExit("operator-query UnsetEnvironment blocks AUTH_SECRET_KEY injection")
+# A matching configured key already survives restart: do not add another source.
+if not cp_key:
+    Path(sys.argv[8]).write_text(f"AUTH_SECRET_KEY={issuer_key}\n")
+    Path(sys.argv[9]).write_text(f"[Service]\nEnvironmentFile={sys.argv[10]}\n")
+for filename in sys.argv[8:10]:
+    os.chmod(filename, 0o600)
+print("credential catalog verified; minimal Hermes CLI and operator-query JWT injection prepared")
+PY
+}
+backup_hermes_cli_environment() {
+  local target label
+  for target in "$HERMES_CLI_ENV_TARGET" "$HERMES_CLI_DROPIN_TARGET"; do
+    label="hermes_cli__$(basename "$target")"
+    if [ -f "$target" ]; then
+      bk "$target" "$label"
+    else
+      printf '%s\n' "$target" >> "$BACKUP_ROOT/new-files.txt"
+    fi
+  done
+}
+install_hermes_cli_environment() {
+  if cmp -s "$HERMES_CLI_ENV_STAGED" "$HERMES_CLI_ENV_TARGET" \
+    && cmp -s "$HERMES_CLI_DROPIN_STAGED" "$HERMES_CLI_DROPIN_TARGET"; then
+    chmod 600 "$HERMES_CLI_ENV_TARGET" "$HERMES_CLI_DROPIN_TARGET"
+    return
+  fi
+  HERMES_CLI_ENV_INSTALLED=1
+  mkdir -p "$(dirname "$HERMES_CLI_ENV_TARGET")" "$(dirname "$HERMES_CLI_DROPIN_TARGET")"
+  install_payload_atomically "$HERMES_CLI_ENV_STAGED" "$HERMES_CLI_ENV_TARGET" 600
+  install_payload_atomically "$HERMES_CLI_DROPIN_STAGED" "$HERMES_CLI_DROPIN_TARGET" 600
+  cmp -s "$HERMES_CLI_ENV_STAGED" "$HERMES_CLI_ENV_TARGET" || die "Hermes CLI environment readback mismatch"
+  cmp -s "$HERMES_CLI_DROPIN_STAGED" "$HERMES_CLI_DROPIN_TARGET" || die "Hermes CLI drop-in readback mismatch"
+  HERMES_RESTART_REQUIRED=1
+  systemctl daemon-reload
+}
+backup_operator_jwt_environment() {
+  local target label
+  [ -s "$OPERATOR_JWT_ENV_STAGED" ] || return 0
+  for target in "$OPERATOR_JWT_ENV_TARGET" "$OPERATOR_JWT_DROPIN_TARGET"; do
+    label="operator_jwt__$(basename "$target")"
+    if [ -f "$target" ]; then
+      bk "$target" "$label"
+    else
+      printf '%s\n' "$target" >> "$BACKUP_ROOT/new-files.txt"
+    fi
+  done
+}
+install_operator_jwt_environment() {
+  [ -s "$OPERATOR_JWT_ENV_STAGED" ] || return 0
+  if cmp -s "$OPERATOR_JWT_ENV_STAGED" "$OPERATOR_JWT_ENV_TARGET" \
+    && cmp -s "$OPERATOR_JWT_DROPIN_STAGED" "$OPERATOR_JWT_DROPIN_TARGET"; then
+    chmod 600 "$OPERATOR_JWT_ENV_TARGET" "$OPERATOR_JWT_DROPIN_TARGET"
+    return
+  fi
+  OPERATOR_JWT_ENV_INSTALLED=1
+  mkdir -p "$(dirname "$OPERATOR_JWT_ENV_TARGET")" "$(dirname "$OPERATOR_JWT_DROPIN_TARGET")"
+  install_payload_atomically "$OPERATOR_JWT_ENV_STAGED" "$OPERATOR_JWT_ENV_TARGET" 600
+  install_payload_atomically "$OPERATOR_JWT_DROPIN_STAGED" "$OPERATOR_JWT_DROPIN_TARGET" 600
+  cmp -s "$OPERATOR_JWT_ENV_STAGED" "$OPERATOR_JWT_ENV_TARGET" || die "operator-query JWT environment readback mismatch"
+  cmp -s "$OPERATOR_JWT_DROPIN_STAGED" "$OPERATOR_JWT_DROPIN_TARGET" || die "operator-query JWT drop-in readback mismatch"
+  systemctl daemon-reload
+}
+restart_signal_runtime_units() {
+  local unit
+  if [ "${SIGNAL_RUNTIME_RESTART_REQUIRED:-0}" != "1" ]; then
+    return
+  fi
+  verify_maintenance_fence "signal-runtime-restart"
+  # Existing producers only. Signal workers and cutover drop-ins remain inert artifacts.
+  for unit in trader-v3-ingress.service "${ORDER_LIFECYCLE_UNIT:-trader-v3-lifecycle-monitor.service}"; do
+    if systemctl is-active --quiet "$unit"; then
+      SIGNAL_RUNTIME_RESTARTED_UNITS+=("$unit")
+      systemctl restart "$unit"
+      systemctl is-active --quiet "$unit" || die "$unit failed to restart"
+    fi
+  done
+}
+
 install_host_python_module() {
   local source="$1"
   local target="$2"
@@ -4613,7 +5054,7 @@ try:
     UUID(redis_fencing_epoch)
 except ValueError as exc:
     raise SystemExit("post-migration Redis fencing epoch is invalid") from exc
-if database_schema_epoch != "0018_projection_reliability":
+if database_schema_epoch != "0022_position_revision_g3":
     raise SystemExit("post-migration database schema epoch is invalid")
 if redis_schema_epoch != "fenced-generation-namespace/v2":
     raise SystemExit("post-migration Redis schema epoch is invalid")
@@ -4801,7 +5242,7 @@ with psycopg2.connect(database_url) as conn, conn.cursor() as cur:
         FROM schema_migrations
         WHERE version = ANY(%s)
         """,
-        (["0010", "0011", "0012", "0013", "0014", "0015"],),
+        (["0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022"],),
     )
     applied_migrations = dict(cur.fetchall())
 if len(rows) != 1:
@@ -4815,6 +5256,13 @@ if applied_migrations != {
     "0013": "four_account_rollout",
     "0014": "cancel_order_contract",
     "0015": "refresh_evidence_command",
+    "0016": "control_plane_lock_privileges",
+    "0017": "operator_query_projection_reads",
+    "0018": "projection_reliability",
+    "0019": "account_equity_samples",
+    "0020": "signal_dispatch_queue_g2",
+    "0021": "signal_execution_g3",
+    "0022": "position_revision_g3",
 }:
     raise SystemExit(
         "post-migration recovery lacks required migrations"
@@ -6689,6 +7137,14 @@ require_staging_artifact \
   || die "0018 up migration missing"
 [ -f "$MIGRATION_PROJECTION_RELIABILITY_DOWN" ] \
   || die "0018 down migration missing"
+[ -f "$MIGRATION_ACCOUNT_EQUITY_SAMPLES_UP" ] || die "0019 up migration missing"
+[ -f "$MIGRATION_ACCOUNT_EQUITY_SAMPLES_DOWN" ] || die "0019 down migration missing"
+[ -f "$MIGRATION_SIGNAL_DISPATCH_QUEUE_UP" ] || die "0020 up migration missing"
+[ -f "$MIGRATION_SIGNAL_DISPATCH_QUEUE_DOWN" ] || die "0020 down migration missing"
+[ -f "$MIGRATION_SIGNAL_EXECUTION_UP" ] || die "0021 up migration missing"
+[ -f "$MIGRATION_SIGNAL_EXECUTION_DOWN" ] || die "0021 down migration missing"
+[ -f "$MIGRATION_POSITION_REVISION_UP" ] || die "0022 up migration missing"
+[ -f "$MIGRATION_POSITION_REVISION_DOWN" ] || die "0022 down migration missing"
 case "$DELIVERY_MODE" in
   immutable_image|transition_bind_mount) ;;
   *) die "invalid DELIVERY_MODE: $DELIVERY_MODE" ;;
@@ -6800,6 +7256,14 @@ for required in \
   db/migrations/0017_operator_query_projection_reads.down.sql \
   db/migrations/0018_projection_reliability.up.sql \
   db/migrations/0018_projection_reliability.down.sql \
+  db/migrations/0019_account_equity_samples.up.sql \
+  db/migrations/0019_account_equity_samples.down.sql \
+  db/migrations/0020_signal_dispatch_queue_g2.up.sql \
+  db/migrations/0020_signal_dispatch_queue_g2.down.sql \
+  db/migrations/0021_signal_execution_g3.up.sql \
+  db/migrations/0021_signal_execution_g3.down.sql \
+  db/migrations/0022_position_revision_g3.up.sql \
+  db/migrations/0022_position_revision_g3.down.sql \
   "$(basename "$DEPENDENCY_LOCK")"; do
   require_checksum_artifact "$required"
 done
@@ -6992,6 +7456,22 @@ expected_steps = [
             ),
         ],
     },
+    {"version": "0019", "name": "account_equity_samples",
+     "up": "db/migrations/0019_account_equity_samples.up.sql",
+     "down": "db/migrations/0019_account_equity_samples.down.sql",
+     "prerequisites": ["db/migrations/0018_projection_reliability.up.sql"]},
+    {"version": "0020", "name": "signal_dispatch_queue_g2",
+     "up": "db/migrations/0020_signal_dispatch_queue_g2.up.sql",
+     "down": "db/migrations/0020_signal_dispatch_queue_g2.down.sql",
+     "prerequisites": ["db/migrations/0019_account_equity_samples.up.sql"]},
+    {"version": "0021", "name": "signal_execution_g3",
+     "up": "db/migrations/0021_signal_execution_g3.up.sql",
+     "down": "db/migrations/0021_signal_execution_g3.down.sql",
+     "prerequisites": ["db/migrations/0020_signal_dispatch_queue_g2.up.sql"]},
+    {"version": "0022", "name": "position_revision_g3",
+     "up": "db/migrations/0022_position_revision_g3.up.sql",
+     "down": "db/migrations/0022_position_revision_g3.down.sql",
+     "prerequisites": ["db/migrations/0021_signal_execution_g3.up.sql"]},
 ]
 if migration.get("steps") != expected_steps:
     raise SystemExit("release migration metadata mismatch: steps")
@@ -7014,6 +7494,14 @@ required_migration_files = {
     "db/migrations/0017_operator_query_projection_reads.down.sql",
     "db/migrations/0018_projection_reliability.up.sql",
     "db/migrations/0018_projection_reliability.down.sql",
+    "db/migrations/0019_account_equity_samples.up.sql",
+    "db/migrations/0019_account_equity_samples.down.sql",
+    "db/migrations/0020_signal_dispatch_queue_g2.up.sql",
+    "db/migrations/0020_signal_dispatch_queue_g2.down.sql",
+    "db/migrations/0021_signal_execution_g3.up.sql",
+    "db/migrations/0021_signal_execution_g3.down.sql",
+    "db/migrations/0022_position_revision_g3.up.sql",
+    "db/migrations/0022_position_revision_g3.down.sql",
 }
 migration_files = migration.get("migration_files")
 if not isinstance(migration_files, list):
@@ -7023,10 +7511,102 @@ if not required_migration_files.issubset(set(migration_files)):
 print(epochs["app"], epochs["db"], epochs["redis"])
 PY
 )
-[ "$DATABASE_SCHEMA_EPOCH" = "0018_projection_reliability" ] \
-  || die "reviewed database schema epoch must be 0018_projection_reliability"
+[ "$DATABASE_SCHEMA_EPOCH" = "0022_position_revision_g3" ] \
+  || die "reviewed database schema epoch must be 0022_position_revision_g3"
 [ "$REDIS_SCHEMA_EPOCH" = "fenced-generation-namespace/v2" ] \
   || die "reviewed Redis schema epoch mismatch"
+
+"$T/.venv-cp/bin/python" - \
+  "$T/.env.v3" \
+  "$MIGRATION_EVIDENCE_INDEXES_UP" \
+  "$MIGRATION_UP" \
+  "$MIGRATION_MAINTENANCE_FENCE_UP" \
+  "$MIGRATION_FOUR_ACCOUNT_ROLLOUT_UP" \
+  "$MIGRATION_CANCEL_ORDER_CONTRACT_UP" \
+  "$MIGRATION_REFRESH_EVIDENCE_COMMAND_UP" \
+  "$MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP" \
+  "$MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP" \
+  "$MIGRATION_PROJECTION_RELIABILITY_UP" \
+  "$MIGRATION_ACCOUNT_EQUITY_SAMPLES_UP" \
+  "$MIGRATION_SIGNAL_DISPATCH_QUEUE_UP" \
+  "$MIGRATION_SIGNAL_EXECUTION_UP" \
+  "$MIGRATION_POSITION_REVISION_UP" <<'PY' || die "live schema migration identity mismatch"
+from __future__ import annotations
+
+import hashlib
+import sys
+from pathlib import Path
+
+import psycopg2
+
+
+def read_environment(path: Path) -> dict[str, str]:
+    values = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip()
+        if (
+            len(value) >= 2
+            and value[0] == value[-1]
+            and value[0] in {"'", '"'}
+        ):
+            value = value[1:-1]
+        values[key.strip()] = value
+    return values
+
+
+env = read_environment(Path(sys.argv[1]))
+database_url = env.get("DATABASE_URL", "")
+if not database_url:
+    raise SystemExit("DATABASE_URL is required for live schema identity")
+specs = (
+    ("0010", "evidence_and_poll_indexes", Path(sys.argv[2])),
+    ("0011", "live_safety", Path(sys.argv[3])),
+    ("0012", "control_plane_maintenance_fence", Path(sys.argv[4])),
+    ("0013", "four_account_rollout", Path(sys.argv[5])),
+    ("0014", "cancel_order_contract", Path(sys.argv[6])),
+    ("0015", "refresh_evidence_command", Path(sys.argv[7])),
+    ("0016", "control_plane_lock_privileges", Path(sys.argv[8])),
+    ("0017", "operator_query_projection_reads", Path(sys.argv[9])),
+    ("0018", "projection_reliability", Path(sys.argv[10])),
+    ("0019", "account_equity_samples", Path(sys.argv[11])),
+    ("0020", "signal_dispatch_queue_g2", Path(sys.argv[12])),
+    ("0021", "signal_execution_g3", Path(sys.argv[13])),
+    ("0022", "position_revision_g3", Path(sys.argv[14])),
+)
+expected = {}
+for version, name, path in specs:
+    sql = path.read_text(encoding="utf-8")
+    if not sql.strip():
+        raise SystemExit(f"{version} migration is empty")
+    expected[version] = (name, hashlib.sha256(sql.encode("utf-8")).hexdigest())
+with psycopg2.connect(database_url) as conn, conn.cursor() as cur:
+    cur.execute(
+        """
+        SELECT version, name, up_sha256
+        FROM schema_migrations
+        WHERE version = ANY(%s)
+        """,
+        (list(expected),),
+    )
+    applied = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
+for version, (name, digest) in expected.items():
+    if version not in applied:
+        continue
+    applied_name, applied_digest = applied[version]
+    if applied_name != name:
+        raise SystemExit(
+            f"schema_migrations {version} name or SQL hash mismatch"
+        )
+    if applied_digest and applied_digest != digest:
+        raise SystemExit(
+            f"schema_migrations {version} name or SQL hash mismatch"
+        )
+print("live schema identity OK")
+PY
 
 RELEASE_RESOURCE_LIMITS="$(
 python3 - \
@@ -8023,8 +8603,20 @@ LEGACY_REDIS_CONTAINER="$(
   python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["legacy_container"])' \
     "$REDIS_CAPACITY_EVIDENCE"
 )"
-docker inspect "$LEGACY_REDIS_CONTAINER" >/dev/null \
-  || die "legacy Redis container from capacity evidence is missing"
+if ! docker inspect "$LEGACY_REDIS_CONTAINER" >/dev/null 2>&1; then
+  # Same-epoch application maintenance does not switch Redis. A pruned legacy
+  # container may be replaced as rollback evidence by its exact retained RDB
+  # and image, after the original cold/capacity and live identity gates above.
+  require_checksum_artifact "verify_retired_redis_artifacts.py"
+  RETIRED_REDIS_RECEIPT="$STAGING/retired-redis-artifacts-$STAMP.json"
+  [ ! -e "$RETIRED_REDIS_RECEIPT" ] && [ ! -L "$RETIRED_REDIS_RECEIPT" ] \
+    || die "retired Redis verification receipt already exists"
+  python3 "$STAGING/verify_retired_redis_artifacts.py" \
+    "$REDIS_COLD_BACKUP_MANIFEST" "$REDIS_CAPACITY_EVIDENCE" \
+    "$DEPLOY_GATE_MODE" > "$RETIRED_REDIS_RECEIPT" \
+    || die "legacy Redis container is missing and retained artifacts failed verification"
+  echo "== missing legacy Redis container: exact retained rollback artifacts verified"
+else
 [ "$(docker inspect --format '{{.State.Running}}' "$LEGACY_REDIS_CONTAINER")" = "false" ] \
   || die "legacy Redis container must remain stopped"
 LEGACY_REDIS_INSPECT="$(docker inspect "$LEGACY_REDIS_CONTAINER")"
@@ -8062,9 +8654,60 @@ source = Path(str(mount.get("Source") or "")).resolve()
 if source != Path(str(backup.get("source_data_root") or "")).resolve():
     raise SystemExit("legacy Redis volume differs from cold backup evidence")
 PY
+fi
 
 # host-side target
+SIGNAL_RUNTIME_FILE_MAP=(
+  "host/security/session_auth.py|$T/services/control-plane/security/session_auth.py"
+  "host/order_management/protection_watchdog.py|$T/services/control-plane/order_management/protection_watchdog.py"
+  "host/execution_domain/ownership_ledger.py|$T/packages/execution-domain/execution_domain/ownership_ledger.py"
+  "host/intent_trace.py|$T/services/control-plane/api/intent_trace.py"
+  "host/operator_queries.py|$T/services/control-plane/api/operator_queries.py"
+  "host/position_protection.py|$T/services/control-plane/api/position_protection.py"
+  "host/position_revision.py|$T/services/control-plane/api/position_revision.py"
+  "host/signal_handoff.py|$T/services/control-plane/api/signal_handoff.py"
+  "host/signal_status.py|$T/services/control-plane/api/signal_status.py"
+  "host/v1_mirror.py|$T/services/control-plane/api/v1_mirror.py"
+  "host/security/__init__.py|$T/services/control-plane/security/__init__.py"
+  "host/security/audit.py|$T/services/control-plane/security/audit.py"
+  "host/security/dangerous_ops.py|$T/services/control-plane/security/dangerous_ops.py"
+  "host/security/permissions.py|$T/services/control-plane/security/permissions.py"
+  "host/security/principal.py|$T/services/control-plane/security/principal.py"
+  "host/db/__init__.py|$T/services/control-plane/db/__init__.py"
+  "host/db/connection.py|$T/services/control-plane/db/connection.py"
+  "host/db/enums.py|$T/services/control-plane/db/enums.py"
+  "host/order_management/state_descriptor.py|$T/services/control-plane/order_management/state_descriptor.py"
+  "host/order_management/execution_jobs.py|$T/services/control-plane/order_management/execution_jobs.py"
+  "host/commands/commands.py|$T/services/control-plane/commands/commands.py"
+  "host/risk_state/risk_state.py|$T/services/control-plane/risk_state/risk_state.py"
+  "host/risk/governor.py|$T/services/control-plane/risk/governor.py"
+  "host/risk/policy.py|$T/services/control-plane/risk/policy.py"
+  "host/hermes-worker/worker.py|$T/services/hermes-worker/worker.py"
+  "host/hermes-worker/hermes_client.py|$T/services/hermes-worker/hermes_client.py"
+  "host/hermes-worker/prompt.py|$T/services/hermes-worker/prompt.py"
+  "host/hermes-worker/operator_diagnostics.py|$T/services/hermes-worker/operator_diagnostics.py"
+  "host/hermes-worker/signal_operator.py|$T/services/hermes-worker/signal_operator.py"
+  "host/hermes-worker/queue/__init__.py|$T/services/hermes-worker/queue/__init__.py"
+  "host/hermes-worker/queue/claims.py|$T/services/hermes-worker/queue/claims.py"
+  "host/hermes-worker/queue/signal_queue.py|$T/services/hermes-worker/queue/signal_queue.py"
+  "host/ingress/__init__.py|$T/services/ingress/ingress/__init__.py"
+  "host/ingress/http.py|$T/services/ingress/ingress/http.py"
+  "host/ingress/service.py|$T/services/ingress/ingress/service.py"
+  "host/order_lifecycle_monitor.py|$T/scripts/order_lifecycle_monitor.py"
+  "host/v3_query.py|$HERMES_V3_TRADER_ROOT/scripts/v3_query.py"
+  "host/execution_domain/http_client.py|$T/packages/execution-domain/execution_domain/http_client.py"
+  "packages/contracts/v1/hermes_decision.v1.json|$T/packages/contracts/v1/hermes_decision.v1.json"
+  "packages/contracts/v1/order_state.v1.json|$T/packages/contracts/v1/order_state.v1.json"
+  "packages/contracts/v1/order_management_settings.v1.json|$T/packages/contracts/v1/order_management_settings.v1.json"
+  "infra/systemd/trader-v3-signal-worker@.service|$T/infra/systemd/trader-v3-signal-worker@.service"
+  "infra/systemd/trader-v3-hermes-feeder-signal-cutover.conf|$T/infra/systemd/trader-v3-hermes-feeder-signal-cutover.conf"
+)
+verify_signal_runtime_payload
+verify_signal_credential_contract
+verify_dashboard_payload
+
 API_TGT="$T/services/control-plane/api/read_api.py"
+POSITION_MAPPING_TGT="$T/services/control-plane/api/position_mapping.py"
 SNAPSHOT_TGT="$T/services/control-plane/api/snapshot.py"
 DECISION_GATEWAY_TGT="$T/services/control-plane/decision_gateway/gateway.py"
 EXCHANGE_STATE_RECORDER_TGT="$T/services/control-plane/tools/exchange_state_recorder.py"
@@ -8092,6 +8735,7 @@ DB_POOLS_TGT="$T/services/control-plane/db/pools.py"
 DB_REPOSITORY_TGT="$T/services/control-plane/db/repository.py"
 REBUILD_ORDERS_PROJECTION_TGT="$T/scripts/rebuild_orders_projection.py"
 [ -f host/read_api.py ] || die "staging missing host/read_api.py"
+[ -f host/position_mapping.py ] || die "staging missing host/position_mapping.py"
 [ -f host/snapshot.py ] || die "staging missing host/snapshot.py"
 [ -f host/decision_gateway/gateway.py ] \
   || die "staging missing host/decision_gateway/gateway.py"
@@ -8196,6 +8840,10 @@ apply_and_verify_database_migration() {
     "$MIGRATION_CONTROL_PLANE_LOCK_PRIVILEGES_UP" \
     "$MIGRATION_OPERATOR_QUERY_PROJECTION_READS_UP" \
     "$MIGRATION_PROJECTION_RELIABILITY_UP" \
+    "$MIGRATION_ACCOUNT_EQUITY_SAMPLES_UP" \
+    "$MIGRATION_SIGNAL_DISPATCH_QUEUE_UP" \
+    "$MIGRATION_SIGNAL_EXECUTION_UP" \
+    "$MIGRATION_POSITION_REVISION_UP" \
     "$DATABASE_SCHEMA_EPOCH" \
     "$MIGRATION_COMMIT_MARKER" \
     "$MAINTENANCE_FENCE_ID" \
@@ -8246,15 +8894,19 @@ refresh_evidence_command_path = Path(sys.argv[8])
 control_plane_lock_privileges_path = Path(sys.argv[9])
 operator_query_projection_reads_path = Path(sys.argv[10])
 projection_reliability_path = Path(sys.argv[11])
-expected_epoch = sys.argv[12]
-migration_commit_marker = Path(sys.argv[13])
-maintenance_fence_id_raw = sys.argv[14]
-maintenance_owner_token = sys.argv[15]
-maintenance_actor = sys.argv[16]
-maintenance_fence_state = Path(sys.argv[17])
-maintenance_lease_seconds = int(sys.argv[18])
-heartbeat_max_age_seconds = int(sys.argv[19])
-deploy_gate_mode = sys.argv[20]
+account_equity_samples_path = Path(sys.argv[12])
+signal_dispatch_queue_g2_path = Path(sys.argv[13])
+signal_execution_g3_path = Path(sys.argv[14])
+position_revision_g3_path = Path(sys.argv[15])
+expected_epoch = sys.argv[16]
+migration_commit_marker = Path(sys.argv[17])
+maintenance_fence_id_raw = sys.argv[18]
+maintenance_owner_token = sys.argv[19]
+maintenance_actor = sys.argv[20]
+maintenance_fence_state = Path(sys.argv[21])
+maintenance_lease_seconds = int(sys.argv[22])
+heartbeat_max_age_seconds = int(sys.argv[23])
+deploy_gate_mode = sys.argv[24]
 if deploy_gate_mode not in {
     "bootstrap_stopped",
     "bootstrap_resume_stopped",
@@ -8270,7 +8922,7 @@ elif maintenance_fence_id_raw:
 database_url = env.get("DATABASE_URL", "")
 if not database_url:
     raise SystemExit("DATABASE_URL is required for migration")
-if expected_epoch != "0018_projection_reliability":
+if expected_epoch != "0022_position_revision_g3":
     raise SystemExit("unexpected database schema epoch")
 migration_specs = (
     ("0005", "order_management", order_management_path),
@@ -8315,6 +8967,10 @@ migration_specs = (
         "projection_reliability",
         projection_reliability_path,
     ),
+    ("0019", "account_equity_samples", account_equity_samples_path),
+    ("0020", "signal_dispatch_queue_g2", signal_dispatch_queue_g2_path),
+    ("0021", "signal_execution_g3", signal_execution_g3_path),
+    ("0022", "position_revision_g3", position_revision_g3_path),
 )
 migrations = []
 for version, name, path in migration_specs:
@@ -8363,6 +9019,9 @@ required_tables = {
     "projection_watermarks",
     "control_plane_maintenance_fences",
     "control_plane_maintenance_fence_events",
+    "signal_dispatch_tasks",
+    "position_revisions",
+    "position_revision_invalidations",
 }
 required_rollout_columns = {
     "redis_fencing_epoch",
@@ -8412,6 +9071,9 @@ required_indexes = {
     "idx_projection_failures_unresolved",
 }
 required_order_management_columns = {
+    "signal_dispatch_tasks": {"processing_purpose", "execution_request", "execution_context", "operator_intent_id"},
+    "position_revisions": {"account_id", "instrument_id", "position_side", "revision"},
+    "position_revision_invalidations": {"account_id", "operation_id", "instrument_id", "position_side"},
     "orders_projection": {
         "execution_job_id",
         "venue_symbol",
@@ -8477,7 +9139,23 @@ try:
                         (version, name, digest),
                     )
                     continue
-                if row != (name, digest):
+                registered_name, registered_digest = row
+                if registered_name != name:
+                    raise SystemExit(
+                        "schema_migrations "
+                        f"{version} name or SQL hash mismatch"
+                    )
+                if not registered_digest:
+                    cur.execute(
+                        """
+                        UPDATE schema_migrations
+                        SET up_sha256=%s
+                        WHERE version=%s
+                        """,
+                        (digest, version),
+                    )
+                    continue
+                if registered_digest != digest:
                     raise SystemExit(
                         "schema_migrations "
                         f"{version} name or SQL hash mismatch"
@@ -8847,7 +9525,7 @@ try:
                 )
 finally:
     conn.close()
-print("database_schema_epoch=0018_projection_reliability")
+print("database_schema_epoch=0022_position_revision_g3")
 PY
   if [ "$DEPLOY_GATE_MODE" = "maintenance_fence" ]; then
     load_maintenance_fence_state
@@ -9140,7 +9818,7 @@ try:
         FROM schema_migrations
         WHERE version = ANY(%s)
         """,
-        (["0010", "0011", "0012", "0013", "0014", "0015"],),
+        (["0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022"],),
     )
             applied_migrations = dict(cur.fetchall())
 finally:
@@ -9184,6 +9862,13 @@ if applied_migrations != {
     "0013": "four_account_rollout",
     "0014": "cancel_order_contract",
     "0015": "refresh_evidence_command",
+    "0016": "control_plane_lock_privileges",
+    "0017": "operator_query_projection_reads",
+    "0018": "projection_reliability",
+    "0019": "account_equity_samples",
+    "0020": "signal_dispatch_queue_g2",
+    "0021": "signal_execution_g3",
+    "0022": "position_revision_g3",
 }:
     raise SystemExit("account-a database schema epoch mismatch")
 if not isinstance(positions, list):
@@ -9344,7 +10029,20 @@ if [ "$DELIVERY_MODE" = "transition_bind_mount" ]; then
 fi
 
 CHANGED_HOST=()
+for mapping in "${SIGNAL_RUNTIME_FILE_MAP[@]}"; do
+  source="${mapping%%|*}"; target="${mapping#*|}"
+  if ! cmp -s "$STAGING/$source" "$target"; then
+    CHANGED_HOST+=("signal_runtime")
+    break
+  fi
+done
 cmp -s host/read_api.py "$API_TGT" || CHANGED_HOST+=("read_api")
+if [ -f "$POSITION_MAPPING_TGT" ]; then
+  cmp -s host/position_mapping.py "$POSITION_MAPPING_TGT" \
+    || CHANGED_HOST+=("position_mapping")
+else
+  CHANGED_HOST+=("position_mapping")
+fi
 cmp -s host/snapshot.py "$SNAPSHOT_TGT" || CHANGED_HOST+=("snapshot")
 cmp -s host/decision_gateway/gateway.py "$DECISION_GATEWAY_TGT" \
   || CHANGED_HOST+=("decision_gateway")
@@ -10432,6 +11130,9 @@ bk() { # bk <src> <label>
   printf '%s\t%s\n' "$2" "$1" >> "$BACKUP_ROOT/index.tsv"
 }
 bk "$T/.env.v3" "config__.env.v3"
+backup_hermes_cli_environment
+backup_operator_jwt_environment
+backup_dashboard_payload
 for index in "${!CONTROL_PLANE_ROLE_ENV_FILES[@]}"; do
   env_file="${CONTROL_PLANE_ROLE_ENV_FILES[$index]}"
   if [ -f "$env_file" ]; then
@@ -10450,7 +11151,24 @@ for f in "${CHANGED_CONTAINER[@]:-}"; do
 done
 for h in "${CHANGED_HOST[@]:-}"; do
   case "$h" in
+      signal_runtime)
+        for mapping in "${SIGNAL_RUNTIME_FILE_MAP[@]}"; do
+          source="${mapping%%|*}"; target="${mapping#*|}"
+          if [ -f "$target" ]; then
+            bk "$target" "signal__${source//\//__}"
+          else
+            printf '%s\n' "$target" >> "$BACKUP_ROOT/new-files.txt"
+          fi
+        done
+        ;;
 	    read_api) bk "$API_TGT" "host__read_api.py" ;;
+	    position_mapping)
+	      if [ -f "$POSITION_MAPPING_TGT" ]; then
+	        bk "$POSITION_MAPPING_TGT" "host__position_mapping.py"
+	      else
+	        printf '%s\n' "$POSITION_MAPPING_TGT" >> "$BACKUP_ROOT/new-files.txt"
+	      fi
+	      ;;
 	    snapshot) bk "$SNAPSHOT_TGT" "host__snapshot.py" ;;
 	    decision_gateway) bk "$DECISION_GATEWAY_TGT" "host__decision_gateway.py" ;;
       exchange_state_recorder)
@@ -10760,6 +11478,9 @@ stop_recreate_nodes
 verify_all_execution_accounts_quiesced
 verify_maintenance_fence "host-install"
 FILES_INSTALLED=1
+install_dashboard_payload
+install_hermes_cli_environment
+install_operator_jwt_environment
 install_operator_account_registry_environment
 bootstrap_control_plane_roles
 if [ "$DELIVERY_MODE" = "transition_bind_mount" ]; then
@@ -10776,7 +11497,16 @@ if [ "$DELIVERY_MODE" = "transition_bind_mount" ]; then
 fi
 for h in "${CHANGED_HOST[@]:-}"; do
   case "$h" in
+      signal_runtime)
+        for mapping in "${SIGNAL_RUNTIME_FILE_MAP[@]}"; do
+          source="${mapping%%|*}"; target="${mapping#*|}"
+          install_host_python_module "$STAGING/$source" "$target"
+        done
+        HERMES_RESTART_REQUIRED=1
+        SIGNAL_RUNTIME_RESTART_REQUIRED=1
+        ;;
 	    read_api) cat host/read_api.py > "$API_TGT" ;;
+	    position_mapping) cat host/position_mapping.py > "$POSITION_MAPPING_TGT" ;;
 	    snapshot) cat host/snapshot.py > "$SNAPSHOT_TGT" ;;
 	    decision_gateway) cat host/decision_gateway/gateway.py > "$DECISION_GATEWAY_TGT" ;;
       exchange_state_recorder)
@@ -10990,13 +11720,14 @@ for h in "${CHANGED_HOST[@]:-}"; do
 	cat "$RELEASE_MANIFEST" > "$T/RELEASE_MANIFEST.json"
 	printf '%s release_id=%s deployed_at=%s\n' \
 	  "$RELEASE_COMMIT" "$RELEASE_ID" "$STAMP" > "$T/DEPLOYED_COMMIT.txt"
+	verify_signal_runtime_installed
+	verify_dashboard_live
 	HOST_RUNTIME_INSTALL_COMPLETE=1
 	echo "== files installed"
 	restart_watcher_runtime
   verify_post_restart_four_channel_account_mapping
   refresh_backup_checksums
 	restart_exchange_state_recorder
-	restart_hermes_units
 
 # ---------- recreate & verify ----------
 verify_all_execution_accounts_quiesced
@@ -11005,6 +11736,8 @@ reconcile_control_plane_lock_privileges
 activate_control_plane_topology
 restart_control_plane_units
 verify_control_plane_router_contract
+restart_signal_runtime_units
+restart_hermes_units
 echo "== control-plane topology=$CONTROL_PLANE_TOPOLOGY units=${CONTROL_PLANE_UNITS[*]}"
 
 verify_maintenance_fence "node-recreate-plan"

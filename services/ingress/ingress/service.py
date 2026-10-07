@@ -3,19 +3,24 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
 from psycopg2 import errors
+from psycopg2.extras import Json
 
 
 CONTROL_PLANE = Path(__file__).resolve().parents[2] / "control-plane"
-if str(CONTROL_PLANE) not in sys.path:
-    sys.path.insert(0, str(CONTROL_PLANE))
+HERMES_QUEUE = Path(__file__).resolve().parents[2] / "hermes-worker" / "queue"
+for _path in (CONTROL_PLANE, HERMES_QUEUE):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
 from db.connection import connect, transaction  # noqa: E402
 from db.repository import ingest_raw_message_with_outbox  # noqa: E402
+import signal_queue  # noqa: E402
 
 
 SOURCE = "telegram"
@@ -28,22 +33,36 @@ class IngressValidationError(ValueError):
     pass
 
 
+def ingest_signal_telegram_update(payload: dict[str, Any], database_url: str | None = None) -> dict[str, Any]:
+    """Dedicated signal writer: an older HTTP service has no matching route."""
+    if payload.get("processing_purpose", "signal") != "signal":
+        raise IngressValidationError("signal endpoint requires processing_purpose signal")
+    return ingest_raw_telegram_update({**payload, "processing_purpose": "signal"}, database_url)
+
+
 def ingest_raw_telegram_update(payload: dict[str, Any], database_url: str | None = None) -> dict[str, Any]:
     request = _normalize_payload(payload)
     conn = connect(database_url)
     try:
         try:
             with transaction(conn):
+                _lock_source_identity(conn, request)
                 existing_id = _find_existing_raw_message_id(conn, request)
                 if existing_id is not None:
-                    return _duplicate_result(existing_id)
+                    _assert_existing_purpose(conn, existing_id, request)
+                    queued = _enqueue_signal_task(conn, str(existing_id), request)
+                    result = _duplicate_result(existing_id)
+                    result["task_id"] = queued.task_id
+                    result["task_inserted"] = queued.inserted
+                    result["processing_purpose"] = request["processing_purpose"]
+                    return result
 
                 raw_message_id = uuid4()
                 outbox_event_id = uuid4()
                 raw_payload = _raw_payload(request)
                 content_hash = _content_hash(raw_payload, request["message_text"], request["media_assets"])
 
-                inserted_raw_id, inserted_outbox_id = ingest_raw_message_with_outbox(
+                inserted_raw_id, inserted_outbox_id = _ingest_for_purpose(
                     conn,
                     {
                         "id": raw_message_id,
@@ -68,23 +87,40 @@ def ingest_raw_telegram_update(payload: dict[str, Any], database_url: str | None
                             "channel_id": request["channel_id"],
                             "source_message_id": request["source_message_id"],
                             "source_version": request["source_version"],
+                            "account_id": request.get("account_id"),
                         },
                         "trace_id": raw_message_id,
                     },
+                    request["processing_purpose"],
                 )
                 _insert_media_assets(conn, inserted_raw_id, request["media_assets"])
+                queued = _enqueue_signal_task(conn, str(inserted_raw_id), request)
                 return {
                     "inserted": True,
                     "raw_message_id": str(inserted_raw_id),
-                    "outbox_event_id": str(inserted_outbox_id),
+                    "outbox_event_id": str(inserted_outbox_id) if inserted_outbox_id is not None else None,
                     "source_version": request["source_version"],
+                    "task_id": queued.task_id,
+                    "task_inserted": queued.inserted,
+                    "related_task_id": queued.related_task_id,
+                    "account_id": request.get("account_id") or signal_queue.DEFAULT_ACCOUNT_ID,
+                    "processing_purpose": request["processing_purpose"],
+                    "task_status": queued.status,
                 }
         except errors.UniqueViolation:
             conn.rollback()
             existing_id = _find_existing_raw_message_id(conn, request)
             if existing_id is None:
                 raise
-            return _duplicate_result(existing_id)
+            with transaction(conn):
+                _lock_source_identity(conn, request)
+                _assert_existing_purpose(conn, existing_id, request)
+                queued = _enqueue_signal_task(conn, str(existing_id), request)
+            result = _duplicate_result(existing_id)
+            result["task_id"] = queued.task_id
+            result["task_inserted"] = queued.inserted
+            result["processing_purpose"] = request["processing_purpose"]
+            return result
     finally:
         conn.close()
 
@@ -110,13 +146,62 @@ def _normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "reply_to": payload.get("reply_to"),
         "raw_payload": payload.get("raw_payload", {}),
         "media_assets": _normalize_media_assets(payload.get("media_assets", [])),
+        "account_id": _optional_text(payload, "account_id"),
+        "action": _optional_text(payload, "action"),
+        "route_error": _optional_text(payload, "route_error"),
+        "processing_purpose": payload.get("processing_purpose", "shadow"),
     }
 
     if not isinstance(request["raw_payload"], dict):
         raise IngressValidationError("raw_payload must be an object")
     if request["reply_to"] is not None and not isinstance(request["reply_to"], dict):
         raise IngressValidationError("reply_to must be an object when present")
+    if request["processing_purpose"] not in {"shadow", "signal"}:
+        raise IngressValidationError("processing_purpose must be shadow or signal")
+    if request["processing_purpose"] == "signal" and request["account_id"] not in {
+        "account-a", "account-b", "account-c", "account-d",
+    }:
+        raise IngressValidationError("signal processing requires an assigned execution account")
     return request
+
+
+def _lock_source_identity(conn, request):
+    # Source purpose is global across account fanout: a shared raw message must
+    # never acquire both a legacy executable outbox and a signal task.
+    identity = json.dumps([SOURCE, request["channel_id"], request["source_message_id"], request["source_version"]])
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", ("ingress-purpose:" + identity,))
+
+
+def _assert_existing_purpose(conn, raw_message_id, request):
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT COALESCE(raw_payload->>'processing_purpose','shadow'),
+                      EXISTS(SELECT 1 FROM outbox_events WHERE aggregate_id=%s AND event_type='queued_for_hermes'),
+                      EXISTS(SELECT 1 FROM signal_dispatch_tasks WHERE raw_message_id=%s AND processing_purpose<>%s)
+               FROM raw_messages WHERE id=%s""",
+            (str(raw_message_id), str(raw_message_id), request["processing_purpose"], str(raw_message_id)),
+        )
+        purpose, legacy_outbox, conflicting_task = cur.fetchone()
+    if purpose != request["processing_purpose"] or conflicting_task or (purpose == "signal" and legacy_outbox):
+        raise IngressValidationError("processing_purpose_conflict: existing source cannot change execution writer")
+
+
+def _ingest_for_purpose(conn, raw_data, outbox_data, purpose):
+    if purpose == "shadow":
+        return ingest_raw_message_with_outbox(conn, raw_data, outbox_data)
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO raw_messages
+               (id,source,channel_id,source_message_id,source_version,source_received_at,
+                author_id,content_hash,message_text,raw_payload)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+            (str(raw_data["id"]), raw_data["source"], raw_data["channel_id"], raw_data["source_message_id"],
+             raw_data["source_version"], raw_data["source_received_at"], raw_data["author_id"],
+             raw_data["content_hash"], raw_data["message_text"], Json(raw_data["raw_payload"])),
+        )
+        raw_id = UUID(str(cur.fetchone()[0]))
+    return raw_id, None
 
 
 def _required_text(payload: dict[str, Any], key: str) -> str:
@@ -184,10 +269,16 @@ def _positive_int_or_none(value: Any, key: str) -> int | None:
 def _raw_payload(request: dict[str, Any]) -> dict[str, Any]:
     raw_payload = dict(request["raw_payload"])
     raw_payload["source"] = SOURCE
+    raw_payload["processing_purpose"] = request["processing_purpose"]
     raw_payload["update_id"] = request.get("update_id")
     raw_payload["message_kind"] = request["message_kind"]
     raw_payload["reply_to"] = request.get("reply_to")
     raw_payload["source_received_at"] = request["source_received_at"]
+    raw_payload.setdefault("receive_ts", request["source_received_at"])
+    raw_payload.setdefault("source_ts", None)
+    raw_payload.setdefault("source_ts_unknown", raw_payload.get("source_ts") is None)
+    raw_payload["source_received_at_is_not_source_ts"] = True
+    raw_payload["persist_at"] = datetime.now(timezone.utc).isoformat()
     raw_payload["media_assets"] = [
         {
             "sha256": asset["sha256"],
@@ -261,6 +352,26 @@ def _insert_media_assets(conn, raw_message_id: UUID, media_assets: list[dict[str
                     asset.get("downloaded_at"),
                 ),
             )
+
+
+def _enqueue_signal_task(conn, raw_message_id: str, request: dict[str, Any]):
+    skipped_reason = request.get("route_error")
+    return signal_queue.enqueue_signal_task(
+        conn,
+        raw_message_id=raw_message_id,
+        source_platform=SOURCE,
+        channel_id=request["channel_id"],
+        source_message_id=request["source_message_id"],
+        edit_version=request["source_version"],
+        account_id=request.get("account_id"),
+        action=request.get("action"),
+        # Evaluation may yield a close or stop update. Entry publication-time
+        # TTL is enforced at signal handoff after classification, not inferred
+        # from the watcher's receive timestamp for every management action.
+        expires_at=None if request["processing_purpose"] == "signal" else signal_queue.signal_expires_at(request["source_received_at"]),
+        skipped_reason=str(skipped_reason) if skipped_reason else None,
+        processing_purpose=request["processing_purpose"],
+    )
 
 
 def _duplicate_result(raw_message_id: UUID) -> dict[str, Any]:

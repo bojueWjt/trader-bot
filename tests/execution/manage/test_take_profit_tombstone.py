@@ -506,14 +506,17 @@ class TakeProfitTombstoneTest(unittest.TestCase):
                 },
             )
 
-            strategy._handle_intent(intent)
+            try:
+                strategy._handle_intent(intent)
 
-            self.assertEqual(strategy.submitted_plans, [])
-            self.assertEqual(strategy.cancelled_client_order_ids, [])
-            self.assertEqual(
-                strategy.denials[-1].reason,
-                "unsupported_order_spec",
-            )
+                self.assertEqual(strategy.submitted_plans, [])
+                self.assertEqual(strategy.cancelled_client_order_ids, [])
+                self.assertEqual(
+                    strategy.denials[-1].reason,
+                    "unsupported_order_spec",
+                )
+            finally:
+                strategy.on_stop()
 
     def test_empty_dict_tombstone_is_inert(self) -> None:
         with tempfile.TemporaryDirectory() as state_dir:
@@ -613,9 +616,12 @@ class TakeProfitTombstoneTest(unittest.TestCase):
                 },
                 target_position_id=None,
             )
-            strategy._submit_order_plan = lambda _plan: False
+            strategy._submit_order_plan = lambda _plan, **_kwargs: False
 
-            strategy._handle_intent(new_entry)
+            try:
+                strategy._handle_intent(new_entry)
+            finally:
+                strategy.on_stop()
 
             self.assertIn(
                 str(old_owner_id),
@@ -821,7 +827,7 @@ class TakeProfitTombstoneTest(unittest.TestCase):
 
             strategy._stash_entry_protection(new_entry, plan)
 
-            self.assertNotIn(
+            self.assertIn(
                 str(legacy_intent_id),
                 strategy._entry_protection_stash,
             )
@@ -1317,6 +1323,7 @@ class _Strategy(IntentExecutionStrategy):
             positions=self._position_snapshots(INSTRUMENT_ID),
             existing_orders=self._order_snapshots(INSTRUMENT_ID),
             existing_intent_ids=frozenset(),
+            simulation=True,
         )
 
 

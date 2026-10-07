@@ -7,7 +7,12 @@ from threading import Lock
 from typing import Any, Callable, Protocol, Sequence
 
 from .contracts import ExecutionEventEnvelopeV1
-from .event_mapper import ProjectionConfig, ProjectionEventMapper
+from .event_mapper import (
+    EVENT_MAPPING_CATALOG,
+    ProjectionConfig,
+    ProjectionEventMapper,
+    _event_is_in_scope,
+)
 from .spool import JsonExecutionSpool
 
 
@@ -105,17 +110,30 @@ class ProjectionActor:
                 outcome=ProjectionIngestOutcome.HALTED,
                 event_id=None,
             )
-        envelope = self._mapper.to_envelope(event)
-        if envelope is None:
-            if self._mapper.is_expected_ownership_ignore(event):
+        if isinstance(event, ExecutionEventEnvelopeV1):
+            if not self._canonical_envelope_in_scope(event):
+                if self._canonical_envelope_ownership_ignore(event):
+                    return ProjectionIngestResult(
+                        outcome=ProjectionIngestOutcome.IGNORED,
+                        event_id=None,
+                    )
                 return ProjectionIngestResult(
-                    outcome=ProjectionIngestOutcome.IGNORED,
+                    outcome=ProjectionIngestOutcome.FILTERED,
                     event_id=None,
                 )
-            return ProjectionIngestResult(
-                outcome=ProjectionIngestOutcome.FILTERED,
-                event_id=None,
-            )
+            envelope = event
+        else:
+            envelope = self._mapper.to_envelope(event)
+            if envelope is None:
+                if self._mapper.is_expected_ownership_ignore(event):
+                    return ProjectionIngestResult(
+                        outcome=ProjectionIngestOutcome.IGNORED,
+                        event_id=None,
+                    )
+                return ProjectionIngestResult(
+                    outcome=ProjectionIngestOutcome.FILTERED,
+                    event_id=None,
+                )
         appended = self.spool.append_once(envelope)
         self._sync_spool_pressure()
         if appended:
@@ -126,6 +144,60 @@ class ProjectionActor:
         return ProjectionIngestResult(
             outcome=outcome,
             event_id=envelope.event_id,
+        )
+
+    def _canonical_envelope_in_scope(
+        self,
+        envelope: ExecutionEventEnvelopeV1,
+    ) -> bool:
+        if envelope.account_id != self.config.account_id:
+            return False
+        if envelope.node_id != self.config.node_id:
+            return False
+        event_type = str(envelope.event_type or "")
+        if event_type not in EVENT_MAPPING_CATALOG:
+            return False
+        payload = envelope.payload or {}
+        instrument_id = payload.get("instrument_id")
+        position_id = payload.get("position_id")
+        return _event_is_in_scope(
+            self.config,
+            event_type=event_type,
+            client_order_id=envelope.client_order_id,
+            instrument_id=(
+                str(instrument_id) if instrument_id is not None else None
+            ),
+            position_id=(
+                str(position_id) if position_id is not None else None
+            ),
+        )
+
+    def _canonical_envelope_ownership_ignore(
+        self,
+        envelope: ExecutionEventEnvelopeV1,
+    ) -> bool:
+        if envelope.account_id != self.config.account_id:
+            return False
+        if envelope.node_id != self.config.node_id:
+            return False
+        event_type = str(envelope.event_type or "")
+        if event_type not in EVENT_MAPPING_CATALOG:
+            return False
+        payload = envelope.payload or {}
+        return not _event_is_in_scope(
+            self.config,
+            event_type=event_type,
+            client_order_id=envelope.client_order_id,
+            instrument_id=(
+                str(payload.get("instrument_id"))
+                if payload.get("instrument_id") is not None
+                else None
+            ),
+            position_id=(
+                str(payload.get("position_id"))
+                if payload.get("position_id") is not None
+                else None
+            ),
         )
 
     def flush(self) -> list[str]:

@@ -1,16 +1,9 @@
 #!/usr/bin/env python3
-"""Feed NEW Telegram watcher messages to the Hermes agent.
+"""Feed NEW Telegram watcher messages to canonical ingress and the live Hermes path.
 
-Hermes (trader profile) is the trading decision maker: for every new channel
-message it must (1) tell the user on Telegram what arrived, (2) decide whether
-it is an actionable signal, (3) place the order through the v3-trader skill if
-so, and (4) report the outcome. This feeder only transports messages — it makes
-no trading judgement itself.
-
-Read-only on watcher-trading.db. Cursor = "telegram_messages:<id>" of the last
-handled raw watcher row. Every new row must reach canonical PostgreSQL ingress
-before Hermes is allowed to process it. A message that keeps failing is skipped
-after MAX_ATTEMPTS so one poison message cannot wedge the queue.
+Persist+enqueue runs independently of model delivery. Default accounts retain
+their legacy writer plus shadow work. Explicit SIGNAL_EXECUTION_ACCOUNTS opt-in
+uses signal-purpose tasks only, with a durable future-message cutover guard.
 """
 from __future__ import annotations
 
@@ -65,6 +58,7 @@ WATCHER_TRADING_DB = resolve_trading_db_path()
 WATCHER_ROOT = "/var/lib/docker/volumes/trader_signal-data/_data"  # container /data -> here
 V3_MEDIA = "/srv/trader-v3/media"
 STATE = "/srv/trader-v3/scripts/.hermes_feeder_cursor"
+PERSIST_STATE = "/srv/trader-v3/scripts/.hermes_feeder_persist_cursor"
 PENDING_STATE = "/srv/trader-v3/scripts/.hermes_feeder_pending.json"
 QUARANTINE_STATE = "/srv/trader-v3/scripts/.hermes_feeder_quarantine.json"
 LOCK = "/srv/trader-v3/scripts/.hermes_feeder.lock"
@@ -144,6 +138,142 @@ class CanonicalIngressError(RuntimeError):
     pass
 
 
+class SignalCutoverError(RuntimeError):
+    pass
+
+
+_SIGNAL_CUTOVER_PREVIEW: dict = {}
+
+
+def signal_execution_config() -> dict[str, str]:
+    """Explicit account opt-in plus an offset-aware receive-time lower bound."""
+    configured = os.environ.get("SIGNAL_EXECUTION_ACCOUNTS", "").strip()
+    if not configured:
+        return {}
+    result = {}
+    for account in configured.split(","):
+        account = account.strip()
+        if account not in {"account-a", "account-b", "account-c", "account-d"} or account in result:
+            raise SignalCutoverError("SIGNAL_EXECUTION_ACCOUNTS requires distinct account-a..account-d names")
+        env_name = "SIGNAL_EXECUTION_CUTOVER_RECEIVED_AT_" + account.upper().replace("-", "_")
+        raw = os.environ.get(env_name, "").strip()
+        try:
+            value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise SignalCutoverError(f"{env_name} requires an explicit ISO receive cutoff") from exc
+        if value.tzinfo is None:
+            raise SignalCutoverError(f"{env_name} requires a timezone offset")
+        result[account] = value.astimezone(timezone.utc).isoformat()
+    return result
+
+
+def _signal_cutover_path() -> str:
+    return os.environ.get("SIGNAL_EXECUTION_STATE_PATH", STATE + ".signal-cutover.json")
+
+
+def _load_signal_cutovers() -> dict:
+    try:
+        with open(_signal_cutover_path(), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        raise SignalCutoverError("signal cutover guard is unreadable; refusing legacy fallback") from exc
+    if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("accounts"), dict):
+        raise SignalCutoverError("signal cutover guard is malformed; refusing legacy fallback")
+    for account, entry in data["accounts"].items():
+        if account not in {"account-a", "account-b", "account-c", "account-d"} or not isinstance(entry, dict):
+            raise SignalCutoverError("invalid account in signal cutover guard")
+        if type(entry.get("watcher_high_water_id")) is not int or entry["watcher_high_water_id"] < 0:
+            raise SignalCutoverError("invalid watcher high water in signal cutover guard")
+        try:
+            cutoff = datetime.fromisoformat(entry["received_at"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SignalCutoverError("invalid receive cutoff in signal cutover guard") from exc
+        if cutoff.tzinfo is None:
+            raise SignalCutoverError("signal cutover guard cutoff has no timezone")
+    return data["accounts"]
+
+
+def _pending_execution_account(conn, pending: dict) -> str | None:
+    # Current routing cannot prove which account an already-dispatched legacy
+    # job received before a channel was rebound. Old records without captured
+    # ownership block activation until that delivery is resolved.
+    account = pending.get("execution_account_id")
+    if account in {"account-a", "account-b", "account-c", "account-d"}:
+        return account
+    return None
+
+
+def initialize_signal_execution_cutover(conn, *, dry_run: bool = False) -> None:
+    """Pin first-enable watcher high water; restarts never replay earlier rows.
+
+    A removed opt-in remains owned but frozen. Returning it to legacy requires a
+    separate reviewed drain/cutover, never merely deleting an environment name.
+    """
+    global _SIGNAL_CUTOVER_PREVIEW
+    configured = signal_execution_config()
+    guards = _load_signal_cutovers()
+    pending = load_pending_delivery()
+    if configured and pending and pending.get("status") not in {"succeeded", "skipped", "quarantined"}:
+        if pending.get("job_id") or pending.get("status") == "dispatching" or pending.get("attempts", 0):
+            account = _pending_execution_account(conn, pending)
+            if account is None or account in configured:
+                raise SignalCutoverError("legacy delivery is active or uncertain; resolve it before signal cutover")
+    changed = False
+    for account, cutoff in configured.items():
+        if account in guards:
+            if guards[account]["received_at"] != cutoff:
+                raise SignalCutoverError(f"{account} receive cutoff differs from its durable cutover guard")
+            continue
+        row = conn.execute("SELECT COALESCE(MAX(id),0) FROM telegram_messages").fetchone()
+        guards[account] = {"received_at": cutoff, "watcher_high_water_id": int(row[0])}
+        changed = True
+    if not changed:
+        return
+    if dry_run:
+        _SIGNAL_CUTOVER_PREVIEW = guards
+        log("signal cutover dry-run: no guard or execution task will be persisted")
+        return
+    path = Path(_signal_cutover_path())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = str(path) + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump({"version": 1, "accounts": guards}, handle, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+    directory_fd = os.open(str(path.parent), os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _signal_dispatch_mode(signal, account_id: str, *, dry_run: bool = False) -> str | None:
+    """None = legacy; signal = future row; other values = frozen audit-only task."""
+    configured = signal_execution_config()
+    guards = _load_signal_cutovers()
+    if dry_run:
+        guards = {**_SIGNAL_CUTOVER_PREVIEW, **guards}
+    if account_id not in configured and account_id not in guards:
+        return None
+    guard = guards.get(account_id)
+    if guard is None:
+        raise SignalCutoverError("signal cutover guard has not been initialized")
+    if account_id not in configured:
+        return "signal_execution_disabled"
+    if configured[account_id] != guard["received_at"]:
+        raise SignalCutoverError("signal receive cutoff differs from the durable guard")
+    row_id = _row_get(signal, "watcher_message_id")
+    if type(row_id) is not int or row_id <= guard["watcher_high_water_id"]:
+        return "signal_cutover_history"
+    received = _parse_received_at(_row_get(signal, "received_at"))
+    if received < datetime.fromisoformat(guard["received_at"]):
+        return "signal_cutover_history"
+    return "signal"
+
+
 def sanitize_prompt(prompt: str) -> str:
     return prompt.translate(_INVISIBLE_TABLE)
 
@@ -198,6 +328,30 @@ def save_cursor(value: str) -> None:
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, STATE)
+
+
+def persist_state_path() -> str:
+    """Honor the configured persist cursor path (production or explicit fixture)."""
+    return PERSIST_STATE
+
+
+def load_persist_cursor() -> str | None:
+    try:
+        return open(persist_state_path()).read().strip() or None
+    except FileNotFoundError:
+        return None
+
+
+def save_persist_cursor(value: str) -> None:
+    path = persist_state_path()
+    tmp = path + ".tmp"
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(value)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
 
 
 def load_pending_delivery() -> dict[str, Any] | None:
@@ -500,19 +654,26 @@ def fetch_new(
         WHERE current.id > ?
           AND NOT EXISTS (
               SELECT 1
-              FROM telegram_messages AS earlier
-              WHERE earlier.id < current.id
-                AND COALESCE(earlier.channel_id, '') =
-                    COALESCE(current.channel_id, '')
-                AND COALESCE(earlier.msg_id, -1) =
-                    COALESCE(current.msg_id, -1)
+              FROM telegram_messages AS prev
+              WHERE prev.id = (
+                  SELECT MAX(earlier.id)
+                  FROM telegram_messages AS earlier
+                  WHERE earlier.id < current.id
+                    AND COALESCE(earlier.channel_id, '') =
+                        COALESCE(current.channel_id, '')
+                    AND COALESCE(earlier.msg_id, -1) =
+                        COALESCE(current.msg_id, -1)
+              )
+              AND COALESCE(prev.text, '') = COALESCE(current.text, '')
+              AND COALESCE(prev.media_filename, '') =
+                  COALESCE(current.media_filename, '')
           )
         ORDER BY current.id
         LIMIT ?
         """,
         (cursor_id, limit),
     ).fetchall()
-    return [normalize_watcher_row(row) for row in rows]
+    return [_fetched_watcher_signal(conn, row) for row in rows]
 
 
 def _row_get(row: Any, key: str, default: Any = None) -> Any:
@@ -578,6 +739,9 @@ def normalize_watcher_row(row: Any) -> dict[str, Any]:
         "media": media,
         "watcher_row_id": row_id,
         "watcher_created_at": created_at,
+        # Only an explicit source timestamp is authoritative for entry TTL.
+        # Watcher receive time is never substituted for Telegram publication time.
+        "source_ts": _row_get(row, "source_ts"),
     }
     return {
         "watcher_message_id": row_id,
@@ -721,11 +885,13 @@ def canonical_ingress_payload(signal: Any) -> dict[str, Any]:
         else:
             message_kind = "media"
     watcher_message_id = _row_get(signal, "watcher_message_id")
+    supplied_source_ts = payload.get("source_ts")
+    source_ts_unknown = supplied_source_ts in (None, "")
     return {
         "source": "telegram",
         "channel_id": channel_id,
         "source_message_id": message_id,
-        "source_version": "v1",
+        "source_version": _watcher_source_version(signal),
         "source_received_at": str(
             _row_get(signal, "received_at") or ""
         ),
@@ -742,20 +908,194 @@ def canonical_ingress_payload(signal: Any) -> dict[str, Any]:
             ),
             "sender": str(payload.get("sender") or ""),
             "media": payload.get("media") or [],
+            "receive_ts": str(_row_get(signal, "received_at") or ""),
+            "source_ts": None if source_ts_unknown else str(supplied_source_ts),
+            "source_ts_unknown": source_ts_unknown,
+            "source_received_at_is_not_source_ts": True,
         },
     }
 
 
-def submit_canonical_ingress(signal: Any) -> dict[str, Any]:
+def _fetched_watcher_signal(conn: sqlite3.Connection, row: Any) -> dict[str, Any]:
+    signal = normalize_watcher_row(row)
+    signal["source_version"] = _source_version_for_watcher_row(conn, row)
+    return signal
+
+
+def _source_version_for_watcher_row(conn: sqlite3.Connection, row: Any) -> str:
+    channel_id = str(_row_get(row, "channel_id") or "").strip()
+    message_id = str(_row_get(row, "msg_id") or "").strip()
+    row_id = int(_row_get(row, "id"))
+    first = conn.execute(
+        """
+        SELECT MIN(id) AS first_id
+        FROM telegram_messages
+        WHERE COALESCE(channel_id, '') = ?
+          AND COALESCE(CAST(msg_id AS TEXT), '') = ?
+        """,
+        (channel_id, message_id),
+    ).fetchone()
+    first_id = None
+    if first is not None:
+        try:
+            first_id = first["first_id"]
+        except (KeyError, IndexError, TypeError):
+            first_id = first[0]
+    if first_id is None or row_id == int(first_id):
+        return "v1"
+    return f"edit:{row_id}"
+
+
+def _watcher_source_version(signal: Any) -> str:
+    explicit = _row_get(signal, "source_version")
+    if explicit:
+        return str(explicit)
+    payload = _payload(signal)
+    nested = payload.get("source_version")
+    if nested:
+        return str(nested)
+    return "v1"
+
+
+def persist_and_enqueue_signal(
+    signal: Any,
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Persist a watcher row to ingress and enqueue per-account work.
+
+    Does not invoke Hermes, cron, or a model.
+    """
+    extra: dict[str, Any] = {"action": "evaluate"}
+    try:
+        route = resolve_channel_account(_signal_channel(signal))
+        extra["account_id"] = route.execution_account_id
+        extra["target_account_id"] = route.target_account_id
+        mode = _signal_dispatch_mode(signal, route.execution_account_id, dry_run=dry_run)
+        if mode is not None:
+            extra["processing_purpose"] = "signal"
+            if mode != "signal":
+                extra["route_error"] = mode
+    except ChannelRouteError as exc:
+        if signal_execution_config() or _load_signal_cutovers():
+            raise CanonicalIngressError(f"invalid_payload: execution account is unassigned: {exc}") from exc
+        extra["account_id"] = "unassigned"
+        extra["route_error"] = str(exc)
+    if dry_run:
+        log(
+            "DRY-RUN would persist+enqueue "
+            f"{_signal_cursor(signal)} account={extra.get('account_id')}"
+        )
+        return {"inserted": True, "dry_run": True, **extra}
+    result = submit_canonical_ingress(signal, extra_fields=extra)
+    if extra.get("processing_purpose") == "signal":
+        if result.get("processing_purpose") != "signal" or not result.get("task_id") or not result.get("raw_message_id"):
+            raise CanonicalIngressError("signal ingress did not confirm durable signal-purpose task; legacy fallback forbidden")
+    return result
+
+
+def persist_new_watcher_messages(
+    conn: sqlite3.Connection,
+    cursor: str | None,
+    *,
+    dry_run: bool,
+) -> tuple[str | None, int]:
+    rows = fetch_new(conn, cursor)
+    if not rows:
+        return cursor, 0
+    last_cursor = cursor
+    persisted = 0
+    for signal in rows:
+        if dry_run:
+            last_cursor = _signal_cursor(signal)
+            persisted += 1
+            continue
+        try:
+            persist_and_enqueue_signal(signal, dry_run=False)
+        except CanonicalIngressError as exc:
+            if _is_systemic_ingress_error(exc):
+                return last_cursor, persisted
+            _record_persist_poison(signal, exc)
+            last_cursor = _signal_cursor(signal)
+            save_persist_cursor(last_cursor)
+            continue
+        last_cursor = _signal_cursor(signal)
+        persisted += 1
+        save_persist_cursor(last_cursor)
+    return last_cursor, persisted
+
+
+def _is_systemic_ingress_error(exc: CanonicalIngressError) -> bool:
+    """401/403/404/5xx/unavailable are service failures. Only row validation is poison."""
+    text = str(exc).lower()
+    row_specific = (
+        "http 400",
+        "invalid_payload",
+        "invalid payload",
+        "ingressvalidationerror",
+        "processing_purpose_conflict",
+    )
+    return not any(marker in text for marker in row_specific)
+
+
+def _record_persist_poison(signal: Any, exc: CanonicalIngressError) -> None:
+    detail = str(exc)
+    _record_quarantine(
+        [signal],
+        "ingress_poison",
+        time.time(),
+        reason_detail=detail,
+    )
+    log(
+        "persist poison quarantined "
+        f"{_signal_cursor(signal)}: {detail[:240]}"
+    )
+
+
+def _submit_direct_ingress(
+    payload: dict[str, Any],
+    database_url: str,
+) -> dict[str, Any]:
+    ingress_root = str(Path(__file__).resolve().parents[1] / "services" / "ingress")
+    if ingress_root not in sys.path:
+        sys.path.insert(0, ingress_root)
+    from ingress.service import IngressValidationError, ingest_raw_telegram_update
+
+    try:
+        if payload.get("processing_purpose") == "signal":
+            from ingress.service import ingest_signal_telegram_update
+            return ingest_signal_telegram_update(payload, database_url)
+        return ingest_raw_telegram_update(payload, database_url)
+    except IngressValidationError as exc:
+        raise CanonicalIngressError(str(exc)) from exc
+    except CanonicalIngressError:
+        raise
+    except Exception as exc:
+        raise CanonicalIngressError(
+            f"direct canonical ingress failed: {exc}"
+        ) from exc
+
+
+def submit_canonical_ingress(
+    signal: Any,
+    extra_fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = canonical_ingress_payload(signal)
+    if extra_fields:
+        payload.update({k: v for k, v in extra_fields.items() if v is not None})
+    direct_url = os.environ.get("INGRESS_DATABASE_URL", "").strip()
+    if direct_url:
+        return _submit_direct_ingress(payload, direct_url)
     if not INGRESS_API_TOKEN:
         raise CanonicalIngressError("INGRESS_API_TOKEN is required")
     body = json.dumps(
-        canonical_ingress_payload(signal),
+        payload,
         ensure_ascii=True,
         sort_keys=True,
     ).encode("utf-8")
+    endpoint = "/telegram/raw/signal" if payload.get("processing_purpose") == "signal" else "/telegram/raw"
     request = Request(
-        f"{INGRESS_URL}/telegram/raw",
+        f"{INGRESS_URL}{endpoint}",
         data=body,
         headers={
             "authorization": f"Bearer {INGRESS_API_TOKEN}",
@@ -1332,7 +1672,7 @@ def _ensure_canonical_ingress(
         if cursor in completed:
             continue
         try:
-            result = submit_canonical_ingress(signal)
+            result = persist_and_enqueue_signal(signal, dry_run=False)
         except CanonicalIngressError as exc:
             attempts = int(pending.get("ingress_attempts") or 0) + 1
             pending["ingress_attempts"] = attempts
@@ -1618,6 +1958,7 @@ def _record_quarantine(
     batch: list[Any],
     reason_code: str,
     now_ts: float,
+    reason_detail: str | None = None,
 ) -> bool:
     quarantine = load_quarantine()
     entries = quarantine["entries"]
@@ -1629,6 +1970,7 @@ def _record_quarantine(
         "last_cursor": _signal_cursor(batch[-1]),
         "channel_id": _quarantine_channel_id(batch),
         "reason_code": reason_code,
+        "reason": str(reason_detail or reason_code)[:1000],
         "quarantined_at": _coerce_now(now_ts).isoformat(),
     }
     save_quarantine(quarantine)
@@ -1696,6 +2038,39 @@ def attempt_batch_delivery(
         return "success"
     if now_ts is None:
         now_ts = time.time()
+
+    # This branch precedes all old pending-job recovery and cron inspection.
+    # Model execution belongs exclusively to the persisted signal queue worker.
+    mode = None
+    if signal_execution_config() or _load_signal_cutovers():
+        try:
+            account = resolve_channel_account(_signal_channel(batch[0])).execution_account_id
+            mode = _signal_dispatch_mode(batch[0], account, dry_run=dry_run)
+        except ChannelRouteError as exc:
+            if not dry_run:
+                _record_quarantine(batch, "execution_account_unassigned", now_ts, reason_detail=str(exc))
+            log(f"execution account unassigned; batch quarantined without dispatch: {exc}")
+            return "quarantined"
+    if mode is not None:
+        pending = load_pending_delivery()
+        if pending is not None:
+            if pending.get("batch_key") != _signal_cursor(batch[0]):
+                return "pending"
+            if pending.get("status") not in {"succeeded", "skipped", "quarantined"} and (
+                pending.get("job_id") or pending.get("status") == "dispatching" or pending.get("attempts", 0)
+            ):
+                raise SignalCutoverError("legacy job state blocks signal handoff; no job is inspected or restarted")
+        for signal in batch:
+            if resolve_channel_account(_signal_channel(signal)).execution_account_id != account:
+                raise SignalCutoverError("mixed account batch cannot cross execution modes")
+            try:
+                persist_and_enqueue_signal(signal, dry_run=dry_run)
+            except CanonicalIngressError as exc:
+                if _is_systemic_ingress_error(exc):
+                    return "retry"
+                if not dry_run:
+                    _record_persist_poison(signal, exc)
+        return "success"
 
     pending = load_pending_delivery()
     key = _signal_cursor(batch[0])
@@ -1786,6 +2161,7 @@ def attempt_batch_delivery(
         return "success" if job_id else "retry"
 
     pending.pop("route_error", None)
+    pending["execution_account_id"] = resolve_channel_account(_signal_channel(batch[0])).execution_account_id
     pending["status"] = "dispatching"
     pending["retry_after"] = 0.0
     save_pending_delivery(pending)
@@ -1976,7 +2352,16 @@ def main() -> None:
         )
         return
 
+    # Validate before the resilient polling loop: a bad activation must exit,
+    # not silently continue legacy dispatch or turn into a perpetual retry loop.
+    if signal_execution_config() or _load_signal_cutovers():
+        cutover_conn = _connect()
+        try:
+            initialize_signal_execution_cutover(cutover_conn, dry_run=args.dry_run)
+        finally:
+            cutover_conn.close()
     cursor = load_cursor()
+    persist_cursor = load_persist_cursor()
     if cursor is not None and _watcher_cursor_id(cursor) is None:
         log(
             "legacy feeder cursor detected; initializing the watcher "
@@ -1986,7 +2371,10 @@ def main() -> None:
         if not args.dry_run:
             clear_pending_delivery()
     reconcile_committed_pending(cursor)
-    log(f"feeder start cursor={cursor!r} dry_run={args.dry_run}")
+    log(
+        f"feeder start cursor={cursor!r} persist_cursor={persist_cursor!r} "
+        f"dry_run={args.dry_run}"
+    )
 
     while True:
         try:
@@ -1999,6 +2387,18 @@ def main() -> None:
                     log(f"initialized cursor to latest={cursor!r} (history is not replayed)")
                     if cursor and not args.dry_run:
                         save_cursor(cursor)
+                if persist_cursor is None:
+                    persist_cursor = cursor
+                    if persist_cursor and not args.dry_run:
+                        save_persist_cursor(persist_cursor)
+                while True:
+                    persist_cursor, persisted = persist_new_watcher_messages(
+                        conn,
+                        persist_cursor,
+                        dry_run=args.dry_run,
+                    )
+                    if persisted == 0:
+                        break
                 while True:
                     rows = fetch_new(conn, cursor)
                     batch = select_deliverable_batch(rows)

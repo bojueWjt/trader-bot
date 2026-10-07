@@ -59,6 +59,15 @@ def test_partial_close_fraction_creates_reduce_only_exit_quantity_from_actual_po
     assert result.orders[0].reduce_only is True
 
 
+def test_close_position_rejects_partial_fraction_instead_of_flattening() -> None:
+    result = plan_intent_execution(
+        _intent(action="close_position", order_plan={"type": "market", "fraction": "0.2"}),
+        _context(position=_position(quantity="0.8"), positions=(_position(quantity="0.8"),)),
+    )
+
+    assert result == OrderDenied("ambiguous_partial_on_close", "0.16<0.8")
+
+
 def _context(**overrides: Any) -> PlannerContext:
     position = _position()
     values = {

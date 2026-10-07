@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -107,6 +108,9 @@ class _Mirror:
     def refresh(self) -> tuple[Any, ...]:
         self.refreshes += 1
         return tuple(self.orders)
+
+    def orders_for_instrument(self, instrument_id: str) -> tuple[Any, ...]:
+        return tuple(order for order in self.orders if order.instrument_id == instrument_id)
 
 
 class _Adapter:
@@ -505,7 +509,7 @@ def test_cancel_all_cancels_durable_entry_with_exchange_quantity_drift() -> None
         assert payload["errors"] == []
 
 
-def test_close_all_filters_scope_and_records_reduce_only_requests() -> None:
+def test_close_all_unconfirmed_cache_cancel_never_submits_close() -> None:
     strategy = _Strategy()
     sol_order = SimpleNamespace(
         client_order_id=ROBOT_SOL_ORDER_ID,
@@ -539,25 +543,75 @@ def test_close_all_filters_scope_and_records_reduce_only_requests() -> None:
 
     assert strategy.cancelled == [ROBOT_SOL_ORDER_ID]
     assert strategy.closed == []
-    assert len(strategy.submitted_plans) == 1
-    close_plan = strategy.submitted_plans[0]
-    assert close_plan.reduce_only is True
-    assert close_plan.side == "SELL"
-    assert close_plan.quantity == "0.2"
-    assert "user_directed=true" in close_plan.tags
+    assert strategy.submitted_plans == []
     payload = strategy.message_bus.messages[0][1]
     close_operations = [
         item
         for item in payload["operations"]
         if item["kind"] == "close_position"
     ]
-    assert len(close_operations) == 1
-    assert close_operations[0]["reduce_only"] is True
-    assert close_operations[0]["position_id"] == "sol-position"
-    assert close_operations[0]["status"] == "submitted"
-    assert close_operations[0]["outcome"] == "user_directed_account_close"
-    assert close_operations[0]["robot_owned_quantity"] == "0.1"
-    assert close_operations[0]["user_directed_quantity"] == "0.1"
+    assert close_operations == []
+    assert payload["errors"] == ["close_entries_reconciling: cancellation not confirmed"]
+
+
+@pytest.mark.parametrize("outcome", ["confirmed", "unknown", "missing_evidence", "stale"])
+def test_close_all_real_worker_requires_cancel_confirmation_and_new_position(outcome) -> None:
+    from threading import Event
+    strategy = _Strategy()
+    robot = _exchange_order("regular", ROBOT_SOL_ORDER_ID, "entry-1")
+    manual = _exchange_order("regular", "aos_manual", "manual-1")
+    mirror = _Mirror([robot, manual])
+    started, release = Event(), Event()
+    results, cancelled = [], []
+
+    def cancel(_action, request, **_kwargs):
+        cancelled.append(request.client_order_id)
+        started.set()
+        assert release.wait(2)
+        if outcome == "unknown":
+            raise TimeoutError("unknown cancellation")
+        mirror.orders = [manual]
+        return SimpleNamespace(outcome="canceled", terminal_status="CANCELED")
+
+    def snapshot(**kwargs):
+        assert kwargs["force_refresh"]
+        fetched = datetime.now(timezone.utc)
+        if outcome == "stale":
+            fetched -= timedelta(seconds=20)
+        return {"positions_fetched_at": fetched, "positions": [
+            {"symbol": "SOLUSDT", "position_side": "LONG", "quantity": "0.7"},
+        ]}
+
+    if outcome != "missing_evidence":
+        strategy._exchange_evidence_provider = SimpleNamespace(snapshot=snapshot)
+    strategy.set_exchange_cancel_adapter(SimpleNamespace(cancel=cancel), mirror)
+    worker = TerminalExchangeWorker(
+        account_id="account-b", mirror=mirror, adapter=SimpleNamespace(cancel=cancel),
+        result_publisher=results.append, total_deadline_seconds=2,
+    )
+    worker.start()
+    strategy.set_terminal_exchange_worker(worker)
+    try:
+        strategy._on_node_command(_command("close-entry-race", CommandType.CLOSE_ALL))
+        assert started.wait(1)
+        assert strategy.submitted_plans == []
+        assert strategy.message_bus.messages == []
+        release.set()
+        assert worker.wait_empty(timeout_seconds=1)
+        strategy._on_terminal_exchange_result(results.pop(0))
+        assert cancelled == [ROBOT_SOL_ORDER_ID]
+        payload = strategy.message_bus.messages[-1][1]
+        if outcome == "confirmed":
+            assert payload["errors"] == []
+            assert len(strategy.submitted_plans) == 1
+            assert strategy.submitted_plans[0].quantity == "0.7"
+            assert strategy.submitted_plans[0].reduce_only
+        else:
+            assert strategy.submitted_plans == []
+            assert payload["errors"]
+    finally:
+        release.set()
+        worker.stop()
 
 
 def test_close_all_rejects_channel_authorization() -> None:

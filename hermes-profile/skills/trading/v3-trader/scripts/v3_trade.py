@@ -10,41 +10,13 @@ import argparse
 import json
 import os
 import re
-import sqlite3
 import sys
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 
 BASE = os.environ.get("V3_CONTROL_PLANE_URL", "http://127.0.0.1:8080")
-ENV_FILE = os.environ.get("V3_ENV_FILE", "/srv/trader-v3/.env.v3")
-DEFAULT_TRADING_DB_PATH = "/var/lib/docker/volumes/trader_signal-data/_data/watcher-trading.db"
-CANONICAL_TRADING_DB_ENV = "TRADER_TRADING_DB_PATH"
-LEGACY_TRADING_DB_ENVS = ("WATCHER_TRADING_DB", "TRADING_DB_PATH")
-TRADING_DB_ENV_NAMES = (CANONICAL_TRADING_DB_ENV, *LEGACY_TRADING_DB_ENVS)
-
-
-def resolve_trading_db_path(env: dict[str, str] | None = None) -> str:
-    if env is None:
-        env = os.environ
-    configured: list[tuple[str, str]] = []
-    for name in TRADING_DB_ENV_NAMES:
-        value = str(env.get(name) or "").strip()
-        if value:
-            configured.append((name, value))
-    if not configured:
-        return DEFAULT_TRADING_DB_PATH
-    canonical_name, canonical_value = configured[0]
-    for name, value in configured[1:]:
-        if value != canonical_value:
-            raise RuntimeError(
-                "conflicting trading DB path environment: "
-                f"{canonical_name}={canonical_value} {name}={value}"
-            )
-    return canonical_value
-
-
-WATCHER_TRADING_DB = resolve_trading_db_path()
 _DEFAULT_OPERATOR_ACCOUNTS = (
     "account-a",
     "account-b",
@@ -110,155 +82,21 @@ def _channel_route_error(message: str) -> None:
     sys.exit(1)
 
 
-def _table_columns(
-    conn: sqlite3.Connection,
-    table_name: str,
-) -> set[str]:
-    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-    return {str(row["name"]) for row in rows}
-
-
-def _route_account_is_enabled(
-    row: sqlite3.Row,
-    account_columns: set[str],
-) -> bool:
-    for field_name in ("is_enabled", "enabled"):
-        if field_name not in account_columns:
-            continue
-        value = str(row[field_name] or "").strip().lower()
-        if value not in _ENABLED_ACCOUNT_STATUSES:
-            return False
-    if "status" not in account_columns:
-        return True
-    status = str(row["status"] or "").strip().lower()
-    if not status:
-        return True
-    return status in _ENABLED_ACCOUNT_STATUSES
-
-
 def _channel_execution_account(channel_id: str) -> str:
-    normalized_channel = str(channel_id or "").strip()
-    if _CHANNEL_ID_RE.fullmatch(normalized_channel) is None:
-        _channel_route_error("channel route requires a numeric Telegram channel id")
-
-    try:
-        conn = sqlite3.connect(
-            f"file:{WATCHER_TRADING_DB}?mode=ro",
-            uri=True,
-        )
-        conn.row_factory = sqlite3.Row
-        try:
-            account_columns = _table_columns(conn, "account_configs")
-            route_columns = _table_columns(conn, "channel_routing")
-            required_account_columns = {
-                "account_id",
-                "account_type",
-                "parent_account_id",
-                "execution_account_id",
-            }
-            if not required_account_columns <= account_columns:
-                _channel_route_error(
-                    "account routing schema requires account identity, "
-                    "hierarchy, and execution identity"
-                )
-            if not {"channel_id", "target_account_id"} <= route_columns:
-                _channel_route_error(
-                    "channel routing schema requires channel_id and "
-                    "target_account_id"
-                )
-
-            fields = [
-                "route.target_account_id AS target_account_id",
-                "account.account_id AS account_id",
-                "account.execution_account_id AS execution_account_id",
-                "(SELECT COUNT(*) FROM account_configs AS candidate "
-                "WHERE candidate.execution_account_id = "
-                "account.execution_account_id) AS execution_account_count",
-                "account.account_type AS account_type",
-                "account.parent_account_id AS parent_account_id",
-                "(SELECT COUNT(*) FROM account_configs AS parent "
-                "WHERE parent.account_id = account.parent_account_id "
-                "AND lower(trim(parent.account_type)) = 'main') "
-                "AS parent_main_account_count",
-            ]
-            for field_name in ("is_enabled", "enabled", "status"):
-                if field_name in account_columns:
-                    fields.append(f"account.{field_name} AS {field_name}")
-            rows = conn.execute(
-                "SELECT "
-                + ", ".join(fields)
-                + " FROM channel_routing AS route "
-                + "LEFT JOIN account_configs AS account "
-                + "ON account.account_id = route.target_account_id "
-                + "WHERE route.channel_id = ?",
-                (normalized_channel,),
-            ).fetchall()
-        finally:
-            conn.close()
-    except (OSError, sqlite3.Error) as exc:
-        _channel_route_error(f"channel routing lookup failed: {exc}")
-
-    if len(rows) != 1:
-        _channel_route_error(
-            f"channel {normalized_channel} must resolve to exactly one account"
-        )
-    row = rows[0]
-    target_account = str(row["target_account_id"] or "").strip()
-    credential_account = str(row["account_id"] or "").strip()
-    execution_account = str(row["execution_account_id"] or "").strip()
-    if not credential_account or credential_account != target_account:
-        _channel_route_error("channel route target credential account is invalid")
-    if _ACCOUNT_ID_RE.fullmatch(execution_account) is None:
-        _channel_route_error("channel route execution account is invalid")
-    try:
-        execution_account_count = int(row["execution_account_count"])
-    except (TypeError, ValueError):
-        _channel_route_error("channel route execution account identity is invalid")
-    if execution_account_count != 1:
-        _channel_route_error("channel route execution account must be unique")
-    account_type = str(row["account_type"] or "").strip().lower()
-    parent_account = str(row["parent_account_id"] or "").strip()
-    if account_type == "main":
-        if parent_account:
-            _channel_route_error(
-                "channel route main account must not have a parent"
-            )
-    elif account_type == "subaccount":
-        try:
-            parent_main_account_count = int(row["parent_main_account_count"])
-        except (TypeError, ValueError):
-            _channel_route_error(
-                "channel route subaccount parent identity is invalid"
-            )
-        if not parent_account or parent_main_account_count != 1:
-            _channel_route_error(
-                "channel route subaccount parent must resolve to one main account"
-            )
-    else:
-        _channel_route_error("channel route account type is invalid")
-    if execution_account not in _configured_operator_accounts():
-        _channel_route_error(
-            f"channel route execution account {execution_account} is not registered"
-        )
-    if not _route_account_is_enabled(row, account_columns):
-        _channel_route_error("channel route target credential account is disabled")
-    return execution_account
+    query = urllib.parse.urlencode({"channel": channel_id})
+    route = _call("GET", "/v1/query/channel-route?" + query)
+    account_id = route.get("execution_account_id")
+    if not isinstance(account_id, str) or account_id not in _configured_operator_accounts():
+        _channel_route_error("control-plane channel route has no registered execution account")
+    return account_id
 
 
 def _token() -> str:
-    tok = os.environ.get("RISK_ADMIN_TOKEN", "").strip()
-    if tok:
-        return tok
-    try:
-        with open(ENV_FILE, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if line.startswith("RISK_ADMIN_TOKEN="):
-                    return line.split("=", 1)[1].strip().strip('"').strip("'")
-    except OSError:
-        pass
-    print(json.dumps({"error": "RISK_ADMIN_TOKEN unavailable (check /srv/trader-v3/.env.v3)"}))
-    sys.exit(2)
+    token = os.environ.get("RISK_ADMIN_TOKEN", "").strip()
+    if not token:
+        print(json.dumps({"error": "RISK_ADMIN_TOKEN unavailable; inject the credential through the process environment"}))
+        raise SystemExit(2)
+    return token
 
 
 def _call(method: str, path: str, payload: dict | None = None) -> dict:
@@ -351,7 +189,7 @@ def _require_channel_account_route(args, action: str) -> None:
             f"{action} --source-message-id must encode the same channel"
         )
 
-    if action != "open":
+    if action not in ("open", "add"):
         entry_ref = str(getattr(args, "entry_ref", "") or "").strip()
         entry_channel = _channel_from_signal_ref(entry_ref)
         if entry_channel != channel:
@@ -359,7 +197,7 @@ def _require_channel_account_route(args, action: str) -> None:
                 f"{action} --entry-ref must encode the same channel"
             )
 
-    if action == "open":
+    if action in ("open", "add"):
         route_account = _channel_execution_account(channel)
         if args.account != route_account:
             _channel_route_error(
@@ -412,28 +250,28 @@ def _print_order_result(placed: dict, status: dict) -> None:
     print(json.dumps(out, ensure_ascii=False, indent=2, default=str))
 
 
-def _require_open_provenance(args) -> str:
+def _require_open_provenance(args, action: str = "open") -> str:
     channel = str(getattr(args, "channel", "") or "").strip()
     client_ref = str(getattr(args, "ref", "") or "").strip()
     if not channel:
         print(json.dumps({
-            "error": "--channel is required for open; pass the Telegram channel id "
-                     "or operator",
+            "error": f"--channel is required for {action}; pass the Telegram "
+                     "channel id or operator",
         }, ensure_ascii=False))
         sys.exit(1)
     if not client_ref:
         print(json.dumps({
-            "error": "--ref is required for open; use tg-sig-c<channel>-m<message> "
-                     "or operator-<stable-id>",
+            "error": f"--ref is required for {action}; use "
+                     "tg-sig-c<channel>-m<message> or operator-<stable-id>",
         }, ensure_ascii=False))
         sys.exit(1)
 
     if channel == "operator":
         if _OPERATOR_OPEN_REF_RE.fullmatch(client_ref):
-            _require_channel_account_route(args, "open")
+            _require_channel_account_route(args, action)
             return channel
         print(json.dumps({
-            "error": "operator open requires --ref operator or "
+            "error": f"operator {action} requires --ref operator or "
                      "operator-<stable-id>",
         }, ensure_ascii=False))
         sys.exit(1)
@@ -442,8 +280,8 @@ def _require_open_provenance(args) -> str:
     match = _TG_OPEN_REF_RE.fullmatch(client_ref)
     if not normalized_channel.isdigit() or match is None:
         print(json.dumps({
-            "error": "signal open requires --channel <numeric-id> and canonical "
-                     "--ref tg-sig-c<channel>-m<message>",
+            "error": f"signal {action} requires --channel <numeric-id> and "
+                     "canonical --ref tg-sig-c<channel>-m<message>",
         }, ensure_ascii=False))
         sys.exit(1)
     if match.group("channel") != normalized_channel:
@@ -453,7 +291,7 @@ def _require_open_provenance(args) -> str:
             "client_ref": client_ref,
         }, ensure_ascii=False))
         sys.exit(1)
-    _require_channel_account_route(args, "open")
+    _require_channel_account_route(args, action)
     return channel
 
 
@@ -505,8 +343,18 @@ def _apply_entry_offset(entry: dict, side: str) -> str:
     return f"；按用户约定：入场模糊点位让利0.1%（原值 {', '.join(raw_parts)}）"
 
 
-def cmd_open(args) -> None:
-    source_channel = _require_open_provenance(args)
+def resolve_entry_action(*, intended_action: str, canary: bool, second_price) -> str:
+    """Preserve explicit intent; the control plane validates current positions."""
+    if canary and intended_action != "open_position":
+        raise SystemExit("canary_open_position_only")
+    if second_price is not None and intended_action != "open_position":
+        raise SystemExit("second_price requires market/limit open_position")
+    return intended_action
+
+
+def _cmd_entry(args, intended_action: str) -> None:
+    label = "add" if intended_action == "add_position" else "open"
+    source_channel = _require_open_provenance(args, label)
     entry = {"type": args.entry_type}
     if args.price is not None:
         entry["price"] = args.price
@@ -531,8 +379,21 @@ def cmd_open(args) -> None:
     reason = args.reason
     if getattr(args, "entry_offset", False):
         reason = reason + _apply_entry_offset(entry, args.side)
+    actual_action = resolve_entry_action(
+        intended_action=intended_action,
+        canary=getattr(args, "canary_permit_id", None) is not None,
+        second_price=second_price,
+    )
+    replay_of = str(getattr(args, "replay_of", None) or "").strip()
+    if replay_of and actual_action != "add_position":
+        print(json.dumps({
+            "error": "replay_of is only valid when submitting add_position",
+        }, ensure_ascii=False))
+        sys.exit(1)
     payload = {
-        "action": "open_position",
+        "action": actual_action,
+        "intended_action": intended_action,
+        "signal_intent": "加仓" if intended_action == "add_position" else "开仓",
         "symbol": args.symbol.upper(),
         "side": args.side,
         "entry": entry,
@@ -541,6 +402,8 @@ def cmd_open(args) -> None:
         "source": "hermes-agent",
         "source_channel": source_channel,
     }
+    if replay_of:
+        payload["replay_of"] = replay_of
     _add_authorization_context(payload, args)
     if args.notional is not None:
         payload["notional_usdt"] = args.notional
@@ -559,6 +422,14 @@ def cmd_open(args) -> None:
     payload["client_ref"] = args.ref
     placed = _call("POST", "/v1/operator/orders", payload)
     _print_order_result(placed, _report(placed["intent_id"], wait=not args.no_wait))
+
+
+def cmd_open(args) -> None:
+    _cmd_entry(args, "open_position")
+
+
+def cmd_add(args) -> None:
+    _cmd_entry(args, "add_position")
 
 
 def _require_management_ref(args, action: str) -> None:
@@ -592,8 +463,66 @@ def _add_attribution_context(payload: dict, args) -> None:
         payload["entry_ref"] = entry_ref
 
 
+def _illegal_close_ratio_error(detail: str) -> None:
+    print(json.dumps({
+        "error": "illegal_close_ratio",
+        "detail": detail,
+        "hint": "use `partial --percent 20` (or --quantity) for a ratio; "
+                "`close` always flattens 100% and must not be used as a fallback",
+    }, ensure_ascii=False))
+    sys.exit(1)
+
+
+def _finite_decimal(raw, label: str):
+    from decimal import Decimal, InvalidOperation
+
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(f"illegal {label}") from exc
+    if not value.is_finite():
+        raise ValueError(f"illegal {label}")
+    return value
+
+
+def resolve_partial_close_quantity(
+    *,
+    quantity: float | None,
+    percent: float | None,
+    position_quantity: float | None,
+) -> float:
+    """Size a partial close. Missing/illegal ratios fail closed — never 100%."""
+    from decimal import Decimal
+
+    has_quantity = quantity is not None
+    has_percent = percent is not None
+    if has_quantity == has_percent:
+        raise ValueError("partial requires exactly one of --quantity or --percent")
+    if has_percent:
+        ratio = _finite_decimal(percent, "percent")
+        if ratio <= 0 or ratio > 100:
+            raise ValueError("percent must be >0 and <=100")
+        if position_quantity is None:
+            raise ValueError("no open position to apply percent against")
+        pos = _finite_decimal(position_quantity, "position_quantity")
+        if pos <= 0:
+            raise ValueError("no open position to apply percent against")
+        sized = pos * ratio / Decimal("100")
+        if not sized.is_finite() or sized <= 0:
+            raise ValueError("percent rounds to zero quantity")
+        return float(sized)
+    sized = _finite_decimal(quantity, "quantity")
+    if sized <= 0:
+        raise ValueError("quantity must be positive")
+    return float(sized)
+
+
 def cmd_close(args) -> None:
     _require_management_ref(args, "close")
+    if getattr(args, "percent", None) is not None or getattr(args, "quantity", None) is not None:
+        _illegal_close_ratio_error(
+            "close ignores ratios and would silently flatten 100%"
+        )
     payload = {
         "action": "close_position",
         "symbol": args.symbol.upper(),
@@ -611,10 +540,30 @@ def cmd_close(args) -> None:
 
 def cmd_partial(args) -> None:
     _require_management_ref(args, "partial")
+    percent = getattr(args, "percent", None)
+    quantity = args.quantity
+    position_quantity = None
+    if percent is not None:
+        position = _position_for(args.symbol.upper(), args.account, args.side)
+        if position is not None:
+            try:
+                position_quantity = float(position.get("quantity") or 0)
+            except (TypeError, ValueError):
+                position_quantity = None
+            if not position_quantity:
+                position_quantity = None
+    try:
+        quantity = resolve_partial_close_quantity(
+            quantity=quantity,
+            percent=percent,
+            position_quantity=position_quantity,
+        )
+    except ValueError as exc:
+        _illegal_close_ratio_error(str(exc))
     payload = {
         "action": "partial_close",
         "symbol": args.symbol.upper(),
-        "quantity": args.quantity,
+        "quantity": quantity,
         "account_id": args.account,
         "reason": args.reason,
         "source": "hermes-agent",
@@ -845,60 +794,79 @@ def main() -> None:
             p.add_argument("--entry-ref", default=None, help="entry signal ref for attribution")
         p.add_argument("--no-wait", action="store_true", help="do not wait for execution result")
 
+    def entry_args(parser, *, include_second_price: bool) -> None:
+        parser.add_argument("symbol")
+        parser.add_argument("side", choices=["long", "short"])
+        parser.add_argument("--notional", type=float, default=None,
+                           help="explicit notional in USDT; omit to auto-size from the risk "
+                                "config (requires --sl). Caps enforced server-side.")
+        parser.add_argument("--entry-type", default="market", choices=["market", "limit", "zone"])
+        parser.add_argument("--price", type=float, default=None)
+        if include_second_price:
+            parser.add_argument('--second-price', type=float, default=None,
+                               help='second explicit limit entry; submit both legs once with equal notionals and one total risk budget')
+            parser.add_argument('--third-price', type=float, default=None,
+                               help='third explicit limit entry; requires --second-price. Equal notionals, one shared risk budget')
+        parser.add_argument("--price-min", type=float, default=None)
+        parser.add_argument("--price-max", type=float, default=None)
+        parser.add_argument(
+            "--time-in-force",
+            "--time_in_force",
+            dest="time_in_force",
+            choices=["GTC", "IOC"],
+            default=None,
+            help="explicit entry time in force; live canary orders require IOC",
+        )
+        parser.add_argument(
+            "--quantity",
+            type=float,
+            default=None,
+            help="explicit base quantity for a reviewed live canary; omit for "
+                 "normal server-side risk sizing",
+        )
+        parser.add_argument(
+            "--canary-permit-id",
+            "--canary_permit_id",
+            dest="canary_permit_id",
+            default=None,
+            help="armed reviewed-release permit id for a live canary order",
+        )
+        parser.add_argument("--entry-offset", action="store_true",
+                           help="signal wording is fuzzy (附近/左右/约): shift entry "
+                                "prices 0.1%% toward fill (long up / short down). "
+                                "Precise signal prices must NOT use this flag.")
+        parser.add_argument("--sl", type=float, default=None, help="stop loss price")
+        parser.add_argument("--tp", default=None, help="take profit price(s), comma separated")
+        parser.add_argument("--leverage", type=float, default=None)
+        parser.add_argument("--expire-hours", type=float, default=48,
+                           help="limit/zone 挂单的交易所侧自动过期(GTD)小时数;0 表示不过期(GTC)")
+        parser.add_argument("--channel", default=None,
+                           help="source Telegram channel id or operator")
+        parser.add_argument(
+            "--replay-of",
+            dest="replay_of",
+            default=None,
+            help="explicit resubmit of a rejected same-source intent with zero "
+                 "execution commands/events; does not bypass source identity",
+        )
+        common(parser)
+
     p = sub.add_parser("open", help="open a position (long/short)")
-    p.add_argument("symbol")
-    p.add_argument("side", choices=["long", "short"])
-    p.add_argument("--notional", type=float, default=None,
-                   help="explicit notional in USDT; omit to auto-size from the risk "
-                        "config (requires --sl). Caps enforced server-side.")
-    p.add_argument("--entry-type", default="market", choices=["market", "limit", "zone"])
-    p.add_argument("--price", type=float, default=None)
-    p.add_argument('--second-price', type=float, default=None,
-                   help='second explicit limit entry; submit both legs once with equal notionals and one total risk budget')
-    p.add_argument('--third-price', type=float, default=None,
-                   help='third explicit limit entry; requires --second-price. Equal notionals, one shared risk budget')
-    p.add_argument("--price-min", type=float, default=None)
-    p.add_argument("--price-max", type=float, default=None)
-    p.add_argument(
-        "--time-in-force",
-        "--time_in_force",
-        dest="time_in_force",
-        choices=["GTC", "IOC"],
-        default=None,
-        help="explicit entry time in force; live canary orders require IOC",
-    )
-    p.add_argument(
-        "--quantity",
-        type=float,
-        default=None,
-        help="explicit base quantity for a reviewed live canary; omit for "
-             "normal server-side risk sizing",
-    )
-    p.add_argument(
-        "--canary-permit-id",
-        "--canary_permit_id",
-        dest="canary_permit_id",
-        default=None,
-        help="armed reviewed-release permit id for a live canary order",
-    )
-    p.add_argument("--entry-offset", action="store_true",
-                   help="signal wording is fuzzy (附近/左右/约): shift entry "
-                        "prices 0.1%% toward fill (long up / short down). "
-                        "Precise signal prices must NOT use this flag.")
-    p.add_argument("--sl", type=float, default=None, help="stop loss price")
-    p.add_argument("--tp", default=None, help="take profit price(s), comma separated")
-    p.add_argument("--leverage", type=float, default=None)
-    p.add_argument("--expire-hours", type=float, default=48,
-                   help="limit/zone 挂单的交易所侧自动过期(GTD)小时数;0 表示不过期(GTC)")
-    p.add_argument("--channel", default=None,
-                   help="source Telegram channel id or operator")
-    common(p)
+    entry_args(p, include_second_price=True)
     p.set_defaults(fn=cmd_open)
+
+    p = sub.add_parser("add", help="add to a same-side position (incremental notional)")
+    entry_args(p, include_second_price=False)
+    p.set_defaults(fn=cmd_add)
 
     p = sub.add_parser("close", help="close the whole position on a symbol")
     p.add_argument("symbol")
     p.add_argument("--side", choices=["long", "short"], required=True,
                    help="position book to manage")
+    p.add_argument("--percent", type=float, default=None,
+                   help="rejected: close is always 100%%; use partial --percent")
+    p.add_argument("--quantity", type=float, default=None,
+                   help="rejected: close is always 100%%; use partial --quantity")
     common(p, management=True)
     p.set_defaults(fn=cmd_close)
 
@@ -906,7 +874,11 @@ def main() -> None:
     p.add_argument("symbol")
     p.add_argument("--side", choices=["long", "short"], required=True,
                    help="position book to manage")
-    p.add_argument("--quantity", type=float, required=True, help="base quantity to close")
+    p.add_argument("--quantity", type=float, default=None,
+                   help="base quantity to close; mutually exclusive with --percent")
+    p.add_argument("--percent", type=float, default=None,
+                   help="percent of current position to close (e.g. 20); "
+                        "missing/illegal percent is rejected, never treated as 100")
     common(p, management=True)
     p.set_defaults(fn=cmd_partial)
 

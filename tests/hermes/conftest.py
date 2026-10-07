@@ -15,12 +15,18 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DB_DIR = REPO_ROOT / "services" / "control-plane" / "db"
 HERMES_WORKER = REPO_ROOT / "services" / "hermes-worker"
+INGRESS = REPO_ROOT / "services" / "ingress"
 MIGRATE = DB_DIR / "migrate.py"
 PG_PORT = "55437"
 
 # Make worker / claims / connection / repository importable at COLLECTION time
 # (test modules import `worker` at top level, before any fixture runs).
-for _path in (str(HERMES_WORKER), str(HERMES_WORKER / "queue"), str(DB_DIR)):
+for _path in (
+    str(HERMES_WORKER),
+    str(HERMES_WORKER / "queue"),
+    str(DB_DIR),
+    str(INGRESS),
+):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 

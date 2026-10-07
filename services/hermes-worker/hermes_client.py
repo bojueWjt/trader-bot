@@ -85,14 +85,18 @@ class RealHermesClient:
             )
 
         # Imported lazily so this module has no hard dependency on prompt assembly.
-        from prompt import MODEL_TEMPERATURE, PROMPT_VERSION, build_messages
+        from prompt import MODEL_TEMPERATURE, PROMPT_VERSION, SIGNAL_PROMPT_VERSION, build_messages
+
+        prompt_version = PROMPT_VERSION
+        if isinstance(request.system_snapshot, dict) and request.system_snapshot.get("execution_account_id"):
+            prompt_version = SIGNAL_PROMPT_VERSION
 
         body = {
             "model": self._model,
             "temperature": MODEL_TEMPERATURE,
             "response_format": {"type": "json_object"},
             "messages": build_messages(request),
-            "metadata": {"prompt_version": PROMPT_VERSION},
+            "metadata": {"prompt_version": prompt_version},
         }
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(
