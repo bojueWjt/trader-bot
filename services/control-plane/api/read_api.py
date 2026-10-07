@@ -45,7 +45,7 @@ for _module_path in (
 from execution_domain.control_plane import (  # noqa: E402
     portfolio_baseline_sha256,
 )
-from execution_domain.entry_batch import batch_reference_price, build_entry_batch
+from execution_domain.entry_batch import MARKET_QUANTITY_HEADROOM, batch_reference_price, build_entry_batch
 from execution_domain.order_ownership import (  # noqa: E402
     client_order_id_from_row,
     row_is_robot_order,
@@ -572,8 +572,21 @@ def _execution_order_plan(order_plan: dict | None, risk_budget: dict | None,
         batch = op['entry_batch']
         if not isinstance(batch, dict) or batch.get('version') != '1':
             raise ValueError('unsupported entry batch version')
-        if batch.get('allocation') != 'equal_notional' or len(batch.get('tranches', [])) != 2:
+        tranches = batch.get('tranches', [])
+        if (
+            batch.get('allocation') != 'equal_notional'
+            or not isinstance(tranches, list)
+            or len(tranches) not in (2, 3)
+        ):
             raise ValueError('invalid entry batch')
+        for index, tranche in enumerate(tranches):
+            if not isinstance(tranche, dict):
+                raise ValueError('invalid entry batch')
+            kind = tranche.get('type')
+            if index == 0 and kind not in ('market', 'limit'):
+                raise ValueError('invalid entry batch')
+            if index > 0 and kind != 'limit':
+                raise ValueError('entry batch later legs must be limit')
         out = {
             'type': 'entry_batch', 'batch_version': '1',
             'side': {'long': 'buy', 'short': 'sell'}.get(op.get('side'), op.get('side')),
@@ -690,7 +703,9 @@ def _single_execution_order_plan(
     else:
         sizing_price = entry_price
     if quantity is None and sizing_price is None and entry_type == "market" and max_notional:
-        sizing_price = _binance_mark_price(symbol)
+        mark = _binance_mark_price(symbol)
+        # Same headroom as a batch market leg: the node re-prices at its own mark.
+        sizing_price = mark * float(MARKET_QUANTITY_HEADROOM) if mark else mark
     if quantity is None and sizing_price and max_notional:
         try:
             quantity = float(max_notional) / float(sizing_price)
@@ -7009,11 +7024,13 @@ def _symbol_risk_ratio(symbol: str) -> float:
 
 def _size_entry_batch(explicit_notional, symbol, account_id, side, first_type,
                       first_price, second_price, stop_loss, leverage, caps,
-                      checks, risk_capital_addon):
+                      checks, risk_capital_addon, third_price=None):
     if first_type == 'market':
         first_price = _binance_mark_price(symbol)
     try:
-        reference = batch_reference_price(first_price, second_price, stop_loss, side)
+        reference = batch_reference_price(
+            first_price, second_price, stop_loss, side, third_price,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     # One call applies the existing equity, risk, funds and leverage ceilings
@@ -7022,7 +7039,9 @@ def _size_entry_batch(explicit_notional, symbol, account_id, side, first_type,
         explicit_notional, symbol, account_id, side, 'limit', float(reference),
         None, None, stop_loss, leverage, caps, checks, risk_capital_addon,
     )
-    batch = build_entry_batch(first_type, first_price, second_price, total, stop_loss)
+    batch = build_entry_batch(
+        first_type, first_price, second_price, total, stop_loss, third_price,
+    )
     checks.append({'name': 'entry_batch_equal_notional', 'passed': True,
                    'allocation': 'equal_notional', 'entry_batch': batch})
     return total, batch
@@ -7636,8 +7655,13 @@ def operator_order(
     entry_price_min = _op_num(entry.get("price_min"), "entry.price_min")
     entry_price_max = _op_num(entry.get("price_max"), "entry.price_max")
     second_price = _op_num(entry.get('second_price'), 'entry.second_price')
+    third_price = _op_num(entry.get('third_price'), 'entry.third_price')
+    if third_price is not None and second_price is None:
+        raise HTTPException(status_code=400, detail='third_price requires second_price')
     if second_price is not None and (action != 'open_position' or entry_type not in ('market', 'limit')):
         raise HTTPException(status_code=400, detail='second_price requires market/limit open_position')
+    if third_price is not None and (action != 'open_position' or entry_type not in ('market', 'limit')):
+        raise HTTPException(status_code=400, detail='third_price requires market/limit open_position')
     if entry_type == "limit" and entry_price is None:
         raise HTTPException(status_code=400, detail="limit entry requires entry.price")
     if entry_type == "zone" and (entry_price_min is None or entry_price_max is None):
@@ -7736,7 +7760,7 @@ def operator_order(
     canary_quantity = None
     canary_price = None
     if canary_open:
-        if second_price is not None:
+        if second_price is not None or third_price is not None:
             raise HTTPException(status_code=400, detail='entry batch is not supported by canary permits')
         _canary_phase_for_account(account_id)
         if entry_type != "limit":
@@ -7963,11 +7987,14 @@ def operator_order(
         if canary_open:
             sizing_caps = dict(caps)
             sizing_caps["_canary_explicit_notional_override"] = True
+        if second_price is not None or third_price is not None:
+            if stop_loss is None:
+                raise HTTPException(status_code=400, detail='entry batch requires stop_loss')
         if second_price is not None:
             notional, entry_batch = _size_entry_batch(
                 explicit_notional, symbol, account_id, side, entry_type,
                 entry_price, second_price, stop_loss, leverage, sizing_caps,
-                checks, open_risk_capital_addon,
+                checks, open_risk_capital_addon, third_price,
             )
         else:
             notional = _size_open_order(
@@ -8017,6 +8044,8 @@ def operator_order(
         if entry_batch:
             order_plan['entry_batch'] = entry_batch
             order_plan['entry']['second_price'] = second_price
+            if third_price is not None:
+                order_plan['entry']['third_price'] = third_price
             if expire_hours:
                 order_plan['entry_expires_at'] = (
                     datetime.now(timezone.utc) + timedelta(hours=expire_hours)

@@ -1,9 +1,15 @@
-"""Two explicit entries: fixed equal notionals and per-order fill evidence.
+"""Two or three explicit entries: fixed equal notionals, one total risk.
 
 No I/O. Fill evidence is stored in the existing protection stash; it never
-infers ownership from a combined exchange position.
+infers ownership from a combined exchange position. A third leg is optional
+and does not change the two-leg call shape.
 """
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
+
+# The node prices a MARKET leg at its own fresh mark just before submitting and
+# rejects the whole intent if the total then exceeds the approved notional.
+# Sizing the quantity 0.5% under the approval quote absorbs that small move.
+MARKET_QUANTITY_HEADROOM = Decimal('1.005')
 
 
 def positive(value):
@@ -16,29 +22,42 @@ def positive(value):
     return number
 
 
-def batch_reference_price(first, second, stop, side):
-    first, second, stop = (positive(value) for value in (first, second, stop))
+def batch_reference_price(first, second, stop, side, third=None):
+    raw_prices = [first, second]
+    if third is not None:
+        raw_prices.append(third)
+    prices = [positive(value) for value in raw_prices]
+    stop = positive(stop)
     if side not in ('long', 'short'):
         raise ValueError('entry batch side must be long or short')
-    if side == 'long' and stop >= min(first, second):
-        raise ValueError('long stop must be below both entries')
-    if side == 'short' and stop <= max(first, second):
-        raise ValueError('short stop must be above both entries')
-    # Equal notionals: total stop fraction is the mean of the two fractions.
-    return Decimal(2) / (Decimal(1) / first + Decimal(1) / second)
+    if len(prices) not in (2, 3):
+        raise ValueError('entry batch requires 2 or 3 legs')
+    if side == 'long' and stop >= min(prices):
+        raise ValueError('long stop must be below every entry')
+    if side == 'short' and stop <= max(prices):
+        raise ValueError('short stop must be above every entry')
+    # Equal notionals: reference is N / sum(1/pi), so one stop fraction
+    # matches the mean of the per-leg fractions.
+    count = Decimal(len(prices))
+    return count / sum((Decimal(1) / price for price in prices), Decimal(0))
 
 
-def build_entry_batch(first_type, first, second, total_notional, stop):
+def build_entry_batch(first_type, first, second, total_notional, stop, third=None):
     if first_type not in ('market', 'limit'):
         raise ValueError('batch first entry must be market or limit')
-    prices = (positive(first), positive(second))
-    per_leg = positive(total_notional) / 2
+    prices = [positive(first), positive(second)]
+    if third is not None:
+        prices.append(positive(third))
+    if len(prices) not in (2, 3):
+        raise ValueError('entry batch requires 2 or 3 legs')
+    per_leg = positive(total_notional) / Decimal(len(prices))
     tranches = []
     for index, price in enumerate(prices):
         kind = 'limit'
         if index == 0:
             kind = first_type
-        quantity = (per_leg / price).quantize(Decimal('0.000000000001'), rounding=ROUND_DOWN)
+        quantity_price = price * MARKET_QUANTITY_HEADROOM if kind == 'market' else price
+        quantity = (per_leg / quantity_price).quantize(Decimal('0.000000000001'), rounding=ROUND_DOWN)
         if quantity <= 0:
             raise ValueError('entry batch quantity rounded to zero')
         leg = {

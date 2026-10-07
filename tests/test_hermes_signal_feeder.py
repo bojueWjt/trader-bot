@@ -617,8 +617,13 @@ def test_four_channel_routes_bind_distinct_accounts_in_hermes_prompt(
         assert "开仓时效:" in prompt
         assert "超过 30 分钟" in prompt
         assert "无法确认发布时间时，开仓类一律只汇报" in prompt
-        assert "两腿同等名义金额，共享总风险预算" in prompt
         assert "第二腿传 --second-price" in prompt
+        assert "第三腿传 --third-price" in prompt
+        assert "同等名义金额，共享一份总风险预算" in prompt
+        assert "系统只定量一次后均分" in prompt
+        assert "不得拆成多次 open" in prompt
+        assert "旧 e1 不自动补单" in prompt
+        assert "多于三腿报告暂不支持且不截断" in prompt
         assert f"路由凭据账号(审计): {target_account_id}" in prompt
         assert f"固定执行账号: {execution_account_id}" in prompt
         assert f"必须使用 --account {execution_account_id}" in prompt

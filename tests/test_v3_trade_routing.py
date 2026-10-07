@@ -118,6 +118,64 @@ def test_two_entries_are_one_cli_request(monkeypatch):
     assert posts[0]['client_ref'] == 'operator-two-entry-test'
 
 
+def _open_argv(*extra):
+    return [
+        'v3_trade.py', 'open', 'ETHUSDT', 'short', '--sl', '3167',
+        '--entry-type', 'limit', '--price', '2877',
+        '--channel', 'operator', '--account', 'account-b',
+        '--ref', 'operator-eth-three', '--reason', 'eth three',
+        '--no-wait', '--authorized-by-type', 'user',
+        '--authorized-by-id', 'test-user',
+        '--source-message-id', 'operator-eth-three',
+        *extra,
+    ]
+
+
+def test_three_explicit_limits_are_one_unshifted_request(monkeypatch):
+    trade = _load_module('test_three_entry_trade', TRADE_PATH)
+    calls = []
+    monkeypatch.setattr(trade, '_call', _successful_call(calls))
+    monkeypatch.setattr(sys, 'argv', _open_argv(
+        '--second-price', '2967', '--third-price', '3067',
+    ))
+    trade.main()
+    posts = [payload for method, path, payload in calls if method == 'POST']
+    assert len(posts) == 1
+    assert posts[0]['entry'] == {
+        'type': 'limit', 'price': 2877.0, 'second_price': 2967.0, 'third_price': 3067.0,
+    }
+    assert posts[0]['stop_loss'] == 3167.0
+    assert 'third_price_raw' not in posts[0]['entry']
+
+
+def test_entry_offset_shifts_third_price_and_keeps_raw_audit(monkeypatch):
+    trade = _load_module('test_three_entry_offset', TRADE_PATH)
+    calls = []
+    monkeypatch.setattr(trade, '_call', _successful_call(calls))
+    monkeypatch.setattr(sys, 'argv', _open_argv(
+        '--second-price', '2967', '--third-price', '3067', '--entry-offset',
+    ))
+    trade.main()
+    entry = [payload for method, path, payload in calls if method == 'POST'][0]
+    prices = entry['entry']
+    assert prices['third_price_raw'] == 3067.0
+    assert prices['second_price_raw'] == 2967.0
+    assert prices['price_raw'] == 2877.0
+    assert prices['third_price'] == pytest.approx(3067 * 0.999)
+    assert prices['price'] == pytest.approx(2877 * 0.999)
+    assert 'third_price=3067' in entry['reason']
+
+
+def test_third_price_without_second_or_stop_is_not_sent(monkeypatch):
+    trade = _load_module('test_three_entry_reject', TRADE_PATH)
+    calls = []
+    monkeypatch.setattr(trade, '_call', _successful_call(calls))
+    monkeypatch.setattr(sys, 'argv', _open_argv('--third-price', '3067'))
+    with pytest.raises(SystemExit):
+        trade.main()
+    assert calls == []
+
+
 @pytest.fixture(autouse=True)
 def _clear_trading_db_path_env(monkeypatch):
     for name in (
@@ -584,3 +642,23 @@ def test_normal_operator_open_keeps_explicit_notional_compatibility(
     assert payload["notional_usdt"] == 300.0
     assert "quantity" not in payload
     assert "canary_permit_id" not in payload
+
+
+def test_v3_trade_help_survives_python314_argparse_validation() -> None:
+    """Python 3.14 validates help strings at add_argument time.
+
+    An unescaped percent in close/partial help (for example ``100%;``) raises
+    ValueError during parser construction, so every subcommand fails before
+    any order is sent.
+    """
+    import subprocess
+
+    for command in ("open", "close", "partial"):
+        proc = subprocess.run(
+            [sys.executable, str(TRADE_PATH), command, "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "usage:" in proc.stdout

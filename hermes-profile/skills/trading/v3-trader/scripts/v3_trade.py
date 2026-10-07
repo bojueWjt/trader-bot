@@ -486,6 +486,7 @@ def _apply_entry_offset(entry: dict, side: str) -> str:
         ("price_min", "price_min_raw"),
         ("price_max", "price_max_raw"),
         ('second_price', 'second_price_raw'),
+        ('third_price', 'third_price_raw'),
     ):
         value = entry.get(key)
         if value is None:
@@ -510,10 +511,17 @@ def cmd_open(args) -> None:
     if args.price is not None:
         entry["price"] = args.price
     second_price = getattr(args, 'second_price', None)
+    third_price = getattr(args, 'third_price', None)
+    if third_price is not None and second_price is None:
+        raise SystemExit('--third-price requires --second-price')
     if second_price is not None:
         if args.entry_type not in ('market', 'limit') or args.sl is None:
             raise SystemExit('--second-price requires market/limit entry and --sl')
         entry['second_price'] = second_price
+    if third_price is not None:
+        if args.entry_type not in ('market', 'limit') or args.sl is None:
+            raise SystemExit('--third-price requires market/limit entry and --sl')
+        entry['third_price'] = third_price
     if args.price_min is not None:
         entry["price_min"] = args.price_min
     if args.price_max is not None:
@@ -847,6 +855,8 @@ def main() -> None:
     p.add_argument("--price", type=float, default=None)
     p.add_argument('--second-price', type=float, default=None,
                    help='second explicit limit entry; submit both legs once with equal notionals and one total risk budget')
+    p.add_argument('--third-price', type=float, default=None,
+                   help='third explicit limit entry; requires --second-price. Equal notionals, one shared risk budget')
     p.add_argument("--price-min", type=float, default=None)
     p.add_argument("--price-max", type=float, default=None)
     p.add_argument(

@@ -257,7 +257,7 @@
             "properties": {
               "tranches": {
                 "minItems": 2,
-                "maxItems": 2,
+                "maxItems": 3,
                 "items": {
                   "required": [
                     "type",
