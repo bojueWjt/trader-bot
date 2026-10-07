@@ -1,0 +1,1307 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trader Bot 系统说明 · 2026-09-18 快照</title>
+  <style>
+    :root {
+      --paper: #f6f1e8;
+      --ink: #1c1917;
+      --muted: #57534e;
+      --line: #d6cfc4;
+      --teal: #0f766e;
+      --teal-deep: #115e59;
+      --card: #fffaf3;
+      --warn: #9a3412;
+      --gap: #c2410c;
+      --gap-bg: #fff4ed;
+      --ok-bg: #f0fdfa;
+      --unk: #57534e;
+      --unk-bg: #f5f5f4;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--paper); color: var(--ink); }
+    body {
+      font-family: "Iowan Old Style", "Palatino Linotype", Palatino, "Songti SC", "Noto Serif SC", serif;
+      line-height: 1.65;
+      font-size: 17px;
+    }
+    a { color: var(--teal-deep); }
+    header {
+      border-bottom: 1px solid var(--line);
+      padding: 1.6rem 1.2rem 1.2rem;
+    }
+    main { max-width: 46rem; margin: 0 auto; padding: 0 1.2rem 3.5rem; }
+    h1 { font-size: 1.7rem; letter-spacing: 0.01em; margin: 0 0 0.4rem; }
+    h2 { font-size: 1.2rem; color: var(--teal-deep); margin: 2.1rem 0 0.6rem; }
+    h3 { font-size: 1.02rem; margin: 0 0 0.35rem; }
+    p, li { color: var(--ink); }
+    .lede { color: var(--muted); margin: 0; }
+    .kicker { color: var(--teal); font-size: 0.82rem; letter-spacing: 0.12em; text-transform: uppercase; }
+    nav.toc { background: var(--card); border: 1px solid var(--line); padding: 0.9rem 1rem; margin: 1.2rem 0 1.6rem; }
+    nav.toc a { margin-right: 0.9rem; }
+    code, .mono, td, th, p, li, summary, h3 {
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    code, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.86em; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--teal);
+      padding: 0.9rem 1rem;
+      margin: 1rem 0;
+    }
+    .warn { border-left-color: var(--warn); }
+    table {
+      width: 100%;
+      max-width: 100%;
+      table-layout: fixed;
+      border-collapse: collapse;
+      font-size: 0.92rem;
+    }
+    th, td { text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); padding: 0.45rem 0.3rem; }
+    th { color: var(--teal-deep); font-weight: 650; }
+    footer { color: var(--muted); font-size: 0.88rem; margin-top: 2.4rem; }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin: 0.8rem 0 1rem;
+      align-items: center;
+    }
+    .toolbar input {
+      flex: 1 1 12rem;
+      min-width: 0;
+      border: 1px solid var(--line);
+      background: var(--card);
+      color: var(--ink);
+      padding: 0.45rem 0.6rem;
+      font: inherit;
+    }
+    .toolbar button {
+      border: 1px solid var(--line);
+      background: var(--card);
+      color: var(--ink);
+      padding: 0.4rem 0.7rem;
+      font: inherit;
+      cursor: pointer;
+    }
+    .toolbar button[aria-pressed="true"] {
+      background: var(--teal-deep);
+      color: #fffaf3;
+      border-color: var(--teal-deep);
+    }
+    .gcard {
+      background: var(--card);
+      border: 1px solid var(--line);
+      margin: 0.8rem 0;
+      padding: 0 0.85rem 0.4rem;
+    }
+    .gcard > summary {
+      cursor: pointer;
+      list-style: none;
+      padding: 0.85rem 0;
+      display: grid;
+      gap: 0.15rem;
+    }
+    .gcard > summary::-webkit-details-marker { display: none; }
+    .gid {
+      color: var(--teal);
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.82rem;
+      letter-spacing: 0.04em;
+    }
+    .gmeta { color: var(--muted); font-size: 0.88rem; }
+    .check {
+      border-top: 1px solid var(--line);
+      padding: 0.75rem 0;
+    }
+    .check[hidden], .gcard[hidden] { display: none; }
+    .badge {
+      display: inline-block;
+      font-size: 0.75rem;
+      letter-spacing: 0.04em;
+      padding: 0.12rem 0.4rem;
+      margin-bottom: 0.35rem;
+    }
+    .badge.implemented { background: var(--ok-bg); color: var(--teal-deep); }
+    .badge.gap { background: var(--gap-bg); color: var(--gap); }
+    .badge.unverified { background: var(--unk-bg); color: var(--unk); }
+    .check.gap { background: var(--gap-bg); margin: 0 -0.85rem; padding: 0.75rem 0.85rem; }
+    .dl { margin: 0.2rem 0 0; font-size: 0.95rem; }
+    .dl div { margin: 0.2rem 0; }
+    .dl dt { color: var(--muted); display: inline; }
+    .dl dd { display: inline; margin: 0 0 0 0.3rem; }
+
+    .hint { color: var(--muted); font-size: 0.82rem; }
+    .gcard[open] .hint-closed { display: none; }
+    dl.dl { margin: 0.2rem 0 0; font-size: 0.95rem; }
+    dl.dl > div { margin: 0.2rem 0; }
+    dl.dl dt { color: var(--muted); display: inline; }
+    dl.dl dd { display: inline; margin: 0 0 0 0.3rem; }
+    .badge.ops, .badge.convention, .badge.observe { background: var(--unk-bg); color: var(--ink); }
+
+    .hint { color: var(--muted); font-size: 0.82rem; }
+    .gcard[open] .hint-closed { display: none; }
+    dl.dl { margin: 0.2rem 0 0; font-size: 0.95rem; }
+    dl.dl > div { margin: 0.2rem 0; }
+    dl.dl dt { color: var(--muted); display: inline; }
+    dl.dl dd { display: inline; margin: 0 0 0 0.3rem; }
+    .badge.ops, .badge.convention, .badge.observe { background: var(--unk-bg); color: var(--ink); }
+    .empty { color: var(--muted); display: none; }
+    body.filter-empty .empty { display: block; }
+    @media (max-width: 720px) {
+      body { font-size: 16px; }
+      h1 { font-size: 1.45rem; }
+      nav.toc { display: flex; flex-wrap: wrap; gap: 0.35rem 0.8rem; }
+      nav.toc a { margin-right: 0; }
+      table { font-size: 0.82rem; }
+      .gcard { padding: 0 0.75rem 0.3rem; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <main>
+      <div class="kicker">Trader Bot · 离线说明</div>
+      <h1>系统说明</h1>
+      <p class="lede">2026-09-18 源码与部署记录快照，不是实时巡检，也不是运行 PASS。主图是同目录 Archify 总览；检查矩阵以本页为准。</p>
+      <p><a href="./system-architecture.html">打开系统架构主图</a> · <a href="./system-architecture.evidence.json">事实证据 JSON</a></p>
+    </main>
+  </header>
+  <main>
+    <nav class="toc">
+      <a href="#checks">关键检查点</a>
+      <a href="#g1">G1</a>
+      <a href="#g2">G2</a>
+      <a href="#g3">G3</a>
+      <a href="#g4">G4</a>
+      <a href="#g5">G5</a>
+      <a href="#g6">G6</a>
+      <a href="#g7">G7</a>
+      <a href="#g8">G8</a>
+      <a href="#path">系统说明</a>
+    </nav>
+
+            <section id="checks">
+      <h2>关键检查点</h2>
+      <p>检查点按交易生命周期组织为 G1–G8。每项注明机制：代码强制、运维流程、提示约定或状态观察。过滤里的「已实现」不是自动拦截承诺，也不等于在线 PASS。</p>
+      <p id="counts"></p>
+      <div class="toolbar" role="search">
+        <input id="q" type="search" placeholder="搜索检查、路径、函数" aria-label="搜索检查点">
+        <button type="button" data-filter="all" aria-pressed="true">全部</button>
+        <button type="button" data-filter="implemented" aria-pressed="false">已实现</button>
+        <button type="button" data-filter="gap" aria-pressed="false">缺口</button>
+        <button type="button" data-filter="unverified" aria-pressed="false">未核实</button>
+      </div>
+      <p class="empty">没有匹配的检查项。</p>
+
+      <details class="gcard" id="g1" open>
+        <summary>
+          <span class="gid">G1</span>
+          <strong>信号接入与持久投递</strong>
+          <span class="gmeta" data-gmeta="1">负责：Watcher / ingress / feeder · 3 项 · 0 缺口</span>
+          <span class="hint">点击展开或收起</span>
+        </summary>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g1-whitelist">
+          <span class="badge implemented">代码强制</span>
+          <h3>频道白名单</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>消息 chatId 是否在 watchGroups。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>Watcher 收到 Telegram update 时。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>逐条 FILTERED OUT，不入库、不进入 feeder。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">bridge/services/telegram-watcher/server.js</span>；<span class="mono">bridge/services/telegram-watcher/lib/telegram-utils.js</span> 中 <span class="mono">chatIdMatchesWatchList</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g1-dedup">
+          <span class="badge implemented">代码强制</span>
+          <h3>消息去重</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>同一 (source, channel_id, source_message_id, source_version) 是否已存在。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>canonical ingress 写入 Postgres 时。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>返回 duplicate，不新插 outbox。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">db/migrations/0001_canonical_schema.up.sql</span> 唯一约束；<span class="mono">services/ingress/ingress/service.py</span> 中 <span class="mono">ingest_raw_telegram_update</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g1-ingress">
+          <span class="badge implemented">代码强制</span>
+          <h3>规范 ingress 与 outbox 先于 Hermes</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>Watcher 行必须先写入 raw_message 与 queued_for_hermes outbox，才允许 cron job。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>feeder 批投递前。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>cursor 不前进，状态 ingress_retry。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">scripts/hermes_signal_feeder.py</span> 中 <span class="mono">_ensure_canonical_ingress</span>；<span class="mono">services/control-plane/db/repository.py</span> 中 <span class="mono">ingest_raw_message_with_outbox</span></dd>
+            </div>
+          </dl>
+        </article>
+      </details>
+
+      <details class="gcard" id="g2" open>
+        <summary>
+          <span class="gid">G2</span>
+          <strong>结构化决策与身份授权</strong>
+          <span class="gmeta" data-gmeta="1">负责：Hermes / 控制面 · 4 项 · 1 待验证</span>
+          <span class="hint">点击展开或收起</span>
+        </summary>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g2-schema">
+          <span class="badge implemented">代码强制</span>
+          <h3>决策 schema</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>落库对象是否符合 HermesDecisionV1，不解析自然语言。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>decision gateway 处理一条 decision 时。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>不写 approved intent。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">services/control-plane/decision_gateway/gateway.py</span> 中 <span class="mono">process_one_decision</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g2-auth-type">
+          <span class="badge implemented">代码强制</span>
+          <h3>user 与 channel 权限分开</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>authorized_by_type 只能是 user 或 channel；管理动作按类型走不同归属。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>POST /v1/operator/orders。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>400，不把 channel 提升为 user。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">services/control-plane/api/read_api.py</span> 中 <span class="mono">_ORDER_AUTHORIZATION_TYPES</span>（工作树 b9ba807 同源字段）</dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g2-ref">
+          <span class="badge implemented">代码强制</span>
+          <h3>来源 channel 与 ref 一致</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>开仓 client_ref 中的频道与声明 channel 是否冲突。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>operator 开仓入口。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>400 source_channel conflicts with client_ref。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">services/control-plane/api/read_api.py</span> 中 <span class="mono">_open_source_channel</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="unverified" data-mechanism="code" id="g2-add-whitelist">
+          <span class="badge unverified">未核实</span>
+          <h3>CLI add_position 与 operator 动作白名单</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>CLI add 提交 add_position，是否被当时运行的 operator 白名单接受。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>静态对照：工作树 <span class="mono">.worktrees/tao-reduction-authority-20260918/services/control-plane/api/read_api.py</span> 的 <span class="mono">_OPERATOR_ACTIONS</span> 含 add_position；仓库主线同文件白名单不含。线上声称 b9ba807。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>若线上实际是主线白名单，CLI 加仓会 400。未做运行时验证，不称已修复。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">hermes-profile/skills/trading/v3-trader/scripts/v3_trade.py</span> 中 <span class="mono">cmd_add</span>；主线与工作树 <span class="mono">read_api.py</span> 白名单对照</dd>
+            </div>
+          </dl>
+        </article>
+      </details>
+
+      <details class="gcard" id="g3" open>
+        <summary>
+          <span class="gid">G3</span>
+          <strong>风控与作用范围</strong>
+          <span class="gmeta" data-gmeta="1">负责：risk_state / governor / 账户预算 · 5 项 · 2 缺口</span>
+          <span class="hint">点击展开或收起</span>
+        </summary>
+        <article class="check gap" data-status="gap" data-mechanism="code" id="g3-risk-or">
+          <span class="badge gap">已知缺口</span>
+          <h3>风险接口无账户/币种过滤地汇总全表</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>GET /v1/risk/state 读取全部 risk_state 行，任意 HALTED 令接口返回全局 HALTED。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>查询/Hermes 调用该接口。2026-09-18 23:07 北京时间 Hermes DM：接口 HALTED，同时 GET /v1/nodes ACTIVE。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>Hermes 把全局 HALTED 用于 GLM 新增风险并拒绝。缺口未修复。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">services/control-plane/api/read_api.py</span> 中 <span class="mono">v1_risk_state</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check gap" data-status="gap" data-mechanism="observe" id="g3-active-not-tradable">
+          <span class="badge gap">已知缺口</span>
+          <h3>节点 ACTIVE 不能代表目标交易可用</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>状态观察</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>node.trading_state 与账户/币种 risk_state.mode 分离存储。节点 ACTIVE 只说明心跳与交易状态机。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>对照心跳与风险查询。23:23 A–D 复核 ACTIVE；23:27 仅再复核 B。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>用节点 ACTIVE 推断可开仓会误判。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">services/control-plane/api/read_api.py</span> 中 <span class="mono">node_heartbeat</span>；<span class="mono">services/control-plane/risk/governor.py</span> 中 <span class="mono">evaluate</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g3-budget">
+          <span class="badge implemented">代码强制</span>
+          <h3>余额保证金与仓位额度</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>账户投影 equity / available_balance（作 free_margin）须新鲜且可承担新风险；开仓还核对品种名义与总风险分数上限。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>风险预留与 governor 批准开仓时。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>预算陈旧则 needs_review；额度超限则 reject。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">services/control-plane/risk/account_budget.py</span> 中 <span class="mono">load_account_budget</span>；<span class="mono">services/control-plane/risk/reservations.py</span>；<span class="mono">services/control-plane/risk/governor.py</span> 中 exposure 段</dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g3-governor">
+          <span class="badge implemented">代码强制</span>
+          <h3>意图级 kill switch 与品种门</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>结构化意图的 risk_state.mode、几何、杠杆；节点侧 live_entry_instrument_not_allowed。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>gateway/governor 批准前；节点提交开仓前。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>reject / denied。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">services/control-plane/risk/governor.py</span> 中 <span class="mono">evaluate</span>；工作树 <span class="mono">.worktrees/tao-reduction-authority-20260918/services/nautilus-node/strategy/intent_execution_strategy.py</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="observe" id="g3-instrument-locks">
+          <span class="badge implemented">状态观察</span>
+          <h3>BTC/ETH 独立锁需显式处置</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>状态观察</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>品种级 risk_state 不会随节点 RESUME 自动清除。审计：B 的 BTC/ETH 锁来自 2026-08-10 ghost-active HALT（instruments 含 BTC/ETH/SOL）；08-19 只 RESUME SOL；今日 RESUME 无 instruments。这是作用范围语义，不是故障。23:30 未提交加仓。锁是否仍应作为有效门尚未另证，不称无效记录。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>只读审计核对 RESUME scope 与遗留行。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>目标品种仍可能被锁，同时节点显示 ACTIVE。需要对该品种显式处置，不是自动清锁缺口。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>2026-09-18 只读审计；相对仓库根 <span class="mono">services/control-plane/api/read_api.py</span> 中 <span class="mono">issue_operator_command</span> 的 RESUME scope</dd>
+            </div>
+          </dl>
+        </article>
+      </details>
+
+      <details class="gcard" id="g4" open>
+        <summary>
+          <span class="gid">G4</span>
+          <strong>意图分发和重复 / 迟到处理</strong>
+          <span class="gmeta" data-gmeta="1">负责：控制面 / 节点 inbox · 4 项 · 1 缺口</span>
+          <span class="hint">点击展开或收起</span>
+        </summary>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g4-ttl">
+          <span class="badge implemented">代码强制</span>
+          <h3>approved 意图有效期</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>节点领取时 valid_until &gt; clock_timestamp()。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>控制面意图分发。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>过期意图不再取出。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">services/control-plane/api/signal_handoff.py</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g4-idem">
+          <span class="badge implemented">代码强制</span>
+          <h3>幂等键 / client_ref</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>同一 idempotency / ref 是否已有意图。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>operator 下单与节点 ACK。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>duplicate_idempotency_key 等；部分拒因不把意图打成终态。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">services/control-plane/api/read_api.py</span> 中 <span class="mono">_NON_TERMINAL_INTENT_REJECTION_REASONS</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g4-inbox">
+          <span class="badge implemented">代码强制</span>
+          <h3>inbox 幂等，不宣称 exactly-once</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>同一 intent/idempotency 登记为 REGISTERED / REPLAY / CONFLICT。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>节点接收已批准意图。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>冲突拒绝；重放不保证恰好一次成交。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">services/nautilus-node/runtime/intent_execution_inbox.py</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check gap" data-status="gap" data-mechanism="code" id="g4-late-halt">
+          <span class="badge gap">已知缺口</span>
+          <h3>迟到 halted ACK 覆盖已受理意图</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>ack_node_intent 在 rejected 且原因不在非终态集合时，把 approved 更新为 rejected。halted 会覆盖已受理。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>节点重启后迟到 ACK。B/GLM 已发生；仅单行审计恢复。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>已批准意图被改写。通用路径未根治。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">services/control-plane/api/read_api.py</span> 中 <span class="mono">ack_node_intent</span>；工作树 <span class="mono">.worktrees/tao-reduction-authority-20260918/docs/reports/2026-09-18-close-reduction-fix.md</span></dd>
+            </div>
+          </dl>
+        </article>
+      </details>
+
+      <details class="gcard" id="g5" open>
+        <summary>
+          <span class="gid">G5</span>
+          <strong>节点执行前校验</strong>
+          <span class="gmeta" data-gmeta="1">负责：Nautilus / Redis / operator 入口 · 6 项 · 0 缺口</span>
+          <span class="hint">点击展开或收起</span>
+        </summary>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g5-lease">
+          <span class="badge implemented">代码强制</span>
+          <h3>租约、fencing、ready、对账</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>心跳带 fencing epoch、lease token、readiness、新鲜 last_seen；部分命令要求 reconciliation 健康。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>节点心跳与控制面写者围栏。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>409/围栏拒绝。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">services/control-plane/api/read_api.py</span> 中 <span class="mono">node_heartbeat</span>、<span class="mono">_require_node_writer</span>；<span class="mono">services/nautilus-node/persistence/redis_namespace_lease.py</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g5-cid">
+          <span class="badge implemented">代码强制</span>
+          <h3>手动单所有权</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>机器人 CID ^B[0-9a-f]{32}[0-9]{2}$；aos_ / stToAg_ 不纳入机器人撤单范围。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>节点对账、生命周期监测、operator cancel。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>跳过手动单，不得撤销。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">packages/execution-domain/execution_domain/order_ownership.py</span> 中 <span class="mono">is_robot_client_order_id</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g5-reduce">
+          <span class="badge implemented">代码强制</span>
+          <h3>减仓基数与 fraction</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>channel：min(robot_owned, 新鲜同侧 venue)；user：venue。fraction 只乘一次，按 step 向下取整。无 owned 则 channel 拒绝。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>节点 planner 提交减仓前。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>reduction_owned_unavailable / reduction_evidence_unavailable。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>工作树 <span class="mono">.worktrees/tao-reduction-authority-20260918/services/nautilus-node/strategy/intent_execution_planner.py</span> 中 <span class="mono">_reduction_scope_quantity</span>、<span class="mono">_round_down_to_increment</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g5-min-notional">
+          <span class="badge implemented">代码强制</span>
+          <h3>min-notional / 交易所过滤</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>名义金额与数量是否满足 min_notional / min_quantity。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>控制面定量与节点下单规格。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>拒绝，不取整到零成交。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">services/control-plane/risk/exchange_filters.py</span>；<span class="mono">services/control-plane/risk/position_sizing.py</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="convention" id="g5-protect">
+          <span class="badge implemented">提示约定</span>
+          <h3>开仓保护完整性（记录，不硬拒）</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>提示约定</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>open/add 若无 take_profits：无止损则记录 protection_policy=deferred 并警告；有止损则记 stop_only。允许的策略 complete/stop_only/deferred/waived。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>POST /v1/operator/orders 开仓/加仓。代码注释写明 owner-operated 账户上完整性是 advisory，从不 blocking。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>非法 protection_policy 返回 422；缺保护不拒绝下单。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">services/control-plane/api/read_api.py</span> 中 <span class="mono">_OPERATOR_PROTECTION_POLICIES</span> 及开仓分支（主线与工作树均存在）</dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g5-entry-batch-mutex">
+          <span class="badge implemented">代码强制</span>
+          <h3>入场批次互斥</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>同一节点（即同一账户）保护 stash 里，若已有同 instrument_id、同 entry_side 且带 batch_entry_ids 的条目，且该批次仍视为 active，则拒绝另一意图的开仓/加仓提交准备。active 条件：非 batch_closing，或 batch_fills 的 owned_quantity &gt; 0，或 batch_entry_ids 尚未全部进入节点订单缓存终态（_batch_entries_pending）。拒因码 entry_batch_active，detail 为已有批次的 stash key（其 intent_id）。此页只陈述该代码门禁；线上 GLM add_position 报告为用户转述，挂单与数量未在本页核验。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>节点 IntentExecutionStrategy 在 open_position / add_position（含 zone ladder）提交前调用 _stage_entry_protection。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>OrderDenied('entry_batch_active', &lt;existing-intent-id&gt;)，不进入本次下单准备；不修改已有批次 stash。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>工作树 <span class="mono">.worktrees/tao-reduction-authority-20260918/services/nautilus-node/strategy/intent_execution_strategy.py</span> 中 <span class="mono">_stage_entry_protection</span>、<span class="mono">_batch_entries_pending</span>；仓库主线同文件同名函数亦有该拒因。调用点 <span class="mono">_queue_single_intent_submit</span></dd>
+            </div>
+          </dl>
+        </article>
+      </details>
+
+      <details class="gcard" id="g6" open>
+        <summary>
+          <span class="gid">G6</span>
+          <strong>交易所结果、保护单与对账</strong>
+          <span class="gmeta" data-gmeta="1">负责：投影 / exchange-state / lifecycle · 4 项 · 0 缺口</span>
+          <span class="hint">点击展开或收起</span>
+        </summary>
+        <article class="check" data-status="implemented" data-mechanism="convention" id="g6-ack-fill">
+          <span class="badge implemented">提示约定</span>
+          <h3>受理与成交分开</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>提示约定</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>HTTP 成功或 intent approved 只表示受理；成交看 OrderFilled 等执行事件。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>event-ingest 入账；Hermes 反馈规范。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>不得把已提交说成已成交。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">hermes-profile/skills/trading/v3-trader/SKILL.md</span>（提示约定）；执行事件由 event-ingest 入账</dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g6-event-dedup">
+          <span class="badge implemented">代码强制</span>
+          <h3>执行事件去重</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>同一 event_id 只保留一行。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>写入 execution_events 时。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>ON CONFLICT (event_id) DO NOTHING。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">services/control-plane/order_management/db_helpers.py</span> 中 <span class="mono">ensure_execution_event</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g6-mirror">
+          <span class="badge implemented">代码强制</span>
+          <h3>REST 镜像与新鲜度</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>只读采集持仓/订单/algo 到 exchange_state_mirror。镜像过期则跳过该账户裸仓判断。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>exchange_state_recorder 周期；monitor 读取。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>记录 stale，不把过期镜像当成交证明。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">services/control-plane/tools/exchange_state_recorder.py</span>；<span class="mono">scripts/order_lifecycle_monitor.py</span> 中 <span class="mono">sweep_naked</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g6-protect">
+          <span class="badge implemented">代码强制</span>
+          <h3>保护覆盖监测</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>新鲜镜像上同账户/品种/方向是否有覆盖仓位的止损类保护。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>lifecycle monitor 扫描。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>告警/唤醒 Hermes，自身不撤单、不补保护。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">scripts/order_lifecycle_monitor.py</span> 中 <span class="mono">naked_positions</span></dd>
+            </div>
+          </dl>
+        </article>
+      </details>
+
+      <details class="gcard" id="g7" open>
+        <summary>
+          <span class="gid">G7</span>
+          <strong>部署门禁与回滚</strong>
+          <span class="gmeta" data-gmeta="1">负责：部署脚本 / systemd / runbook · 4 项 · 0 缺口</span>
+          <span class="hint">点击展开或收起</span>
+        </summary>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g7-image">
+          <span class="badge implemented">代码强制</span>
+          <h3>镜像与 manifest 哈希</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>目标镜像 digest 与 release manifest 一致。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>preflight 构建或 inspect。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>硬闸，不进入停机窗。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">docs/runbooks/2026-08-18-deployment-gate-matrix.md</span> 五道硬闸；<span class="mono">scripts/reviewed_release_rollout.py</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="ops" id="g7-freshness">
+          <span class="badge implemented">运维流程已定义</span>
+          <h3>fault 1h / capacity 24h 新鲜度</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>运维流程已定义</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>运维铁律要求停节点前刷新这些证据窗口。旧 runbook 把部分 freshness 标为告警而非硬闸。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>部署 preflight。不是解释器里的自动拦截器。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>按铁律应中止并保持原版本；脚本路径上部分项可能只 warn_gate。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">AGENTS.md</span>；<span class="mono">docs/runbooks/2026-08-18-deployment-gate-matrix.md</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="ops" id="g7-restart">
+          <span class="badge implemented">运维流程已定义</span>
+          <h3>控制面更新后重启对应服务</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>运维流程已定义</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>operator-query / node-control / event-ingest 落盘后是否已换进程。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>部署后人工/流程验收。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>旧进程继续服务，视为未生效。无自动拦截器。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">AGENTS.md</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="ops" id="g7-rollback">
+          <span class="badge implemented">运维流程已定义</span>
+          <h3>回滚去向</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>运维流程已定义</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>回滚走已验证 manifest 与备份目录，不把在途 fraction 意图交给会按全簿计算的旧节点。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>部署失败或主动回滚。2026-09-18 备份目录 <span class="mono">/srv/trader-v3/backups/deploy-20260918T144953Z-account-stall-hardening</span>。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>保持原版本；回滚本身不授权 RESUME。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">docs/runbooks/ORDER_MANAGEMENT_ROLLBACK.md</span>；工作树 <span class="mono">.worktrees/tao-reduction-authority-20260918/docs/reports/2026-09-18-close-reduction-fix.md</span>（CUTOVER_ROLLBACK.md 是 HK 切换草稿，不代表 jp-24 现役回滚入口）</dd>
+            </div>
+          </dl>
+        </article>
+      </details>
+
+      <details class="gcard" id="g8" open>
+        <summary>
+          <span class="gid">G8</span>
+          <strong>HALT / RESUME 与验收</strong>
+          <span class="gmeta" data-gmeta="1">负责：operator-query / 运维 · 3 项 · 0 缺口</span>
+          <span class="hint">点击展开或收起</span>
+        </summary>
+        <article class="check" data-status="implemented" data-mechanism="code" id="g8-confirm">
+          <span class="badge implemented">代码强制</span>
+          <h3>危险命令 API 门闩</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>代码强制</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>HALT/RESUME 等必须 confirm=true、request_id、reason；RESUME scope 另需 symbol 与完整 release_id。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>POST /v1/commands。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>400，不写命令。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">services/control-plane/api/read_api.py</span> 中 <span class="mono">issue_operator_command</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="ops" id="g8-user-resume">
+          <span class="badge implemented">运维流程已定义</span>
+          <h3>RESUME 仅用户明确授权</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>运维流程已定义</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>HALT 可走安全方向；开闸必须用户指令。部署脚本不自行 RESUME。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>运维与部署 execute。API 不验证操作者是否为用户本人。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>保持 HALTED。今日用户 RESUME 后 B 于 23:01 completed，之后无新 HALT。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">AGENTS.md</span>；<span class="mono">docs/runbooks/2026-08-18-deployment-gate-matrix.md</span></dd>
+            </div>
+          </dl>
+        </article>
+        <article class="check" data-status="implemented" data-mechanism="ops" id="g8-accept">
+          <span class="badge implemented">运维流程已定义</span>
+          <h3>验收：新审计 + 心跳递增</h3>
+          <dl class="dl">
+            <div>
+              <dt>机制</dt>
+              <dd>运维流程已定义</dd>
+            </div>
+            <div>
+              <dt>检查</dt>
+              <dd>不采信转述。核 operator_command 审计、节点 ACK、heartbeat_sequence 递增、ready。</dd>
+            </div>
+            <div>
+              <dt>何时 / 谁</dt>
+              <dd>RESUME/部署后只读核对。不是自动门禁。</dd>
+            </div>
+            <div>
+              <dt>失败</dt>
+              <dd>不得宣布恢复。App 构建未安装。</dd>
+            </div>
+            <div>
+              <dt>依据</dt>
+              <dd>相对仓库根 <span class="mono">AGENTS.md</span>；心跳字段见 <span class="mono">services/control-plane/api/read_api.py</span> 中 <span class="mono">heartbeat_sequence</span></dd>
+            </div>
+          </dl>
+        </article>
+      </details>
+    </section>
+
+    <section id="path">
+      <h2>主路径</h2>
+      <p>现役生产在 jp-24。HK 旧交易栈已于 2026-08-23 停用；旧脚本里的 hk 名称不代表当前部署地点。</p>
+      <p>信号主路径是：Telegram 频道 → 信号接入 → Hermes → 控制面意图/风控/授权 → 四账户 Nautilus → Binance USDT-M。主图把 Watcher 与持久投递画成一个「信号接入」节点；内部仍是独立组件。</p>
+      <div class="card">
+        <p><strong>信号接入内部</strong></p>
+        <ul>
+          <li><span class="mono">trader-watcher-1</span> 按白名单收频道消息，写入 Watcher SQLite。</li>
+          <li>feeder 读 SQLite 游标，先把每条消息提交规范 PostgreSQL ingress（<span class="mono">POST /telegram/raw</span>，同事务写 raw_message 与 <span class="mono">queued_for_hermes</span> outbox），才允许 Hermes 处理。</li>
+          <li>随后 feeder 创建一次性 Hermes cron job（<span class="mono">v3-trader</span> skill）。feeder 只运输，不做交易判断。投毒消息在有限重试后跳过，避免卡住队列。</li>
+        </ul>
+      </div>
+      <p>Hermes 把频道文本变成结构化决策，经 v3-trader 调用控制面。LLM 不直接握交易执行权，也不直连交易所。节点 inbox/stash 用于幂等恢复，不宣称 exactly-once。「已提交」只表示控制面受理，不是交易所成交；成交靠执行事件与交易所对账回流。</p>
+      <p>App / 看板在生产边界外：读 operator-query 投影，并可通过 <span class="mono">POST /v1/operator/orders</span> 提交手动平仓、止损等管理命令。这是独立入口，不经过频道信号链。</p>
+    </section>
+
+    <section id="control">
+      <h2>控制面</h2>
+      <p>同一套 API 按角色拆成三个 systemd 服务，数据库角色与连接池隔离：</p>
+      <table>
+        <thead><tr><th>角色</th><th>职责</th></tr></thead>
+        <tbody>
+          <tr><td><span class="mono">operator-query</span></td><td>看板/App 读模型；<span class="mono">POST /v1/operator/orders</span>、<span class="mono">POST /v1/commands</span></td></tr>
+          <tr><td><span class="mono">node-control</span></td><td>心跳、意图拉取、命令 ACK、节点事故</td></tr>
+          <tr><td><span class="mono">event-ingest</span></td><td>执行事件入账</td></tr>
+        </tbody>
+      </table>
+      <p>PostgreSQL 保存意图、事件、投影、审计。Redis 管租约、fencing token、运行时缓存/总线，不是记账真相。exchange-state 录制器只读采集交易所持仓与订单到 <span class="mono">exchange_state_mirror</span>。生命周期监测只告警或唤醒 Hermes，不自己撤单。</p>
+      <p>控制面代码更新后必须重启对应服务；文件落盘不等于生效。</p>
+    </section>
+
+    <section id="accounts">
+      <h2>四账户边界</h2>
+      <p>A–D 是同一 jp-24 上的四个独立执行容器（<span class="mono">trader-v3-node-a</span> … <span class="mono">d</span>），不是四台物理主机。各账户有独立密钥、独立 spool、独立 health 端口。主图「执行与租约域」是逻辑分组：Redis 是共享实例，不在四个节点容器里；账户之间靠租约命名空间隔离。节点启动为 HALTED，不会自动变成 ACTIVE。</p>
+    </section>
+
+    <section id="auth">
+      <h2>授权、减仓与订单身份</h2>
+      <ul>
+        <li>机器人 <span class="mono">clientOrderId</span> 匹配 <span class="mono">^B[0-9a-f]{32}[0-9]{2}$</span>。</li>
+        <li><span class="mono">aos_</span> / <span class="mono">stToAg_</span> 是用户手动单。任何自动化不得撤销，也不得用它们当机器人仓。</li>
+        <li>user 与 channel 权限分开，不能把 channel 提升为 user。</li>
+        <li>channel 减仓基数是 <span class="mono">min(robot_owned, 新鲜同侧 venue)</span>；user 基数是新鲜同侧 venue。owned 是账户/品种/方向级，不是 per-channel。无 owned 时 channel 请求拒绝。</li>
+        <li>比例减仓只提交结构化 <span class="mono">fraction</span>，乘基数后按 step 向下取整。工程量化例：venue 9.890 / owned 0.308 / 30% / step 0.001 → 0.092。</li>
+      </ul>
+    </section>
+
+    <section id="ops">
+      <h2>运维边界</h2>
+      <p>HALT 可以走安全方向。RESUME / 开闸交易只能由用户明确指令触发。部署预检门禁必须在停节点之前全部完成；失败则保持原版本，禁止把舰队留在停机态。维护流程会重建 A–D。验收要查新审计和递增心跳，不采信转述。</p>
+    </section>
+
+    <section id="snapshot">
+      <h2>2026-09-18 部署记录</h2>
+      <ul>
+        <li>后端 <span class="mono">b9ba807</span> 已上线；用户明确 RESUME 后 A–D 复核 ACTIVE。</li>
+        <li>App 已构建，尚未安装到手机，未做真机交易验证。</li>
+        <li>B/GLM 意图在节点重启后被迟到 <span class="mono">halted</span> ACK 从已受理改成 rejected。当时只对该行做了证据化 status 恢复。通用「迟到 halted ACK 覆盖已受理意图」代码路径仍未根治，不能写成已修复。</li>
+      </ul>
+    </section>
+
+    <section id="risk-split">
+      <h2>节点 ACTIVE 不等于交易入口可用</h2>
+      <div class="card warn">
+        <p>这是 2026-09-18 晚间只读核查结果，不是修复记录。未改风险状态，未下单。</p>
+        <ul>
+          <li>北京时间 23:01：B 的 RESUME completed，之后无新 HALT。</li>
+          <li>23:07：Hermes DM 里 <span class="mono">GET /v1/risk/state</span> 返回 HALTED，同时 <span class="mono">GET /v1/nodes</span> 为 ACTIVE。</li>
+          <li>23:23：A–D 节点复核 ACTIVE。</li>
+          <li>23:27：仅再次复核 B，心跳递增且 ready healthy。</li>
+          <li>23:30：未提交加仓。</li>
+          <li>B 的 BTC/ETH 锁来自 2026-08-10 ghost-active HALT（instruments 含 BTC/ETH/SOL）。08-19 只 RESUME SOL。今日 RESUME 无 instruments，BTC/ETH 仍是未解除的独立锁，不能按日期认无效。</li>
+          <li>风险接口无账户/币种过滤地汇总所有 <span class="mono">risk_state</span>，任意 HALTED 令接口返回全局 HALTED，Hermes 因此拒绝 GLM 新增风险。锁是否仍应作为有效门尚未另证，不称无效记录。</li>
+        </ul>
+        <p>节点 ACTIVE 只说明执行容器心跳与交易状态机。它不能证明风险入口、品种门或 Hermes 决策路径全部放开。</p>
+      </div>
+    </section>
+
+    <section id="sources">
+      <h2>源码依据</h2>
+      <p>本页不声称存在公开 GitHub 源码，也不把私有仓库上传到 Archify 服务器。路径相对于 trader-bot 仓库；减仓实现以工作树 <span class="mono">.worktrees/tao-reduction-authority-20260918</span> 为准。</p>
+      <table>
+        <thead><tr><th>路径</th><th>用来核对什么</th></tr></thead>
+        <tbody>
+          <tr><td><span class="mono">docs/agent-operations.md</span></td><td>现役排障链路与运维铁律</td></tr>
+          <tr><td><span class="mono">scripts/hermes_signal_feeder.py</span></td><td>ingress 先于 Hermes、一次性 job</td></tr>
+          <tr><td><span class="mono">services/ingress/ingress/service.py</span></td><td>规范消息落库</td></tr>
+          <tr><td><span class="mono">services/control-plane/api/app_roles.py</span></td><td>三角色隔离</td></tr>
+          <tr><td><span class="mono">services/control-plane/api/read_api.py</span></td><td>operator API、风险汇总、意图 ACK</td></tr>
+          <tr><td><span class="mono">services/nautilus-node/</span></td><td>执行节点、inbox、减仓、Redis 租约</td></tr>
+          <tr><td><span class="mono">packages/execution-domain/execution_domain/order_ownership.py</span></td><td>机器人 CID</td></tr>
+          <tr><td><span class="mono">.worktrees/tao-reduction-authority-20260918/docs/reports/2026-09-18-close-reduction-fix.md</span></td><td>减仓规则、部署与 GLM 单行恢复</td></tr>
+        </tbody>
+      </table>
+      <p>完整清单见 <a href="./system-architecture.evidence.json">system-architecture.evidence.json</a>。Archify 渲染器版本 <span class="mono">2.17.0-dev.1</span>，commit <span class="mono">72c750bb070d95171dbb2244e5b62b1b7da69c12</span>。</p>
+    </section>
+
+    <footer>
+      <p>离线单文件，无外部依赖。主图使用 Archify 内建查看器。同目录 visual-check PNG 对应更早 HTML，SHA 不匹配本版；本版未再跑浏览器验收。</p>
+    </footer>
+  </main>
+  <script>
+    (function () {
+      var q = document.getElementById("q");
+      var buttons = document.querySelectorAll(".toolbar button[data-filter]");
+      var filter = "all";
+      var countsEl = document.getElementById("counts");
+
+      function text(el) {
+        return (el.textContent || "").toLowerCase();
+      }
+
+      function recount() {
+        var total = document.querySelectorAll(".check").length;
+        var implemented = document.querySelectorAll('.check[data-status="implemented"]').length;
+        var gap = document.querySelectorAll('.check[data-status="gap"]').length;
+        var unverified = document.querySelectorAll('.check[data-status="unverified"]').length;
+        var code = document.querySelectorAll('.check[data-mechanism="code"]').length;
+        var ops = document.querySelectorAll('.check[data-mechanism="ops"]').length;
+        var convention = document.querySelectorAll('.check[data-mechanism="convention"]').length;
+        var observe = document.querySelectorAll('.check[data-mechanism="observe"]').length;
+        countsEl.textContent =
+          "共 " + total + " 项。过滤：已实现 " + implemented +
+          "，缺口 " + gap + "，未核实 " + unverified +
+          "。机制：代码强制 " + code +
+          "，运维流程 " + ops +
+          "，提示约定 " + convention +
+          "，状态观察 " + observe +
+          "。「已实现」只表示源码或书面流程存在，不等于在线 PASS。";
+      }
+
+      function apply() {
+        var query = (q.value || "").trim().toLowerCase();
+        var shown = 0;
+        var filtering = filter !== "all" || query !== "";
+        document.querySelectorAll(".gcard").forEach(function (card) {
+          var any = false;
+          card.querySelectorAll(".check").forEach(function (item) {
+            var status = item.getAttribute("data-status");
+            var okFilter = filter === "all" || status === filter;
+            var summary = card.querySelector("summary");
+            var hay = text(item) + " " + text(summary);
+            var okQuery = !query || hay.indexOf(query) !== -1;
+            var vis = okFilter && okQuery;
+            item.hidden = !vis;
+            if (vis) {
+              any = true;
+            }
+          });
+          card.hidden = !any;
+          if (any) {
+            shown += 1;
+            if (filtering) {
+              card.open = true;
+            }
+          }
+        });
+        document.body.classList.toggle("filter-empty", shown === 0);
+      }
+
+      buttons.forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          filter = btn.getAttribute("data-filter");
+          buttons.forEach(function (b) {
+            b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+          });
+          apply();
+        });
+      });
+      q.addEventListener("input", apply);
+      recount();
+    })();
+  </script>
+
+</body>
+</html>
