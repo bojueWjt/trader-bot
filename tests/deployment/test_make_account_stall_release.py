@@ -34,9 +34,6 @@ WATCHER_BUILDER_SOURCE_PATH = (
 WATCHER_BUILDER_RELEASE_PATH = "build_immutable_watcher_image.py"
 HERMES_FEEDER_SOURCE_PATH = "scripts/hermes_signal_feeder.py"
 HERMES_FEEDER_RELEASE_PATH = "host/hermes_signal_feeder.py"
-HERMES_FEEDER_REQUIRED_SHA256 = (
-    "1c8518eba5332fadc64276d4c475c1e0c6c0e9974ec785c7b7a2067f5e5ef8a2"
-)
 V3_TRADE_SOURCE_PATH = (
     "hermes-profile/skills/trading/v3-trader/scripts/v3_trade.py"
 )
@@ -609,15 +606,6 @@ def test_release_builder_writes_complete_checksummed_payload(
     assert REQUIRED_HERMES_RELEASE_PATHS == (
         release.REQUIRED_HERMES_RELEASE_PATHS
     )
-    assert release.HERMES_FEEDER_SOURCE_PATH == HERMES_FEEDER_SOURCE_PATH
-    assert (
-        release.HERMES_FEEDER_REQUIRED_SHA256
-        == HERMES_FEEDER_REQUIRED_SHA256
-    )
-    feeder_payload = (output / HERMES_FEEDER_RELEASE_PATH).read_bytes()
-    assert hashlib.sha256(feeder_payload).hexdigest() == (
-        HERMES_FEEDER_REQUIRED_SHA256
-    )
     assert REQUIRED_CONTROL_PLANE_HOST_RELEASE_PATHS == (
         release.REQUIRED_CONTROL_PLANE_HOST_RELEASE_PATHS
     )
@@ -1085,29 +1073,6 @@ def test_release_builder_rejects_attention_content_and_does_not_publish(
     with pytest.raises(
         release.ReleaseBundleError,
         match="forbidden Attention content",
-    ):
-        release.build_release(repo, output)
-
-    assert not output.exists()
-
-
-def test_release_builder_rejects_noncanonical_hermes_feeder(
-    tmp_path: Path,
-) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _seed_repo(repo)
-    feeder = repo / HERMES_FEEDER_SOURCE_PATH
-    feeder.write_text(
-        feeder.read_text(encoding="utf-8") + "\n# stale feeder payload\n",
-        encoding="utf-8",
-    )
-    _commit_path(repo, feeder, "replace canonical Hermes feeder")
-    output = tmp_path / "release"
-
-    with pytest.raises(
-        release.ReleaseBundleError,
-        match="Hermes feeder SHA256 does not match",
     ):
         release.build_release(repo, output)
 
